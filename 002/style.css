@@ -152,6 +152,7 @@ body {
 .st-arrived { background: #3498db; }
 .st-field_working { background: #e74c3c; }
 .st-unloaded_pending_info { background: #ff9800; }
+.st-converted { background: #8e24aa; }
 
 .biz-tag {
   display: inline-block;

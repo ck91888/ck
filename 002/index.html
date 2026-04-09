@@ -297,13 +297,16 @@
     <div class="filter-bar">
       <select id="fbFilterType" onchange="loadFeedbackList()">
         <option value="">全部类型</option>
-        <option value="unload_no_doc">无单卸货</option>
+        <option value="unplanned_unload">计划外卸货</option>
+        <option value="unload_no_doc">无单卸货(旧)</option>
         <option value="general">一般反馈</option>
       </select>
       <select id="fbFilterStatus" onchange="loadFeedbackList()">
         <option value="">全部状态</option>
-        <option value="open">待处理</option>
+        <option value="field_working">现场卸货中</option>
+        <option value="unloaded_pending_info">待补充信息</option>
         <option value="converted">已转正</option>
+        <option value="open">待处理(旧)</option>
       </select>
       <button class="btn btn-outline btn-sm" onclick="loadFeedbackList()">刷新</button>
     </div>

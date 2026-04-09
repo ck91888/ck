@@ -338,6 +338,16 @@ const MIGRATIONS = [
   // ---- source_type for dynamic plans ----
   `ALTER TABLE v2_inbound_plans ADD COLUMN source_type TEXT DEFAULT 'manual'`,
   `ALTER TABLE v2_inbound_plans ADD COLUMN needs_info_update INTEGER DEFAULT 0`,
+
+  // ---- unplanned_unload: feedback-first flow columns ----
+  `ALTER TABLE v2_field_feedbacks ADD COLUMN result_lines_json TEXT DEFAULT '[]'`,
+  `ALTER TABLE v2_field_feedbacks ADD COLUMN diff_note TEXT DEFAULT ''`,
+  `ALTER TABLE v2_field_feedbacks ADD COLUMN remark TEXT DEFAULT ''`,
+  `ALTER TABLE v2_field_feedbacks ADD COLUMN completed_at TEXT DEFAULT ''`,
+  `ALTER TABLE v2_field_feedbacks ADD COLUMN completed_by TEXT DEFAULT ''`,
+  `ALTER TABLE v2_field_feedbacks ADD COLUMN inbound_plan_id TEXT DEFAULT ''`,
+  `ALTER TABLE v2_field_feedbacks ADD COLUMN parent_job_id TEXT DEFAULT ''`,
+  `ALTER TABLE v2_field_feedbacks ADD COLUMN interrupt_type TEXT DEFAULT ''`,
 ];
 
 let _migrated = false;
@@ -953,7 +963,191 @@ route("v2_inbound_dynamic_finalize", async (body, env) => {
 // =====================================================
 // UNLOAD / INBOUND JOBS — Ops side
 // =====================================================
-// ===== Dynamic no-doc unload: create plan + job in one shot =====
+// =====================================================
+// UNPLANNED UNLOAD — feedback-first flow (new)
+// =====================================================
+
+// Step 1: Start unplanned unload — creates feedback + unload job, NO inbound_plan
+route("v2_unplanned_unload_start", async (body, env) => {
+  if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  const worker_id = String(body.worker_id || "").trim();
+  const worker_name = String(body.worker_name || "").trim();
+  const parent_job_id = String(body.parent_job_id || "").trim();
+  const interrupt_type = String(body.interrupt_type || "").trim();
+  if (!worker_id) return err("missing worker_id");
+
+  const t = now();
+  const fb_id = "FB-" + uid();
+
+  // 1. Create field feedback record
+  await env.DB.prepare(`
+    INSERT INTO v2_field_feedbacks(id, feedback_type, related_doc_type, related_doc_id,
+      title, content, submitted_by, status, parent_job_id, interrupt_type, created_at, updated_at)
+    VALUES(?,'unplanned_unload','ops_job','',?,?,?,'field_working',?,?,?,?)
+  `).bind(fb_id,
+      "计划外到货-现场卸货中",
+      "现场操作人员发起计划外卸货",
+      worker_name || worker_id,
+      parent_job_id, interrupt_type, t, t).run();
+
+  // 2. Create unload job linked to this feedback
+  const job_id = "JOB-" + uid();
+  await env.DB.prepare(`
+    INSERT INTO v2_ops_jobs(id, flow_stage, biz_class, job_type, related_doc_type, related_doc_id,
+      status, parent_job_id, is_temporary_interrupt, interrupt_type, created_by, created_at, updated_at, active_worker_count)
+    VALUES(?, 'unload', '', 'unload', 'field_feedback', ?, 'working', ?, ?, ?, ?, ?, ?, 1)
+  `).bind(job_id, fb_id, parent_job_id, parent_job_id ? 1 : 0, interrupt_type, worker_id, t, t).run();
+
+  // Update feedback with job reference
+  await env.DB.prepare(
+    "UPDATE v2_field_feedbacks SET related_doc_id=? WHERE id=?"
+  ).bind(job_id, fb_id).run();
+
+  // 3. If this is an interrupt, pause the parent job for this worker
+  if (parent_job_id) {
+    await closeAllOpenSegs(env, parent_job_id, worker_id, t, 'interrupted');
+    await recalcActiveCount(env, parent_job_id, t);
+  }
+
+  // 4. Create worker segment
+  const seg_id = "WS-" + uid();
+  await env.DB.prepare(`
+    INSERT INTO v2_ops_job_workers(id, job_id, worker_id, worker_name, joined_at)
+    VALUES(?,?,?,?,?)
+  `).bind(seg_id, job_id, worker_id, worker_name, t).run();
+
+  return json({ ok: true, feedback_id: fb_id, job_id, worker_seg_id: seg_id });
+});
+
+// Step 2: Finish unplanned unload — save result to feedback, do NOT create inbound_plan
+route("v2_unplanned_unload_finish", async (body, env) => {
+  if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  const job_id = String(body.job_id || "").trim();
+  const worker_id = String(body.worker_id || "").trim();
+  if (!job_id) return err("missing job_id");
+
+  const t = now();
+  const result_lines = body.result_lines || [];
+  const diff_note = String(body.diff_note || "").trim();
+  const remark = String(body.remark || "").trim();
+  const leave_only = body.leave_only === true;
+
+  // Close worker segments + recalc
+  await closeAllOpenSegs(env, job_id, worker_id, t, leave_only ? 'leave' : 'finished');
+  const realCount = await recalcActiveCount(env, job_id, t);
+
+  if (leave_only) {
+    return json({ ok: true, left: true });
+  }
+
+  // Validate
+  if (realCount > 0) {
+    return json({ ok: false, error: "others_still_working", active_count: realCount });
+  }
+  const hasAnyQty = result_lines.some(ln => Number(ln.actual_qty || 0) > 0);
+  if (!hasAnyQty) {
+    return json({ ok: false, error: "empty_result", message: "至少填写一项实际数量" });
+  }
+
+  const job = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
+  if (!job) return err("job not found", 404);
+
+  // Save result record
+  const result_id = "RES-" + uid();
+  await env.DB.prepare(`
+    INSERT INTO v2_ops_job_results(id, job_id, box_count, pallet_count, remark, result_json, result_lines_json, diff_note, created_by, created_at)
+    VALUES(?,?,0,0,?,?,?,?,?,?)
+  `).bind(result_id, job_id, remark,
+      JSON.stringify({ result_lines, diff_note, remark }),
+      JSON.stringify(result_lines), diff_note, worker_id, t).run();
+
+  // Complete the job
+  const sharedResult = JSON.stringify({ result_lines, diff_note, remark });
+  await env.DB.prepare(
+    "UPDATE v2_ops_jobs SET status='completed', shared_result_json=?, active_worker_count=0, updated_at=? WHERE id=?"
+  ).bind(sharedResult, t, job_id).run();
+  await env.DB.prepare(
+    "UPDATE v2_ops_job_workers SET left_at=?, leave_reason='job_completed' WHERE job_id=? AND left_at=''"
+  ).bind(t, job_id).run();
+
+  // Update feedback: save result + set status to unloaded_pending_info
+  const fb_id = (job.related_doc_type === 'field_feedback') ? job.related_doc_id : '';
+  if (fb_id) {
+    const cargoSummary = result_lines.map(rl => (rl.unit_type || "") + " " + (rl.actual_qty || 0)).join(" / ");
+    await env.DB.prepare(`
+      UPDATE v2_field_feedbacks SET status='unloaded_pending_info',
+        result_lines_json=?, diff_note=?, remark=?,
+        completed_at=?, completed_by=?,
+        title=?, updated_at=? WHERE id=?
+    `).bind(
+      JSON.stringify(result_lines), diff_note, remark,
+      t, worker_id,
+      "计划外卸货完成: " + (cargoSummary || "无明细"), t, fb_id
+    ).run();
+  }
+
+  return json({ ok: true, result_id, feedback_id: fb_id });
+});
+
+// Step 3: Finalize feedback → create formal inbound plan with lines
+route("v2_feedback_finalize_to_inbound", async (body, env) => {
+  if (!isAuth(body, env)) return err("unauthorized", 401);
+  const feedback_id = String(body.feedback_id || "").trim();
+  if (!feedback_id) return err("missing feedback_id");
+
+  const fb = await env.DB.prepare("SELECT * FROM v2_field_feedbacks WHERE id=?").bind(feedback_id).first();
+  if (!fb) return err("feedback not found", 404);
+  if (fb.status !== 'unloaded_pending_info') return err("feedback status must be unloaded_pending_info, current: " + fb.status);
+
+  const t = now();
+  const plan_date = kstToday();
+  const plan_id = "IB-" + uid();
+  const display_no = await nextDisplayNo(env, plan_date);
+
+  const customer = String(body.customer || "").trim();
+  const biz_class = String(body.biz_class || "").trim();
+  const cargo_summary = String(body.cargo_summary || "").trim();
+  const expected_arrival = String(body.expected_arrival || "").trim();
+  const purpose = String(body.purpose || "").trim();
+  const remark = String(body.remark || "").trim();
+  const created_by = String(body.created_by || "").trim();
+
+  if (!customer) return err("customer is required");
+
+  // 1. Create formal inbound plan
+  await env.DB.prepare(`
+    INSERT INTO v2_inbound_plans(id, plan_date, customer, biz_class, cargo_summary,
+      expected_arrival, purpose, remark, status, source_feedback_id, created_by, created_at, updated_at, display_no, source_type)
+    VALUES(?,?,?,?,?,?,?,?,'pending',?,?,?,?,?,'from_feedback')
+  `).bind(plan_id, plan_date, customer, biz_class, cargo_summary,
+      expected_arrival, purpose, remark,
+      feedback_id, created_by, t, t, display_no).run();
+
+  // 2. Create inbound plan lines from feedback result or provided lines
+  let lines = body.lines || [];
+  // If no lines provided from frontend, fall back to feedback's result_lines
+  if (lines.length === 0) {
+    try { lines = JSON.parse(fb.result_lines_json || "[]"); } catch(e) { lines = []; }
+  }
+  for (let i = 0; i < lines.length; i++) {
+    const ln = lines[i];
+    const actual = Number(ln.actual_qty || ln.planned_qty || 0);
+    await env.DB.prepare(
+      "INSERT INTO v2_inbound_plan_lines(id, plan_id, line_no, unit_type, planned_qty, actual_qty, remark) VALUES(?,?,?,?,?,?,?)"
+    ).bind("IPL-" + uid(), plan_id, i + 1, String(ln.unit_type || ""), actual, actual, String(ln.remark || "")).run();
+  }
+
+  // 3. Update feedback to converted
+  await env.DB.prepare(`
+    UPDATE v2_field_feedbacks SET status='converted', inbound_plan_id=?, updated_at=? WHERE id=?
+  `).bind(plan_id, t, feedback_id).run();
+
+  return json({ ok: true, inbound_plan_id: plan_id, display_no });
+});
+
+// ===== [DEPRECATED] Dynamic no-doc unload: create plan + job in one shot =====
+// This route is kept for backward compatibility but should NOT be called from frontend.
+// Use v2_unplanned_unload_start instead.
 route("v2_unload_dynamic_start", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
   const worker_id = String(body.worker_id || "").trim();
@@ -1597,7 +1791,10 @@ route("v2_feedback_detail", async (body, env) => {
     ).bind(row.related_doc_id).all();
     jobResults = jr.results || [];
   }
-  return json({ ok: true, feedback: row, job_results: jobResults });
+  // Parse result_lines from feedback itself (unplanned_unload flow)
+  let feedbackResultLines = [];
+  try { feedbackResultLines = JSON.parse(row.result_lines_json || "[]"); } catch(e) {}
+  return json({ ok: true, feedback: row, job_results: jobResults, feedback_result_lines: feedbackResultLines });
 });
 
 route("v2_feedback_convert_to_inbound", async (body, env) => {

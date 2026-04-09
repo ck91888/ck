@@ -195,6 +195,7 @@ body {
 .st-awaiting_close { background: #8e44ad; }
 .st-field_working { background: #e74c3c; }
 .st-unloaded_pending_info { background: #ff9800; }
+.st-converted { background: #8e24aa; }
 
 .priority-urgent { color: #e74c3c; font-weight: 800; }
 .priority-high { color: #e67e22; font-weight: 700; }

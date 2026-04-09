@@ -62,7 +62,7 @@
     });
     var html='<div class="card">';
     items.forEach(function(p){
-      var dynTag = (p.source_type==='field_dynamic') ? '<span style="background:#ff9800;color:#fff;font-size:10px;padding:1px 4px;border-radius:2px;margin-right:4px;">动态</span>' : '';
+      var dynTag = (p.source_type==='from_feedback') ? '<span style="background:#8e24aa;color:#fff;font-size:10px;padding:1px 4px;border-radius:2px;margin-right:4px;">反馈转正</span>' : (p.source_type==='field_dynamic') ? '<span style="background:#ff9800;color:#fff;font-size:10px;padding:1px 4px;border-radius:2px;margin-right:4px;">动态</span>' : '';
       html+='<div class="list-item" onclick="openInboundDetail(\''+esc(p.id)+'\')"><div class="item-title"><span class="st st-'+esc(p.status)+'">'+esc(stLabel(p.status))+'</span> '+dynTag+'<span class="biz-tag biz-'+esc(p.biz_class)+'">'+esc(bizLabel(p.biz_class))+'</span> '+esc(p.display_no||p.id)+' · '+esc(p.customer||'--')+'</div><div class="item-meta">'+esc(p.plan_date||'')+' · '+esc(p.cargo_summary||'')+' · '+esc(fmtTime(p.created_at))+'</div></div>';
     });
     html+='</div>'; body.innerHTML=html;

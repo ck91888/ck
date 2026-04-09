@@ -1104,10 +1104,11 @@ async function loadFeedbackList() {
 
   var html = '<div class="card">';
   items.forEach(function(fb) {
-    var typeLabel = fb.feedback_type === "unload_no_doc" ? L("feedback_unload_no_doc") : (fb.feedback_type || L("feedback_general"));
+    var typeLabel = fb.feedback_type === "unplanned_unload" ? "计划外卸货" : fb.feedback_type === "unload_no_doc" ? L("feedback_unload_no_doc") : (fb.feedback_type || L("feedback_general"));
+    var statusLabel = fb.status === "open" ? L("status_open") : fb.status === "converted" ? L("status_converted") : fb.status === "field_working" ? "现场卸货中" : fb.status === "unloaded_pending_info" ? "待补充信息" : stLabel(fb.status);
     html += '<div class="list-item" onclick="openFeedbackDetail(\'' + esc(fb.id) + '\')">';
     html += '<div class="item-title">';
-    html += '<span class="st st-' + esc(fb.status) + '">' + esc(fb.status === "open" ? L("status_open") : fb.status === "converted" ? L("status_converted") : stLabel(fb.status)) + '</span> ';
+    html += '<span class="st st-' + esc(fb.status) + '">' + esc(statusLabel) + '</span> ';
     html += '<span class="biz-tag">' + esc(typeLabel) + '</span> ';
     html += esc(fb.title || "(无标题)");
     html += '</div>';
@@ -1137,19 +1138,47 @@ async function loadFeedbackDetail() {
 
   var fb = res.feedback;
   var jobResults = res.job_results || [];
-  var typeLabel = fb.feedback_type === "unload_no_doc" ? L("feedback_unload_no_doc") : (fb.feedback_type || L("feedback_general"));
+  var feedbackResultLines = res.feedback_result_lines || [];
+  var isUnplanned = (fb.feedback_type === "unplanned_unload");
+  var typeLabel = isUnplanned ? "计划外卸货" : fb.feedback_type === "unload_no_doc" ? L("feedback_unload_no_doc") : (fb.feedback_type || L("feedback_general"));
+  var statusLabel = fb.status === "open" ? L("status_open") : fb.status === "converted" ? L("status_converted") : fb.status === "field_working" ? "现场卸货中" : fb.status === "unloaded_pending_info" ? "已卸货·待补充信息" : stLabel(fb.status);
 
   var html = '<div class="card">';
   html += '<div style="font-size:16px;font-weight:700;margin-bottom:8px;">' + esc(fb.id) + '</div>';
-  html += '<div class="detail-field"><b>' + L("status") + ':</b> <span class="st st-' + esc(fb.status) + '">' + esc(fb.status === "open" ? L("status_open") : fb.status === "converted" ? L("status_converted") : stLabel(fb.status)) + '</span></div>';
+  html += '<div class="detail-field"><b>' + L("status") + ':</b> <span class="st st-' + esc(fb.status) + '">' + esc(statusLabel) + '</span></div>';
   html += '<div class="detail-field"><b>' + L("feedback_type") + ':</b> ' + esc(typeLabel) + '</div>';
   html += '<div class="detail-field"><b>标题:</b> ' + esc(fb.title) + '</div>';
   html += '<div class="detail-field"><b>内容:</b> ' + esc(fb.content) + '</div>';
   html += '<div class="detail-field"><b>' + L("submitted_by") + ':</b> ' + esc(fb.submitted_by) + ' · ' + esc(fmtTime(fb.created_at)) + '</div>';
+  if (fb.completed_at) {
+    html += '<div class="detail-field"><b>完成时间:</b> ' + esc(fmtTime(fb.completed_at)) + '</div>';
+  }
+  if (fb.completed_by) {
+    html += '<div class="detail-field"><b>完成人:</b> ' + esc(fb.completed_by) + '</div>';
+  }
+  if (fb.diff_note) {
+    html += '<div class="detail-field"><b>差异备注:</b> ' + esc(fb.diff_note) + '</div>';
+  }
+  if (fb.remark) {
+    html += '<div class="detail-field"><b>备注:</b> ' + esc(fb.remark) + '</div>';
+  }
+  if (fb.inbound_plan_id) {
+    html += '<div class="detail-field"><b>已转正入库计划:</b> <a href="#" onclick="openInboundDetail(\'' + esc(fb.inbound_plan_id) + '\');return false;">' + esc(fb.inbound_plan_id) + '</a></div>';
+  }
   html += '</div>';
 
-  // Job results
-  if (jobResults.length > 0) {
+  // Unload result lines (from feedback itself — unplanned_unload flow)
+  if (feedbackResultLines.length > 0) {
+    html += '<div class="card"><div class="card-title">卸货结果明���</div>';
+    html += '<table class="line-table"><thead><tr><th>类型</th><th>实际数量</th></tr></thead><tbody>';
+    feedbackResultLines.forEach(function(r) {
+      html += '<tr><td>' + esc(unitTypeLabel(r.unit_type)) + '</td><td>' + (r.actual_qty || 0) + '</td></tr>';
+    });
+    html += '</tbody></table></div>';
+  }
+
+  // Legacy job results (for old unload_no_doc feedbacks)
+  if (jobResults.length > 0 && feedbackResultLines.length === 0) {
     html += '<div class="card"><div class="card-title">卸货结果</div>';
     jobResults.forEach(function(jr) {
       html += '<div style="font-size:13px;padding:4px 0;">';
@@ -1163,7 +1192,35 @@ async function loadFeedbackDetail() {
     html += '</div>';
   }
 
-  // Convert action (only for open unload_no_doc)
+  // "补充并转正" form — for unplanned_unload with status unloaded_pending_info
+  if (fb.status === "unloaded_pending_info" && (isUnplanned || fb.feedback_type === "unload_no_doc")) {
+    html += '<div class="card"><div class="card-title">补充信息并转正为入库计划</div>';
+    html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:13px;">';
+    html += '<div><label><b>' + L("customer") + ' *</b></label><input id="fb-conv-customer" class="input" placeholder="客户名称"></div>';
+    html += '<div><label><b>' + L("biz_class") + '</b></label><select id="fb-conv-biz" class="input"><option value="">--</option><option value="direct_ship">' + bizLabel("direct_ship") + '</option><option value="bulk">' + bizLabel("bulk") + '</option><option value="return">' + bizLabel("return") + '</option><option value="import">' + bizLabel("import") + '</option></select></div>';
+    var defaultCargo = feedbackResultLines.map(function(r) { return unitTypeLabel(r.unit_type) + ' ' + (r.actual_qty || 0); }).join(' / ');
+    html += '<div style="grid-column:1/-1;"><label><b>' + L("cargo_summary") + '</b></label><input id="fb-conv-cargo" class="input" value="' + esc(defaultCargo || fb.title || '') + '"></div>';
+    html += '<div><label><b>' + L("expected_arrival") + '</b></label><input id="fb-conv-arrival" class="input" placeholder="预计到达"></div>';
+    html += '<div><label><b>' + L("purpose") + '</b></label><input id="fb-conv-purpose" class="input" placeholder="入库目的"></div>';
+    html += '<div style="grid-column:1/-1;"><label><b>' + L("remark") + '</b></label><input id="fb-conv-remark" class="input" value="' + esc(fb.remark || '') + '"></div>';
+    html += '</div>';
+
+    // Show editable lines table
+    if (feedbackResultLines.length > 0) {
+      html += '<div style="margin-top:10px;"><b>卸货明细（将作为入库计划明细）:</b>';
+      html += '<table class="line-table"><thead><tr><th>类型</th><th>数量</th></tr></thead><tbody id="fb-conv-lines">';
+      feedbackResultLines.forEach(function(r, idx) {
+        html += '<tr><td>' + esc(unitTypeLabel(r.unit_type)) + '<input type="hidden" class="fb-line-unit" value="' + esc(r.unit_type) + '"></td>';
+        html += '<td><input type="number" class="fb-line-qty" value="' + (r.actual_qty || 0) + '" min="0" step="0.1" style="width:80px;"></td></tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+
+    html += '<div style="margin-top:12px;"><button class="btn btn-success" onclick="convertFeedbackToInbound()">确认转正为入库计划</button></div>';
+    html += '</div>';
+  }
+
+  // Legacy convert action (for old open unload_no_doc)
   if (fb.status === "open" && fb.feedback_type === "unload_no_doc") {
     html += '<div class="card"><div class="card-title">' + L("convert_to_inbound") + '</div>';
     html += '<div class="form-group"><label>' + L("customer") + '</label><input id="fb-conv-customer" type="text"></div>';
@@ -1182,19 +1239,38 @@ async function convertFeedbackToInbound() {
   var biz = (document.getElementById("fb-conv-biz") || {}).value || "";
   var cargo = (document.getElementById("fb-conv-cargo") || {}).value || "";
   if (!customer.trim()) { alert(L("customer") + " " + L("required") + "!"); return; }
+  if (!confirm("确认将此反馈转正为正式入库计划？")) return;
+
+  // Collect lines from the editable table
+  var lines = [];
+  var unitEls = document.querySelectorAll(".fb-line-unit");
+  var qtyEls = document.querySelectorAll(".fb-line-qty");
+  for (var i = 0; i < unitEls.length; i++) {
+    var qty = parseFloat(qtyEls[i].value) || 0;
+    if (qty > 0) {
+      lines.push({ unit_type: unitEls[i].value, actual_qty: qty, planned_qty: qty });
+    }
+  }
 
   var res = await api({
-    action: "v2_feedback_convert_to_inbound",
+    action: "v2_feedback_finalize_to_inbound",
     feedback_id: _currentFeedbackId,
     customer: customer.trim(),
     biz_class: biz,
     cargo_summary: cargo.trim(),
+    expected_arrival: (document.getElementById("fb-conv-arrival") || {}).value || "",
+    purpose: (document.getElementById("fb-conv-purpose") || {}).value || "",
+    remark: (document.getElementById("fb-conv-remark") || {}).value || "",
+    lines: lines,
     created_by: getUser()
   });
 
   if (res && res.ok) {
-    alert(L("success") + ": " + res.inbound_plan_id);
-    goTab("feedback");
+    alert(L("success") + ": " + (res.display_no || res.inbound_plan_id));
+    // Jump to the new inbound plan detail
+    _currentInboundId = res.inbound_plan_id;
+    goView("inbound_detail");
+    loadInboundDetail();
   } else {
     alert(L("error") + ": " + (res ? res.error : "unknown"));
   }

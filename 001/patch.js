@@ -111,10 +111,12 @@
     if(_activeJobId){
       var res=await api({action:'v2_ops_job_detail',job_id:_activeJobId});
       if(res&&res.ok&&res.job&&res.job.job_type==='unload'&&res.job.status==='working'){
-        var planId=res.job.related_doc_id||'';
-        if(planId){
-          var planRes=await api({action:'v2_inbound_plan_detail',id:planId});
+        // Only load plan if related to inbound_plan, not field_feedback
+        if(res.job.related_doc_type==='inbound_plan'&&res.job.related_doc_id){
+          var planRes=await api({action:'v2_inbound_plan_detail',id:res.job.related_doc_id});
           if(planRes&&planRes.ok) _unloadPlanData=planRes;
+        } else {
+          _unloadPlanData=null; // feedback-first flow: no plan data
         }
         showUnloadWorking(res.job);
         startJobPoll('unload');
@@ -177,11 +179,47 @@
       if(hasDiff&&!diffNote) diffNote='现场实收数量与计划数量不一致';
     }
     var remark=((document.getElementById('unloadRemark')||{}).value||'').trim();
-    var res=await api({action:'v2_unload_job_finish',job_id:_activeJobId,worker_id:getWorkerId(),result_lines:resultLines,diff_note:diffNote,remark:remark,complete_job:true});
-    if(res&&res.ok){ var msg='卸货已完成 / 하차 완료'; if(res.dynamic_plan) msg+='\n（动态单已转为待补充状态，请协同中心补全信息 / 동적 하차단 정보보완 필요）'; else if(res.no_doc) msg+='\n（无单卸货已自动生成反馈 / 서류 없는 하차 피드백 자동 생성됨）'; alert(msg); clearActiveJob(); _unloadPlanData=null; goPage('home'); }
+
+    // Determine which finish API to call based on whether this is feedback-first flow
+    var fbId=localStorage.getItem('v2_unplanned_fb_id')||'';
+    var actionName = fbId ? 'v2_unplanned_unload_finish' : 'v2_unload_job_finish';
+
+    var res=await api({action:actionName,job_id:_activeJobId,worker_id:getWorkerId(),result_lines:resultLines,diff_note:diffNote,remark:remark,complete_job:true});
+    if(res&&res.ok){
+      var msg='卸货已完成 / 하차 완료';
+      if(fbId||res.feedback_id){
+        msg+='\n（现场反馈已更新，请协同中心补充信息并转正 / 현장 피드백 업데이트됨, 협업센터에서 정보 보완 후 전환 필요）';
+      }
+      alert(msg);
+
+      // Clean up feedback tracking
+      localStorage.removeItem('v2_unplanned_fb_id');
+
+      // Check if there's a parent job to resume
+      var resumed = await checkAndResumeParent();
+      if(!resumed){
+        clearActiveJob();
+        _unloadPlanData=null;
+        goPage('home');
+      }
+    }
     else if(res&&res.error==='others_still_working'){ alert('还有'+res.active_count+'人参与中，无法完成 / 아직 '+res.active_count+'명 참여 중, 완료 불가'); }
     else if(res&&res.error==='empty_result'){ alert(res.message||'至少填写一项实际数量'); }
-    else if(res&&res.error==='diff_note_required'){ alert('系统仍要求差异备注，已记录默认说明后请重试'); }
+    else if(res&&res.error==='diff_note_required'){
+      // Auto-fill default diff note and retry
+      diffNote='现场实收数量与计划数量不一致（自动补充）';
+      var el=document.getElementById('unloadDiffNote');
+      if(el) el.value=diffNote;
+      var retryRes=await api({action:actionName,job_id:_activeJobId,worker_id:getWorkerId(),result_lines:resultLines,diff_note:diffNote,remark:remark,complete_job:true});
+      if(retryRes&&retryRes.ok){
+        alert('卸货已完成（已自动补充差异备注）/ 하차 완료 (차이 메모 자동 추가됨)');
+        localStorage.removeItem('v2_unplanned_fb_id');
+        var resumed2 = await checkAndResumeParent();
+        if(!resumed2){ clearActiveJob(); _unloadPlanData=null; goPage('home'); }
+      } else {
+        alert('失败/실패: '+(retryRes?retryRes.error:'unknown'));
+      }
+    }
     else { alert('失败/실패: '+(res?res.error:'unknown')); }
   };
 
@@ -193,24 +231,29 @@
     if(lbl) lbl.textContent='差异备注（可选） / 차이 메모(선택)';
   }
 
-  // ===== Override startUnloadNoPlan: use dynamic start API =====
+  // ===== Override startUnloadNoPlan: feedback-first flow =====
   window.startUnloadNoPlan = async function(){
     if(_startInflight) return;
     _startInflight=true;
     try{
+      // Check if we're coming from an interrupt
+      var interruptInfo=null;
+      try{ interruptInfo=JSON.parse(localStorage.getItem(V2_INTERRUPT_KEY)||'null'); }catch(e){}
+
       var res=await api({
-        action:'v2_unload_dynamic_start',
+        action:'v2_unplanned_unload_start',
         worker_id:getWorkerId(),
-        worker_name:getWorkerName()
+        worker_name:getWorkerName(),
+        parent_job_id:(interruptInfo&&interruptInfo.parent_job_id)||'',
+        interrupt_type:(interruptInfo&&interruptInfo.parent_job_id)?'unload':''
       });
       if(res&&res.ok){
         saveActiveJob(res.job_id, res.worker_seg_id);
+        // Store feedback_id for use when completing
+        localStorage.setItem('v2_unplanned_fb_id', res.feedback_id||'');
         stopUnloadScan();
-        // Load plan data for the newly created dynamic plan
-        _unloadPlanData=null;
-        var planRes=await api({action:'v2_inbound_plan_detail',id:res.plan_id});
-        if(planRes&&planRes.ok) _unloadPlanData=planRes;
-        alert('已创建动态卸货单: '+(res.display_no||res.plan_id)+' / 동적 하차단 생성됨');
+        _unloadPlanData=null; // No plan in feedback-first flow
+        alert('已创建计划外卸货任务，现场反馈已生成\n계획외 하차 작업 생성, 현장 피드백 생성됨');
         var jobRes=await api({action:'v2_ops_job_detail',job_id:res.job_id});
         if(jobRes&&jobRes.ok) showUnloadWorking(jobRes.job);
         startJobPoll('unload');
