@@ -112,6 +112,10 @@
     <button class="btn btn-success" onclick="startUnload()">开始卸货 / 하차 시작</button>
     <div style="height:8px"></div>
     <button class="btn btn-outline btn-sm" onclick="startUnloadNoPlan()">无单临时卸货 / 서류없이 임시 하차</button>
+    <div id="unplannedActiveList" style="margin-top:12px;display:none;">
+      <div style="font-weight:700;font-size:13px;margin-bottom:6px;">当前计划外卸货中 / 진행 중 계획외 하차</div>
+      <div id="unplannedActiveItems"></div>
+    </div>
   </div>
 
   <!-- Plan info card (shown after job starts with plan) -->

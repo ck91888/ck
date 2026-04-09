@@ -98,6 +98,28 @@ async function recalcActiveCount(env, jobId, t) {
   return real;
 }
 
+// ===== Feedback Display No helper =====
+async function nextFeedbackDisplayNo(env, date, prefix) {
+  const dateStr = String(date || kstToday()).replace(/-/g, '');
+  const pfx = prefix + '-' + dateStr + '-';
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const row = await env.DB.prepare(
+      "SELECT display_no FROM v2_field_feedbacks WHERE display_no LIKE ? ORDER BY display_no DESC LIMIT 1"
+    ).bind(pfx + '%').first();
+    let seq = 1;
+    if (row && row.display_no) {
+      const tail = row.display_no.split('-').pop();
+      seq = (parseInt(tail, 10) || 0) + 1;
+    }
+    const no = pfx + String(seq).padStart(3, '0');
+    const dup = await env.DB.prepare(
+      "SELECT 1 FROM v2_field_feedbacks WHERE display_no=? LIMIT 1"
+    ).bind(no).first();
+    if (!dup) return no;
+  }
+  return prefix + '-' + dateStr + '-' + Date.now().toString(36).slice(-4);
+}
+
 // ===== Display No helper =====
 // 查当日最大序号 +1，唯一索引兜底重试
 async function nextDisplayNo(env, planDate) {
@@ -348,6 +370,10 @@ const MIGRATIONS = [
   `ALTER TABLE v2_field_feedbacks ADD COLUMN inbound_plan_id TEXT DEFAULT ''`,
   `ALTER TABLE v2_field_feedbacks ADD COLUMN parent_job_id TEXT DEFAULT ''`,
   `ALTER TABLE v2_field_feedbacks ADD COLUMN interrupt_type TEXT DEFAULT ''`,
+
+  // ---- display_no for feedbacks ----
+  `ALTER TABLE v2_field_feedbacks ADD COLUMN display_no TEXT DEFAULT ''`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_feedback_display_no ON v2_field_feedbacks(display_no) WHERE display_no != ''`,
 ];
 
 let _migrated = false;
@@ -978,17 +1004,18 @@ route("v2_unplanned_unload_start", async (body, env) => {
 
   const t = now();
   const fb_id = "FB-" + uid();
+  const fb_display_no = await nextFeedbackDisplayNo(env, kstToday(), 'XCXH');
 
   // 1. Create field feedback record
   await env.DB.prepare(`
     INSERT INTO v2_field_feedbacks(id, feedback_type, related_doc_type, related_doc_id,
-      title, content, submitted_by, status, parent_job_id, interrupt_type, created_at, updated_at)
-    VALUES(?,'unplanned_unload','ops_job','',?,?,?,'field_working',?,?,?,?)
+      title, content, submitted_by, status, parent_job_id, interrupt_type, display_no, created_at, updated_at)
+    VALUES(?,'unplanned_unload','ops_job','',?,?,?,'field_working',?,?,?,?,?)
   `).bind(fb_id,
-      "计划外到货-现场卸货中",
+      fb_display_no + " 计划外到货-现场卸货中",
       "现场操作人员发起计划外卸货",
       worker_name || worker_id,
-      parent_job_id, interrupt_type, t, t).run();
+      parent_job_id, interrupt_type, fb_display_no, t, t).run();
 
   // 2. Create unload job linked to this feedback
   const job_id = "JOB-" + uid();
@@ -1016,7 +1043,7 @@ route("v2_unplanned_unload_start", async (body, env) => {
     VALUES(?,?,?,?,?)
   `).bind(seg_id, job_id, worker_id, worker_name, t).run();
 
-  return json({ ok: true, feedback_id: fb_id, job_id, worker_seg_id: seg_id });
+  return json({ ok: true, feedback_id: fb_id, display_no: fb_display_no, job_id, worker_seg_id: seg_id });
 });
 
 // Step 2: Finish unplanned unload — save result to feedback, do NOT create inbound_plan
@@ -1074,6 +1101,8 @@ route("v2_unplanned_unload_finish", async (body, env) => {
   const fb_id = (job.related_doc_type === 'field_feedback') ? job.related_doc_id : '';
   if (fb_id) {
     const cargoSummary = result_lines.map(rl => (rl.unit_type || "") + " " + (rl.actual_qty || 0)).join(" / ");
+    const fbRow = await env.DB.prepare("SELECT display_no FROM v2_field_feedbacks WHERE id=?").bind(fb_id).first();
+    const fbNo = (fbRow && fbRow.display_no) || fb_id;
     await env.DB.prepare(`
       UPDATE v2_field_feedbacks SET status='unloaded_pending_info',
         result_lines_json=?, diff_note=?, remark=?,
@@ -1082,11 +1111,76 @@ route("v2_unplanned_unload_finish", async (body, env) => {
     `).bind(
       JSON.stringify(result_lines), diff_note, remark,
       t, worker_id,
-      "计划外卸货完成: " + (cargoSummary || "无明细"), t, fb_id
+      fbNo + " 计划外卸货完成: " + (cargoSummary || "无明细"), t, fb_id
     ).run();
   }
 
   return json({ ok: true, result_id, feedback_id: fb_id });
+});
+
+// List active (field_working) unplanned unload feedbacks for join
+route("v2_unplanned_unload_active_list", async (body, env) => {
+  if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  const fbs = await env.DB.prepare(
+    "SELECT * FROM v2_field_feedbacks WHERE feedback_type='unplanned_unload' AND status='field_working' ORDER BY created_at DESC LIMIT 50"
+  ).all();
+  const items = [];
+  for (const fb of (fbs.results || [])) {
+    const jobId = fb.related_doc_id || '';
+    let activeCount = 0, workerNames = [];
+    if (jobId) {
+      const ws = await env.DB.prepare(
+        "SELECT worker_id, worker_name FROM v2_ops_job_workers WHERE job_id=? AND left_at=''"
+      ).bind(jobId).all();
+      const rows = ws.results || [];
+      activeCount = rows.length;
+      workerNames = rows.map(r => r.worker_name || r.worker_id);
+    }
+    items.push({
+      feedback_id: fb.id,
+      display_no: fb.display_no || fb.id,
+      title: fb.title,
+      submitted_by: fb.submitted_by,
+      created_at: fb.created_at,
+      related_job_id: jobId,
+      active_worker_count: activeCount,
+      worker_names: workerNames
+    });
+  }
+  return json({ ok: true, items });
+});
+
+// Join an existing unplanned unload task
+route("v2_unplanned_unload_join", async (body, env) => {
+  if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  const feedback_id = String(body.feedback_id || "").trim();
+  const worker_id = String(body.worker_id || "").trim();
+  const worker_name = String(body.worker_name || "").trim();
+  if (!feedback_id || !worker_id) return err("missing feedback_id or worker_id");
+
+  const fb = await env.DB.prepare("SELECT * FROM v2_field_feedbacks WHERE id=?").bind(feedback_id).first();
+  if (!fb) return err("feedback not found", 404);
+  if (fb.status !== 'field_working') return err("feedback is not in field_working status");
+
+  const job_id = fb.related_doc_id || '';
+  if (!job_id) return err("no related job found");
+
+  const t = now();
+
+  // Check if worker already has open segment
+  const existing = await findOpenSeg(env, job_id, worker_id);
+  if (existing) {
+    return json({ ok: true, feedback_id, display_no: fb.display_no || fb.id, job_id, worker_seg_id: existing.id, already_joined: true });
+  }
+
+  // Create new worker segment
+  const seg_id = "WS-" + uid();
+  await env.DB.prepare(
+    "INSERT INTO v2_ops_job_workers(id, job_id, worker_id, worker_name, joined_at) VALUES(?,?,?,?,?)"
+  ).bind(seg_id, job_id, worker_id, worker_name, t).run();
+  await recalcActiveCount(env, job_id, t);
+
+  return json({ ok: true, feedback_id, display_no: fb.display_no || fb.id, job_id, worker_seg_id: seg_id, already_joined: false });
 });
 
 // Step 3: Finalize feedback → create formal inbound plan with lines

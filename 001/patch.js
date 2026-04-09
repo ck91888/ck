@@ -253,7 +253,7 @@
         localStorage.setItem('v2_unplanned_fb_id', res.feedback_id||'');
         stopUnloadScan();
         _unloadPlanData=null; // No plan in feedback-first flow
-        alert('已创建计划外卸货任务，现场反馈已生成\n계획외 하차 작업 생성, 현장 피드백 생성됨');
+        alert('已创建计划外卸货单: '+(res.display_no||res.feedback_id)+'\n계획외 하차 작업 생성됨');
         var jobRes=await api({action:'v2_ops_job_detail',job_id:res.job_id});
         if(jobRes&&jobRes.ok) showUnloadWorking(jobRes.job);
         startJobPoll('unload');

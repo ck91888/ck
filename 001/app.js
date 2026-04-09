@@ -520,6 +520,63 @@ async function showUnloadEntry() {
   document.getElementById("unloadWorkersCard").style.display = "none";
   document.getElementById("unloadResultCard").style.display = "none";
   await loadInboundPlans("unloadPlanSelect");
+  loadUnplannedActiveList();
+}
+
+async function loadUnplannedActiveList() {
+  var wrap = document.getElementById("unplannedActiveList");
+  var box = document.getElementById("unplannedActiveItems");
+  if (!wrap || !box) return;
+  var res = await api({ action: "v2_unplanned_unload_active_list" });
+  if (!res || !res.ok || !res.items || res.items.length === 0) {
+    wrap.style.display = "none";
+    box.innerHTML = "";
+    return;
+  }
+  wrap.style.display = "";
+  var html = "";
+  res.items.forEach(function(item) {
+    html += '<div style="border:1px solid #e67e22;border-radius:6px;padding:8px;margin-bottom:6px;background:#fff8f0;">';
+    html += '<div style="font-weight:700;font-size:13px;">' + esc(item.display_no) + '</div>';
+    html += '<div style="font-size:12px;color:#555;">';
+    html += '发起: ' + esc(item.submitted_by) + ' · ' + esc(fmtTime(item.created_at));
+    html += ' · 参与: ' + item.active_worker_count + '人';
+    if (item.worker_names && item.worker_names.length > 0) {
+      html += ' (' + esc(item.worker_names.join(', ')) + ')';
+    }
+    html += '</div>';
+    html += '<button class="btn btn-outline btn-sm" style="margin-top:4px;" onclick="joinUnplannedUnload(\'' + esc(item.feedback_id) + '\')">加入卸货 / 참여</button>';
+    html += '</div>';
+  });
+  box.innerHTML = html;
+}
+
+async function joinUnplannedUnload(feedbackId) {
+  if (_startInflight) return;
+  _startInflight = true;
+  try {
+    var res = await api({
+      action: "v2_unplanned_unload_join",
+      feedback_id: feedbackId,
+      worker_id: getWorkerId(),
+      worker_name: getWorkerName()
+    });
+    if (res && res.ok) {
+      saveActiveJob(res.job_id, res.worker_seg_id);
+      localStorage.setItem('v2_unplanned_fb_id', res.feedback_id || '');
+      _unloadPlanData = null;
+      if (res.already_joined) {
+        alert("已在此任务中 / 이미 참여 중: " + (res.display_no || ''));
+      } else {
+        alert("已加入计划外卸货: " + (res.display_no || '') + "\n계획외 하차 참여됨");
+      }
+      var jobRes = await api({ action: "v2_ops_job_detail", job_id: res.job_id });
+      if (jobRes && jobRes.ok) showUnloadWorking(jobRes.job);
+      startJobPoll("unload");
+    } else {
+      alert("失败/실패: " + (res ? res.error : "unknown"));
+    }
+  } finally { _startInflight = false; }
 }
 
 function showUnloadWorking(job) {
@@ -694,7 +751,7 @@ async function startUnloadNoPlan() {
       localStorage.setItem('v2_unplanned_fb_id', res.feedback_id || '');
       stopUnloadScan();
       _unloadPlanData = null;
-      alert("已创建计划外卸货任务，现场反馈已生成\n계획외 하차 작업 생성, 현장 피드백 생성됨");
+      alert("已创建计划外卸货单: " + (res.display_no || res.feedback_id) + "\n계획외 하차 작업 생성됨");
       var jobRes = await api({ action: "v2_ops_job_detail", job_id: res.job_id });
       if (jobRes && jobRes.ok) showUnloadWorking(jobRes.job);
       startJobPoll("unload");

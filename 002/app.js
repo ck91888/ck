@@ -1106,11 +1106,12 @@ async function loadFeedbackList() {
   items.forEach(function(fb) {
     var typeLabel = fb.feedback_type === "unplanned_unload" ? "计划外卸货" : fb.feedback_type === "unload_no_doc" ? L("feedback_unload_no_doc") : (fb.feedback_type || L("feedback_general"));
     var statusLabel = fb.status === "open" ? L("status_open") : fb.status === "converted" ? L("status_converted") : fb.status === "field_working" ? "现场卸货中" : fb.status === "unloaded_pending_info" ? "待补充信息" : stLabel(fb.status);
+    var fbDisplayNo = fb.display_no || fb.id;
     html += '<div class="list-item" onclick="openFeedbackDetail(\'' + esc(fb.id) + '\')">';
     html += '<div class="item-title">';
     html += '<span class="st st-' + esc(fb.status) + '">' + esc(statusLabel) + '</span> ';
     html += '<span class="biz-tag">' + esc(typeLabel) + '</span> ';
-    html += esc(fb.title || "(无标题)");
+    html += '[' + esc(fbDisplayNo) + '] ' + esc(fb.title || "(无标题)");
     html += '</div>';
     html += '<div class="item-meta">' + esc(fb.submitted_by || "") + ' · ' + esc(fmtTime(fb.created_at)) + '</div>';
     html += '</div>';
@@ -1143,8 +1144,12 @@ async function loadFeedbackDetail() {
   var typeLabel = isUnplanned ? "计划外卸货" : fb.feedback_type === "unload_no_doc" ? L("feedback_unload_no_doc") : (fb.feedback_type || L("feedback_general"));
   var statusLabel = fb.status === "open" ? L("status_open") : fb.status === "converted" ? L("status_converted") : fb.status === "field_working" ? "现场卸货中" : fb.status === "unloaded_pending_info" ? "已卸货·待补充信息" : stLabel(fb.status);
 
+  var fbDisplayNo = fb.display_no || fb.id;
   var html = '<div class="card">';
-  html += '<div style="font-size:16px;font-weight:700;margin-bottom:8px;">' + esc(fb.id) + '</div>';
+  html += '<div style="font-size:16px;font-weight:700;margin-bottom:4px;">' + esc(fbDisplayNo) + '</div>';
+  if (fb.display_no) {
+    html += '<div style="font-size:11px;color:#999;margin-bottom:8px;">ID: ' + esc(fb.id) + '</div>';
+  }
   html += '<div class="detail-field"><b>' + L("status") + ':</b> <span class="st st-' + esc(fb.status) + '">' + esc(statusLabel) + '</span></div>';
   html += '<div class="detail-field"><b>' + L("feedback_type") + ':</b> ' + esc(typeLabel) + '</div>';
   html += '<div class="detail-field"><b>标题:</b> ' + esc(fb.title) + '</div>';
@@ -1169,7 +1174,7 @@ async function loadFeedbackDetail() {
 
   // Unload result lines (from feedback itself — unplanned_unload flow)
   if (feedbackResultLines.length > 0) {
-    html += '<div class="card"><div class="card-title">卸货结果明���</div>';
+    html += '<div class="card"><div class="card-title">卸货结果明细</div>';
     html += '<table class="line-table"><thead><tr><th>类型</th><th>实际数量</th></tr></thead><tbody>';
     feedbackResultLines.forEach(function(r) {
       html += '<tr><td>' + esc(unitTypeLabel(r.unit_type)) + '</td><td>' + (r.actual_qty || 0) + '</td></tr>';
