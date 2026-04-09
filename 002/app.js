@@ -267,7 +267,7 @@ async function loadDashboard() {
 
   var pendingIssues = issueItems.filter(function(i) { return i.status === "pending" || i.status === "processing"; });
   var pendingOb = obItems.filter(function(o) { return o.status === "draft" || o.status === "issued" || o.status === "working"; });
-  var pendingIb = ibItems.filter(function(p) { return p.status === "pending" || p.status === "arrived" || p.status === "processing" || p.status === "field_working" || p.status === "unloaded_pending_info"; });
+  var pendingIb = ibItems.filter(function(p) { return p.status === "pending" || p.status === "unloading" || p.status === "arrived_pending_putaway" || p.status === "putting_away"; });
   var respondedIssues = issueItems.filter(function(i) { return i.status === "responded"; });
 
   var html = '';
@@ -307,9 +307,10 @@ async function loadDashboard() {
   html += '<div class="d-title">📦 ' + L("today_inbound") + '</div>';
   if (pendingIb.length > 0) {
     html += '<div class="d-count">' + pendingIb.length + '</div>';
+    var ibDashStMap = {pending:'待到库',unloading:'卸货中',arrived_pending_putaway:'已到库待入库',putting_away:'入库中'};
     pendingIb.slice(0, 3).forEach(function(p) {
       html += '<div style="font-size:12px;padding:2px 0;">' +
-        '<span class="st st-' + esc(p.status) + '">' + esc(stLabel(p.status)) + '</span> ' +
+        '<span class="st st-' + esc(p.status) + '">' + esc(ibDashStMap[p.status] || stLabel(p.status)) + '</span> ' +
         esc(p.customer || "--") + ' ' + esc(p.cargo_summary || "") + '</div>';
     });
   } else {
