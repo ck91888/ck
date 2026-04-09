@@ -1066,7 +1066,7 @@ async function markInboundCompleted() {
   if (!_currentInboundId) return;
   var remark = prompt("入库完成备注（可选）/ 입고 완료 메모(선택):", "");
   if (remark === null) return; // cancelled
-  if (!confirm("确认将此入库计划标记为"已入库"？\n이 입고계획을 "입고완료"로 변경하시겠습니까?")) return;
+  if (!confirm("确认将此入库计划标记为\u201C已入库\u201D？\n이 입고계획을 \u201C입고완료\u201D로 변경하시겠습니까?")) return;
   var res = await api({
     action: "v2_inbound_mark_completed",
     inbound_plan_id: _currentInboundId,

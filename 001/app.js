@@ -883,7 +883,7 @@ async function unloadComplete() {
     if (fbId || res.feedback_id) {
       msg += "\n（现场反馈已更新，请协同中心补充信息并转正 / 현장 피드백 업데이트됨, 협업센터에서 정보 보완 후 전환 필요）";
     } else {
-      msg += "\n（入库计划状态已变更为"已到库待入库" / 입고계획 상태가 "입고대기"로 변경됨）";
+      msg += "\n（入库计划状态已变更为\u201C已到库待入库\u201D / 입고계획 상태가 \u201C입고대기\u201D로 변경됨）";
     }
     alert(msg);
     localStorage.removeItem('v2_unplanned_fb_id');
@@ -1054,7 +1054,7 @@ async function finishInbound() {
     complete_job: true
   });
   if (res && res.ok) {
-    alert("入库已完成，状态已更新为"已入库"\n입고 완료, 상태가 "입고완료"로 변경됨");
+    alert("入库已完成，状态已更新为\u201C已入库\u201D\n입고 완료, 상태가 \u201C입고완료\u201D로 변경됨");
     clearActiveJob();
     goPage("home");
   } else if (res && res.error === "others_still_working") {
