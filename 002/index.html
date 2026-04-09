@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>协同中心 V2 / 협업센터</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- Login -->
+<div id="page-login" class="page active">
+  <div class="login-box">
+    <h2 id="loginTitle">协同中心 V2</h2>
+    <input id="loginKey" type="password" placeholder="访问码">
+    <div style="height:12px"></div>
+    <button class="btn btn-primary btn-full" onclick="doLogin()" id="loginBtn">进入</button>
+    <div id="loginErr" class="muted mt-10" style="color:#e74c3c;text-align:center;"></div>
+  </div>
+</div>
+
+<!-- Main -->
+<div id="page-main" class="page">
+
+  <!-- Header -->
+  <div class="c-header">
+    <div>
+      <div class="title" id="mainTitle">协同中心</div>
+      <div class="sub" id="mainSub">入库计划 · 出库作业 · 问题点沟通 · 核对异常</div>
+    </div>
+    <div class="c-header-right">
+      <button class="lang-btn" id="langBtn" onclick="toggleLang()">한국어</button>
+      <span class="user-badge" id="userBadge" onclick="promptUserName()" style="cursor:pointer;" title="点击修改显示名">--</span>
+      <button class="btn btn-outline btn-sm" id="logoutBtn" onclick="doLogout()">退出</button>
+    </div>
+  </div>
+
+  <!-- Tabs -->
+  <div class="tab-bar" id="mainTabs">
+    <button class="active" onclick="goTab('home',this)" data-tab="home">今日看板</button>
+    <button onclick="goTab('issue',this)" data-tab="issue">问题点沟通</button>
+    <button onclick="goTab('outbound',this)" data-tab="outbound">出库作业单</button>
+    <button onclick="goTab('inbound',this)" data-tab="inbound">入库计划</button>
+    <button onclick="goTab('feedback',this)" data-tab="feedback">现场反馈</button>
+    <button onclick="goTab('check',this)" data-tab="check">核对中心</button>
+  </div>
+
+  <!-- Actions -->
+  <div class="actions-bar" id="actionsBar">
+    <button onclick="goView('issue_create')" id="btnNewIssue">+ 新建问题点</button>
+    <button onclick="goView('outbound_create')" id="btnNewOutbound">+ 出库作业单</button>
+    <button onclick="goView('inbound_create')" id="btnNewInbound">+ 入库计划</button>
+  </div>
+
+  <!-- Dashboard -->
+  <div id="view-home" class="view">
+    <div class="dash-grid" id="dashGrid"></div>
+  </div>
+
+  <!-- Issue list -->
+  <div id="view-issue" class="view" style="display:none;">
+    <div class="filter-bar">
+      <select id="issueFilterStatus" onchange="loadIssueList()">
+        <option value="">全部状态</option>
+        <option value="pending">待处理</option>
+        <option value="processing">处理中</option>
+        <option value="responded">已反馈</option>
+        <option value="closed">已关闭</option>
+      </select>
+      <select id="issueFilterBiz" onchange="loadIssueList()">
+        <option value="">全部分类</option>
+        <option value="direct_ship">代发</option>
+        <option value="bulk">大货</option>
+        <option value="return">退件</option>
+        <option value="import">进口</option>
+      </select>
+      <button class="btn btn-outline btn-sm" onclick="loadIssueList()">刷新</button>
+    </div>
+    <div id="issueListBody"></div>
+  </div>
+
+  <!-- Issue create -->
+  <div id="view-issue_create" class="view" style="display:none;">
+    <button class="nav-back" onclick="goTab('issue')">← 返回</button>
+    <div class="card">
+      <div class="card-title" id="issueCreateTitle">新建问题点</div>
+      <div class="form-group">
+        <label id="lbl_biz_class">业务分类</label>
+        <select id="ic-biz">
+          <option value="direct_ship">代发</option>
+          <option value="bulk">大货</option>
+          <option value="return">退件</option>
+          <option value="import">进口</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>客户</label>
+        <input id="ic-customer" type="text" placeholder="客户名称">
+      </div>
+      <div class="form-group">
+        <label>关联单号</label>
+        <input id="ic-docno" type="text" placeholder="可选">
+      </div>
+      <div class="form-group">
+        <label>问题类型</label>
+        <input id="ic-type" type="text" placeholder="如：破损、缺件、标签错误...">
+      </div>
+      <div class="form-group">
+        <label>问题摘要</label>
+        <input id="ic-summary" type="text" placeholder="简短描述">
+      </div>
+      <div class="form-group">
+        <label>问题描述</label>
+        <textarea id="ic-desc" rows="4" placeholder="详细描述"></textarea>
+      </div>
+      <div class="form-group">
+        <label>优先级</label>
+        <select id="ic-priority">
+          <option value="normal">普通</option>
+          <option value="high">高</option>
+          <option value="urgent">紧急</option>
+          <option value="low">低</option>
+        </select>
+      </div>
+      <button class="btn btn-primary btn-full mt-10" onclick="submitIssue()">提交</button>
+    </div>
+  </div>
+
+  <!-- Issue detail -->
+  <div id="view-issue_detail" class="view" style="display:none;">
+    <button class="nav-back" onclick="goTab('issue')">← 返回</button>
+    <div id="issueDetailBody"></div>
+  </div>
+
+  <!-- Outbound list -->
+  <div id="view-outbound" class="view" style="display:none;">
+    <div class="filter-bar">
+      <input type="date" id="obFilterStart">
+      <input type="date" id="obFilterEnd">
+      <select id="obFilterStatus" onchange="loadOutboundList()">
+        <option value="">全部状态</option>
+        <option value="draft">草稿</option>
+        <option value="issued">已下发</option>
+        <option value="working">作业中</option>
+        <option value="completed">已完成</option>
+      </select>
+      <button class="btn btn-outline btn-sm" onclick="loadOutboundList()">查询</button>
+    </div>
+    <div id="outboundListBody"></div>
+  </div>
+
+  <!-- Outbound create -->
+  <div id="view-outbound_create" class="view" style="display:none;">
+    <button class="nav-back" onclick="goTab('outbound')">← 返回</button>
+    <div class="card">
+      <div class="card-title">新建出库作业单</div>
+      <div class="form-group">
+        <label>日期</label>
+        <input id="oc-date" type="date">
+      </div>
+      <div class="form-group">
+        <label>客户</label>
+        <input id="oc-customer" type="text">
+      </div>
+      <div class="form-group">
+        <label>业务分类</label>
+        <select id="oc-biz">
+          <option value="direct_ship">代发</option>
+          <option value="bulk">大货</option>
+          <option value="return">退件</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>操作模式</label>
+        <input id="oc-opmode" type="text" placeholder="如：打包出库、整柜出库">
+      </div>
+      <div class="form-group">
+        <label>出库模式</label>
+        <input id="oc-outmode" type="text" placeholder="如：客户自提、送货上门">
+      </div>
+      <div class="form-group">
+        <label>作业说明</label>
+        <textarea id="oc-instruction" rows="3"></textarea>
+      </div>
+      <div class="form-group">
+        <label>备注</label>
+        <textarea id="oc-remark" rows="2"></textarea>
+      </div>
+      <div class="card-title mt-10">明细行</div>
+      <table class="line-table" id="ocLinesTable">
+        <thead><tr><th>WMS工单号</th><th>SKU</th><th>数量</th><th></th></tr></thead>
+        <tbody id="ocLinesBody"></tbody>
+      </table>
+      <button class="btn btn-outline btn-sm mt-10" onclick="addOutboundLine()">+ 添加明细</button>
+      <button class="btn btn-primary btn-full mt-10" onclick="submitOutbound()">提交</button>
+    </div>
+  </div>
+
+  <!-- Outbound detail -->
+  <div id="view-outbound_detail" class="view" style="display:none;">
+    <button class="nav-back" onclick="goTab('outbound')">← 返回</button>
+    <div id="outboundDetailBody"></div>
+  </div>
+
+  <!-- Inbound list -->
+  <div id="view-inbound" class="view" style="display:none;">
+    <div class="filter-bar">
+      <input type="date" id="ibFilterStart">
+      <input type="date" id="ibFilterEnd">
+      <select id="ibFilterStatus" onchange="loadInboundList()">
+        <option value="">全部状态</option>
+        <option value="pending">未到货</option>
+        <option value="arrived">已到货</option>
+        <option value="processing">处理中</option>
+        <option value="completed">已完成</option>
+      </select>
+      <button class="btn btn-outline btn-sm" onclick="loadInboundList()">查询</button>
+    </div>
+    <div id="inboundListBody"></div>
+  </div>
+
+  <!-- Inbound create -->
+  <div id="view-inbound_create" class="view" style="display:none;">
+    <button class="nav-back" onclick="goTab('inbound')">← 返回</button>
+    <div class="card">
+      <div class="card-title" id="ibcTitle">新建入库计划</div>
+      <div class="form-group">
+        <label id="lbl_ibc_date">计划日期</label>
+        <input id="ibc-date" type="date">
+      </div>
+      <div class="form-group">
+        <label>客户</label>
+        <input id="ibc-customer" type="text">
+      </div>
+      <div class="form-group">
+        <label>业务分类</label>
+        <select id="ibc-biz">
+          <option value="direct_ship">代发</option>
+          <option value="bulk">大货</option>
+          <option value="return">退件</option>
+          <option value="import">进口</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>货物摘要</label>
+        <input id="ibc-cargo" type="text" placeholder="简要描述货物">
+      </div>
+      <div class="form-group">
+        <label>预计到达</label>
+        <input id="ibc-arrival" type="text" placeholder="如：下午2点、晚班到达">
+      </div>
+      <div class="form-group">
+        <label>用途</label>
+        <input id="ibc-purpose" type="text" placeholder="可选">
+      </div>
+      <div class="form-group">
+        <label>备注</label>
+        <textarea id="ibc-remark" rows="2"></textarea>
+      </div>
+      <!-- Plan lines -->
+      <div class="card-title mt-10" id="ibcLinesTitle">货物明细</div>
+      <table class="line-table" id="ibcLinesTable">
+        <thead><tr><th>类型</th><th>计划数量</th><th>备注</th><th></th></tr></thead>
+        <tbody id="ibcLinesBody"></tbody>
+      </table>
+      <button class="btn btn-outline btn-sm mt-10" onclick="addIbcLine()">+ 添加明细</button>
+      <!-- Auto outbound -->
+      <div class="form-group mt-10">
+        <label><input type="checkbox" id="ibc-auto-ob" onchange="toggleIbcAutoOb()"> 同时创建出库单</label>
+      </div>
+      <div id="ibcAutoObFields" style="display:none;">
+        <div class="form-group">
+          <label>操作模式</label>
+          <input id="ibc-ob-opmode" type="text" placeholder="如：打包出库、整柜出库">
+        </div>
+        <div class="form-group">
+          <label>出库模式</label>
+          <input id="ibc-ob-outmode" type="text" placeholder="如：客户自提、送货上门">
+        </div>
+        <div class="form-group">
+          <label>作业说明</label>
+          <textarea id="ibc-ob-instruction" rows="2"></textarea>
+        </div>
+      </div>
+      <button class="btn btn-primary btn-full mt-10" onclick="submitInbound()">提交</button>
+    </div>
+  </div>
+
+  <!-- Inbound detail -->
+  <div id="view-inbound_detail" class="view" style="display:none;">
+    <button class="nav-back" onclick="goTab('inbound')">← 返回</button>
+    <div id="inboundDetailBody"></div>
+  </div>
+
+  <!-- Feedback list -->
+  <div id="view-feedback" class="view" style="display:none;">
+    <div class="filter-bar">
+      <select id="fbFilterType" onchange="loadFeedbackList()">
+        <option value="">全部类型</option>
+        <option value="unload_no_doc">无单卸货</option>
+        <option value="general">一般反馈</option>
+      </select>
+      <select id="fbFilterStatus" onchange="loadFeedbackList()">
+        <option value="">全部状态</option>
+        <option value="open">待处理</option>
+        <option value="converted">已转正</option>
+      </select>
+      <button class="btn btn-outline btn-sm" onclick="loadFeedbackList()">刷新</button>
+    </div>
+    <div id="feedbackListBody"></div>
+  </div>
+
+  <!-- Feedback detail -->
+  <div id="view-feedback_detail" class="view" style="display:none;">
+    <button class="nav-back" onclick="goTab('feedback')">← 返回</button>
+    <div id="feedbackDetailBody"></div>
+  </div>
+
+  <!-- Check (skeleton) -->
+  <div id="view-check" class="view" style="display:none;">
+    <div class="card"><span class="muted">核对中心模块 — 下一轮完善</span></div>
+  </div>
+
+</div>
+
+<!-- Lightbox -->
+<div id="lightbox" class="lightbox" onclick="this.classList.remove('show')">
+  <img id="lightboxImg" src="">
+</div>
+
+<input type="file" id="fileInput" accept="image/*" style="display:none;" onchange="handleFileUpload(this)">
+
+<script src="config.js"></script>
+<script src="../shared/qrcode.min.js"></script>
+<script src="app.js?v=20260408g"></script>
+<script src="patch.js?v=20260408f"></script>
+</body>
+</html>

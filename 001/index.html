@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+  <title>现场执行系统 V2 / 현장 실행 시스템</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="../shared/html5-qrcode.min.js"></script>
+</head>
+<body>
+
+<!-- Header -->
+<div class="v2-header">
+  <div>
+    <div class="title" id="headerTitle">现场执行 / 현장 실행</div>
+    <div class="sub">CK 仓库 · 인천</div>
+  </div>
+  <div class="worker-badge" id="headerWorker" onclick="showBadgeChange()">--</div>
+</div>
+
+<!-- Badge Scan Entry (replaces old login page) -->
+<div id="page-badge" class="page active">
+  <div class="login-screen">
+    <div class="login-box">
+      <h2>현장 실행 시스템<br>现场执行系统 V2</h2>
+      <p style="color:#666;font-size:14px;margin-bottom:16px;">
+        请扫描工牌开始<br>명찰을 스캔하여 시작하세요
+      </p>
+      <div id="badgeReader" style="width:100%;max-width:300px;margin:0 auto 12px;"></div>
+      <div id="badgeStatus" class="muted" style="min-height:20px;margin-bottom:8px;"></div>
+      <button class="btn btn-primary" onclick="startBadgeScan()" id="badgeScanBtn">开始扫码 / 스캔 시작</button>
+      <div style="height:8px"></div>
+      <button class="btn btn-outline" onclick="showBadgeManualInput()">手动输入 / 수동 입력</button>
+      <div id="badgeManualBox" style="display:none;margin-top:12px;">
+        <input id="badgeManualInput" type="text" placeholder="EMP-001|张三 / DA-...|이름 / DAF-...|이름" style="font-size:14px;">
+        <div style="height:8px"></div>
+        <button class="btn btn-primary" onclick="submitManualBadge()">确认 / 확인</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Home -->
+<div id="page-home" class="page">
+  <div style="padding:12px;">
+    <div id="myTaskBar" class="card hidden" style="cursor:pointer;" onclick="goMyTask()">
+      <div style="font-weight:700;font-size:14px;">📌 <span id="myTaskLabel">--</span></div>
+      <div class="muted" id="myTaskMeta">--</div>
+    </div>
+  </div>
+  <div class="home-grid">
+    <div class="home-btn" onclick="goPage('unload')">
+      <div class="icon">🚛</div>
+      <div class="label">到仓卸货</div>
+      <div class="label-ko">하차</div>
+    </div>
+    <div class="home-btn" onclick="goPage('inbound_menu')">
+      <div class="icon">📦</div>
+      <div class="label">入库</div>
+      <div class="label-ko">입고</div>
+    </div>
+    <div class="home-btn" onclick="goPage('order_op_menu')">
+      <div class="icon">📋</div>
+      <div class="label">按单操作</div>
+      <div class="label-ko">주문별 작업</div>
+    </div>
+    <div class="home-btn" onclick="goPage('outbound_menu')">
+      <div class="icon">🚚</div>
+      <div class="label">出库作业</div>
+      <div class="label-ko">출고 작업</div>
+    </div>
+    <div class="home-btn" onclick="goPage('internal_menu')">
+      <div class="icon">🔧</div>
+      <div class="label">库内操作</div>
+      <div class="label-ko">창고 내 작업</div>
+    </div>
+    <div class="home-btn accent" onclick="goPage('issue_list')">
+      <div class="icon">⚠️</div>
+      <div class="label">问题点处理</div>
+      <div class="label-ko">이슈 처리</div>
+    </div>
+    <div class="home-btn" onclick="goPage('import_menu')">
+      <div class="icon">✈️</div>
+      <div class="label">进口专区</div>
+      <div class="label-ko">수입 전용</div>
+    </div>
+    <div class="home-btn" onclick="window.open('../002/','_blank')">
+      <div class="icon">🔗</div>
+      <div class="label">去协同中心</div>
+      <div class="label-ko">협업센터</div>
+    </div>
+  </div>
+</div>
+
+<!-- Unload -->
+<div id="page-unload" class="page">
+  <div class="topbar">
+    <button class="back-btn" onclick="unloadGoBack()">← 返回/뒤로</button>
+    <div class="page-title">到仓卸货 / 하차</div>
+  </div>
+
+  <!-- Entry card (hidden when job active) -->
+  <div id="unloadEntryCard" class="card">
+    <label style="font-weight:700;">选择入库计划 / 입고계획 선택</label>
+    <div id="unloadScanArea" style="margin:8px 0;">
+      <button class="btn btn-outline btn-sm" onclick="startUnloadScan()">📷 扫码选单 / QR 스캔</button>
+      <div id="unloadScanReader" style="width:280px;margin:6px 0;"></div>
+    </div>
+    <select id="unloadPlanSelect"><option value="">-- 选择/선택 --</option></select>
+    <button class="btn btn-outline btn-sm mt-10" onclick="loadInboundPlans('unloadPlanSelect')">刷新列表 / 새로고침</button>
+    <div style="height:10px"></div>
+    <button class="btn btn-success" onclick="startUnload()">开始卸货 / 하차 시작</button>
+    <div style="height:8px"></div>
+    <button class="btn btn-outline btn-sm" onclick="startUnloadNoPlan()">无单临时卸货 / 서류없이 임시 하차</button>
+  </div>
+
+  <!-- Plan info card (shown after job starts with plan) -->
+  <div id="unloadPlanCard" class="card" style="display:none;">
+    <div class="card-title">入库计划信息 / 입고계획 정보</div>
+    <div id="unloadPlanInfo" class="muted">--</div>
+    <div id="unloadPlanLinesArea" style="margin-top:8px;"></div>
+  </div>
+
+  <!-- Workers card -->
+  <div id="unloadWorkersCard" class="card" style="display:none;">
+    <div class="card-title">当前参与人员 / 현재 참여 인원</div>
+    <div id="unloadWorkers" class="workers-panel"><span class="muted">--</span></div>
+  </div>
+
+  <!-- Result card (shown when job active) -->
+  <div id="unloadResultCard" class="card" style="display:none;">
+    <div class="card-title">实际卸货结果 / 실제 하차 결과</div>
+    <div id="unloadResultLines"></div>
+    <div id="unloadDiffArea" style="display:none;margin-top:8px;">
+      <div style="color:#e74c3c;font-weight:700;">⚠ 计划与实际有差异 / 계획과 실제 차이 있음</div>
+      <label>差异说明 / 차이 설명 <span style="color:#e74c3c">*</span></label>
+      <textarea id="unloadDiffNote" rows="2" placeholder="请说明差异原因 / 차이 사유를 입력하세요"></textarea>
+    </div>
+    <label style="margin-top:8px;">备注 / 비고</label>
+    <textarea id="unloadRemark" rows="2"></textarea>
+    <div style="height:10px"></div>
+    <div id="unloadActions"></div>
+  </div>
+</div>
+
+<!-- Inbound Menu -->
+<div id="page-inbound_menu" class="page">
+  <div class="topbar">
+    <button class="back-btn" onclick="goPage('home')">← 返回/뒤로</button>
+    <div class="page-title">入库 / 입고</div>
+  </div>
+  <div style="padding:12px;">
+    <button class="btn btn-primary" onclick="goPage('inbound',{job_type:'inbound_direct',biz_class:'direct_ship'})">代发入库 / 직배송 입고</button>
+    <button class="btn btn-primary" onclick="goPage('inbound',{job_type:'inbound_bulk',biz_class:'bulk'})">大货入库 / 대량화물 입고</button>
+    <button class="btn btn-primary" onclick="goPage('inbound',{job_type:'inbound_return',biz_class:'return'})">退件入库 / 반품 입고</button>
+  </div>
+</div>
+
+<!-- Inbound -->
+<div id="page-inbound" class="page">
+  <div class="topbar">
+    <button class="back-btn" onclick="goPage('inbound_menu')">← 返回/뒤로</button>
+    <div class="page-title" id="inboundTitle">入库 / 입고</div>
+  </div>
+  <div class="card">
+    <label>关联入库计划 / 입고계획 선택</label>
+    <select id="inboundPlanSelect"><option value="">-- 选择/선택 --</option></select>
+    <button class="btn btn-outline btn-sm mt-10" onclick="loadInboundPlans('inboundPlanSelect')">刷新列表 / 새로고침</button>
+  </div>
+  <div class="card">
+    <button class="btn btn-success" onclick="startInbound()">开始入库 / 입고 시작</button>
+    <button class="btn btn-danger" onclick="finishInbound()">结束入库 / 입고 종료</button>
+  </div>
+  <div class="card">
+    <div class="card-title">当前参与人员 / 현재 참여 인원</div>
+    <div id="inboundWorkers" class="workers-panel"><span class="muted">--</span></div>
+  </div>
+</div>
+
+<!-- Order Op Menu -->
+<div id="page-order_op_menu" class="page">
+  <div class="topbar">
+    <button class="back-btn" onclick="goPage('home')">← 返回/뒤로</button>
+    <div class="page-title">按单操作 / 주문별 작업</div>
+  </div>
+  <div style="padding:12px;">
+    <button class="btn btn-primary" onclick="goPage('generic_job',{flow_stage:'order_op',job_type:'pick_direct',title:'代发拣货/직배송 피킹'})">代发拣货 / 직배송 피킹</button>
+    <button class="btn btn-primary" onclick="goPage('generic_job',{flow_stage:'order_op',job_type:'bulk_op',title:'大货操作/대량화물 작업'})">大货操作 / 대량화물 작업</button>
+  </div>
+</div>
+
+<!-- Outbound Menu -->
+<div id="page-outbound_menu" class="page">
+  <div class="topbar">
+    <button class="back-btn" onclick="goPage('home')">← 返回/뒤로</button>
+    <div class="page-title">出库作业 / 출고 작업</div>
+  </div>
+  <div style="padding:12px;">
+    <button class="btn btn-primary" onclick="goPage('generic_job',{flow_stage:'outbound',job_type:'pack_direct',title:'代发打包/직배송 포장'})">代发打包 / 직배송 포장</button>
+    <button class="btn btn-primary" onclick="goPage('outbound_load')">出库装货 / 출고 상차</button>
+  </div>
+</div>
+
+<!-- Outbound Load -->
+<div id="page-outbound_load" class="page">
+  <div class="topbar">
+    <button class="back-btn" onclick="goPage('outbound_menu')">← 返回/뒤로</button>
+    <div class="page-title">出库装货 / 출고 상차</div>
+  </div>
+  <div class="card">
+    <label>关联出库作业单 / 출고작업단 선택</label>
+    <select id="loadOrderSelect"><option value="">-- 选择/선택 --</option></select>
+    <button class="btn btn-outline btn-sm mt-10" onclick="loadOutboundOrders()">刷新列表 / 새로고침</button>
+    <div style="height:8px"></div>
+    <button class="btn btn-outline btn-sm" onclick="startLoadNoOrder()">无单临时装货 / 서류없이 임시 상차</button>
+  </div>
+  <div class="card">
+    <button class="btn btn-success" onclick="startOutboundLoad()">开始装货 / 상차 시작</button>
+    <button class="btn btn-danger" onclick="finishOutboundLoad()">结束装货 / 상차 종료</button>
+  </div>
+  <div class="card">
+    <div class="card-title">当前参与人员 / 현재 참여 인원</div>
+    <div id="loadWorkers" class="workers-panel"><span class="muted">--</span></div>
+  </div>
+  <div class="card" id="loadResultCard" style="display:none;">
+    <div class="card-title">出库结果 / 출고 결과</div>
+    <label>箱数 / 박스 수</label>
+    <input type="number" id="loadBoxCount" placeholder="0">
+    <label>托数 / 팔레트 수</label>
+    <input type="number" id="loadPalletCount" placeholder="0">
+    <label>备注 / 비고</label>
+    <textarea id="loadRemark" rows="2"></textarea>
+    <label>提货车辆照片 / 차량 사진</label>
+    <div class="photo-upload" id="loadPhotos">
+      <div class="photo-add" onclick="uploadPhoto('outbound_order','vehicle_photo')">+</div>
+    </div>
+    <button class="btn btn-primary mt-10" onclick="saveOutboundLoadResult()">保存并完成 / 저장 후 완료</button>
+  </div>
+  <div class="interrupt-bar" id="loadInterruptBar" style="display:none;">
+    <button class="btn btn-warning btn-sm" onclick="interruptToUnload()">挂起→临时卸货 / 임시 하차</button>
+  </div>
+</div>
+
+<!-- Internal Menu -->
+<div id="page-internal_menu" class="page">
+  <div class="topbar">
+    <button class="back-btn" onclick="goPage('home')">← 返回/뒤로</button>
+    <div class="page-title">库内操作 / 창고 내 작업</div>
+  </div>
+  <div style="padding:12px;">
+    <button class="btn btn-primary" onclick="goPage('generic_job',{flow_stage:'internal',job_type:'inventory',title:'盘点/재고조사'})">盘点 / 재고조사</button>
+    <button class="btn btn-primary" onclick="goPage('generic_job',{flow_stage:'internal',job_type:'disposal',title:'废弃处理/폐기 처리'})">废弃处理 / 폐기 처리</button>
+    <button class="btn btn-primary" onclick="goPage('generic_job',{flow_stage:'internal',job_type:'qc',title:'质检/품검'})">质检 / 품검</button>
+    <button class="btn btn-primary" onclick="goPage('generic_job',{flow_stage:'internal',job_type:'other_internal',title:'其他库内作业/기타 창고작업'})">其他库内作业 / 기타 창고작업</button>
+  </div>
+</div>
+
+<!-- Import Menu -->
+<div id="page-import_menu" class="page">
+  <div class="topbar">
+    <button class="back-btn" onclick="goPage('home')">← 返回/뒤로</button>
+    <div class="page-title">进口专区 / 수입 전용</div>
+  </div>
+  <div style="padding:12px;">
+    <button class="btn btn-primary" onclick="goPage('generic_job',{flow_stage:'import',job_type:'unload',biz_class:'import',title:'进口卸货/수입 하차'})">进口卸货 / 수입 하차</button>
+    <button class="btn btn-primary" onclick="goPage('generic_job',{flow_stage:'import',job_type:'scan_pallet',biz_class:'import',title:'过机扫描/스캔'})">过机扫描 / 스캔</button>
+    <button class="btn btn-primary" onclick="goPage('generic_job',{flow_stage:'import',job_type:'load_import',biz_class:'import',title:'装柜出货/적재 출고'})">装柜出货 / 적재 출고</button>
+  </div>
+</div>
+
+<!-- Issue List -->
+<div id="page-issue_list" class="page">
+  <div class="topbar">
+    <button class="back-btn" onclick="goPage('home')">← 返回/뒤로</button>
+    <div class="page-title">问题点处理 / 이슈 처리</div>
+  </div>
+  <div class="tab-bar">
+    <button class="active" onclick="filterIssues('pending',this)">待处理/대기중</button>
+    <button onclick="filterIssues('processing',this)">处理中/처리중</button>
+    <button onclick="filterIssues('my',this)">我处理的/내 처리건</button>
+    <button onclick="filterIssues('responded',this)">已反馈/완료</button>
+  </div>
+  <div id="issueListBody"></div>
+  <div style="padding:12px;">
+    <button class="btn btn-outline btn-sm" onclick="loadIssueList()">刷新 / 새로고침</button>
+  </div>
+</div>
+
+<!-- Issue Detail -->
+<div id="page-issue_detail" class="page">
+  <div class="topbar">
+    <button class="back-btn" onclick="goPage('issue_list')">← 返回/뒤로</button>
+    <div class="page-title">问题详情 / 이슈 상세</div>
+  </div>
+  <div id="issueDetailBody" style="padding:0 12px;"></div>
+</div>
+
+<!-- Generic Job (skeleton for order_op, internal, import) -->
+<div id="page-generic_job" class="page">
+  <div class="topbar">
+    <button class="back-btn" onclick="goGenericBack()">← 返回/뒤로</button>
+    <div class="page-title" id="genericJobTitle">--</div>
+  </div>
+  <div class="card">
+    <button class="btn btn-success" onclick="startGenericJob()">开始 / 시작</button>
+    <button class="btn btn-danger" onclick="finishGenericJob()">结束 / 종료</button>
+  </div>
+  <div class="card">
+    <div class="card-title">当前参与人员 / 현재 참여 인원</div>
+    <div id="genericWorkers" class="workers-panel"><span class="muted">--</span></div>
+  </div>
+  <div class="interrupt-bar">
+    <button class="btn btn-warning btn-sm" onclick="interruptToUnload()">挂起→临时卸货 / 임시 하차</button>
+    <button class="btn btn-warning btn-sm" onclick="interruptToLoad()">挂起→临时装货 / 임시 상차</button>
+  </div>
+</div>
+
+<!-- Badge Change Modal (right-top entry) -->
+<div id="badgeModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:999;align-items:center;justify-content:center;">
+  <div class="card" style="max-width:360px;margin:20px;">
+    <div class="card-title">更换工牌 / 명찰 변경</div>
+    <div id="badgeModalReader" style="width:100%;max-width:280px;margin:0 auto 10px;"></div>
+    <div id="badgeModalStatus" class="muted" style="min-height:20px;margin-bottom:8px;"></div>
+    <button class="btn btn-primary" onclick="startBadgeModalScan()">扫码 / 스캔</button>
+    <div style="height:6px"></div>
+    <input id="badgeModalInput" type="text" placeholder="手动输入工牌 / 명찰 수동 입력">
+    <button class="btn btn-primary mt-10" onclick="submitBadgeModal()">确认 / 확인</button>
+    <button class="btn btn-outline mt-10" onclick="hideBadgeModal()">取消 / 취소</button>
+  </div>
+</div>
+
+<!-- Photo lightbox -->
+<div id="lightbox" class="lightbox hidden" onclick="this.classList.add('hidden')">
+  <img id="lightboxImg" src="">
+</div>
+
+<input type="file" id="photoInput" accept="image/*" capture="environment" style="display:none;" onchange="handlePhotoUpload(this)">
+
+<script src="config.js"></script>
+<script src="app.js?v=20260408d"></script>
+<script src="patch.js?v=20260408d"></script>
+</body>
+</html>
