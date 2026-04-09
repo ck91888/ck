@@ -945,6 +945,9 @@ async function loadInboundDetail() {
   if (p.purpose) html += '<div style="grid-column:1/-1;"><b>' + L("purpose") + ':</b> ' + esc(p.purpose) + '</div>';
   if (p.remark) html += '<div style="grid-column:1/-1;"><b>' + L("remark") + ':</b> ' + esc(p.remark) + '</div>';
   html += '<div style="grid-column:1/-1;"><b>' + L("submitted_by") + ':</b> ' + esc(p.created_by) + ' · ' + esc(fmtTime(p.created_at)) + '</div>';
+  if (p.manual_completed_by) {
+    html += '<div style="grid-column:1/-1;"><b>直接完结人:</b> ' + esc(p.manual_completed_by) + ' · ' + esc(fmtTime(p.manual_completed_at)) + '</div>';
+  }
   html += '</div></div>';
 
   // --- Plan lines ---
@@ -982,6 +985,8 @@ async function loadInboundDetail() {
         html += '<div>实际结果：--</div>';
       }
       html += '<div>差异备注：' + esc(j.diff_note || '无') + '</div>';
+      if (j.remark) html += '<div>备注：' + esc(j.remark) + '</div>';
+      if (j.result_note) html += '<div>产出说明：' + esc(j.result_note) + '</div>';
       html += '</div>';
     });
     html += '</div>';

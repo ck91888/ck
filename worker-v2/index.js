@@ -374,6 +374,10 @@ const MIGRATIONS = [
   // ---- display_no for feedbacks ----
   `ALTER TABLE v2_field_feedbacks ADD COLUMN display_no TEXT DEFAULT ''`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_feedback_display_no ON v2_field_feedbacks(display_no) WHERE display_no != ''`,
+
+  // ---- manual completion tracking for inbound plans ----
+  `ALTER TABLE v2_inbound_plans ADD COLUMN manual_completed_by TEXT DEFAULT ''`,
+  `ALTER TABLE v2_inbound_plans ADD COLUMN manual_completed_at TEXT DEFAULT ''`,
 ];
 
 let _migrated = false;
@@ -887,12 +891,16 @@ route("v2_inbound_plan_detail", async (body, env) => {
     const maxLeft = workerRows.reduce((m, w) => (w.left_at && w.left_at > m ? w.left_at : m), "");
 
     const latestResult = await env.DB.prepare(
-      "SELECT result_lines_json, diff_note, created_at FROM v2_ops_job_results WHERE job_id=? ORDER BY created_at DESC LIMIT 1"
+      "SELECT result_lines_json, diff_note, remark, result_json, created_at FROM v2_ops_job_results WHERE job_id=? ORDER BY created_at DESC LIMIT 1"
     ).bind(job.id).first();
 
     let resultLines = [];
     if (latestResult && latestResult.result_lines_json) {
       try { resultLines = JSON.parse(latestResult.result_lines_json); } catch(e) {}
+    }
+    let resultNote = "";
+    if (latestResult && latestResult.result_json) {
+      try { const rj = JSON.parse(latestResult.result_json); resultNote = rj.result_note || ""; } catch(e) {}
     }
 
     enrichedJobs.push({
@@ -902,7 +910,9 @@ route("v2_inbound_plan_detail", async (body, env) => {
       total_minutes_worked: Math.round(totalMin),
       completed_at: maxLeft || job.updated_at || "",
       result_lines: resultLines,
-      diff_note: (latestResult && latestResult.diff_note) || ""
+      diff_note: (latestResult && latestResult.diff_note) || "",
+      remark: (latestResult && latestResult.remark) || "",
+      result_note: resultNote
     });
   }
 
@@ -1609,8 +1619,8 @@ route("v2_inbound_mark_completed", async (body, env) => {
   }
 
   const t = now();
-  let updateSql = "UPDATE v2_inbound_plans SET status='completed', updated_at=?";
-  const binds = [t];
+  let updateSql = "UPDATE v2_inbound_plans SET status='completed', updated_at=?, manual_completed_by=?, manual_completed_at=?";
+  const binds = [t, operator, t];
   if (remark) { updateSql += ", remark=?"; binds.push(remark); }
   updateSql += " WHERE id=?";
   binds.push(plan_id);
@@ -1943,6 +1953,9 @@ route("v2_feedback_detail", async (body, env) => {
   return json({ ok: true, feedback: row, job_results: jobResults, feedback_result_lines: feedbackResultLines });
 });
 
+// ===== [DEPRECATED] Generic feedback-to-inbound conversion =====
+// New flow for unplanned_unload feedbacks must use v2_feedback_finalize_to_inbound.
+// This route is kept only for backward compatibility with old open/unload_no_doc feedback data.
 route("v2_feedback_convert_to_inbound", async (body, env) => {
   if (!isAuth(body, env)) return err("unauthorized", 401);
   const feedback_id = String(body.feedback_id || "").trim();
@@ -1950,6 +1963,11 @@ route("v2_feedback_convert_to_inbound", async (body, env) => {
 
   const fb = await env.DB.prepare("SELECT * FROM v2_field_feedbacks WHERE id=?").bind(feedback_id).first();
   if (!fb) return err("feedback not found", 404);
+
+  // Block unplanned_unload — must use v2_feedback_finalize_to_inbound
+  if (fb.feedback_type === 'unplanned_unload') {
+    return err("unplanned_unload feedbacks must use v2_feedback_finalize_to_inbound instead");
+  }
 
   const t = now();
   const id = "IB-" + uid();
