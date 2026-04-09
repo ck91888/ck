@@ -1,0 +1,12 @@
+name = "ck-v2-api"
+main = "index.js"
+compatibility_date = "2026-03-03"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "ck_v2"
+database_id = "2c32cce7-57ca-404e-89da-10a94c4da930"
+
+[[r2_buckets]]
+binding = "R2_BUCKET"
+bucket_name = "ck-v2-files"
