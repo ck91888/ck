@@ -947,7 +947,9 @@ route("v2_inbound_plan_update_status", async (body, env) => {
   return json({ ok: true });
 });
 
-// ===== Dynamic plan finalize: fill info and convert to formal inbound =====
+// ===== [DEPRECATED] Dynamic plan finalize: fill info and convert to formal inbound =====
+// This route is kept for backward compatibility with old field_dynamic plans only.
+// New flow uses v2_feedback_finalize_to_inbound instead.
 route("v2_inbound_dynamic_finalize", async (body, env) => {
   if (!isAuth(body, env)) return err("unauthorized", 401);
   const id = String(body.id || "").trim();
@@ -1212,7 +1214,7 @@ route("v2_feedback_finalize_to_inbound", async (body, env) => {
   await env.DB.prepare(`
     INSERT INTO v2_inbound_plans(id, plan_date, customer, biz_class, cargo_summary,
       expected_arrival, purpose, remark, status, source_feedback_id, created_by, created_at, updated_at, display_no, source_type)
-    VALUES(?,?,?,?,?,?,?,?,'pending',?,?,?,?,?,'from_feedback')
+    VALUES(?,?,?,?,?,?,?,?,'arrived_pending_putaway',?,?,?,?,?,'from_feedback')
   `).bind(plan_id, plan_date, customer, biz_class, cargo_summary,
       expected_arrival, purpose, remark,
       feedback_id, created_by, t, t, display_no).run();
@@ -1316,7 +1318,7 @@ route("v2_unload_job_start", async (body, env) => {
     `).bind(job_id, biz_class, plan_id, worker_id, t, t).run();
     if (plan_id) {
       await env.DB.prepare(
-        "UPDATE v2_inbound_plans SET status='processing', updated_at=? WHERE id=? AND status IN ('pending','arrived')"
+        "UPDATE v2_inbound_plans SET status='unloading', updated_at=? WHERE id=? AND status IN ('pending','arrived','arrived_pending_putaway')"
       ).bind(t, plan_id).run();
     }
   }
@@ -1456,7 +1458,7 @@ route("v2_unload_job_finish", async (body, env) => {
         return json({ ok: true, result_id, dynamic_plan: true, plan_id });
       } else {
         await env.DB.prepare(
-          "UPDATE v2_inbound_plans SET status='completed', updated_at=? WHERE id=?"
+          "UPDATE v2_inbound_plans SET status='arrived_pending_putaway', updated_at=? WHERE id=?"
         ).bind(t, plan_id).run();
       }
     }
@@ -1490,21 +1492,26 @@ route("v2_inbound_job_start", async (body, env) => {
   const biz_class = String(body.biz_class || "").trim();
   const job_type = String(body.job_type || "inbound_direct").trim();
   if (!worker_id) return err("missing worker_id");
+  if (!plan_id) return err("missing plan_id");
+
+  // Only allow starting putaway for plans that are arrived_pending_putaway
+  const plan = await env.DB.prepare("SELECT status FROM v2_inbound_plans WHERE id=?").bind(plan_id).first();
+  if (!plan) return err("plan not found", 404);
+  if (plan.status !== 'arrived_pending_putaway' && plan.status !== 'putting_away') {
+    return err("plan status must be arrived_pending_putaway, current: " + plan.status);
+  }
 
   const t = now();
 
   let job = null;
-  if (plan_id) {
-    const existing = await env.DB.prepare(
-      "SELECT * FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type=? AND status IN ('pending','working') LIMIT 1"
-    ).bind(plan_id, job_type).first();
-    if (existing) job = existing;
-  }
+  const existing = await env.DB.prepare(
+    "SELECT * FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type LIKE 'inbound%' AND status IN ('pending','working') LIMIT 1"
+  ).bind(plan_id).first();
+  if (existing) job = existing;
 
   let job_id, is_new_job = false;
   if (job) {
     job_id = job.id;
-    // 防重：同一 worker 已有 open segment 则直接返回
     const dup = await findOpenSeg(env, job_id, worker_id);
     if (dup) return json({ ok: true, job_id, worker_seg_id: dup.id, is_new_job: false, already_joined: true });
     await env.DB.prepare(
@@ -1518,6 +1525,10 @@ route("v2_inbound_job_start", async (body, env) => {
         status, created_by, created_at, updated_at, active_worker_count)
       VALUES(?, 'inbound', ?, ?, 'inbound_plan', ?, 'working', ?, ?, ?, 1)
     `).bind(job_id, biz_class, job_type, plan_id, worker_id, t, t).run();
+    // Update plan status to putting_away
+    await env.DB.prepare(
+      "UPDATE v2_inbound_plans SET status='putting_away', updated_at=? WHERE id=? AND status='arrived_pending_putaway'"
+    ).bind(t, plan_id).run();
   }
 
   const seg_id = "WS-" + uid();
@@ -1534,37 +1545,78 @@ route("v2_inbound_job_finish", async (body, env) => {
   const job_id = String(body.job_id || "").trim();
   const worker_id = String(body.worker_id || "").trim();
   const complete_job = body.complete_job === true;
+  const leave_only = body.leave_only === true;
   if (!job_id) return err("missing job_id");
 
   const t = now();
   const remark = String(body.remark || "");
+  const result_note = String(body.result_note || "");
 
-  // 自愈：关闭该 worker 全部 open segments + 重算 count
-  await closeAllOpenSegs(env, job_id, worker_id, t, 'finished');
+  await closeAllOpenSegs(env, job_id, worker_id, t, leave_only ? 'leave' : 'finished');
   const realCount = await recalcActiveCount(env, job_id, t);
 
-  if (remark) {
-    const resultJson = JSON.stringify({ remark });
-    await env.DB.prepare(
-      "UPDATE v2_ops_jobs SET shared_result_json=?, updated_at=? WHERE id=?"
-    ).bind(resultJson, t, job_id).run();
+  if (leave_only) {
+    return json({ ok: true, left: true });
   }
 
+  // Save result
+  const resultData = { remark, result_note };
+  await env.DB.prepare(
+    "UPDATE v2_ops_jobs SET shared_result_json=?, updated_at=? WHERE id=?"
+  ).bind(JSON.stringify(resultData), t, job_id).run();
+
   if (complete_job) {
-    if (realCount <= 0) {
-      await env.DB.prepare(
-        "UPDATE v2_ops_jobs SET status='completed', updated_at=? WHERE id=?"
-      ).bind(t, job_id).run();
-      const job = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
-      if (job && job.related_doc_id) {
-        await env.DB.prepare(
-          "UPDATE v2_inbound_plans SET status='completed', updated_at=? WHERE id=?"
-        ).bind(t, job.related_doc_id).run();
-      }
+    if (realCount > 0) {
+      return json({ ok: false, error: "others_still_working", active_count: realCount });
     }
+    // Save result record
+    const result_id = "RES-" + uid();
+    await env.DB.prepare(
+      "INSERT INTO v2_ops_job_results(id, job_id, box_count, pallet_count, remark, result_json, created_by, created_at) VALUES(?,?,0,0,?,?,?,?)"
+    ).bind(result_id, job_id, remark, JSON.stringify(resultData), worker_id, t).run();
+
+    await env.DB.prepare(
+      "UPDATE v2_ops_jobs SET status='completed', updated_at=? WHERE id=?"
+    ).bind(t, job_id).run();
+    await env.DB.prepare(
+      "UPDATE v2_ops_job_workers SET left_at=?, leave_reason='job_completed' WHERE job_id=? AND left_at=''"
+    ).bind(t, job_id).run();
+
+    const job = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
+    if (job && job.related_doc_id) {
+      await env.DB.prepare(
+        "UPDATE v2_inbound_plans SET status='completed', updated_at=? WHERE id=?"
+      ).bind(t, job.related_doc_id).run();
+    }
+    return json({ ok: true, result_id });
   }
 
   return json({ ok: true });
+});
+
+// ===== Clerk direct mark completed =====
+route("v2_inbound_mark_completed", async (body, env) => {
+  if (!isAuth(body, env)) return err("unauthorized", 401);
+  const plan_id = String(body.inbound_plan_id || "").trim();
+  if (!plan_id) return err("missing inbound_plan_id");
+  const operator = String(body.operator_name || "").trim();
+  const remark = String(body.remark || "").trim();
+
+  const plan = await env.DB.prepare("SELECT status FROM v2_inbound_plans WHERE id=?").bind(plan_id).first();
+  if (!plan) return err("plan not found", 404);
+  if (plan.status !== 'arrived_pending_putaway') {
+    return err("only arrived_pending_putaway can be marked completed, current: " + plan.status);
+  }
+
+  const t = now();
+  let updateSql = "UPDATE v2_inbound_plans SET status='completed', updated_at=?";
+  const binds = [t];
+  if (remark) { updateSql += ", remark=?"; binds.push(remark); }
+  updateSql += " WHERE id=?";
+  binds.push(plan_id);
+  await env.DB.prepare(updateSql).bind(...binds).run();
+
+  return json({ ok: true, operator, completed_at: t });
 });
 
 // =====================================================

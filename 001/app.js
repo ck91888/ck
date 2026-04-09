@@ -450,17 +450,23 @@ var JOB_TYPE_LABEL = {
 };
 
 var STATUS_LABEL = {
-  pending: "待处理/대기중",
+  pending: "待到库/대기중",
+  unloading: "卸货中/하차중",
+  arrived_pending_putaway: "已到库待入库/입고대기",
+  putting_away: "入库中/입고중",
   processing: "处理中/처리중",
   working: "作业中/작업중",
   responded: "已反馈/피드백완료",
-  completed: "已完成/완료",
+  completed: "已入库/입고완료",
   closed: "已关闭/종료",
   cancelled: "已取消/취소됨",
   draft: "草稿/초안",
   issued: "已下发/배정됨",
   arrived: "已到货/도착",
-  awaiting_close: "待收尾/마감대기"
+  awaiting_close: "待收尾/마감대기",
+  field_working: "现场卸货中/현장하차중",
+  unloaded_pending_info: "待补充信息/정보보완대기",
+  converted: "已转正/전환완료"
 };
 
 var BIZ_LABEL = {
@@ -692,12 +698,15 @@ async function updateUnloadActions() {
 async function loadInboundPlans(selectId) {
   var sel = document.getElementById(selectId);
   if (!sel) return;
+  var isForPutaway = (selectId === "inboundPlanSelect");
   var res = await api({ action: "v2_inbound_plan_list", start_date: "", end_date: "", status: "" });
   var opts = '<option value="">-- 选择入库计划/입고계획 선택 --</option>';
   if (res && res.ok && res.items) {
     res.items.forEach(function(p) {
       if (p.status === "completed" || p.status === "cancelled") return;
-      opts += '<option value="' + esc(p.id) + '">[' + esc(p.display_no || p.id) + '] ' + esc(p.customer) + ' - ' + esc(p.cargo_summary) + '</option>';
+      if (isForPutaway && p.status !== "arrived_pending_putaway" && p.status !== "putting_away") return;
+      var stText = isForPutaway ? '' : (STATUS_LABEL[p.status] ? ' [' + STATUS_LABEL[p.status].split('/')[0] + ']' : '');
+      opts += '<option value="' + esc(p.id) + '">[' + esc(p.display_no || p.id) + ']' + stText + ' ' + esc(p.customer) + ' - ' + esc(p.cargo_summary) + '</option>';
     });
   }
   sel.innerHTML = opts;
@@ -873,6 +882,8 @@ async function unloadComplete() {
     var msg = "卸货已完成 / 하차 완료";
     if (fbId || res.feedback_id) {
       msg += "\n（现场反馈已更新，请协同中心补充信息并转正 / 현장 피드백 업데이트됨, 협업센터에서 정보 보완 후 전환 필요）";
+    } else {
+      msg += "\n（入库计划状态已变更为"已到库待入库" / 입고계획 상태가 "입고대기"로 변경됨）";
     }
     alert(msg);
     localStorage.removeItem('v2_unplanned_fb_id');
@@ -966,8 +977,22 @@ async function initInbound() {
   var title = document.getElementById("inboundTitle");
   var jt = _pageParams.job_type || "inbound_direct";
   title.textContent = JOB_TYPE_LABEL[jt] || "入库/입고";
+
+  // If already in a putaway job, show working state
+  if (_activeJobId) {
+    var res = await api({ action: "v2_ops_job_detail", job_id: _activeJobId });
+    if (res && res.ok && res.job && res.job.job_type && res.job.job_type.indexOf("inbound") === 0 && res.job.status === "working") {
+      document.getElementById("inboundEntryCard").style.display = "none";
+      document.getElementById("inboundWorkingCard").style.display = "";
+      refreshInboundWorkers();
+      startJobPoll("inbound");
+      return;
+    }
+  }
+
+  document.getElementById("inboundEntryCard").style.display = "";
+  document.getElementById("inboundWorkingCard").style.display = "none";
   await loadInboundPlans("inboundPlanSelect");
-  startJobPoll("inbound");
 }
 
 async function startInbound() {
@@ -975,6 +1000,7 @@ async function startInbound() {
   _startInflight = true;
   try {
     var planId = document.getElementById("inboundPlanSelect").value;
+    if (!planId) { alert("请选择入库计划 / 입고계획을 선택하세요"); return; }
     var res = await api({
       action: "v2_inbound_job_start",
       plan_id: planId,
@@ -986,28 +1012,53 @@ async function startInbound() {
     if (res && res.ok) {
       saveActiveJob(res.job_id, res.worker_seg_id);
       if (!res.already_joined) {
-        alert(res.is_new_job ? "已创建入库任务 / 입고 작업 생성됨" : "已加入入库任务 / 입고 작업 참여됨");
+        alert(res.is_new_job ? "已创建入库任务，状态变更为入库中 / 입고 작업 생성됨" : "已加入入库任务 / 입고 작업 참여됨");
       }
+      document.getElementById("inboundEntryCard").style.display = "none";
+      document.getElementById("inboundWorkingCard").style.display = "";
       refreshInboundWorkers();
+      startJobPoll("inbound");
     } else {
       alert("失败/실패: " + (res ? res.error : "unknown"));
     }
   } finally { _startInflight = false; }
 }
 
-async function finishInbound() {
-  if (!_activeJobId) { alert("没有进行中的任务 / 진행 중인 작업 없음"); return; }
+async function inboundLeave() {
+  if (!_activeJobId) return;
+  if (!confirm("确认暂时离开？/ 일시 퇴장하시겠습니까?")) return;
   var res = await api({
     action: "v2_inbound_job_finish",
     job_id: _activeJobId,
     worker_id: getWorkerId(),
-    remark: "",
+    leave_only: true
+  });
+  if (res && res.ok) {
+    clearActiveJob();
+    goPage("home");
+  } else {
+    alert("失败/실패: " + (res ? res.error : "unknown"));
+  }
+}
+
+async function finishInbound() {
+  if (!_activeJobId) { alert("没有进行中的任务 / 진행 중인 작업 없음"); return; }
+  var remark = (document.getElementById("inboundRemark") || {}).value || "";
+  var resultNote = (document.getElementById("inboundResultNote") || {}).value || "";
+  var res = await api({
+    action: "v2_inbound_job_finish",
+    job_id: _activeJobId,
+    worker_id: getWorkerId(),
+    remark: remark.trim(),
+    result_note: resultNote.trim(),
     complete_job: true
   });
   if (res && res.ok) {
-    alert("入库已完成 / 입고 완료");
+    alert("入库已完成，状态已更新为"已入库"\n입고 완료, 상태가 "입고완료"로 변경됨");
     clearActiveJob();
     goPage("home");
+  } else if (res && res.error === "others_still_working") {
+    alert("还有" + res.active_count + "人参与中，无法完成 / 아직 " + res.active_count + "명 참여 중, 완료 불가");
   } else {
     alert("失败/실패: " + (res ? res.error : "unknown"));
   }

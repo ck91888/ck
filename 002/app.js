@@ -791,7 +791,8 @@ async function loadInboundList() {
   items.forEach(function(p) {
     html += '<div class="list-item" onclick="openInboundDetail(\'' + esc(p.id) + '\')">';
     html += '<div class="item-title">';
-    html += '<span class="st st-' + esc(p.status) + '">' + esc(stLabel(p.status)) + '</span> ';
+    var ibStMap = {pending:'待到库',unloading:'卸货中',arrived_pending_putaway:'已到库待入库',putting_away:'入库中',completed:'已入库',cancelled:'已取消'};
+    html += '<span class="st st-' + esc(p.status) + '">' + esc(ibStMap[p.status] || stLabel(p.status)) + '</span> ';
     html += '<span class="biz-tag biz-' + esc(p.biz_class) + '">' + esc(bizLabel(p.biz_class)) + '</span> ';
     html += esc(p.display_no || p.id) + ' · ' + esc(p.customer || "--") + ' · ' + esc(p.cargo_summary || "");
     html += '</div>';
@@ -927,12 +928,15 @@ async function loadInboundDetail() {
 
   // --- Basic info: two-column grid ---
   var isDynamic = (p.source_type === 'field_dynamic');
+  var isFromFeedback = (p.source_type === 'from_feedback');
   var html = '<div class="card">';
   html += '<div style="font-size:16px;font-weight:700;margin-bottom:10px;">';
-  if (isDynamic) html += '<span style="background:#ff9800;color:#fff;font-size:11px;padding:2px 6px;border-radius:3px;margin-right:6px;">现场动态单</span>';
+  if (isFromFeedback) html += '<span style="background:#8e24aa;color:#fff;font-size:11px;padding:2px 6px;border-radius:3px;margin-right:6px;">反馈转正</span>';
+  else if (isDynamic) html += '<span style="background:#ff9800;color:#fff;font-size:11px;padding:2px 6px;border-radius:3px;margin-right:6px;">旧动态单</span>';
   html += esc(p.display_no || p.id) + '</div>';
   html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px;font-size:13px;">';
-  html += '<div><b>' + L("status") + ':</b> <span class="st st-' + esc(p.status) + '">' + esc(stLabel(p.status)) + '</span></div>';
+  var ibStatusMap = {pending:'待到库',unloading:'卸货中',arrived_pending_putaway:'已到库待入库',putting_away:'入库中',completed:'已入库',cancelled:'已取消'};
+  html += '<div><b>' + L("status") + ':</b> <span class="st st-' + esc(p.status) + '">' + esc(ibStatusMap[p.status] || stLabel(p.status)) + '</span></div>';
   html += '<div><b>' + L("biz_class") + ':</b> <span class="biz-tag biz-' + esc(p.biz_class) + '">' + esc(bizLabel(p.biz_class)) + '</span></div>';
   html += '<div><b>' + L("plan_date") + ':</b> ' + esc(p.plan_date) + '</div>';
   html += '<div><b>' + L("customer") + ':</b> ' + esc(p.customer) + '</div>';
@@ -961,7 +965,7 @@ async function loadInboundDetail() {
     html += '<div class="card"><div class="card-title">现场执行记录</div>';
     jobs.forEach(function(j, idx) {
       if (idx > 0) html += '<div style="border-top:1px solid #eee;margin:8px 0;"></div>';
-      var jobTypeMap = {unload:'卸货',load:'装货',sort:'分拣',check:'核对',other:'其他'};
+      var jobTypeMap = {unload:'卸货',inbound_direct:'代发入库',inbound_bulk:'大货入库',inbound_return:'退件入库',load:'装货',sort:'分拣',check:'核对',other:'其他'};
       var jobLabel = jobTypeMap[j.job_type] || j.job_type || '--';
       html += '<div style="font-size:13px;line-height:1.8;">';
       html += '<div><span class="st st-' + esc(j.status) + '">' + esc(stLabel(j.status)) + '</span> <b>' + esc(jobLabel) + '</b></div>';
@@ -1010,19 +1014,14 @@ async function loadInboundDetail() {
     html += '</div>';
   }
 
-  // --- Actions: print + status buttons in one row ---
+  // --- Actions ---
   html += '<div class="card">';
   html += '<button class="btn btn-outline btn-sm" onclick="printIbQr()">' + L("print") + '</button> ';
+  if (p.status === "arrived_pending_putaway") {
+    html += '<button class="btn btn-success" onclick="markInboundCompleted()">文员直接完成入库 / 직접 입고 완료</button> ';
+  }
   if (p.status !== "completed" && p.status !== "cancelled") {
-    if (p.status === "pending") {
-      html += '<button class="btn btn-primary" onclick="updateIbStatus(\'arrived\')">' + L("status_arrived") + '</button> ';
-    }
-    if (p.status === "arrived" || p.status === "processing") {
-      html += '<button class="btn btn-success" onclick="updateIbStatus(\'completed\')">' + L("status_completed") + '</button> ';
-    }
-    if (p.status !== "field_working" && p.status !== "unloaded_pending_info") {
-      html += '<button class="btn btn-danger" onclick="updateIbStatus(\'cancelled\')">' + L("status_cancelled") + '</button>';
-    }
+    html += '<button class="btn btn-danger btn-sm" onclick="updateIbStatus(\'cancelled\')">' + L("status_cancelled") + '</button>';
   }
   html += '</div>';
 
@@ -1054,6 +1053,25 @@ async function updateIbStatus(status) {
     loadInboundDetail();
   } else {
     alert("失败: " + (res ? res.error : "unknown"));
+  }
+}
+
+async function markInboundCompleted() {
+  if (!_currentInboundId) return;
+  var remark = prompt("入库完成备注（可选）/ 입고 완료 메모(선택):", "");
+  if (remark === null) return; // cancelled
+  if (!confirm("确认将此入库计划标记为"已入库"？\n이 입고계획을 "입고완료"로 변경하시겠습니까?")) return;
+  var res = await api({
+    action: "v2_inbound_mark_completed",
+    inbound_plan_id: _currentInboundId,
+    operator_name: getUser(),
+    remark: remark
+  });
+  if (res && res.ok) {
+    alert("已标记为已入库 / 입고완료로 변경됨");
+    loadInboundDetail();
+  } else {
+    alert(L("error") + ": " + (res ? res.error : "unknown"));
   }
 }
 
