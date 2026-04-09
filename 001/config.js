@@ -7,7 +7,7 @@ var V2_API = "https://ck-v2-api.ck91888.workers.dev";
 
 // ===== OPS 专用访问码（第一轮轻量访问控制，非安全密钥）=====
 // 部署时替换为实际值，并在 Cloudflare Workers 设置对应 OPSKEY secret
-var OPS_KEY = "ck888";
+var OPS_KEY = "ck003";
 
 // ===== localStorage keys =====
 var V2_OPS_BADGE_KEY = "ck_v2_ops_badge";       // 工牌原始值 e.g. "EMP-001|张三"
