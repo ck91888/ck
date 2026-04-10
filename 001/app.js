@@ -192,7 +192,8 @@ function resumeActiveOrHome() {
       saveActiveJob(res.job.id, res.segment ? res.segment.id : null);
       var jt = res.job.job_type || "";
       if (jt === "unload") showPage("unload");
-      else if (jt.indexOf("inbound") === 0) { _pageParams = { job_type: jt, biz_class: res.job.biz_class || "" }; showPage("inbound"); }
+      else if (jt === "inbound_return") showPage("inbound_return");
+      else if (jt === "inbound_direct" || jt === "inbound_bulk") { _pageParams = { job_type: jt, biz_class: res.job.biz_class || "" }; showPage("inbound"); }
       else if (jt === "load_outbound") showPage("outbound_load");
       else if (jt === "issue_handle") { _currentIssueId = res.job.related_doc_id || null; showPage("issue_detail"); }
       else { _pageParams = { flow_stage: res.job.flow_stage || "", biz_class: res.job.biz_class || "", job_type: jt, title: JOB_TYPE_LABEL[jt] || jt }; showPage("generic_job"); }
@@ -855,6 +856,48 @@ function stopUnloadScan() {
   }
 }
 
+// ===== External inbound number scanner (standard inbound external mode) =====
+var _inboundExtScanner = null;
+function startInboundExternalScan() {
+  if (_inboundExtScanner) { stopInboundExternalScan(); return; }
+  var readerEl = document.getElementById("inboundExternalScanReader");
+  if (!readerEl) return;
+  readerEl.innerHTML = "";
+  var btn = document.getElementById("ibExtScanBtn");
+  try {
+    _inboundExtScanner = new Html5Qrcode("inboundExternalScanReader");
+    _inboundExtScanner.start(
+      { facingMode: "environment" },
+      { fps: 10, qrbox: { width: 250, height: 150 } },
+      function(decoded) {
+        stopInboundExternalScan();
+        var code = String(decoded || "").trim();
+        if (!code) return;
+        var inp = document.getElementById("inboundExternalNo");
+        if (inp) inp.value = code;
+        alert("已扫到外部单号 / 외부번호 스캔됨: " + code);
+      },
+      function() {} // ignore scan errors
+    ).catch(function(e) {
+      alert("摄像头启动失败 / 카메라 시작 실패: " + e);
+      _inboundExtScanner = null;
+    });
+    if (btn) btn.textContent = "取消扫码 / 스캔 취소";
+  } catch(e) {
+    alert("扫码不可用 / 스캔 불가: " + e.message);
+  }
+}
+function stopInboundExternalScan() {
+  if (_inboundExtScanner) {
+    try { _inboundExtScanner.stop(); } catch(e) {}
+    _inboundExtScanner = null;
+    var el = document.getElementById("inboundExternalScanReader");
+    if (el) el.innerHTML = "";
+    var btn = document.getElementById("ibExtScanBtn");
+    if (btn) btn.textContent = "扫码外部单号 / 외부번호 스캔";
+  }
+}
+
 async function unloadLeave(btnEl) {
   if (!_activeJobId) return;
   if (!confirm("确认暂时离开？/ 일시 퇴장하시겠습니까?")) return;
@@ -997,6 +1040,7 @@ var _inboundSource = 'plan'; // 'plan' | 'external'
 
 function switchInboundSource(src) {
   _inboundSource = src;
+  if (src !== 'external') stopInboundExternalScan();
   var planBox = document.getElementById("ibSrcPlan");
   var extBox = document.getElementById("ibSrcExternal");
   var planBtn = document.getElementById("ibSrcBtnPlan");
@@ -1080,6 +1124,7 @@ async function startInbound(btnEl) {
   }
 
   withActionLock('startInbound', btnEl || null, '提交中.../저장중...', async function() {
+    stopInboundExternalScan();
     var res = await api(payload);
     if (res && res.ok) {
       saveActiveJob(res.job_id, res.worker_seg_id);
