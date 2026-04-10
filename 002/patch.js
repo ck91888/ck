@@ -91,7 +91,8 @@
 
     // Generate small QR SVG in main page
     var qrHtml='';
-    try{ qrHtml=buildInboundQrHtml(planId, 3); }catch(e){ qrHtml='<div style="color:red;font-size:10px;">QR error</div>'; }
+    var qrContent=displayNo||planId;
+    try{ qrHtml=buildInboundQrHtml(qrContent, 3); }catch(e){ qrHtml='<div style="color:red;font-size:10px;">QR error</div>'; }
 
     // Collect lines table from detail page
     var detailBody=document.getElementById('inboundDetailBody');
@@ -130,7 +131,7 @@
           '<div class="print-title">入库计划单</div>'+
           '<div class="print-sub">CK 仓储</div>'+
         '</div>'+
-        '<div class="qr-box">'+qrHtml+'<div class="qr-label">'+esc(displayNo)+'<br/>'+esc(planId)+'</div></div>'+
+        '<div class="qr-box">'+qrHtml+'<div class="qr-label">'+esc(displayNo)+'</div></div>'+
       '</div>'+
 
       // Info grid: 两列正文

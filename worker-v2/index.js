@@ -925,6 +925,24 @@ route("v2_inbound_plan_detail", async (body, env) => {
   });
 });
 
+// Find inbound plan by display_no or id (for QR scan)
+route("v2_inbound_plan_find_by_code", async (body, env) => {
+  if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  const code = String(body.code || "").trim();
+  if (!code) return err("missing code");
+  // Prefer display_no, fallback to id
+  let row = await env.DB.prepare(
+    "SELECT id, display_no, status, customer, cargo_summary, biz_class FROM v2_inbound_plans WHERE display_no=? AND status!='cancelled'"
+  ).bind(code).first();
+  if (!row) {
+    row = await env.DB.prepare(
+      "SELECT id, display_no, status, customer, cargo_summary, biz_class FROM v2_inbound_plans WHERE id=? AND status!='cancelled'"
+    ).bind(code).first();
+  }
+  if (!row) return err("not found", 404);
+  return json({ ok: true, plan: row });
+});
+
 // Upcoming inbound plans (next 3 working days, skip Sundays)
 route("v2_inbound_plan_list_upcoming", async (body, env) => {
   if (!isAuth(body, env)) return err("unauthorized", 401);

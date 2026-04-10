@@ -779,19 +779,14 @@ function startUnloadScan() {
     _unloadScanner.start(
       { facingMode: "environment" },
       { fps: 10, qrbox: { width: 250, height: 150 } },
-      function(decoded) {
+      async function(decoded) {
         stopUnloadScan();
-        // Try to find matching plan
-        var sel = document.getElementById("unloadPlanSelect");
-        var found = false;
-        for (var i = 0; i < sel.options.length; i++) {
-          if (sel.options[i].value === decoded) {
-            sel.value = decoded;
-            found = true;
-            break;
-          }
-        }
-        if (found) {
+        var res = await api({ action: "v2_inbound_plan_find_by_code", code: decoded });
+        if (res && res.ok && res.plan) {
+          var sel = document.getElementById("unloadPlanSelect");
+          sel.value = res.plan.id;
+          var label = res.plan.display_no || decoded;
+          alert("已匹配入库计划: " + label + "\n입고계획 매칭됨: " + label);
           startUnload();
         } else {
           alert("未找到匹配入库计划 / 일치하는 입고계획 없음: " + decoded);
