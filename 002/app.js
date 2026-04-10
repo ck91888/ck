@@ -197,6 +197,11 @@ function stLabel(status) {
   return L("status_" + status) || status;
 }
 
+function inboundStatusLabel(status) {
+  var map = {pending:'待到库',unloading:'卸货中',arrived_pending_putaway:'已到库待入库',putting_away:'入库中',completed:'已入库',cancelled:'已取消'};
+  return map[status] || stLabel(status);
+}
+
 function bizLabel(biz) {
   return L("biz_" + biz) || biz;
 }
@@ -254,11 +259,12 @@ async function loadDashboard() {
   grid.innerHTML = '<div class="dash-card"><span class="muted">' + L("loading") + '</span></div>';
 
   // Parallel fetch
-  var [issues, outbounds, inbounds, upcoming] = await Promise.all([
+  var [issues, outbounds, inbounds, upcoming, feedbacks] = await Promise.all([
     api({ action: "v2_issue_list", status: "" }),
     api({ action: "v2_outbound_order_list", start_date: "", end_date: "" }),
     api({ action: "v2_inbound_plan_list", start_date: "", end_date: "" }),
-    api({ action: "v2_inbound_plan_list_upcoming" })
+    api({ action: "v2_inbound_plan_list_upcoming" }),
+    api({ action: "v2_feedback_list", feedback_type: "", status: "" })
   ]);
 
   var issueItems = (issues && issues.items) || [];
@@ -268,7 +274,8 @@ async function loadDashboard() {
   var pendingIssues = issueItems.filter(function(i) { return i.status === "pending" || i.status === "processing"; });
   var pendingOb = obItems.filter(function(o) { return o.status === "draft" || o.status === "issued" || o.status === "working"; });
   var pendingIb = ibItems.filter(function(p) { return p.status === "pending" || p.status === "unloading" || p.status === "arrived_pending_putaway" || p.status === "putting_away"; });
-  var respondedIssues = issueItems.filter(function(i) { return i.status === "responded"; });
+  var fbItems = (feedbacks && feedbacks.items) || [];
+  var activeFb = fbItems.filter(function(f) { return f.status === "field_working" || f.status === "unloaded_pending_info"; });
 
   var html = '';
 
@@ -307,10 +314,9 @@ async function loadDashboard() {
   html += '<div class="d-title">📦 ' + L("today_inbound") + '</div>';
   if (pendingIb.length > 0) {
     html += '<div class="d-count">' + pendingIb.length + '</div>';
-    var ibDashStMap = {pending:'待到库',unloading:'卸货中',arrived_pending_putaway:'已到库待入库',putting_away:'入库中'};
     pendingIb.slice(0, 3).forEach(function(p) {
       html += '<div style="font-size:12px;padding:2px 0;">' +
-        '<span class="st st-' + esc(p.status) + '">' + esc(ibDashStMap[p.status] || stLabel(p.status)) + '</span> ' +
+        '<span class="st st-' + esc(p.status) + '">' + esc(inboundStatusLabel(p.status)) + '</span> ' +
         esc(p.customer || "--") + ' ' + esc(p.cargo_summary || "") + '</div>';
     });
   } else {
@@ -319,14 +325,15 @@ async function loadDashboard() {
   html += '</div>';
 
   // Feedback card
-  html += '<div class="dash-card" onclick="goTab(\'issue\')">';
+  var fbStMap = {field_working:'现场卸货中',unloaded_pending_info:'已卸货待补充信息',converted:'已转正'};
+  html += '<div class="dash-card" onclick="goTab(\'feedback\')">';
   html += '<div class="d-title">💬 ' + L("today_feedback") + '</div>';
-  if (respondedIssues.length > 0) {
-    html += '<div class="d-count">' + respondedIssues.length + '</div>';
-    respondedIssues.slice(0, 3).forEach(function(i) {
+  if (activeFb.length > 0) {
+    html += '<div class="d-count">' + activeFb.length + '</div>';
+    activeFb.slice(0, 3).forEach(function(f) {
       html += '<div style="font-size:12px;padding:2px 0;">' +
-        '<span class="st st-responded">' + esc(stLabel("responded")) + '</span> ' +
-        esc(i.issue_summary || i.customer || "--") + '</div>';
+        '<span class="st st-' + esc(f.status) + '">' + esc(fbStMap[f.status] || stLabel(f.status)) + '</span> ' +
+        esc(f.display_no || f.id) + ' ' + esc(f.title || "--") + '</div>';
     });
   } else {
     html += '<div class="d-empty">' + L("no_data") + '</div>';
@@ -352,7 +359,7 @@ async function loadDashboard() {
       html += '<div style="font-size:11px;font-weight:700;margin-top:4px;">' + esc(d) + '</div>';
       byDate[d].forEach(function(p) {
         html += '<div style="font-size:12px;padding:2px 0;">' +
-          '<span class="st st-' + esc(p.status) + '">' + esc(stLabel(p.status)) + '</span> ' +
+          '<span class="st st-' + esc(p.status) + '">' + esc(inboundStatusLabel(p.status)) + '</span> ' +
           esc(p.customer || "--") + ' ' + esc(p.cargo_summary || "") + '</div>';
       });
     });
@@ -792,8 +799,7 @@ async function loadInboundList() {
   items.forEach(function(p) {
     html += '<div class="list-item" onclick="openInboundDetail(\'' + esc(p.id) + '\')">';
     html += '<div class="item-title">';
-    var ibStMap = {pending:'待到库',unloading:'卸货中',arrived_pending_putaway:'已到库待入库',putting_away:'入库中',completed:'已入库',cancelled:'已取消'};
-    html += '<span class="st st-' + esc(p.status) + '">' + esc(ibStMap[p.status] || stLabel(p.status)) + '</span> ';
+    html += '<span class="st st-' + esc(p.status) + '">' + esc(inboundStatusLabel(p.status)) + '</span> ';
     html += '<span class="biz-tag biz-' + esc(p.biz_class) + '">' + esc(bizLabel(p.biz_class)) + '</span> ';
     html += esc(p.display_no || p.id) + ' · ' + esc(p.customer || "--") + ' · ' + esc(p.cargo_summary || "");
     html += '</div>';
@@ -936,8 +942,7 @@ async function loadInboundDetail() {
   else if (isDynamic) html += '<span style="background:#ff9800;color:#fff;font-size:11px;padding:2px 6px;border-radius:3px;margin-right:6px;">旧动态单</span>';
   html += esc(p.display_no || p.id) + '</div>';
   html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px;font-size:13px;">';
-  var ibStatusMap = {pending:'待到库',unloading:'卸货中',arrived_pending_putaway:'已到库待入库',putting_away:'入库中',completed:'已入库',cancelled:'已取消'};
-  html += '<div><b>' + L("status") + ':</b> <span class="st st-' + esc(p.status) + '">' + esc(ibStatusMap[p.status] || stLabel(p.status)) + '</span></div>';
+  html += '<div><b>' + L("status") + ':</b> <span class="st st-' + esc(p.status) + '">' + esc(inboundStatusLabel(p.status)) + '</span></div>';
   html += '<div><b>' + L("biz_class") + ':</b> <span class="biz-tag biz-' + esc(p.biz_class) + '">' + esc(bizLabel(p.biz_class)) + '</span></div>';
   html += '<div><b>' + L("plan_date") + ':</b> ' + esc(p.plan_date) + '</div>';
   html += '<div><b>' + L("customer") + ':</b> ' + esc(p.customer) + '</div>';

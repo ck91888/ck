@@ -378,6 +378,10 @@ const MIGRATIONS = [
   // ---- manual completion tracking for inbound plans ----
   `ALTER TABLE v2_inbound_plans ADD COLUMN manual_completed_by TEXT DEFAULT ''`,
   `ALTER TABLE v2_inbound_plans ADD COLUMN manual_completed_at TEXT DEFAULT ''`,
+
+  // ---- performance indexes for inbound plans ----
+  `CREATE INDEX IF NOT EXISTS idx_v2_inbound_status ON v2_inbound_plans(status)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_inbound_plan_date_status ON v2_inbound_plans(plan_date, status)`,
 ];
 
 let _migrated = false;
@@ -947,13 +951,16 @@ route("v2_inbound_plan_find_by_code", async (body, env) => {
 route("v2_inbound_plan_list_upcoming", async (body, env) => {
   if (!isAuth(body, env)) return err("unauthorized", 401);
   const today = kstToday();
-  // Compute next 3 working days (skip Sundays)
-  const dates = [today];
-  let d = new Date(today + "T00:00:00+09:00");
-  while (dates.length < 4) {
-    d.setDate(d.getDate() + 1);
-    if (d.getDay() !== 0) { // 0=Sunday
-      dates.push(d.toISOString().slice(0, 10));
+  // Compute next 3 working days strictly after today (skip Sundays)
+  const dates = [];
+  const kstMs = Date.now() + 9 * 3600 * 1000;
+  let d = new Date(kstMs);
+  d.setUTCHours(0, 0, 0, 0);
+  while (dates.length < 3) {
+    d.setUTCDate(d.getUTCDate() + 1);
+    if (d.getUTCDay() !== 0) { // 0=Sunday
+      const ds = d.toISOString().slice(0, 10);
+      if (ds !== today && dates.indexOf(ds) === -1) dates.push(ds);
     }
   }
   const first = dates[0];
