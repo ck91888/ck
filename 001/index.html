@@ -174,15 +174,21 @@
     <button class="btn btn-success" onclick="startInbound()">开始入库 / 입고 시작</button>
   </div>
   <div id="inboundWorkingCard" style="display:none;">
+    <div class="card" id="inboundPlanInfoCard">
+      <div class="card-title">入库计划信息 / 입고계획 정보</div>
+      <div id="inboundPlanInfo" style="font-size:13px;line-height:1.8;"><span class="muted">--</span></div>
+    </div>
     <div class="card">
       <div class="card-title">当前参与人员 / 현재 참여 인원</div>
       <div id="inboundWorkers" class="workers-panel"><span class="muted">--</span></div>
     </div>
     <div class="card">
-      <div class="card-title">入库备注 / 입고 비고</div>
-      <textarea id="inboundRemark" rows="2" placeholder="入库备注 / 입고 비고"></textarea>
-      <label style="margin-top:8px;">产出说明 / 작업 내용</label>
-      <textarea id="inboundResultNote" rows="3" placeholder="入库产出说明（数量、位置等）/ 입고 내용 설명"></textarea>
+      <div class="card-title">入库结果 / 입고 결과</div>
+      <div id="inboundResultLines"></div>
+      <label style="margin-top:8px;">入库说明 / 입고 설명</label>
+      <textarea id="inboundResultNote" rows="2" placeholder="入库说明（位置、情况等）/ 입고 설명"></textarea>
+      <label style="margin-top:8px;">其他备注 / 기타 비고</label>
+      <textarea id="inboundRemark" rows="2" placeholder="其他备注 / 기타 비고"></textarea>
       <div style="height:10px"></div>
       <button class="btn btn-success" onclick="finishInbound()">完成入库 / 입고 완료</button>
       <div style="height:8px"></div>

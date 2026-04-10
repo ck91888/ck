@@ -952,6 +952,7 @@ async function initInbound() {
     if (res && res.ok && res.job && res.job.job_type && res.job.job_type.indexOf("inbound") === 0 && res.job.status === "working") {
       document.getElementById("inboundEntryCard").style.display = "none";
       document.getElementById("inboundWorkingCard").style.display = "";
+      loadInboundPlanInfo(res.job.related_doc_id);
       refreshInboundWorkers();
       startJobPoll("inbound");
       return;
@@ -984,12 +985,56 @@ async function startInbound() {
       }
       document.getElementById("inboundEntryCard").style.display = "none";
       document.getElementById("inboundWorkingCard").style.display = "";
+      loadInboundPlanInfo(planId);
       refreshInboundWorkers();
       startJobPoll("inbound");
     } else {
       alert("失败/실패: " + (res ? res.error : "unknown"));
     }
   } finally { _startInflight = false; }
+}
+
+var _inboundPlanData = null;
+
+async function loadInboundPlanInfo(planId) {
+  _inboundPlanData = null;
+  var infoEl = document.getElementById("inboundPlanInfo");
+  var linesEl = document.getElementById("inboundResultLines");
+  if (!planId) {
+    if (infoEl) infoEl.innerHTML = '<span class="muted">--</span>';
+    if (linesEl) linesEl.innerHTML = '';
+    return;
+  }
+  var res = await api({ action: "v2_inbound_plan_detail", id: planId });
+  if (!res || !res.ok || !res.plan) return;
+  _inboundPlanData = res;
+  var p = res.plan;
+  var lines = res.lines || [];
+  // Plan info card
+  if (infoEl) {
+    var html = '<div><b>' + esc(p.display_no || p.id) + '</b> · ' + esc(p.customer || '--') + '</div>';
+    html += '<div>' + esc(p.cargo_summary || '--') + '</div>';
+    infoEl.innerHTML = html;
+  }
+  // Build result lines form
+  if (linesEl) {
+    if (lines.length > 0) {
+      var html = '<table style="width:100%;font-size:13px;border-collapse:collapse;margin-bottom:8px;">';
+      html += '<thead><tr style="background:#f5f5f5;"><th style="padding:4px 6px;text-align:left;">类型</th><th style="padding:4px 6px;">卸货实到</th><th style="padding:4px 6px;">本次入库</th></tr></thead><tbody>';
+      lines.forEach(function(ln) {
+        var actualQty = ln.actual_qty || 0;
+        html += '<tr>';
+        html += '<td style="padding:4px 6px;">' + esc(ln.unit_type || '--') + '</td>';
+        html += '<td style="padding:4px 6px;text-align:center;">' + actualQty + '</td>';
+        html += '<td style="padding:4px 6px;"><input type="number" class="input ib-putaway-input" data-unit="' + esc(ln.unit_type || '') + '" value="' + actualQty + '" min="0" style="width:80px;text-align:center;"></td>';
+        html += '</tr>';
+      });
+      html += '</tbody></table>';
+      linesEl.innerHTML = html;
+    } else {
+      linesEl.innerHTML = '<div style="font-size:12px;color:#999;">无明细行，完成时仅记录备注</div>';
+    }
+  }
 }
 
 async function inboundLeave() {
@@ -1013,17 +1058,29 @@ async function finishInbound() {
   if (!_activeJobId) { alert("没有进行中的任务 / 진행 중인 작업 없음"); return; }
   var remark = (document.getElementById("inboundRemark") || {}).value || "";
   var resultNote = (document.getElementById("inboundResultNote") || {}).value || "";
+
+  // Collect putaway result lines
+  var resultLines = [];
+  var inputs = document.querySelectorAll(".ib-putaway-input");
+  for (var i = 0; i < inputs.length; i++) {
+    var inp = inputs[i];
+    var qty = Number(inp.value || 0);
+    resultLines.push({ unit_type: inp.getAttribute("data-unit") || "", putaway_qty: qty });
+  }
+
   var res = await api({
     action: "v2_inbound_job_finish",
     job_id: _activeJobId,
     worker_id: getWorkerId(),
     remark: remark.trim(),
     result_note: resultNote.trim(),
+    result_lines: resultLines,
     complete_job: true
   });
   if (res && res.ok) {
     alert("入库已完成，状态已更新为\u201C已入库\u201D\n입고 완료, 상태가 \u201C입고완료\u201D로 변경됨");
     clearActiveJob();
+    _inboundPlanData = null;
     goPage("home");
   } else if (res && res.error === "others_still_working") {
     alert("还有" + res.active_count + "人参与中，无法完成 / 아직 " + res.active_count + "명 참여 중, 완료 불가");

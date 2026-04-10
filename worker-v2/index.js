@@ -382,6 +382,10 @@ const MIGRATIONS = [
   // ---- performance indexes for inbound plans ----
   `CREATE INDEX IF NOT EXISTS idx_v2_inbound_status ON v2_inbound_plans(status)`,
   `CREATE INDEX IF NOT EXISTS idx_v2_inbound_plan_date_status ON v2_inbound_plans(plan_date, status)`,
+
+  // ---- putaway tracking on plan lines ----
+  `ALTER TABLE v2_inbound_plan_lines ADD COLUMN putaway_qty REAL DEFAULT 0`,
+  `ALTER TABLE v2_inbound_plan_lines ADD COLUMN putaway_remark TEXT DEFAULT ''`,
 ];
 
 let _migrated = false;
@@ -1600,6 +1604,7 @@ route("v2_inbound_job_finish", async (body, env) => {
   const t = now();
   const remark = String(body.remark || "");
   const result_note = String(body.result_note || "");
+  const result_lines = body.result_lines || [];
 
   await closeAllOpenSegs(env, job_id, worker_id, t, leave_only ? 'leave' : 'finished');
   const realCount = await recalcActiveCount(env, job_id, t);
@@ -1608,8 +1613,8 @@ route("v2_inbound_job_finish", async (body, env) => {
     return json({ ok: true, left: true });
   }
 
-  // Save result
-  const resultData = { remark, result_note };
+  // Save shared result to job
+  const resultData = { remark, result_note, result_lines };
   await env.DB.prepare(
     "UPDATE v2_ops_jobs SET shared_result_json=?, updated_at=? WHERE id=?"
   ).bind(JSON.stringify(resultData), t, job_id).run();
@@ -1618,11 +1623,12 @@ route("v2_inbound_job_finish", async (body, env) => {
     if (realCount > 0) {
       return json({ ok: false, error: "others_still_working", active_count: realCount });
     }
-    // Save result record
+
+    // Save structured result record
     const result_id = "RES-" + uid();
     await env.DB.prepare(
-      "INSERT INTO v2_ops_job_results(id, job_id, box_count, pallet_count, remark, result_json, created_by, created_at) VALUES(?,?,0,0,?,?,?,?)"
-    ).bind(result_id, job_id, remark, JSON.stringify(resultData), worker_id, t).run();
+      "INSERT INTO v2_ops_job_results(id, job_id, box_count, pallet_count, remark, result_json, result_lines_json, created_by, created_at) VALUES(?,?,0,0,?,?,?,?,?)"
+    ).bind(result_id, job_id, remark, JSON.stringify(resultData), JSON.stringify(result_lines), worker_id, t).run();
 
     await env.DB.prepare(
       "UPDATE v2_ops_jobs SET status='completed', updated_at=? WHERE id=?"
@@ -1631,8 +1637,16 @@ route("v2_inbound_job_finish", async (body, env) => {
       "UPDATE v2_ops_job_workers SET left_at=?, leave_reason='job_completed' WHERE job_id=? AND left_at=''"
     ).bind(t, job_id).run();
 
+    // Write back putaway_qty to plan lines
     const job = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
     if (job && job.related_doc_id) {
+      for (const rl of result_lines) {
+        if (rl.unit_type && Number(rl.putaway_qty || 0) > 0) {
+          await env.DB.prepare(
+            "UPDATE v2_inbound_plan_lines SET putaway_qty=?, putaway_remark=? WHERE plan_id=? AND unit_type=?"
+          ).bind(Number(rl.putaway_qty || 0), String(rl.putaway_remark || ""), job.related_doc_id, String(rl.unit_type)).run();
+        }
+      }
       await env.DB.prepare(
         "UPDATE v2_inbound_plans SET status='completed', updated_at=? WHERE id=?"
       ).bind(t, job.related_doc_id).run();
@@ -1655,6 +1669,14 @@ route("v2_inbound_mark_completed", async (body, env) => {
   if (!plan) return err("plan not found", 404);
   if (plan.status !== 'arrived_pending_putaway') {
     return err("only arrived_pending_putaway can be marked completed, current: " + plan.status);
+  }
+
+  // Block if there's an active inbound job
+  const activeJob = await env.DB.prepare(
+    "SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type LIKE 'inbound%' AND status IN ('pending','working','awaiting_close') LIMIT 1"
+  ).bind(plan_id).first();
+  if (activeJob) {
+    return json({ ok: false, error: "inbound_job_still_active", message: "当前仍有进行中的入库任务，不能直接完结" });
   }
 
   const t = now();

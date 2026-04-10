@@ -968,13 +968,28 @@ async function loadInboundDetail() {
 
   // --- Plan lines ---
   if (lines.length > 0) {
+    var hasPutaway = lines.some(function(ln) { return (ln.putaway_qty || 0) > 0; });
     html += '<div class="card"><div class="card-title">' + L("plan_lines") + '</div>';
-    html += '<table class="line-table"><thead><tr><th>' + L("biz_class") + '</th><th>' + L("planned_qty") + '</th><th>' + L("actual_qty") + '</th><th>' + L("diff") + '</th></tr></thead><tbody>';
+    html += '<table class="line-table"><thead><tr><th>' + L("biz_class") + '</th><th>' + L("planned_qty") + '</th><th>' + L("actual_qty") + '</th>';
+    if (hasPutaway) html += '<th>实际入库</th><th>差异</th>';
+    else html += '<th>' + L("diff") + '</th>';
+    html += '</tr></thead><tbody>';
     lines.forEach(function(ln) {
-      var diff = (ln.actual_qty || 0) - (ln.planned_qty || 0);
-      var diffStr = diff === 0 ? "-" : (diff > 0 ? "+" + diff : "" + diff);
-      var diffClass = diff !== 0 ? ' style="color:#e74c3c;font-weight:700;"' : '';
-      html += '<tr><td>' + esc(unitTypeLabel(ln.unit_type)) + '</td><td>' + ln.planned_qty + '</td><td>' + (ln.actual_qty || 0) + '</td><td' + diffClass + '>' + diffStr + '</td></tr>';
+      var actualQty = ln.actual_qty || 0;
+      html += '<tr><td>' + esc(unitTypeLabel(ln.unit_type)) + '</td><td>' + ln.planned_qty + '</td><td>' + actualQty + '</td>';
+      if (hasPutaway) {
+        var pQty = ln.putaway_qty || 0;
+        var diff2 = pQty - actualQty;
+        var diffStr2 = diff2 === 0 ? "-" : (diff2 > 0 ? "+" + diff2 : "" + diff2);
+        var diffClass2 = diff2 !== 0 ? ' style="color:#e74c3c;font-weight:700;"' : '';
+        html += '<td>' + pQty + '</td><td' + diffClass2 + '>' + diffStr2 + '</td>';
+      } else {
+        var diff = actualQty - (ln.planned_qty || 0);
+        var diffStr = diff === 0 ? "-" : (diff > 0 ? "+" + diff : "" + diff);
+        var diffClass = diff !== 0 ? ' style="color:#e74c3c;font-weight:700;"' : '';
+        html += '<td' + diffClass + '>' + diffStr + '</td>';
+      }
+      html += '</tr>';
     });
     html += '</tbody></table></div>';
   }
@@ -991,18 +1006,22 @@ async function loadInboundDetail() {
       html += '<div>参与人员：' + esc(j.worker_names_text || j.created_by || '--') + '</div>';
       html += '<div>完成时间：' + esc(j.completed_at ? fmtTime(j.completed_at) : '--') + '</div>';
       html += '<div>用时：' + (j.total_minutes_worked || 0) + L("minutes") + '</div>';
-      // Result lines
+      // Result lines — unload shows actual_qty, inbound shows putaway_qty
       var rl = j.result_lines || [];
+      var isInboundJob = (j.job_type || '').indexOf('inbound') === 0;
       if (rl.length > 0) {
         var parts = [];
-        rl.forEach(function(r) { parts.push(unitTypeLabel(r.unit_type) + ' ' + (r.actual_qty || 0)); });
-        html += '<div>实际结果：' + esc(parts.join(' / ')) + '</div>';
-      } else {
-        html += '<div>实际结果：--</div>';
+        rl.forEach(function(r) {
+          var qty = isInboundJob ? (r.putaway_qty || 0) : (r.actual_qty || 0);
+          parts.push(unitTypeLabel(r.unit_type) + ' ' + qty);
+        });
+        html += '<div>' + (isInboundJob ? '实际入库：' : '实际结果：') + esc(parts.join(' / ')) + '</div>';
+      } else if (j.status === 'completed') {
+        html += '<div>' + (isInboundJob ? '实际入库：' : '实际结果：') + '--</div>';
       }
-      html += '<div>现场差异说明：' + esc(j.diff_note || '无') + '</div>';
-      if (j.remark) html += '<div>备注：' + esc(j.remark) + '</div>';
-      if (j.result_note) html += '<div>产出说明：' + esc(j.result_note) + '</div>';
+      if (j.diff_note) html += '<div>现场差异说明：' + esc(j.diff_note) + '</div>';
+      if (j.result_note) html += '<div>入库说明：' + esc(j.result_note) + '</div>';
+      if (j.remark) html += '<div>其他备注：' + esc(j.remark) + '</div>';
       html += '</div>';
     });
     html += '</div>';
@@ -1089,8 +1108,10 @@ async function markInboundCompleted() {
     remark: remark
   });
   if (res && res.ok) {
-    alert("已标记为已入库 / 입고완료로 변경됨");
+    alert("已标记为已入库（文员直接完结）/ 입고완료로 변경됨(직접 완결)");
     loadInboundDetail();
+  } else if (res && res.error === "inbound_job_still_active") {
+    alert("当前仍有进行中的入库任务，不能直接完结\n현재 진행 중인 입고 작업이 있어 직접 완결 불가");
   } else {
     alert(L("error") + ": " + (res ? res.error : "unknown"));
   }
