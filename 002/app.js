@@ -3,6 +3,39 @@
  * Desktop+mobile, language-switchable (zh/ko), issue/outbound/inbound CRUD
  */
 
+// ===== Action Lock — 防连点 =====
+var _actionLocks = {};
+function withActionLock(key, btnEl, pendingText, fn) {
+  if (_actionLocks[key]) return;
+  _actionLocks[key] = true;
+  var origText = '';
+  var origDisabled = false;
+  if (btnEl) {
+    origText = btnEl.textContent;
+    origDisabled = btnEl.disabled;
+    btnEl.disabled = true;
+    btnEl.textContent = pendingText || '提交中.../저장중...';
+  }
+  var restore = function() {
+    _actionLocks[key] = false;
+    if (btnEl) {
+      btnEl.disabled = origDisabled;
+      btnEl.textContent = origText;
+    }
+  };
+  try {
+    var result = fn();
+    if (result && typeof result.then === 'function') {
+      result.then(restore, restore);
+    } else {
+      restore();
+    }
+  } catch(e) {
+    restore();
+    throw e;
+  }
+}
+
 // ===== State =====
 var _currentTab = "home";
 var _currentView = "home";
@@ -630,54 +663,54 @@ function addOutboundLine() {
 }
 
 async function submitOutbound() {
-  var date = document.getElementById("oc-date").value || kstToday();
   var customer = document.getElementById("oc-customer").value.trim();
-  var biz = document.getElementById("oc-biz").value;
-  var opmode = document.getElementById("oc-opmode").value.trim();
-  var outmode = document.getElementById("oc-outmode").value.trim();
-  var instruction = document.getElementById("oc-instruction").value.trim();
-  var remark = document.getElementById("oc-remark").value.trim();
-
   if (!customer) { alert("请填写客户名"); return; }
+  withActionLock('submitOutbound', document.querySelector('[onclick*="submitOutbound"]'), '提交中.../저장중...', async function() {
+    var date = document.getElementById("oc-date").value || kstToday();
+    var biz = document.getElementById("oc-biz").value;
+    var opmode = document.getElementById("oc-opmode").value.trim();
+    var outmode = document.getElementById("oc-outmode").value.trim();
+    var instruction = document.getElementById("oc-instruction").value.trim();
+    var remark = document.getElementById("oc-remark").value.trim();
 
-  // Collect lines
-  var lines = [];
-  var rows = document.getElementById("ocLinesBody").querySelectorAll("tr");
-  rows.forEach(function(tr) {
-    var id = tr.id.replace("oc-line-", "");
-    var wms = (document.getElementById("ocl-wms-" + id) || {}).value || "";
-    var sku = (document.getElementById("ocl-sku-" + id) || {}).value || "";
-    var qty = parseInt((document.getElementById("ocl-qty-" + id) || {}).value) || 0;
-    if (wms || sku || qty > 0) lines.push({ wms_order_no: wms, sku: sku, quantity: qty });
+    // Collect lines
+    var lines = [];
+    var rows = document.getElementById("ocLinesBody").querySelectorAll("tr");
+    rows.forEach(function(tr) {
+      var id = tr.id.replace("oc-line-", "");
+      var wms = (document.getElementById("ocl-wms-" + id) || {}).value || "";
+      var sku = (document.getElementById("ocl-sku-" + id) || {}).value || "";
+      var qty = parseInt((document.getElementById("ocl-qty-" + id) || {}).value) || 0;
+      if (wms || sku || qty > 0) lines.push({ wms_order_no: wms, sku: sku, quantity: qty });
+    });
+
+    var res = await api({
+      action: "v2_outbound_order_create",
+      order_date: date,
+      customer: customer,
+      biz_class: biz,
+      operation_mode: opmode,
+      outbound_mode: outmode,
+      instruction: instruction,
+      remark: remark,
+      created_by: getUser(),
+      lines: lines
+    });
+
+    if (res && res.ok) {
+      alert("已创建: " + res.id);
+      document.getElementById("oc-customer").value = "";
+      document.getElementById("oc-opmode").value = "";
+      document.getElementById("oc-outmode").value = "";
+      document.getElementById("oc-instruction").value = "";
+      document.getElementById("oc-remark").value = "";
+      document.getElementById("ocLinesBody").innerHTML = "";
+      _obLineCount = 0;
+      goTab("outbound");
+    } else {
+      alert("失败: " + (res ? res.error : "unknown"));
+    }
   });
-
-  var res = await api({
-    action: "v2_outbound_order_create",
-    order_date: date,
-    customer: customer,
-    biz_class: biz,
-    operation_mode: opmode,
-    outbound_mode: outmode,
-    instruction: instruction,
-    remark: remark,
-    created_by: getUser(),
-    lines: lines
-  });
-
-  if (res && res.ok) {
-    alert("已创建: " + res.id);
-    // Clear form
-    document.getElementById("oc-customer").value = "";
-    document.getElementById("oc-opmode").value = "";
-    document.getElementById("oc-outmode").value = "";
-    document.getElementById("oc-instruction").value = "";
-    document.getElementById("oc-remark").value = "";
-    document.getElementById("ocLinesBody").innerHTML = "";
-    _obLineCount = 0;
-    goTab("outbound");
-  } else {
-    alert("失败: " + (res ? res.error : "unknown"));
-  }
 }
 
 // ===== Outbound Detail =====
@@ -775,12 +808,14 @@ async function loadOutboundDetail() {
 
 async function updateObStatus(status) {
   if (!confirm(L("confirm") + "?")) return;
-  var res = await api({ action: "v2_outbound_order_update_status", id: _currentOutboundId, status: status });
-  if (res && res.ok) {
-    loadOutboundDetail();
-  } else {
-    alert("失败: " + (res ? res.error : "unknown"));
-  }
+  withActionLock('updateObStatus_' + status, null, null, async function() {
+    var res = await api({ action: "v2_outbound_order_update_status", id: _currentOutboundId, status: status });
+    if (res && res.ok) {
+      loadOutboundDetail();
+    } else {
+      alert("失败: " + (res ? res.error : "unknown"));
+    }
+  });
 }
 
 // ===== Inbound List =====
@@ -856,56 +891,57 @@ function toggleIbcAutoOb() {
 }
 
 async function submitInbound() {
-  var date = document.getElementById("ibc-date").value || kstToday();
   var customer = document.getElementById("ibc-customer").value.trim();
-  var biz = document.getElementById("ibc-biz").value;
-  var cargo = document.getElementById("ibc-cargo").value.trim();
-  var arrival = document.getElementById("ibc-arrival").value.trim();
-  var purpose = document.getElementById("ibc-purpose").value.trim();
-  var remark = document.getElementById("ibc-remark").value.trim();
-  var lines = getIbcLines();
-  var autoOb = document.getElementById("ibc-auto-ob").checked;
-
   if (!customer) { alert(L("customer") + " " + L("required") + "!"); return; }
+  withActionLock('submitInbound', document.querySelector('[onclick*="submitInbound"]'), '提交中.../저장중...', async function() {
+    var date = document.getElementById("ibc-date").value || kstToday();
+    var biz = document.getElementById("ibc-biz").value;
+    var cargo = document.getElementById("ibc-cargo").value.trim();
+    var arrival = document.getElementById("ibc-arrival").value.trim();
+    var purpose = document.getElementById("ibc-purpose").value.trim();
+    var remark = document.getElementById("ibc-remark").value.trim();
+    var lines = getIbcLines();
+    var autoOb = document.getElementById("ibc-auto-ob").checked;
 
-  var payload = {
-    action: "v2_inbound_plan_create",
-    plan_date: date,
-    customer: customer,
-    biz_class: biz,
-    cargo_summary: cargo,
-    expected_arrival: arrival,
-    purpose: purpose,
-    remark: remark,
-    lines: lines,
-    created_by: getUser()
-  };
+    var payload = {
+      action: "v2_inbound_plan_create",
+      plan_date: date,
+      customer: customer,
+      biz_class: biz,
+      cargo_summary: cargo,
+      expected_arrival: arrival,
+      purpose: purpose,
+      remark: remark,
+      lines: lines,
+      created_by: getUser()
+    };
 
-  if (autoOb) {
-    payload.auto_create_outbound = true;
-    payload.ob_operation_mode = (document.getElementById("ibc-ob-opmode") || {}).value || "";
-    payload.ob_outbound_mode = (document.getElementById("ibc-ob-outmode") || {}).value || "";
-    payload.ob_instruction = (document.getElementById("ibc-ob-instruction") || {}).value || "";
-  }
+    if (autoOb) {
+      payload.auto_create_outbound = true;
+      payload.ob_operation_mode = (document.getElementById("ibc-ob-opmode") || {}).value || "";
+      payload.ob_outbound_mode = (document.getElementById("ibc-ob-outmode") || {}).value || "";
+      payload.ob_instruction = (document.getElementById("ibc-ob-instruction") || {}).value || "";
+    }
 
-  var res = await api(payload);
+    var res = await api(payload);
 
-  if (res && res.ok) {
-    var msg = L("success") + ": " + res.id;
-    if (res.outbound_id) msg += "\n" + L("auto_create_outbound") + ": " + res.outbound_id;
-    alert(msg);
-    document.getElementById("ibc-customer").value = "";
-    document.getElementById("ibc-cargo").value = "";
-    document.getElementById("ibc-arrival").value = "";
-    document.getElementById("ibc-purpose").value = "";
-    document.getElementById("ibc-remark").value = "";
-    document.getElementById("ibcLinesBody").innerHTML = "";
-    document.getElementById("ibc-auto-ob").checked = false;
-    document.getElementById("ibcAutoObFields").style.display = "none";
-    goTab("inbound");
-  } else {
-    alert(L("error") + ": " + (res ? res.error : "unknown"));
-  }
+    if (res && res.ok) {
+      var msg = L("success") + ": " + res.id;
+      if (res.outbound_id) msg += "\n" + L("auto_create_outbound") + ": " + res.outbound_id;
+      alert(msg);
+      document.getElementById("ibc-customer").value = "";
+      document.getElementById("ibc-cargo").value = "";
+      document.getElementById("ibc-arrival").value = "";
+      document.getElementById("ibc-purpose").value = "";
+      document.getElementById("ibc-remark").value = "";
+      document.getElementById("ibcLinesBody").innerHTML = "";
+      document.getElementById("ibc-auto-ob").checked = false;
+      document.getElementById("ibcAutoObFields").style.display = "none";
+      goTab("inbound");
+    } else {
+      alert(L("error") + ": " + (res ? res.error : "unknown"));
+    }
+  });
 }
 
 // ===== Inbound Detail =====
@@ -1060,8 +1096,8 @@ async function loadInboundDetail() {
   if (p.status === "arrived_pending_putaway") {
     html += '<button class="btn btn-success" onclick="markInboundCompleted()">文员直接完成入库 / 직접 입고 완료</button> ';
   }
-  if (p.status !== "completed" && p.status !== "cancelled") {
-    html += '<button class="btn btn-danger btn-sm" onclick="updateIbStatus(\'cancelled\')">' + L("status_cancelled") + '</button>';
+  if (p.status === "pending" || p.status === "arrived_pending_putaway") {
+    html += '<button class="btn btn-danger btn-sm" onclick="cancelInboundPlan()">' + L("status_cancelled") + '</button>';
   }
   html += '</div>';
 
@@ -1086,57 +1122,75 @@ function printIbQr() {
   win.document.close();
 }
 
-async function updateIbStatus(status) {
-  if (!confirm(L("confirm") + "?")) return;
-  var res = await api({ action: "v2_inbound_plan_update_status", id: _currentInboundId, status: status });
-  if (res && res.ok) {
-    loadInboundDetail();
-  } else {
-    alert("失败: " + (res ? res.error : "unknown"));
-  }
+async function cancelInboundPlan() {
+  var reason = prompt("取消原因（可选）/ 취소 사유(선택):", "");
+  if (reason === null) return; // user pressed Cancel on prompt
+  if (!confirm("确认取消此入库计划？\n이 입고계획을 취소하시겠습니까?")) return;
+  withActionLock('cancelInboundPlan', document.querySelector('[onclick*="cancelInboundPlan"]'), '提交中.../저장중...', async function() {
+    var res = await api({
+      action: "v2_inbound_plan_cancel",
+      inbound_plan_id: _currentInboundId,
+      operator_name: getUser(),
+      reason: reason.trim()
+    });
+    if (res && res.ok) {
+      alert("已取消 / 취소됨");
+      loadInboundDetail();
+    } else if (res && res.error === "active_job_exists") {
+      alert("当前仍有进行中的现场任务，不能取消\n현재 진행 중인 현장 작업이 있어 취소 불가");
+    } else if (res && res.error === "cancel_not_allowed") {
+      alert(res.message || "当前状态不允许取消");
+    } else {
+      alert("失败: " + (res ? res.error : "unknown"));
+    }
+  });
 }
 
 async function markInboundCompleted() {
   if (!_currentInboundId) return;
   var remark = prompt("入库完成备注（可选）/ 입고 완료 메모(선택):", "");
-  if (remark === null) return; // cancelled
+  if (remark === null) return;
   if (!confirm("确认将此入库计划标记为\u201C已入库\u201D？\n이 입고계획을 \u201C입고완료\u201D로 변경하시겠습니까?")) return;
-  var res = await api({
-    action: "v2_inbound_mark_completed",
-    inbound_plan_id: _currentInboundId,
-    operator_name: getUser(),
-    remark: remark
+  withActionLock('markInboundCompleted', document.querySelector('[onclick*="markInboundCompleted"]'), '提交中.../저장중...', async function() {
+    var res = await api({
+      action: "v2_inbound_mark_completed",
+      inbound_plan_id: _currentInboundId,
+      operator_name: getUser(),
+      remark: remark
+    });
+    if (res && res.ok) {
+      alert("已标记为已入库（文员直接完结）/ 입고완료로 변경됨(직접 완결)");
+      loadInboundDetail();
+    } else if (res && res.error === "inbound_job_still_active") {
+      alert("当前仍有进行中的入库任务，不能直接完结\n현재 진행 중인 입고 작업이 있어 직접 완결 불가");
+    } else {
+      alert(L("error") + ": " + (res ? res.error : "unknown"));
+    }
   });
-  if (res && res.ok) {
-    alert("已标记为已入库（文员直接完结）/ 입고완료로 변경됨(직접 완결)");
-    loadInboundDetail();
-  } else if (res && res.error === "inbound_job_still_active") {
-    alert("当前仍有进行中的入库任务，不能直接完结\n현재 진행 중인 입고 작업이 있어 직접 완결 불가");
-  } else {
-    alert(L("error") + ": " + (res ? res.error : "unknown"));
-  }
 }
 
 async function finalizeDynamicPlan() {
   var customer = (document.getElementById("dynCustomer") || {}).value || "";
   if (!customer.trim()) { alert("请填写客户名称"); return; }
   if (!confirm("确认将此动态单转正为正式入库单？")) return;
-  var res = await api({
-    action: "v2_inbound_dynamic_finalize",
-    id: _currentInboundId,
-    customer: customer.trim(),
-    biz_class: (document.getElementById("dynBiz") || {}).value || "",
-    cargo_summary: (document.getElementById("dynCargo") || {}).value || "",
-    expected_arrival: (document.getElementById("dynArrival") || {}).value || "",
-    purpose: (document.getElementById("dynPurpose") || {}).value || "",
-    remark: (document.getElementById("dynRemark") || {}).value || ""
+  withActionLock('finalizeDynamicPlan', document.querySelector('[onclick*="finalizeDynamicPlan"]'), '提交中.../저장중...', async function() {
+    var res = await api({
+      action: "v2_inbound_dynamic_finalize",
+      id: _currentInboundId,
+      customer: customer.trim(),
+      biz_class: (document.getElementById("dynBiz") || {}).value || "",
+      cargo_summary: (document.getElementById("dynCargo") || {}).value || "",
+      expected_arrival: (document.getElementById("dynArrival") || {}).value || "",
+      purpose: (document.getElementById("dynPurpose") || {}).value || "",
+      remark: (document.getElementById("dynRemark") || {}).value || ""
+    });
+    if (res && res.ok) {
+      alert("已转正为入库单: " + (res.display_no || res.id));
+      loadInboundDetail();
+    } else {
+      alert("失败: " + (res ? res.error : "unknown"));
+    }
   });
-  if (res && res.ok) {
-    alert("已转正为入库单: " + (res.display_no || res.id));
-    loadInboundDetail();
-  } else {
-    alert("失败: " + (res ? res.error : "unknown"));
-  }
 }
 
 // ===== Feedback Module =====
@@ -1301,44 +1355,45 @@ async function loadFeedbackDetail() {
 
 async function convertFeedbackToInbound() {
   var customer = (document.getElementById("fb-conv-customer") || {}).value || "";
-  var biz = (document.getElementById("fb-conv-biz") || {}).value || "";
-  var cargo = (document.getElementById("fb-conv-cargo") || {}).value || "";
   if (!customer.trim()) { alert(L("customer") + " " + L("required") + "!"); return; }
   if (!confirm("确认将此反馈转正为正式入库计划？")) return;
+  withActionLock('convertFeedbackToInbound', document.querySelector('[onclick*="convertFeedbackToInbound"]'), '提交中.../저장중...', async function() {
+    var biz = (document.getElementById("fb-conv-biz") || {}).value || "";
+    var cargo = (document.getElementById("fb-conv-cargo") || {}).value || "";
 
-  // Collect lines from the editable table
-  var lines = [];
-  var unitEls = document.querySelectorAll(".fb-line-unit");
-  var qtyEls = document.querySelectorAll(".fb-line-qty");
-  for (var i = 0; i < unitEls.length; i++) {
-    var qty = parseFloat(qtyEls[i].value) || 0;
-    if (qty > 0) {
-      lines.push({ unit_type: unitEls[i].value, actual_qty: qty, planned_qty: qty });
+    // Collect lines from the editable table
+    var lines = [];
+    var unitEls = document.querySelectorAll(".fb-line-unit");
+    var qtyEls = document.querySelectorAll(".fb-line-qty");
+    for (var i = 0; i < unitEls.length; i++) {
+      var qty = parseFloat(qtyEls[i].value) || 0;
+      if (qty > 0) {
+        lines.push({ unit_type: unitEls[i].value, actual_qty: qty, planned_qty: qty });
+      }
     }
-  }
 
-  var res = await api({
-    action: "v2_feedback_finalize_to_inbound",
-    feedback_id: _currentFeedbackId,
-    customer: customer.trim(),
-    biz_class: biz,
-    cargo_summary: cargo.trim(),
-    expected_arrival: (document.getElementById("fb-conv-arrival") || {}).value || "",
-    purpose: (document.getElementById("fb-conv-purpose") || {}).value || "",
-    remark: (document.getElementById("fb-conv-remark") || {}).value || "",
-    lines: lines,
-    created_by: getUser()
+    var res = await api({
+      action: "v2_feedback_finalize_to_inbound",
+      feedback_id: _currentFeedbackId,
+      customer: customer.trim(),
+      biz_class: biz,
+      cargo_summary: cargo.trim(),
+      expected_arrival: (document.getElementById("fb-conv-arrival") || {}).value || "",
+      purpose: (document.getElementById("fb-conv-purpose") || {}).value || "",
+      remark: (document.getElementById("fb-conv-remark") || {}).value || "",
+      lines: lines,
+      created_by: getUser()
+    });
+
+    if (res && res.ok) {
+      alert(L("success") + ": " + (res.display_no || res.inbound_plan_id));
+      _currentInboundId = res.inbound_plan_id;
+      goView("inbound_detail");
+      loadInboundDetail();
+    } else {
+      alert(L("error") + ": " + (res ? res.error : "unknown"));
+    }
   });
-
-  if (res && res.ok) {
-    alert(L("success") + ": " + (res.display_no || res.inbound_plan_id));
-    // Jump to the new inbound plan detail
-    _currentInboundId = res.inbound_plan_id;
-    goView("inbound_detail");
-    loadInboundDetail();
-  } else {
-    alert(L("error") + ": " + (res ? res.error : "unknown"));
-  }
 }
 
 // ===== File Upload =====

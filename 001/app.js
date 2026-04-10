@@ -21,6 +21,39 @@ var _badgeScanner = null;  // Html5Qrcode instance for badge scan
 var _badgeModalScanner = null; // Html5Qrcode instance for badge change modal
 var _startInflight = false; // in-flight guard for start actions
 
+// ===== Action Lock — 防连点 =====
+var _actionLocks = {};
+function withActionLock(key, btnEl, pendingText, fn) {
+  if (_actionLocks[key]) return;        // 已锁定，直接忽略
+  _actionLocks[key] = true;
+  var origText = '';
+  var origDisabled = false;
+  if (btnEl) {
+    origText = btnEl.textContent;
+    origDisabled = btnEl.disabled;
+    btnEl.disabled = true;
+    btnEl.textContent = pendingText || '提交中.../저장중...';
+  }
+  var restore = function() {
+    _actionLocks[key] = false;
+    if (btnEl) {
+      btnEl.disabled = origDisabled;
+      btnEl.textContent = origText;
+    }
+  };
+  try {
+    var result = fn();
+    if (result && typeof result.then === 'function') {
+      result.then(restore, restore);
+    } else {
+      restore();
+    }
+  } catch(e) {
+    restore();
+    throw e;
+  }
+}
+
 // ===== Badge logic (ported from main system app.js) =====
 function parseBadge(code) {
   var raw = (code || "").trim();
@@ -558,9 +591,7 @@ async function loadUnplannedActiveList() {
 }
 
 async function joinUnplannedUnload(feedbackId) {
-  if (_startInflight) return;
-  _startInflight = true;
-  try {
+  withActionLock('joinUnplanned_' + feedbackId, null, null, async function() {
     var res = await api({
       action: "v2_unplanned_unload_join",
       feedback_id: feedbackId,
@@ -582,7 +613,7 @@ async function joinUnplannedUnload(feedbackId) {
     } else {
       alert("失败/실패: " + (res ? res.error : "unknown"));
     }
-  } finally { _startInflight = false; }
+  });
 }
 
 function showUnloadWorking(job) {
@@ -702,11 +733,20 @@ async function loadInboundPlans(selectId) {
   var isForUnload = (selectId === "unloadPlanSelect");
   var res = await api({ action: "v2_inbound_plan_list", start_date: "", end_date: "", status: "" });
   var opts = '<option value="">-- 选择入库计划/입고계획 선택 --</option>';
+
+  // 入库菜单按业务类型筛选：biz_class 映射
+  var bizFilter = '';
+  if (isForPutaway && _pageParams.biz_class) {
+    bizFilter = _pageParams.biz_class;
+  }
+
   if (res && res.ok && res.items) {
     res.items.forEach(function(p) {
       if (p.status === "completed" || p.status === "cancelled") return;
       if (isForPutaway && p.status !== "arrived_pending_putaway" && p.status !== "putting_away") return;
       if (isForUnload && p.status !== "pending" && p.status !== "unloading") return;
+      // 按业务类型过滤
+      if (bizFilter && p.biz_class && p.biz_class !== bizFilter) return;
       var stText = isForPutaway ? '' : (STATUS_LABEL[p.status] ? ' [' + STATUS_LABEL[p.status].split('/')[0] + ']' : '');
       opts += '<option value="' + esc(p.id) + '">[' + esc(p.display_no || p.id) + ']' + stText + ' ' + esc(p.customer) + ' - ' + esc(p.cargo_summary) + '</option>';
     });
@@ -715,9 +755,7 @@ async function loadInboundPlans(selectId) {
 }
 
 async function startUnload() {
-  if (_startInflight) return;
-  _startInflight = true;
-  try {
+  withActionLock('startUnload', document.querySelector('[onclick*="startUnload"]'), '提交中.../저장중...', async function() {
     var planId = document.getElementById("unloadPlanSelect").value;
     var res = await api({
       action: "v2_unload_job_start",
@@ -747,13 +785,11 @@ async function startUnload() {
     } else {
       alert("失败/실패: " + (res ? res.error : "unknown"));
     }
-  } finally { _startInflight = false; }
+  });
 }
 
 async function startUnloadNoPlan() {
-  if (_startInflight) return;
-  _startInflight = true;
-  try {
+  withActionLock('startUnloadNoPlan', document.querySelector('[onclick*="startUnloadNoPlan"]'), '提交中.../저장중...', async function() {
     var res = await api({
       action: "v2_unplanned_unload_start",
       worker_id: getWorkerId(),
@@ -773,7 +809,7 @@ async function startUnloadNoPlan() {
     } else {
       alert("失败/실패: " + (res ? res.error : "unknown"));
     }
-  } finally { _startInflight = false; }
+  });
 }
 
 function startUnloadScan() {
@@ -820,21 +856,23 @@ function stopUnloadScan() {
 async function unloadLeave() {
   if (!_activeJobId) return;
   if (!confirm("确认暂时离开？/ 일시 퇴장하시겠습니까?")) return;
-  var fbId = localStorage.getItem('v2_unplanned_fb_id') || '';
-  var leaveAction = fbId ? 'v2_unplanned_unload_finish' : 'v2_unload_job_finish';
-  var res = await api({
-    action: leaveAction,
-    job_id: _activeJobId,
-    worker_id: getWorkerId(),
-    leave_only: true
+  withActionLock('unloadLeave', document.querySelector('[onclick*="unloadLeave"]'), '提交中.../저장중...', async function() {
+    var fbId = localStorage.getItem('v2_unplanned_fb_id') || '';
+    var leaveAction = fbId ? 'v2_unplanned_unload_finish' : 'v2_unload_job_finish';
+    var res = await api({
+      action: leaveAction,
+      job_id: _activeJobId,
+      worker_id: getWorkerId(),
+      leave_only: true
+    });
+    if (res && res.ok) {
+      clearActiveJob();
+      _unloadPlanData = null;
+      goPage("home");
+    } else {
+      alert("失败/실패: " + (res ? res.error : "unknown"));
+    }
   });
-  if (res && res.ok) {
-    clearActiveJob();
-    _unloadPlanData = null;
-    goPage("home");
-  } else {
-    alert("失败/실패: " + (res ? res.error : "unknown"));
-  }
 }
 
 async function unloadComplete() {
@@ -845,47 +883,58 @@ async function unloadComplete() {
     return;
   }
 
-  var diffNote = ((document.getElementById("unloadDiffNote") || {}).value || "").trim();
+  withActionLock('unloadComplete', document.querySelector('[onclick*="unloadComplete"]'), '提交中.../저장중...', async function() {
+    var diffNote = ((document.getElementById("unloadDiffNote") || {}).value || "").trim();
+    var remark = (document.getElementById("unloadRemark") || {}).value || "";
 
-  var remark = (document.getElementById("unloadRemark") || {}).value || "";
+    // Determine which finish API to call
+    var fbId = localStorage.getItem('v2_unplanned_fb_id') || '';
+    var actionName = fbId ? 'v2_unplanned_unload_finish' : 'v2_unload_job_finish';
 
-  // Determine which finish API to call
-  var fbId = localStorage.getItem('v2_unplanned_fb_id') || '';
-  var actionName = fbId ? 'v2_unplanned_unload_finish' : 'v2_unload_job_finish';
+    var res = await api({
+      action: actionName,
+      job_id: _activeJobId,
+      worker_id: getWorkerId(),
+      result_lines: resultLines,
+      diff_note: diffNote,
+      remark: remark.trim(),
+      complete_job: true
+    });
 
-  var res = await api({
-    action: actionName,
-    job_id: _activeJobId,
-    worker_id: getWorkerId(),
-    result_lines: resultLines,
-    diff_note: diffNote,
-    remark: remark.trim(),
-    complete_job: true
-  });
+    if (res && res.ok) {
+      var msg = "卸货已完成 / 하차 완료";
+      if (fbId || res.feedback_id) {
+        msg += "\n（现场反馈已更新，请协同中心补充信息并转正 / 현장 피드백 업데이트됨, 협업센터에서 정보 보완 후 전환 필요）";
+      } else {
+        msg += "\n（入库计划状态已变更为\u201C已到库待入库\u201D / 입고계획 상태가 \u201C입고대기\u201D로 변경됨）";
+      }
+      alert(msg);
+      localStorage.removeItem('v2_unplanned_fb_id');
 
-  if (res && res.ok) {
-    var msg = "卸货已完成 / 하차 완료";
-    if (fbId || res.feedback_id) {
-      msg += "\n（现场反馈已更新，请协同中心补充信息并转正 / 현장 피드백 업데이트됨, 협업센터에서 정보 보완 후 전환 필요）";
-    } else {
-      msg += "\n（入库计划状态已变更为\u201C已到库待入库\u201D / 입고계획 상태가 \u201C입고대기\u201D로 변경됨）";
-    }
-    alert(msg);
-    localStorage.removeItem('v2_unplanned_fb_id');
-
-    var resumed = await checkAndResumeParent();
-    if (!resumed) {
+      var resumed = await checkAndResumeParent();
+      if (!resumed) {
+        clearActiveJob();
+        _unloadPlanData = null;
+        goPage("home");
+      }
+    } else if (res && res.error === "already_completed") {
+      alert("任务已完成，请勿重复提交\n작업이 이미 완료되었습니다. 중복 제출하지 마세요");
       clearActiveJob();
       _unloadPlanData = null;
       goPage("home");
+    } else if (res && res.error === "unload_plan_status_invalid") {
+      alert("当前卸货计划状态已变化，不能继续完成，请返回刷新\n하차 계획 상태가 변경되었습니다. 새로고침해 주세요");
+      clearActiveJob();
+      _unloadPlanData = null;
+      goPage("home");
+    } else if (res && res.error === "others_still_working") {
+      alert("还有" + res.active_count + "人参与中，无法完成 / 아직 " + res.active_count + "명 참여 중, 완료 불가");
+    } else if (res && res.error === "empty_result") {
+      alert(res.message || "至少填写一项实际数量");
+    } else {
+      alert("失败/실패: " + (res ? res.error : "unknown"));
     }
-  } else if (res && res.error === "others_still_working") {
-    alert("还有" + res.active_count + "人参与中，无法完成 / 아직 " + res.active_count + "명 참여 중, 완료 불가");
-  } else if (res && res.error === "empty_result") {
-    alert(res.message || "至少填写一项实际数量");
-  } else {
-    alert("失败/실패: " + (res ? res.error : "unknown"));
-  }
+  });
 }
 
 function unloadGoBack() {
@@ -965,11 +1014,9 @@ async function initInbound() {
 }
 
 async function startInbound() {
-  if (_startInflight) return;
-  _startInflight = true;
-  try {
-    var planId = document.getElementById("inboundPlanSelect").value;
-    if (!planId) { alert("请选择入库计划 / 입고계획을 선택하세요"); return; }
+  var planId = document.getElementById("inboundPlanSelect").value;
+  if (!planId) { alert("请选择入库计划 / 입고계획을 선택하세요"); return; }
+  withActionLock('startInbound', document.querySelector('[onclick*="startInbound"]'), '提交中.../저장중...', async function() {
     var res = await api({
       action: "v2_inbound_job_start",
       plan_id: planId,
@@ -991,7 +1038,7 @@ async function startInbound() {
     } else {
       alert("失败/실패: " + (res ? res.error : "unknown"));
     }
-  } finally { _startInflight = false; }
+  });
 }
 
 var _inboundPlanData = null;
@@ -1040,53 +1087,67 @@ async function loadInboundPlanInfo(planId) {
 async function inboundLeave() {
   if (!_activeJobId) return;
   if (!confirm("确认暂时离开？/ 일시 퇴장하시겠습니까?")) return;
-  var res = await api({
-    action: "v2_inbound_job_finish",
-    job_id: _activeJobId,
-    worker_id: getWorkerId(),
-    leave_only: true
+  withActionLock('inboundLeave', document.querySelector('[onclick*="inboundLeave"]'), '提交中.../저장중...', async function() {
+    var res = await api({
+      action: "v2_inbound_job_finish",
+      job_id: _activeJobId,
+      worker_id: getWorkerId(),
+      leave_only: true
+    });
+    if (res && res.ok) {
+      clearActiveJob();
+      goPage("home");
+    } else {
+      alert("失败/실패: " + (res ? res.error : "unknown"));
+    }
   });
-  if (res && res.ok) {
-    clearActiveJob();
-    goPage("home");
-  } else {
-    alert("失败/실패: " + (res ? res.error : "unknown"));
-  }
 }
 
 async function finishInbound() {
   if (!_activeJobId) { alert("没有进行中的任务 / 진행 중인 작업 없음"); return; }
-  var remark = (document.getElementById("inboundRemark") || {}).value || "";
-  var resultNote = (document.getElementById("inboundResultNote") || {}).value || "";
+  withActionLock('finishInbound', document.querySelector('[onclick*="finishInbound"]'), '提交中.../저장중...', async function() {
+    var remark = (document.getElementById("inboundRemark") || {}).value || "";
+    var resultNote = (document.getElementById("inboundResultNote") || {}).value || "";
 
-  // Collect putaway result lines
-  var resultLines = [];
-  var inputs = document.querySelectorAll(".ib-putaway-input");
-  for (var i = 0; i < inputs.length; i++) {
-    var inp = inputs[i];
-    var qty = Number(inp.value || 0);
-    resultLines.push({ unit_type: inp.getAttribute("data-unit") || "", putaway_qty: qty });
-  }
+    // Collect putaway result lines
+    var resultLines = [];
+    var inputs = document.querySelectorAll(".ib-putaway-input");
+    for (var i = 0; i < inputs.length; i++) {
+      var inp = inputs[i];
+      var qty = Number(inp.value || 0);
+      resultLines.push({ unit_type: inp.getAttribute("data-unit") || "", putaway_qty: qty });
+    }
 
-  var res = await api({
-    action: "v2_inbound_job_finish",
-    job_id: _activeJobId,
-    worker_id: getWorkerId(),
-    remark: remark.trim(),
-    result_note: resultNote.trim(),
-    result_lines: resultLines,
-    complete_job: true
+    var res = await api({
+      action: "v2_inbound_job_finish",
+      job_id: _activeJobId,
+      worker_id: getWorkerId(),
+      remark: remark.trim(),
+      result_note: resultNote.trim(),
+      result_lines: resultLines,
+      complete_job: true
+    });
+    if (res && res.ok) {
+      alert("入库已完成，状态已更新为\u201C已入库\u201D\n입고 완료, 상태가 \u201C입고완료\u201D로 변경됨");
+      clearActiveJob();
+      _inboundPlanData = null;
+      goPage("home");
+    } else if (res && res.error === "already_completed") {
+      alert("任务已完成，请勿重复提交\n작업이 이미 완료되었습니다. 중복 제출하지 마세요");
+      clearActiveJob();
+      _inboundPlanData = null;
+      goPage("home");
+    } else if (res && res.error === "inbound_plan_status_invalid") {
+      alert("当前入库计划状态已变化，不能继续完成，请返回刷新\n입고계획 상태가 변경되었습니다. 새로고침해 주세요");
+      clearActiveJob();
+      _inboundPlanData = null;
+      goPage("home");
+    } else if (res && res.error === "others_still_working") {
+      alert("还有" + res.active_count + "人参与中，无法完成 / 아직 " + res.active_count + "명 참여 중, 완료 불가");
+    } else {
+      alert("失败/실패: " + (res ? res.error : "unknown"));
+    }
   });
-  if (res && res.ok) {
-    alert("入库已完成，状态已更新为\u201C已入库\u201D\n입고 완료, 상태가 \u201C입고완료\u201D로 변경됨");
-    clearActiveJob();
-    _inboundPlanData = null;
-    goPage("home");
-  } else if (res && res.error === "others_still_working") {
-    alert("还有" + res.active_count + "人参与中，无法完成 / 아직 " + res.active_count + "명 참여 중, 완료 불가");
-  } else {
-    alert("失败/실패: " + (res ? res.error : "unknown"));
-  }
 }
 
 async function refreshInboundWorkers() {
@@ -1116,9 +1177,7 @@ async function loadOutboundOrders() {
 }
 
 async function startOutboundLoad() {
-  if (_startInflight) return;
-  _startInflight = true;
-  try {
+  withActionLock('startOutboundLoad', document.querySelector('[onclick*="startOutboundLoad"]'), '提交中.../저장중...', async function() {
     var orderId = document.getElementById("loadOrderSelect").value;
     var res = await api({
       action: "v2_outbound_load_start",
@@ -1138,7 +1197,7 @@ async function startOutboundLoad() {
     } else {
       alert("失败/실패: " + (res ? res.error : "unknown"));
     }
-  } finally { _startInflight = false; }
+  });
 }
 
 function startLoadNoOrder() {
@@ -1148,26 +1207,32 @@ function startLoadNoOrder() {
 
 async function finishOutboundLoad() {
   if (!_activeJobId) { alert("没有进行中的任务 / 진행 중인 작업 없음"); return; }
-  var box = parseInt(document.getElementById("loadBoxCount").value) || 0;
-  var pallet = parseInt(document.getElementById("loadPalletCount").value) || 0;
-  var remark = document.getElementById("loadRemark").value.trim();
+  withActionLock('finishOutboundLoad', document.querySelector('[onclick*="finishOutboundLoad"], [onclick*="saveOutboundLoadResult"]'), '提交中.../저장중...', async function() {
+    var box = parseInt(document.getElementById("loadBoxCount").value) || 0;
+    var pallet = parseInt(document.getElementById("loadPalletCount").value) || 0;
+    var remark = document.getElementById("loadRemark").value.trim();
 
-  var res = await api({
-    action: "v2_outbound_load_finish",
-    job_id: _activeJobId,
-    worker_id: getWorkerId(),
-    box_count: box,
-    pallet_count: pallet,
-    remark: remark,
-    complete_job: true
+    var res = await api({
+      action: "v2_outbound_load_finish",
+      job_id: _activeJobId,
+      worker_id: getWorkerId(),
+      box_count: box,
+      pallet_count: pallet,
+      remark: remark,
+      complete_job: true
+    });
+    if (res && res.ok) {
+      alert("装货已完成 / 상차 완료");
+      clearActiveJob();
+      goPage("home");
+    } else if (res && res.error === "already_completed") {
+      alert("任务已完成，请勿重复提交\n작업이 이미 완료되었습니다. 중복 제출하지 마세요");
+      clearActiveJob();
+      goPage("home");
+    } else {
+      alert("失败/실패: " + (res ? res.error : "unknown"));
+    }
   });
-  if (res && res.ok) {
-    alert("装货已完成 / 상차 완료");
-    clearActiveJob();
-    goPage("home");
-  } else {
-    alert("失败/실패: " + (res ? res.error : "unknown"));
-  }
 }
 
 async function saveOutboundLoadResult() {
@@ -1323,53 +1388,57 @@ async function loadIssueDetail() {
 }
 
 async function handleIssueStart() {
-  var res = await api({
-    action: "v2_issue_handle_start",
-    issue_id: _currentIssueId,
-    handler_id: getWorkerId(),
-    handler_name: getWorkerName()
+  withActionLock('handleIssueStart', document.querySelector('[onclick*="handleIssueStart"]'), '提交中.../저장중...', async function() {
+    var res = await api({
+      action: "v2_issue_handle_start",
+      issue_id: _currentIssueId,
+      handler_id: getWorkerId(),
+      handler_name: getWorkerName()
+    });
+    if (res && res.ok) {
+      _currentRunId = res.run_id;
+      saveActiveJob(res.job_id, res.worker_seg_id);
+      alert("已开始处理 / 처리 시작됨");
+      loadIssueDetail();
+    } else {
+      alert("失败/실패: " + (res ? res.error : "unknown"));
+    }
   });
-  if (res && res.ok) {
-    _currentRunId = res.run_id;
-    saveActiveJob(res.job_id, res.worker_seg_id);
-    alert("已开始处理 / 처리 시작됨");
-    loadIssueDetail();
-  } else {
-    alert("失败/실패: " + (res ? res.error : "unknown"));
-  }
 }
 
 async function handleIssueFinish() {
-  if (!_currentRunId && _activeJobId) {
-    // Try to find the run from job
-    var jobRes = await api({ action: "v2_ops_job_detail", job_id: _activeJobId });
-  }
+  withActionLock('handleIssueFinish', document.querySelector('[onclick*="handleIssueFinish"]'), '提交中.../저장중...', async function() {
+    if (!_currentRunId && _activeJobId) {
+      // Try to find the run from job
+      var jobRes = await api({ action: "v2_ops_job_detail", job_id: _activeJobId });
+    }
 
-  // Find latest working run for this issue
-  var detailRes = await api({ action: "v2_issue_detail", id: _currentIssueId });
-  var runs = (detailRes && detailRes.handle_runs) || [];
-  var workingRun = runs.find(function(r) { return r.run_status === "working"; });
-  if (!workingRun) {
-    alert("找不到进行中的处理记录 / 진행 중인 처리 기록을 찾을 수 없습니다");
-    return;
-  }
+    // Find latest working run for this issue
+    var detailRes = await api({ action: "v2_issue_detail", id: _currentIssueId });
+    var runs = (detailRes && detailRes.handle_runs) || [];
+    var workingRun = runs.find(function(r) { return r.run_status === "working"; });
+    if (!workingRun) {
+      alert("找不到进行中的处理记录 / 진행 중인 처리 기록을 찾을 수 없습니다");
+      return;
+    }
 
-  var feedback = document.getElementById("issueFeedback");
-  var feedbackText = feedback ? feedback.value.trim() : "";
+    var feedback = document.getElementById("issueFeedback");
+    var feedbackText = feedback ? feedback.value.trim() : "";
 
-  var res = await api({
-    action: "v2_issue_handle_finish",
-    run_id: workingRun.id,
-    feedback_text: feedbackText
+    var res = await api({
+      action: "v2_issue_handle_finish",
+      run_id: workingRun.id,
+      feedback_text: feedbackText
+    });
+
+    if (res && res.ok) {
+      alert("处理完成 / 처리 완료\n工시/작업시간: " + res.minutes_worked.toFixed(1) + " 分钟/분");
+      clearActiveJob();
+      loadIssueDetail();
+    } else {
+      alert("失败/실패: " + (res ? res.error : "unknown"));
+    }
   });
-
-  if (res && res.ok) {
-    alert("处理完成 / 처리 완료\n工时/작업시간: " + res.minutes_worked.toFixed(1) + " 分钟/분");
-    clearActiveJob();
-    loadIssueDetail();
-  } else {
-    alert("失败/실패: " + (res ? res.error : "unknown"));
-  }
 }
 
 // ===== Generic Job =====
@@ -1391,9 +1460,7 @@ function goGenericBack() {
 }
 
 async function startGenericJob() {
-  if (_startInflight) return;
-  _startInflight = true;
-  try {
+  withActionLock('startGenericJob', document.querySelector('[onclick*="startGenericJob"]'), '提交中.../저장중...', async function() {
     var res = await api({
       action: "v2_ops_job_start",
       flow_stage: _genericJobCtx.flow_stage || "",
@@ -1413,23 +1480,29 @@ async function startGenericJob() {
     } else {
       alert("失败/실패: " + (res ? res.error : "unknown"));
     }
-  } finally { _startInflight = false; }
+  });
 }
 
 async function finishGenericJob() {
   if (!_activeJobId) { alert("没有进行中的任务 / 진행 중인 작업 없음"); return; }
-  var res = await api({
-    action: "v2_ops_job_finish",
-    job_id: _activeJobId,
-    worker_id: getWorkerId()
+  withActionLock('finishGenericJob', document.querySelector('[onclick*="finishGenericJob"]'), '提交中.../저장중...', async function() {
+    var res = await api({
+      action: "v2_ops_job_finish",
+      job_id: _activeJobId,
+      worker_id: getWorkerId()
+    });
+    if (res && res.ok) {
+      alert("任务已完成 / 작업 완료");
+      clearActiveJob();
+      goPage("home");
+    } else if (res && res.error === "already_completed") {
+      alert("任务已完成，请勿重复提交\n작업이 이미 완료되었습니다. 중복 제출하지 마세요");
+      clearActiveJob();
+      goPage("home");
+    } else {
+      alert("失败/실패: " + (res ? res.error : "unknown"));
+    }
   });
-  if (res && res.ok) {
-    alert("任务已完成 / 작업 완료");
-    clearActiveJob();
-    goPage("home");
-  } else {
-    alert("失败/실패: " + (res ? res.error : "unknown"));
-  }
 }
 
 async function refreshGenericWorkers() {

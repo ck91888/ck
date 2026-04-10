@@ -754,6 +754,12 @@ route("v2_outbound_load_finish", async (body, env) => {
   const remark = String(body.remark || "");
   const complete_job = body.complete_job === true;
 
+  // 终态幂等保护：已完成的 job 不再重复写
+  const jobCheck = await env.DB.prepare("SELECT status FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
+  if (jobCheck && jobCheck.status === 'completed') {
+    return json({ ok: false, error: "already_completed", message: "任务已完成，请勿重复提交" });
+  }
+
   // 自愈：关闭该 worker 全部 open segments + 重算 count
   await closeAllOpenSegs(env, job_id, worker_id, t, 'finished');
   const realCount = await recalcActiveCount(env, job_id, t);
@@ -980,10 +986,51 @@ route("v2_inbound_plan_update_status", async (body, env) => {
   const id = String(body.id || "").trim();
   const status = String(body.status || "").trim();
   if (!id || !status) return err("missing id or status");
+  // 禁止通过此接口设置 cancelled，必须走专用取消接口
+  if (status === 'cancelled') return err("请使用 v2_inbound_plan_cancel 取消入库计划");
   await env.DB.prepare(
     "UPDATE v2_inbound_plans SET status=?, updated_at=? WHERE id=?"
   ).bind(status, now(), id).run();
   return json({ ok: true });
+});
+
+// ===== 入库计划专用取消接口 =====
+route("v2_inbound_plan_cancel", async (body, env) => {
+  if (!isAuth(body, env)) return err("unauthorized", 401);
+  const id = String(body.inbound_plan_id || "").trim();
+  if (!id) return err("missing inbound_plan_id");
+  const operator = String(body.operator_name || "").trim();
+  const reason = String(body.reason || "").trim();
+
+  const plan = await env.DB.prepare("SELECT * FROM v2_inbound_plans WHERE id=?").bind(id).first();
+  if (!plan) return err("plan not found", 404);
+
+  // 只允许 pending / arrived_pending_putaway 取消
+  const allowCancel = ['pending', 'arrived_pending_putaway'];
+  if (!allowCancel.includes(plan.status)) {
+    return json({ ok: false, error: "cancel_not_allowed", message: "当前状态（" + plan.status + "）不允许取消，只有待到库和已到库待入库可以取消" });
+  }
+
+  // 检查是否有进行中的 unload 或 inbound job
+  const activeJob = await env.DB.prepare(
+    "SELECT id, job_type FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND status IN ('pending','working','awaiting_close') LIMIT 1"
+  ).bind(id).first();
+  if (activeJob) {
+    return json({ ok: false, error: "active_job_exists", message: "当前仍有进行中的现场任务（" + (activeJob.job_type || "") + "），不能取消" });
+  }
+
+  const t = now();
+  let updateSql = "UPDATE v2_inbound_plans SET status='cancelled', updated_at=?";
+  const binds = [t];
+  if (reason) {
+    updateSql += ", remark=CASE WHEN remark='' THEN ? ELSE remark||' | 取消原因: '||? END";
+    binds.push('取消原因: ' + reason, reason);
+  }
+  updateSql += " WHERE id=?";
+  binds.push(id);
+  await env.DB.prepare(updateSql).bind(...binds).run();
+
+  return json({ ok: true, operator, cancelled_at: t });
 });
 
 // ===== [DEPRECATED] Dynamic plan finalize: fill info and convert to formal inbound =====
@@ -1099,6 +1146,14 @@ route("v2_unplanned_unload_finish", async (body, env) => {
   const diff_note = String(body.diff_note || "").trim();
   const remark = String(body.remark || "").trim();
   const leave_only = body.leave_only === true;
+
+  // 终态幂等保护：已完成的 job 不再重复写（leave_only 不受限）
+  if (!leave_only) {
+    const jobCheck = await env.DB.prepare("SELECT status FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
+    if (jobCheck && jobCheck.status === 'completed') {
+      return json({ ok: false, error: "already_completed", message: "任务已完成，请勿重复提交" });
+    }
+  }
 
   // Close worker segments + recalc
   await closeAllOpenSegs(env, job_id, worker_id, t, leave_only ? 'leave' : 'finished');
@@ -1400,6 +1455,14 @@ route("v2_unload_job_finish", async (body, env) => {
   const diff_note = String(body.diff_note || "").trim();
   const remark = String(body.remark || "");
 
+  // 终态幂等保护：已完成的 job 不再重复写（leave_only 不受限）
+  if (!leave_only) {
+    const jobCheck = await env.DB.prepare("SELECT status FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
+    if (jobCheck && jobCheck.status === 'completed') {
+      return json({ ok: false, error: "already_completed", message: "任务已完成，请勿重复提交" });
+    }
+  }
+
   // 1. 自愈：关闭该 worker 全部 open segments + 重算 count
   await closeAllOpenSegs(env, job_id, worker_id, t, leave_only ? 'leave' : 'finished');
   const realCount = await recalcActiveCount(env, job_id, t);
@@ -1423,6 +1486,14 @@ route("v2_unload_job_finish", async (body, env) => {
     const hasAnyQty = result_lines.some(ln => Number(ln.actual_qty || 0) > 0);
     if (!hasAnyQty) {
       return json({ ok: false, error: "empty_result", message: "至少填写一项实际数量" });
+    }
+
+    // 4b2. Plan 状态校验：若关联 inbound_plan，plan 必须为 unloading 才允许完成卸货
+    if (job.related_doc_type === 'inbound_plan' && job.related_doc_id) {
+      const planCheck = await env.DB.prepare("SELECT status FROM v2_inbound_plans WHERE id=?").bind(job.related_doc_id).first();
+      if (planCheck && planCheck.status !== 'unloading') {
+        return json({ ok: false, error: "unload_plan_status_invalid", message: "当前卸货计划状态已变化（" + planCheck.status + "），不能继续完成" });
+      }
     }
 
     // 4c. Check diff vs plan and require diff_note
@@ -1606,6 +1677,14 @@ route("v2_inbound_job_finish", async (body, env) => {
   const result_note = String(body.result_note || "");
   const result_lines = body.result_lines || [];
 
+  // 终态幂等保护：已完成的 job 不再重复写（leave_only 不受限）
+  if (!leave_only) {
+    const jobCheck = await env.DB.prepare("SELECT status FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
+    if (jobCheck && jobCheck.status === 'completed') {
+      return json({ ok: false, error: "already_completed", message: "任务已完成，请勿重复提交" });
+    }
+  }
+
   await closeAllOpenSegs(env, job_id, worker_id, t, leave_only ? 'leave' : 'finished');
   const realCount = await recalcActiveCount(env, job_id, t);
 
@@ -1624,6 +1703,15 @@ route("v2_inbound_job_finish", async (body, env) => {
       return json({ ok: false, error: "others_still_working", active_count: realCount });
     }
 
+    // Plan 状态校验：plan 必须为 putting_away 才允许完成入库
+    const job = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
+    if (job && job.related_doc_id) {
+      const planCheck = await env.DB.prepare("SELECT status FROM v2_inbound_plans WHERE id=?").bind(job.related_doc_id).first();
+      if (planCheck && planCheck.status !== 'putting_away') {
+        return json({ ok: false, error: "inbound_plan_status_invalid", message: "当前入库计划状态不允许完成入库（当前: " + planCheck.status + "）" });
+      }
+    }
+
     // Save structured result record
     const result_id = "RES-" + uid();
     await env.DB.prepare(
@@ -1638,7 +1726,6 @@ route("v2_inbound_job_finish", async (body, env) => {
     ).bind(t, job_id).run();
 
     // Write back putaway_qty to plan lines
-    const job = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
     if (job && job.related_doc_id) {
       for (const rl of result_lines) {
         if (rl.unit_type && Number(rl.putaway_qty || 0) > 0) {
@@ -1784,6 +1871,12 @@ route("v2_ops_job_finish", async (body, env) => {
   if (!job_id) return err("missing job_id");
 
   const t = now();
+
+  // 终态幂等保护：已完成的 job 不再重复写
+  const jobCheck = await env.DB.prepare("SELECT status FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
+  if (jobCheck && jobCheck.status === 'completed') {
+    return json({ ok: false, error: "already_completed", message: "任务已完成，请勿重复提交" });
+  }
 
   // 自愈：关闭该 worker 全部 open segments
   await closeAllOpenSegs(env, job_id, worker_id, t, 'finished');
