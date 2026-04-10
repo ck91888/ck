@@ -156,20 +156,34 @@
   <div style="padding:12px;">
     <button class="btn btn-primary" onclick="goPage('inbound',{job_type:'inbound_direct',biz_class:'direct_ship'})">代发入库 / 직배송 입고</button>
     <button class="btn btn-primary" onclick="goPage('inbound',{job_type:'inbound_bulk',biz_class:'bulk'})">大货入库 / 대량화물 입고</button>
-    <button class="btn btn-primary" onclick="goPage('inbound',{job_type:'inbound_return',biz_class:'return'})">退件入库 / 반품 입고</button>
+    <button class="btn btn-primary" onclick="goPage('inbound_return')">退件入库 / 반품 입고</button>
   </div>
 </div>
 
-<!-- Inbound -->
+<!-- Inbound (standard: direct_ship + bulk) -->
 <div id="page-inbound" class="page">
   <div class="topbar">
     <button class="back-btn" onclick="goPage('inbound_menu')">← 返回/뒤로</button>
     <div class="page-title" id="inboundTitle">入库 / 입고</div>
   </div>
   <div id="inboundEntryCard" class="card">
-    <label style="font-weight:700;">选择已到库待入库的计划 / 입고대기 계획 선택</label>
-    <select id="inboundPlanSelect"><option value="">-- 选择/선택 --</option></select>
-    <button class="btn btn-outline btn-sm mt-10" onclick="loadInboundPlans('inboundPlanSelect')">刷新列表 / 새로고침</button>
+    <div style="display:flex;gap:6px;margin-bottom:10px;">
+      <button class="btn btn-outline btn-sm" id="ibSrcBtnPlan" onclick="switchInboundSource('plan')" style="flex:1;">系统入库计划 / 시스템계획</button>
+      <button class="btn btn-outline btn-sm" id="ibSrcBtnExternal" onclick="switchInboundSource('external')" style="flex:1;">外部入库单号 / 외부번호</button>
+    </div>
+    <div id="ibSrcPlan">
+      <label style="font-weight:700;">选择已到库待入库的计划 / 입고대기 계획 선택</label>
+      <select id="inboundPlanSelect"><option value="">-- 选择/선택 --</option></select>
+      <button class="btn btn-outline btn-sm mt-10" onclick="loadInboundPlans('inboundPlanSelect')">刷新列表 / 새로고침</button>
+    </div>
+    <div id="ibSrcExternal" style="display:none;">
+      <label style="font-weight:700;">外部 WMS 入库单号 / 외부 WMS 입고번호 <span style="color:#e74c3c;">*</span></label>
+      <input id="inboundExternalNo" type="text" placeholder="请手动输入或扫描 / 입력 또는 스캔">
+      <label style="margin-top:8px;font-weight:700;">客户名 / 고객명 <span style="color:#e74c3c;">*</span></label>
+      <input id="inboundExternalCustomer" type="text" placeholder="必填 / 필수">
+      <label style="margin-top:8px;">开始备注（可选）/ 시작 비고 (선택)</label>
+      <input id="inboundExternalRemark" type="text" placeholder="例如：先处理 A 区 / 예: A구역 먼저">
+    </div>
     <div style="height:10px"></div>
     <button class="btn btn-success" onclick="startInbound(this)">开始入库 / 입고 시작</button>
   </div>
@@ -185,6 +199,27 @@
     <div class="card">
       <div class="card-title">入库结果 / 입고 결과</div>
       <div id="inboundResultLines"></div>
+      <div style="margin-top:10px;padding-top:10px;border-top:1px dashed #ddd;">
+        <div style="font-weight:700;font-size:13px;margin-bottom:6px;">额外作业量 / 추가 작업량</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">
+          <div>
+            <label style="font-size:12px;">理货数量 / 정리수</label>
+            <input id="inboundExtraSort" type="number" min="0" value="0">
+          </div>
+          <div>
+            <label style="font-size:12px;">贴标数量 / 라벨수</label>
+            <input id="inboundExtraLabel" type="number" min="0" value="0">
+          </div>
+          <div>
+            <label style="font-size:12px;">修补箱数量 / 보수박스</label>
+            <input id="inboundExtraRepair" type="number" min="0" value="0">
+          </div>
+          <div>
+            <label style="font-size:12px;">其他操作说明 / 기타 작업 설명</label>
+            <input id="inboundExtraOther" type="text" placeholder="可选 / 선택">
+          </div>
+        </div>
+      </div>
       <label style="margin-top:8px;">入库说明 / 입고 설명</label>
       <textarea id="inboundResultNote" rows="2" placeholder="入库说明（位置、情况等）/ 입고 설명"></textarea>
       <label style="margin-top:8px;">其他备注 / 기타 비고</label>
@@ -193,6 +228,47 @@
       <button class="btn btn-success" onclick="finishInbound(this)">完成入库 / 입고 완료</button>
       <div style="height:8px"></div>
       <button class="btn btn-outline" onclick="inboundLeave(this)">暂时离开 / 일시 퇴장</button>
+    </div>
+  </div>
+</div>
+
+<!-- Inbound (return: lightweight work-time tracking) -->
+<div id="page-inbound_return" class="page">
+  <div class="topbar">
+    <button class="back-btn" onclick="goPage('inbound_menu')">← 返回/뒤로</button>
+    <div class="page-title">退件入库 / 반품 입고</div>
+  </div>
+  <div id="inboundReturnEntryCard" class="card">
+    <div style="background:#fff8e1;border-left:3px solid #f39c12;padding:8px 10px;margin-bottom:10px;font-size:12px;line-height:1.6;">
+      退件入库只记录工时，不填入库数量。具体入库明细由外部 WMS 数据对账。<br>
+      반품 입고는 작업 시간만 기록합니다. 상세 수량은 외부 WMS 데이터로 대조합니다.
+    </div>
+    <label>客户名（可选）/ 고객명 (선택)</label>
+    <input id="inboundReturnCustomer" type="text" placeholder="例如：XX 公司 / 예: XX 회사">
+    <label style="margin-top:8px;">开始备注（可选）/ 시작 비고 (선택)</label>
+    <input id="inboundReturnStartRemark" type="text" placeholder="例如：托盘 3 板 / 예: 팔레트 3개">
+    <div style="height:10px"></div>
+    <button class="btn btn-success" onclick="startInboundReturn(this)">开始退件入库 / 반품 입고 시작</button>
+  </div>
+  <div id="inboundReturnWorkingCard" style="display:none;">
+    <div class="card">
+      <div class="card-title">当前会话 / 현재 세션</div>
+      <div id="inboundReturnSessionInfo" style="font-size:13px;line-height:1.8;"><span class="muted">--</span></div>
+    </div>
+    <div class="card">
+      <div class="card-title">当前参与人员 / 현재 참여 인원</div>
+      <div id="inboundReturnWorkers" class="workers-panel"><span class="muted">--</span></div>
+    </div>
+    <div class="card">
+      <div class="card-title">结束记录 / 종료 기록</div>
+      <label>工作说明 / 작업 설명</label>
+      <textarea id="inboundReturnResultNote" rows="2" placeholder="本次退件入库处理情况 / 이번 반품 입고 처리 내용"></textarea>
+      <label style="margin-top:8px;">其他备注 / 기타 비고</label>
+      <textarea id="inboundReturnRemark" rows="2" placeholder="其他备注 / 기타 비고"></textarea>
+      <div style="height:10px"></div>
+      <button class="btn btn-success" onclick="finishInboundReturn(this)">完成退件入库 / 반품 입고 완료</button>
+      <div style="height:8px"></div>
+      <button class="btn btn-outline" onclick="inboundReturnLeave(this)">暂时离开 / 일시 퇴장</button>
     </div>
   </div>
 </div>
@@ -357,7 +433,7 @@
 <input type="file" id="photoInput" accept="image/*" capture="environment" style="display:none;" onchange="handlePhotoUpload(this)">
 
 <script src="config.js"></script>
-<script src="app.js?v=20260408d"></script>
+<script src="app.js?v=20260410a"></script>
 <script src="patch.js?v=20260408d"></script>
 </body>
 </html>

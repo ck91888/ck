@@ -164,6 +164,7 @@ function showPage(name) {
   if (name === "home") initHome();
   if (name === "unload") initUnload();
   if (name === "inbound") initInbound();
+  if (name === "inbound_return") initInboundReturn();
   if (name === "outbound_load") initOutboundLoad();
   if (name === "issue_list") loadIssueList();
   if (name === "issue_detail") loadIssueDetail();
@@ -457,6 +458,7 @@ function goMyTask() {
     if (!res || !res.ok || !res.job) { goPage("home"); return; }
     var jt = res.job.job_type || "";
     if (jt === "unload") goPage("unload");
+    else if (jt === "inbound_return") goPage("inbound_return");
     else if (jt.indexOf("inbound") === 0) goPage("inbound", { job_type: jt, biz_class: res.job.biz_class || "" });
     else if (jt === "load_outbound") goPage("outbound_load");
     else if (jt === "issue_handle") goPage("issue_detail");
@@ -962,6 +964,7 @@ function startJobPoll(type) {
     if (type === "unload") refreshUnloadWorkers();
     if (type === "load") refreshLoadWorkers();
     if (type === "inbound") refreshInboundWorkers();
+    if (type === "inbound_return") refreshInboundReturnWorkers();
     if (type === "generic") refreshGenericWorkers();
   }, 5000);
 }
@@ -989,7 +992,30 @@ function renderWorkers(containerId, workers) {
   el.innerHTML = html;
 }
 
-// ===== Inbound =====
+// ===== Inbound (standard: direct_ship + bulk) =====
+var _inboundSource = 'plan'; // 'plan' | 'external'
+
+function switchInboundSource(src) {
+  _inboundSource = src;
+  var planBox = document.getElementById("ibSrcPlan");
+  var extBox = document.getElementById("ibSrcExternal");
+  var planBtn = document.getElementById("ibSrcBtnPlan");
+  var extBtn = document.getElementById("ibSrcBtnExternal");
+  if (src === 'external') {
+    if (planBox) planBox.style.display = 'none';
+    if (extBox) extBox.style.display = '';
+    if (planBtn) planBtn.classList.remove('btn-primary');
+    if (extBtn) { extBtn.classList.remove('btn-outline'); extBtn.classList.add('btn-primary'); }
+    if (planBtn) planBtn.classList.add('btn-outline');
+  } else {
+    if (planBox) planBox.style.display = '';
+    if (extBox) extBox.style.display = 'none';
+    if (extBtn) extBtn.classList.remove('btn-primary');
+    if (planBtn) { planBtn.classList.remove('btn-outline'); planBtn.classList.add('btn-primary'); }
+    if (extBtn) extBtn.classList.add('btn-outline');
+  }
+}
+
 async function initInbound() {
   var title = document.getElementById("inboundTitle");
   var jt = _pageParams.job_type || "inbound_direct";
@@ -998,7 +1024,7 @@ async function initInbound() {
   // If already in a putaway job, show working state
   if (_activeJobId) {
     var res = await api({ action: "v2_ops_job_detail", job_id: _activeJobId });
-    if (res && res.ok && res.job && res.job.job_type && res.job.job_type.indexOf("inbound") === 0 && res.job.status === "working") {
+    if (res && res.ok && res.job && res.job.job_type && (res.job.job_type === 'inbound_direct' || res.job.job_type === 'inbound_bulk') && res.job.status === "working") {
       document.getElementById("inboundEntryCard").style.display = "none";
       document.getElementById("inboundWorkingCard").style.display = "";
       loadInboundPlanInfo(res.job.related_doc_id);
@@ -1010,21 +1036,51 @@ async function initInbound() {
 
   document.getElementById("inboundEntryCard").style.display = "";
   document.getElementById("inboundWorkingCard").style.display = "none";
+  _inboundSource = 'plan';
+  switchInboundSource('plan');
+  // Reset external inputs
+  var exNo = document.getElementById("inboundExternalNo"); if (exNo) exNo.value = '';
+  var exCu = document.getElementById("inboundExternalCustomer"); if (exCu) exCu.value = '';
+  var exRe = document.getElementById("inboundExternalRemark"); if (exRe) exRe.value = '';
+  // Reset extra_ops inputs
+  var eSort = document.getElementById("inboundExtraSort"); if (eSort) eSort.value = '0';
+  var eLabel = document.getElementById("inboundExtraLabel"); if (eLabel) eLabel.value = '0';
+  var eRepair = document.getElementById("inboundExtraRepair"); if (eRepair) eRepair.value = '0';
+  var eOther = document.getElementById("inboundExtraOther"); if (eOther) eOther.value = '';
+  var rNote = document.getElementById("inboundResultNote"); if (rNote) rNote.value = '';
+  var rRmk = document.getElementById("inboundRemark"); if (rRmk) rRmk.value = '';
   await loadInboundPlans("inboundPlanSelect");
 }
 
 async function startInbound(btnEl) {
-  var planId = document.getElementById("inboundPlanSelect").value;
-  if (!planId) { alert("请选择入库计划 / 입고계획을 선택하세요"); return; }
+  var jobType = _pageParams.job_type || "inbound_direct";
+  var bizClass = _pageParams.biz_class || "";
+
+  var payload = {
+    action: "v2_inbound_job_start",
+    worker_id: getWorkerId(),
+    worker_name: getWorkerName(),
+    biz_class: bizClass,
+    job_type: jobType
+  };
+
+  if (_inboundSource === 'external') {
+    var exNo = ((document.getElementById("inboundExternalNo") || {}).value || "").trim();
+    var exCu = ((document.getElementById("inboundExternalCustomer") || {}).value || "").trim();
+    var exRe = ((document.getElementById("inboundExternalRemark") || {}).value || "").trim();
+    if (!exNo) { alert("请输入外部 WMS 入库单号 / 외부 입고번호를 입력하세요"); return; }
+    if (!exCu) { alert("请输入客户名 / 고객명을 입력하세요"); return; }
+    payload.external_inbound_no = exNo;
+    payload.customer_name = exCu;
+    payload.start_remark = exRe;
+  } else {
+    var planId = document.getElementById("inboundPlanSelect").value;
+    if (!planId) { alert("请选择入库计划 / 입고계획을 선택하세요"); return; }
+    payload.plan_id = planId;
+  }
+
   withActionLock('startInbound', btnEl || null, '提交中.../저장중...', async function() {
-    var res = await api({
-      action: "v2_inbound_job_start",
-      plan_id: planId,
-      worker_id: getWorkerId(),
-      worker_name: getWorkerName(),
-      biz_class: _pageParams.biz_class || "",
-      job_type: _pageParams.job_type || "inbound_direct"
-    });
+    var res = await api(payload);
     if (res && res.ok) {
       saveActiveJob(res.job_id, res.worker_seg_id);
       if (!res.already_joined) {
@@ -1032,7 +1088,7 @@ async function startInbound(btnEl) {
       }
       document.getElementById("inboundEntryCard").style.display = "none";
       document.getElementById("inboundWorkingCard").style.display = "";
-      loadInboundPlanInfo(planId);
+      loadInboundPlanInfo(res.plan_id || payload.plan_id);
       refreshInboundWorkers();
       startJobPoll("inbound");
     } else {
@@ -1118,6 +1174,14 @@ async function finishInbound(btnEl) {
       resultLines.push({ unit_type: inp.getAttribute("data-unit") || "", putaway_qty: qty });
     }
 
+    // Collect extra_ops (额外作业量)
+    var extraOps = {
+      sort_qty: Number(((document.getElementById("inboundExtraSort") || {}).value) || 0) || 0,
+      label_qty: Number(((document.getElementById("inboundExtraLabel") || {}).value) || 0) || 0,
+      repair_box_qty: Number(((document.getElementById("inboundExtraRepair") || {}).value) || 0) || 0,
+      other_op_remark: (((document.getElementById("inboundExtraOther") || {}).value) || "").trim()
+    };
+
     var res = await api({
       action: "v2_inbound_job_finish",
       job_id: _activeJobId,
@@ -1125,6 +1189,7 @@ async function finishInbound(btnEl) {
       remark: remark.trim(),
       result_note: resultNote.trim(),
       result_lines: resultLines,
+      extra_ops: extraOps,
       complete_job: true
     });
     if (res && res.ok) {
@@ -1154,6 +1219,117 @@ async function refreshInboundWorkers() {
   if (!_activeJobId) return;
   var res = await api({ action: "v2_ops_job_detail", job_id: _activeJobId });
   if (res && res.ok) renderWorkers("inboundWorkers", res.workers);
+}
+
+// ===== Return Inbound (lightweight work-time tracking) =====
+async function initInboundReturn() {
+  // If already in a return inbound job, show working state
+  if (_activeJobId) {
+    var res = await api({ action: "v2_ops_job_detail", job_id: _activeJobId });
+    if (res && res.ok && res.job && res.job.job_type === 'inbound_return' && res.job.status === 'working') {
+      document.getElementById("inboundReturnEntryCard").style.display = "none";
+      document.getElementById("inboundReturnWorkingCard").style.display = "";
+      renderInboundReturnSession(res.job);
+      refreshInboundReturnWorkers();
+      startJobPoll("inbound_return");
+      return;
+    }
+  }
+  document.getElementById("inboundReturnEntryCard").style.display = "";
+  document.getElementById("inboundReturnWorkingCard").style.display = "none";
+  var cu = document.getElementById("inboundReturnCustomer"); if (cu) cu.value = '';
+  var sr = document.getElementById("inboundReturnStartRemark"); if (sr) sr.value = '';
+  var rn = document.getElementById("inboundReturnResultNote"); if (rn) rn.value = '';
+  var rm = document.getElementById("inboundReturnRemark"); if (rm) rm.value = '';
+}
+
+function renderInboundReturnSession(job) {
+  var el = document.getElementById("inboundReturnSessionInfo");
+  if (!el) return;
+  var html = '<div><b>任务号/작업번호:</b> ' + esc(job.id) + '</div>';
+  el.innerHTML = html;
+}
+
+async function startInboundReturn(btnEl) {
+  var customer = ((document.getElementById("inboundReturnCustomer") || {}).value || "").trim();
+  var startRemark = ((document.getElementById("inboundReturnStartRemark") || {}).value || "").trim();
+  withActionLock('startInboundReturn', btnEl || null, '提交中.../저장중...', async function() {
+    var res = await api({
+      action: "v2_inbound_job_start",
+      worker_id: getWorkerId(),
+      worker_name: getWorkerName(),
+      biz_class: "return",
+      job_type: "inbound_return",
+      customer_name: customer,
+      start_remark: startRemark
+    });
+    if (res && res.ok) {
+      saveActiveJob(res.job_id, res.worker_seg_id);
+      alert("已开始退件入库 / 반품 입고 시작됨");
+      document.getElementById("inboundReturnEntryCard").style.display = "none";
+      document.getElementById("inboundReturnWorkingCard").style.display = "";
+      var jobRes = await api({ action: "v2_ops_job_detail", job_id: res.job_id });
+      if (jobRes && jobRes.ok) renderInboundReturnSession(jobRes.job);
+      refreshInboundReturnWorkers();
+      startJobPoll("inbound_return");
+    } else {
+      alert("失败/실패: " + (res ? res.error : "unknown"));
+    }
+  });
+}
+
+async function inboundReturnLeave(btnEl) {
+  if (!_activeJobId) return;
+  if (!confirm("确认暂时离开？/ 일시 퇴장하시겠습니까?")) return;
+  withActionLock('inboundReturnLeave', btnEl || null, '提交中.../저장중...', async function() {
+    var res = await api({
+      action: "v2_inbound_job_finish",
+      job_id: _activeJobId,
+      worker_id: getWorkerId(),
+      leave_only: true
+    });
+    if (res && res.ok) {
+      clearActiveJob();
+      goPage("home");
+    } else {
+      alert("失败/실패: " + (res ? res.error : "unknown"));
+    }
+  });
+}
+
+async function finishInboundReturn(btnEl) {
+  if (!_activeJobId) { alert("没有进行中的任务 / 진행 중인 작업 없음"); return; }
+  withActionLock('finishInboundReturn', btnEl || null, '提交中.../저장중...', async function() {
+    var remark = (document.getElementById("inboundReturnRemark") || {}).value || "";
+    var resultNote = (document.getElementById("inboundReturnResultNote") || {}).value || "";
+    var res = await api({
+      action: "v2_inbound_job_finish",
+      job_id: _activeJobId,
+      worker_id: getWorkerId(),
+      remark: remark.trim(),
+      result_note: resultNote.trim(),
+      complete_job: true
+    });
+    if (res && res.ok) {
+      alert("退件入库工时已记录 / 반품 입고 작업 시간 기록됨");
+      clearActiveJob();
+      goPage("home");
+    } else if (res && res.error === "already_completed") {
+      alert("任务已完成，请勿重复提交\n작업이 이미 완료되었습니다");
+      clearActiveJob();
+      goPage("home");
+    } else if (res && res.error === "others_still_working") {
+      alert("还有" + res.active_count + "人参与中，无法完成 / 아직 " + res.active_count + "명 참여 중, 완료 불가");
+    } else {
+      alert("失败/실패: " + (res ? res.error : "unknown"));
+    }
+  });
+}
+
+async function refreshInboundReturnWorkers() {
+  if (!_activeJobId) return;
+  var res = await api({ action: "v2_ops_job_detail", job_id: _activeJobId });
+  if (res && res.ok) renderWorkers("inboundReturnWorkers", res.workers);
 }
 
 // ===== Outbound Load =====

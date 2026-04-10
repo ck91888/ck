@@ -986,11 +986,21 @@ async function loadInboundDetail() {
   // --- Basic info: two-column grid ---
   var isDynamic = (p.source_type === 'field_dynamic');
   var isFromFeedback = (p.source_type === 'from_feedback');
+  var isExternal = (p.source_type === 'external_inbound');
+  var isReturnSession = (p.source_type === 'return_session');
   var html = '<div class="card">';
   html += '<div style="font-size:16px;font-weight:700;margin-bottom:10px;">';
   if (isFromFeedback) html += '<span style="background:#8e24aa;color:#fff;font-size:11px;padding:2px 6px;border-radius:3px;margin-right:6px;">反馈转正</span>';
   else if (isDynamic) html += '<span style="background:#ff9800;color:#fff;font-size:11px;padding:2px 6px;border-radius:3px;margin-right:6px;">旧动态单</span>';
+  else if (isExternal) html += '<span style="background:#2196f3;color:#fff;font-size:11px;padding:2px 6px;border-radius:3px;margin-right:6px;">外部WMS入库</span>';
+  else if (isReturnSession) html += '<span style="background:#f39c12;color:#fff;font-size:11px;padding:2px 6px;border-radius:3px;margin-right:6px;">退件入库会话</span>';
   html += esc(p.display_no || p.id) + '</div>';
+  if (isExternal && p.external_inbound_no) {
+    html += '<div style="font-size:12px;color:#1565c0;margin-bottom:8px;">外部 WMS 入库单号：<b>' + esc(p.external_inbound_no) + '</b></div>';
+  }
+  if (isReturnSession) {
+    html += '<div style="background:#fff8e1;border-left:3px solid #f39c12;padding:6px 10px;margin-bottom:8px;font-size:12px;">退件入库 · 仅记录工时 · 入库数量由外部 WMS 数据对账</div>';
+  }
   html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px;font-size:13px;">';
   html += '<div><b>' + L("status") + ':</b> <span class="st st-' + esc(p.status) + '">' + esc(inboundStatusLabel(p.status)) + '</span></div>';
   html += '<div><b>' + L("biz_class") + ':</b> <span class="biz-tag biz-' + esc(p.biz_class) + '">' + esc(bizLabel(p.biz_class)) + '</span></div>';
@@ -1041,26 +1051,44 @@ async function loadInboundDetail() {
       if (idx > 0) html += '<div style="border-top:1px solid #eee;margin:8px 0;"></div>';
       var jobTypeMap = {unload:'卸货',inbound_direct:'代发入库',inbound_bulk:'大货入库',inbound_return:'退件入库',load:'装货',sort:'分拣',check:'核对',other:'其他'};
       var jobLabel = jobTypeMap[j.job_type] || j.job_type || '--';
+      var isInboundJob = (j.job_type || '').indexOf('inbound') === 0;
+      var isReturnJob = (j.job_type === 'inbound_return') || j.is_return === true;
       html += '<div style="font-size:13px;line-height:1.8;">';
       html += '<div><span class="st st-' + esc(j.status) + '">' + esc(stLabel(j.status)) + '</span> <b>' + esc(jobLabel) + '</b></div>';
+      if (isReturnJob) {
+        html += '<div style="background:#fff8e1;border-left:3px solid #f39c12;padding:4px 8px;margin:4px 0;font-size:12px;">退件入库 · 仅记录工时 · 入库数量由外部 WMS 数据对账</div>';
+      }
       html += '<div>参与人员：' + esc(j.worker_names_text || j.created_by || '--') + '</div>';
       html += '<div>完成时间：' + esc(j.completed_at ? fmtTime(j.completed_at) : '--') + '</div>';
       html += '<div>用时：' + (j.total_minutes_worked || 0) + L("minutes") + '</div>';
-      // Result lines — unload shows actual_qty, inbound shows putaway_qty
+      // Result lines — unload shows actual_qty, standard inbound shows putaway_qty, return inbound shows nothing
       var rl = j.result_lines || [];
-      var isInboundJob = (j.job_type || '').indexOf('inbound') === 0;
-      if (rl.length > 0) {
-        var parts = [];
-        rl.forEach(function(r) {
-          var qty = isInboundJob ? (r.putaway_qty || 0) : (r.actual_qty || 0);
-          parts.push(unitTypeLabel(r.unit_type) + ' ' + qty);
-        });
-        html += '<div>' + (isInboundJob ? '实际入库：' : '实际结果：') + esc(parts.join(' / ')) + '</div>';
-      } else if (j.status === 'completed') {
-        html += '<div>' + (isInboundJob ? '实际入库：' : '实际结果：') + '--</div>';
+      if (!isReturnJob) {
+        if (rl.length > 0) {
+          var parts = [];
+          rl.forEach(function(r) {
+            var qty = isInboundJob ? (r.putaway_qty || 0) : (r.actual_qty || 0);
+            parts.push(unitTypeLabel(r.unit_type) + ' ' + qty);
+          });
+          html += '<div>' + (isInboundJob ? '实际入库：' : '实际结果：') + esc(parts.join(' / ')) + '</div>';
+        } else if (j.status === 'completed') {
+          html += '<div>' + (isInboundJob ? '实际入库：' : '实际结果：') + '--</div>';
+        }
+      }
+      // Extra ops — standard inbound only
+      if (!isReturnJob && isInboundJob && j.extra_ops) {
+        var eo = j.extra_ops;
+        var eoParts = [];
+        if (Number(eo.sort_qty || 0) > 0) eoParts.push('理货 ' + eo.sort_qty);
+        if (Number(eo.label_qty || 0) > 0) eoParts.push('贴标 ' + eo.label_qty);
+        if (Number(eo.repair_box_qty || 0) > 0) eoParts.push('修补箱 ' + eo.repair_box_qty);
+        if (eoParts.length > 0) {
+          html += '<div>额外作业：' + esc(eoParts.join(' / ')) + '</div>';
+        }
+        if (eo.other_op_remark) html += '<div>其他操作说明：' + esc(eo.other_op_remark) + '</div>';
       }
       if (j.diff_note) html += '<div>现场差异说明：' + esc(j.diff_note) + '</div>';
-      if (j.result_note) html += '<div>入库说明：' + esc(j.result_note) + '</div>';
+      if (j.result_note) html += '<div>' + (isReturnJob ? '工作说明：' : '入库说明：') + esc(j.result_note) + '</div>';
       if (j.remark) html += '<div>其他备注：' + esc(j.remark) + '</div>';
       html += '</div>';
     });

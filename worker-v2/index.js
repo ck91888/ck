@@ -386,6 +386,10 @@ const MIGRATIONS = [
   // ---- putaway tracking on plan lines ----
   `ALTER TABLE v2_inbound_plan_lines ADD COLUMN putaway_qty REAL DEFAULT 0`,
   `ALTER TABLE v2_inbound_plan_lines ADD COLUMN putaway_remark TEXT DEFAULT ''`,
+
+  // ---- external WMS inbound number (for standard inbound started from external no) ----
+  `ALTER TABLE v2_inbound_plans ADD COLUMN external_inbound_no TEXT DEFAULT ''`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_inbound_external_no ON v2_inbound_plans(external_inbound_no) WHERE external_inbound_no != ''`,
 ];
 
 let _migrated = false;
@@ -913,8 +917,15 @@ route("v2_inbound_plan_detail", async (body, env) => {
       try { resultLines = JSON.parse(latestResult.result_lines_json); } catch(e) {}
     }
     let resultNote = "";
+    let extraOps = null;
+    let isReturnFlag = false;
     if (latestResult && latestResult.result_json) {
-      try { const rj = JSON.parse(latestResult.result_json); resultNote = rj.result_note || ""; } catch(e) {}
+      try {
+        const rj = JSON.parse(latestResult.result_json);
+        resultNote = rj.result_note || "";
+        if (rj.extra_ops && typeof rj.extra_ops === 'object') extraOps = rj.extra_ops;
+        if (rj.is_return === true) isReturnFlag = true;
+      } catch(e) {}
     }
 
     enrichedJobs.push({
@@ -926,7 +937,9 @@ route("v2_inbound_plan_detail", async (body, env) => {
       result_lines: resultLines,
       diff_note: (latestResult && latestResult.diff_note) || "",
       remark: (latestResult && latestResult.remark) || "",
-      result_note: resultNote
+      result_note: resultNote,
+      extra_ops: extraOps,
+      is_return: isReturnFlag || (job.job_type === 'inbound_return')
     });
   }
 
@@ -1616,34 +1629,100 @@ route("v2_unload_job_finish", async (body, env) => {
 
 route("v2_inbound_job_start", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
-  const plan_id = String(body.plan_id || "").trim();
+  let plan_id = String(body.plan_id || "").trim();
   const worker_id = String(body.worker_id || "").trim();
   const worker_name = String(body.worker_name || "").trim();
   const biz_class = String(body.biz_class || "").trim();
   const job_type = String(body.job_type || "inbound_direct").trim();
+  const external_inbound_no = String(body.external_inbound_no || "").trim();
+  const customer_name = String(body.customer_name || "").trim();
+  const start_remark = String(body.start_remark || "").trim();
   if (!worker_id) return err("missing worker_id");
-  if (!plan_id) return err("missing plan_id");
 
-  // Only allow starting putaway for plans that are arrived_pending_putaway
-  const plan = await env.DB.prepare("SELECT status FROM v2_inbound_plans WHERE id=?").bind(plan_id).first();
-  if (!plan) return err("plan not found", 404);
-  if (plan.status !== 'arrived_pending_putaway' && plan.status !== 'putting_away') {
-    return err("plan status must be arrived_pending_putaway, current: " + plan.status);
+  const VALID_JOB_TYPES = ['inbound_direct', 'inbound_bulk', 'inbound_return'];
+  if (VALID_JOB_TYPES.indexOf(job_type) === -1) return err("invalid job_type: " + job_type);
+  const isReturn = (job_type === 'inbound_return');
+  const isStandard = (job_type === 'inbound_direct' || job_type === 'inbound_bulk');
+
+  // biz_class sanity
+  if (isReturn && biz_class && biz_class !== 'return') {
+    return err("biz_class mismatch for inbound_return: " + biz_class);
+  }
+  if (isStandard && biz_class !== 'direct_ship' && biz_class !== 'bulk') {
+    return err("biz_class must be direct_ship or bulk for standard inbound, got: " + biz_class);
   }
 
   const t = now();
+  const today = kstToday();
 
+  // ===== Path A: start from existing system inbound plan (standard only) =====
+  if (plan_id && isStandard) {
+    const plan = await env.DB.prepare("SELECT status, biz_class FROM v2_inbound_plans WHERE id=?").bind(plan_id).first();
+    if (!plan) return err("plan not found", 404);
+    if (plan.status !== 'arrived_pending_putaway' && plan.status !== 'putting_away') {
+      return err("plan status must be arrived_pending_putaway, current: " + plan.status);
+    }
+    if (plan.biz_class && biz_class && plan.biz_class !== biz_class) {
+      return err("plan biz_class mismatch: plan=" + plan.biz_class + " req=" + biz_class);
+    }
+  }
+  // ===== Path B: start from external WMS inbound number (standard only) =====
+  else if (!plan_id && isStandard) {
+    if (!external_inbound_no) return err("missing plan_id or external_inbound_no");
+    if (!customer_name) return err("missing customer_name for external inbound");
+    // Dedupe: if there's an active external plan with same external_no still putting_away, reuse it
+    const dupPlan = await env.DB.prepare(
+      "SELECT id FROM v2_inbound_plans WHERE source_type='external_inbound' AND external_inbound_no=? AND status='putting_away' ORDER BY created_at DESC LIMIT 1"
+    ).bind(external_inbound_no).first();
+    if (dupPlan) {
+      plan_id = dupPlan.id;
+    } else {
+      plan_id = "IB-" + uid();
+      const display_no = await nextDisplayNo(env, today);
+      await env.DB.prepare(`
+        INSERT INTO v2_inbound_plans(id, plan_date, customer, biz_class, cargo_summary,
+          expected_arrival, purpose, remark, status, created_by, created_at, updated_at,
+          display_no, source_type, external_inbound_no)
+        VALUES(?,?,?,?,'外部WMS入库单','','',?, 'putting_away',?,?,?,?,'external_inbound',?)
+      `).bind(plan_id, today, customer_name, biz_class, start_remark, worker_id, t, t, display_no, external_inbound_no).run();
+    }
+  }
+  // ===== Path C: return inbound lightweight session =====
+  else if (isReturn) {
+    if (!plan_id) {
+      plan_id = "IB-" + uid();
+      const display_no = await nextDisplayNo(env, today);
+      await env.DB.prepare(`
+        INSERT INTO v2_inbound_plans(id, plan_date, customer, biz_class, cargo_summary,
+          expected_arrival, purpose, remark, status, created_by, created_at, updated_at,
+          display_no, source_type)
+        VALUES(?,?,?,'return','退件入库会话','','',?, 'putting_away',?,?,?,?,'return_session')
+      `).bind(plan_id, today, customer_name || '未指定', start_remark, worker_id, t, t, display_no).run();
+    } else {
+      // Join existing return session: verify it's putting_away and is a return_session
+      const rp = await env.DB.prepare(
+        "SELECT status, source_type, biz_class FROM v2_inbound_plans WHERE id=?"
+      ).bind(plan_id).first();
+      if (!rp) return err("return session not found", 404);
+      if (rp.status !== 'putting_away') return err("return session status invalid: " + rp.status);
+      if (rp.biz_class !== 'return') return err("not a return session");
+    }
+  } else {
+    return err("missing plan_id");
+  }
+
+  // ===== Find / create job bound to plan_id =====
   let job = null;
   const existing = await env.DB.prepare(
-    "SELECT * FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type LIKE 'inbound%' AND status IN ('pending','working') LIMIT 1"
-  ).bind(plan_id).first();
+    "SELECT * FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type=? AND status IN ('pending','working') LIMIT 1"
+  ).bind(plan_id, job_type).first();
   if (existing) job = existing;
 
   let job_id, is_new_job = false;
   if (job) {
     job_id = job.id;
     const dup = await findOpenSeg(env, job_id, worker_id);
-    if (dup) return json({ ok: true, job_id, worker_seg_id: dup.id, is_new_job: false, already_joined: true });
+    if (dup) return json({ ok: true, job_id, worker_seg_id: dup.id, is_new_job: false, already_joined: true, plan_id });
     await env.DB.prepare(
       "UPDATE v2_ops_jobs SET active_worker_count=active_worker_count+1, updated_at=?, status='working' WHERE id=?"
     ).bind(t, job_id).run();
@@ -1655,10 +1734,13 @@ route("v2_inbound_job_start", async (body, env) => {
         status, created_by, created_at, updated_at, active_worker_count)
       VALUES(?, 'inbound', ?, ?, 'inbound_plan', ?, 'working', ?, ?, ?, 1)
     `).bind(job_id, biz_class, job_type, plan_id, worker_id, t, t).run();
-    // Update plan status to putting_away
-    await env.DB.prepare(
-      "UPDATE v2_inbound_plans SET status='putting_away', updated_at=? WHERE id=? AND status='arrived_pending_putaway'"
-    ).bind(t, plan_id).run();
+    // Only standard inbound flips plan from arrived_pending_putaway → putting_away.
+    // External/return paths already created plan in putting_away state.
+    if (isStandard) {
+      await env.DB.prepare(
+        "UPDATE v2_inbound_plans SET status='putting_away', updated_at=? WHERE id=? AND status='arrived_pending_putaway'"
+      ).bind(t, plan_id).run();
+    }
   }
 
   const seg_id = "WS-" + uid();
@@ -1667,7 +1749,7 @@ route("v2_inbound_job_start", async (body, env) => {
     VALUES(?,?,?,?,?)
   `).bind(seg_id, job_id, worker_id, worker_name, t).run();
 
-  return json({ ok: true, job_id, worker_seg_id: seg_id, is_new_job });
+  return json({ ok: true, job_id, worker_seg_id: seg_id, is_new_job, plan_id });
 });
 
 route("v2_inbound_job_finish", async (body, env) => {
@@ -1681,21 +1763,35 @@ route("v2_inbound_job_finish", async (body, env) => {
   const t = now();
   const remark = String(body.remark || "");
   const result_note = String(body.result_note || "");
-  const result_lines = body.result_lines || [];
+  const result_lines = Array.isArray(body.result_lines) ? body.result_lines : [];
+
+  // Sanitize extra_ops (standard inbound only — ignored for return)
+  const rawExtra = body.extra_ops || {};
+  const extra_ops = {
+    sort_qty: Number(rawExtra.sort_qty || 0) || 0,
+    label_qty: Number(rawExtra.label_qty || 0) || 0,
+    repair_box_qty: Number(rawExtra.repair_box_qty || 0) || 0,
+    other_op_remark: String(rawExtra.other_op_remark || "")
+  };
 
   // 终态幂等保护：已完成的 job 不再重复写（leave_only 不受限）
   if (!leave_only) {
-    const jobCheck = await env.DB.prepare("SELECT status FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
+    const jobCheck = await env.DB.prepare("SELECT status, job_type FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
     if (jobCheck && jobCheck.status === 'completed') {
       return json({ ok: false, error: "already_completed", message: "任务已完成，请勿重复提交" });
     }
   }
 
+  // Read job early — we need job_type to branch
+  const jobRow = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
+  if (!jobRow) return err("job not found", 404);
+  const isReturnJob = (jobRow.job_type === 'inbound_return');
+
   // ===== 前置校验：完成入库前先校验 plan 状态，避免人已退出再报错 =====
-  if (complete_job && !leave_only) {
-    const preJob = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
-    if (preJob && preJob.related_doc_id) {
-      const planCheck = await env.DB.prepare("SELECT status FROM v2_inbound_plans WHERE id=?").bind(preJob.related_doc_id).first();
+  // 退件入库是轻量会话，使用 return_session 计划但不走正式状态机，跳过此校验
+  if (complete_job && !leave_only && !isReturnJob) {
+    if (jobRow.related_doc_id) {
+      const planCheck = await env.DB.prepare("SELECT status FROM v2_inbound_plans WHERE id=?").bind(jobRow.related_doc_id).first();
       if (planCheck && planCheck.status !== 'putting_away') {
         return json({ ok: false, error: "inbound_plan_status_invalid", message: "当前入库计划状态不允许完成入库（当前: " + planCheck.status + "）" });
       }
@@ -1709,8 +1805,10 @@ route("v2_inbound_job_finish", async (body, env) => {
     return json({ ok: true, left: true });
   }
 
-  // Save shared result to job
-  const resultData = { remark, result_note, result_lines };
+  // Persist shared result — return inbound stores no result_lines / extra_ops
+  const resultData = isReturnJob
+    ? { remark, result_note, result_lines: [], is_return: true }
+    : { remark, result_note, result_lines, extra_ops };
   await env.DB.prepare(
     "UPDATE v2_ops_jobs SET shared_result_json=?, updated_at=? WHERE id=?"
   ).bind(JSON.stringify(resultData), t, job_id).run();
@@ -1720,13 +1818,12 @@ route("v2_inbound_job_finish", async (body, env) => {
       return json({ ok: false, error: "others_still_working", active_count: realCount });
     }
 
-    const job = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
-
     // Save structured result record
     const result_id = "RES-" + uid();
     await env.DB.prepare(
       "INSERT INTO v2_ops_job_results(id, job_id, box_count, pallet_count, remark, result_json, result_lines_json, created_by, created_at) VALUES(?,?,0,0,?,?,?,?,?)"
-    ).bind(result_id, job_id, remark, JSON.stringify(resultData), JSON.stringify(result_lines), worker_id, t).run();
+    ).bind(result_id, job_id, remark, JSON.stringify(resultData),
+           JSON.stringify(isReturnJob ? [] : result_lines), worker_id, t).run();
 
     await env.DB.prepare(
       "UPDATE v2_ops_jobs SET status='completed', updated_at=? WHERE id=?"
@@ -1735,18 +1832,25 @@ route("v2_inbound_job_finish", async (body, env) => {
       "UPDATE v2_ops_job_workers SET left_at=?, leave_reason='job_completed' WHERE job_id=? AND left_at=''"
     ).bind(t, job_id).run();
 
-    // Write back putaway_qty to plan lines
-    if (job && job.related_doc_id) {
+    // Write back putaway_qty + mark plan completed — standard inbound only
+    if (!isReturnJob && jobRow.related_doc_id) {
       for (const rl of result_lines) {
-        if (rl.unit_type && Number(rl.putaway_qty || 0) > 0) {
+        if (rl && rl.unit_type && Number(rl.putaway_qty || 0) > 0) {
           await env.DB.prepare(
             "UPDATE v2_inbound_plan_lines SET putaway_qty=?, putaway_remark=? WHERE plan_id=? AND unit_type=?"
-          ).bind(Number(rl.putaway_qty || 0), String(rl.putaway_remark || ""), job.related_doc_id, String(rl.unit_type)).run();
+          ).bind(Number(rl.putaway_qty || 0), String(rl.putaway_remark || ""), jobRow.related_doc_id, String(rl.unit_type)).run();
         }
       }
       await env.DB.prepare(
         "UPDATE v2_inbound_plans SET status='completed', updated_at=? WHERE id=?"
-      ).bind(t, job.related_doc_id).run();
+      ).bind(t, jobRow.related_doc_id).run();
+    }
+    // Return inbound: close the return_session plan too so it doesn't clutter the list.
+    // Each return session is per-worker-start and completes with its job.
+    if (isReturnJob && jobRow.related_doc_id) {
+      await env.DB.prepare(
+        "UPDATE v2_inbound_plans SET status='completed', updated_at=? WHERE id=? AND source_type='return_session'"
+      ).bind(t, jobRow.related_doc_id).run();
     }
     return json({ ok: true, result_id });
   }
