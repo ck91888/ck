@@ -990,7 +990,7 @@ async function loadInboundDetail() {
       } else {
         html += '<div>实际结果：--</div>';
       }
-      html += '<div>差异备注：' + esc(j.diff_note || '无') + '</div>';
+      html += '<div>现场差异说明：' + esc(j.diff_note || '无') + '</div>';
       if (j.remark) html += '<div>备注：' + esc(j.remark) + '</div>';
       if (j.result_note) html += '<div>产出说明：' + esc(j.result_note) + '</div>';
       html += '</div>';
@@ -1191,7 +1191,7 @@ async function loadFeedbackDetail() {
     html += '<div class="detail-field"><b>完成人:</b> ' + esc(fb.completed_by) + '</div>';
   }
   if (fb.diff_note) {
-    html += '<div class="detail-field"><b>差异备注:</b> ' + esc(fb.diff_note) + '</div>';
+    html += '<div class="detail-field"><b>现场差异说明:</b> ' + esc(fb.diff_note) + '</div>';
   }
   if (fb.remark) {
     html += '<div class="detail-field"><b>备注:</b> ' + esc(fb.remark) + '</div>';

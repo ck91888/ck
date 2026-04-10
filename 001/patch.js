@@ -228,7 +228,7 @@
     var diffArea=document.getElementById('unloadDiffArea');
     if(!diffArea) return;
     var lbl=diffArea.querySelector('label');
-    if(lbl) lbl.textContent='差异原因 / 차이 사유';
+    if(lbl) lbl.textContent='现场差异说明 / 현장 차이 설명';
   }
 
   // ===== Override startUnloadNoPlan: feedback-first flow =====

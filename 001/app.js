@@ -839,23 +839,7 @@ async function unloadComplete() {
     return;
   }
 
-  // Check diff note
-  var planLines = (_unloadPlanData && _unloadPlanData.lines) || [];
-  var diffNote = (document.getElementById("unloadDiffNote") || {}).value || "";
-  diffNote = diffNote.trim();
-  if (planLines.length > 0) {
-    var hasDiff = false;
-    var actualMap = {};
-    resultLines.forEach(function(r) { actualMap[r.unit_type] = r.actual_qty; });
-    planLines.forEach(function(ln) {
-      if ((actualMap[ln.unit_type] || 0) !== (ln.planned_qty || 0)) hasDiff = true;
-    });
-    if (hasDiff && !diffNote) {
-      diffNote = "现场实收数量与计划数量不一致";
-      var diffEl = document.getElementById("unloadDiffNote");
-      if (diffEl) diffEl.value = diffNote;
-    }
-  }
+  var diffNote = ((document.getElementById("unloadDiffNote") || {}).value || "").trim();
 
   var remark = (document.getElementById("unloadRemark") || {}).value || "";
 
@@ -893,23 +877,6 @@ async function unloadComplete() {
     alert("还有" + res.active_count + "人参与中，无法完成 / 아직 " + res.active_count + "명 참여 중, 완료 불가");
   } else if (res && res.error === "empty_result") {
     alert(res.message || "至少填写一项实际数量");
-  } else if (res && res.error === "diff_note_required") {
-    // Auto-fill default diff note and retry
-    diffNote = "现场实收数量与计划数量不一致（自动补充）";
-    var autoEl = document.getElementById("unloadDiffNote");
-    if (autoEl) autoEl.value = diffNote;
-    var retryRes = await api({
-      action: actionName, job_id: _activeJobId, worker_id: getWorkerId(),
-      result_lines: resultLines, diff_note: diffNote, remark: remark.trim(), complete_job: true
-    });
-    if (retryRes && retryRes.ok) {
-      alert("卸货已完成（已自动补充差异备注）/ 하차 완료 (차이 메모 자동 추가됨)");
-      localStorage.removeItem('v2_unplanned_fb_id');
-      var resumed2 = await checkAndResumeParent();
-      if (!resumed2) { clearActiveJob(); _unloadPlanData = null; goPage("home"); }
-    } else {
-      alert("失败/실패: " + (retryRes ? retryRes.error : "unknown"));
-    }
   } else {
     alert("失败/실패: " + (res ? res.error : "unknown"));
   }

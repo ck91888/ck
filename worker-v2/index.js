@@ -1428,9 +1428,7 @@ route("v2_unload_job_finish", async (body, env) => {
       }
     }
 
-    if (hasDiff && !diff_note) {
-      return json({ ok: false, error: "diff_note_required", message: "计划与实际有差异，请填写差异说明" });
-    }
+    // diff_note is optional — warehouse records observations, not reasons
 
     // 4d. Write result record
     const result_id = "RES-" + uid();
@@ -1440,7 +1438,7 @@ route("v2_unload_job_finish", async (body, env) => {
       INSERT INTO v2_ops_job_results(id, job_id, box_count, pallet_count, remark, result_json, result_lines_json, diff_note, created_by, created_at)
       VALUES(?,?,?,?,?,?,?,?,?,?)
     `).bind(result_id, job_id, box_count, pallet_count, remark,
-        JSON.stringify({ box_count, pallet_count, remark }),
+        JSON.stringify({ box_count, pallet_count, remark, has_diff: hasDiff }),
         JSON.stringify(result_lines), diff_note, worker_id, t).run();
 
     // 4e. Write back actual_qty to plan lines
@@ -1453,7 +1451,7 @@ route("v2_unload_job_finish", async (body, env) => {
     }
 
     // 4f. Complete job
-    const sharedResult = JSON.stringify({ box_count, pallet_count, remark, result_lines, diff_note });
+    const sharedResult = JSON.stringify({ box_count, pallet_count, remark, result_lines, diff_note, has_diff: hasDiff });
     await env.DB.prepare(
       "UPDATE v2_ops_jobs SET status='completed', shared_result_json=?, updated_at=? WHERE id=?"
     ).bind(sharedResult, t, job_id).run();
