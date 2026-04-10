@@ -584,14 +584,14 @@ async function loadUnplannedActiveList() {
       html += ' (' + esc(item.worker_names.join(', ')) + ')';
     }
     html += '</div>';
-    html += '<button class="btn btn-outline btn-sm" style="margin-top:4px;" onclick="joinUnplannedUnload(\'' + esc(item.feedback_id) + '\')">加入卸货 / 참여</button>';
+    html += '<button class="btn btn-outline btn-sm" style="margin-top:4px;" onclick="joinUnplannedUnload(\'' + esc(item.feedback_id) + '\', this)">加入卸货 / 참여</button>';
     html += '</div>';
   });
   box.innerHTML = html;
 }
 
-async function joinUnplannedUnload(feedbackId) {
-  withActionLock('joinUnplanned_' + feedbackId, null, null, async function() {
+async function joinUnplannedUnload(feedbackId, btnEl) {
+  withActionLock('joinUnplanned_' + feedbackId, btnEl || null, '提交中.../저장중...', async function() {
     var res = await api({
       action: "v2_unplanned_unload_join",
       feedback_id: feedbackId,
@@ -716,9 +716,9 @@ async function updateUnloadActions() {
   var res = await api({ action: "v2_ops_job_detail", job_id: _activeJobId });
   var workerCount = (res && res.ok && res.job) ? res.job.active_worker_count : 1;
 
-  var html = '<button class="btn btn-outline" onclick="unloadLeave()">暂时离开 / 일시 퇴장</button>';
+  var html = '<button class="btn btn-outline" onclick="unloadLeave(this)">暂时离开 / 일시 퇴장</button>';
   if (workerCount <= 1) {
-    html = '<button class="btn btn-success" onclick="unloadComplete()">完成卸货 / 하차 완료</button>' +
+    html = '<button class="btn btn-success" onclick="unloadComplete(this)">完成卸货 / 하차 완료</button>' +
       '<div style="height:8px"></div>' + html;
   } else {
     html = '<div class="muted" style="margin-bottom:8px;">还有其他人参与中(' + workerCount + '人/명)，无法完成 / 다른 참여자 있음</div>' + html;
@@ -754,8 +754,8 @@ async function loadInboundPlans(selectId) {
   sel.innerHTML = opts;
 }
 
-async function startUnload() {
-  withActionLock('startUnload', document.querySelector('[onclick*="startUnload"]'), '提交中.../저장중...', async function() {
+async function startUnload(btnEl) {
+  withActionLock('startUnload', btnEl || null, '提交中.../저장중...', async function() {
     var planId = document.getElementById("unloadPlanSelect").value;
     var res = await api({
       action: "v2_unload_job_start",
@@ -788,8 +788,8 @@ async function startUnload() {
   });
 }
 
-async function startUnloadNoPlan() {
-  withActionLock('startUnloadNoPlan', document.querySelector('[onclick*="startUnloadNoPlan"]'), '提交中.../저장중...', async function() {
+async function startUnloadNoPlan(btnEl) {
+  withActionLock('startUnloadNoPlan', btnEl || null, '提交中.../저장중...', async function() {
     var res = await api({
       action: "v2_unplanned_unload_start",
       worker_id: getWorkerId(),
@@ -853,10 +853,10 @@ function stopUnloadScan() {
   }
 }
 
-async function unloadLeave() {
+async function unloadLeave(btnEl) {
   if (!_activeJobId) return;
   if (!confirm("确认暂时离开？/ 일시 퇴장하시겠습니까?")) return;
-  withActionLock('unloadLeave', document.querySelector('[onclick*="unloadLeave"]'), '提交中.../저장중...', async function() {
+  withActionLock('unloadLeave', btnEl || null, '提交中.../저장중...', async function() {
     var fbId = localStorage.getItem('v2_unplanned_fb_id') || '';
     var leaveAction = fbId ? 'v2_unplanned_unload_finish' : 'v2_unload_job_finish';
     var res = await api({
@@ -875,7 +875,7 @@ async function unloadLeave() {
   });
 }
 
-async function unloadComplete() {
+async function unloadComplete(btnEl) {
   if (!_activeJobId) return;
   var resultLines = getUnloadResultLines();
   if (resultLines.length === 0) {
@@ -883,7 +883,7 @@ async function unloadComplete() {
     return;
   }
 
-  withActionLock('unloadComplete', document.querySelector('[onclick*="unloadComplete"]'), '提交中.../저장중...', async function() {
+  withActionLock('unloadComplete', btnEl || null, '提交中.../저장중...', async function() {
     var diffNote = ((document.getElementById("unloadDiffNote") || {}).value || "").trim();
     var remark = (document.getElementById("unloadRemark") || {}).value || "";
 
@@ -1013,10 +1013,10 @@ async function initInbound() {
   await loadInboundPlans("inboundPlanSelect");
 }
 
-async function startInbound() {
+async function startInbound(btnEl) {
   var planId = document.getElementById("inboundPlanSelect").value;
   if (!planId) { alert("请选择入库计划 / 입고계획을 선택하세요"); return; }
-  withActionLock('startInbound', document.querySelector('[onclick*="startInbound"]'), '提交中.../저장중...', async function() {
+  withActionLock('startInbound', btnEl || null, '提交中.../저장중...', async function() {
     var res = await api({
       action: "v2_inbound_job_start",
       plan_id: planId,
@@ -1084,10 +1084,10 @@ async function loadInboundPlanInfo(planId) {
   }
 }
 
-async function inboundLeave() {
+async function inboundLeave(btnEl) {
   if (!_activeJobId) return;
   if (!confirm("确认暂时离开？/ 일시 퇴장하시겠습니까?")) return;
-  withActionLock('inboundLeave', document.querySelector('[onclick*="inboundLeave"]'), '提交中.../저장중...', async function() {
+  withActionLock('inboundLeave', btnEl || null, '提交中.../저장중...', async function() {
     var res = await api({
       action: "v2_inbound_job_finish",
       job_id: _activeJobId,
@@ -1103,9 +1103,9 @@ async function inboundLeave() {
   });
 }
 
-async function finishInbound() {
+async function finishInbound(btnEl) {
   if (!_activeJobId) { alert("没有进行中的任务 / 진행 중인 작업 없음"); return; }
-  withActionLock('finishInbound', document.querySelector('[onclick*="finishInbound"]'), '提交中.../저장중...', async function() {
+  withActionLock('finishInbound', btnEl || null, '提交中.../저장중...', async function() {
     var remark = (document.getElementById("inboundRemark") || {}).value || "";
     var resultNote = (document.getElementById("inboundResultNote") || {}).value || "";
 
@@ -1176,8 +1176,8 @@ async function loadOutboundOrders() {
   sel.innerHTML = opts;
 }
 
-async function startOutboundLoad() {
-  withActionLock('startOutboundLoad', document.querySelector('[onclick*="startOutboundLoad"]'), '提交中.../저장중...', async function() {
+async function startOutboundLoad(btnEl) {
+  withActionLock('startOutboundLoad', btnEl || null, '提交中.../저장중...', async function() {
     var orderId = document.getElementById("loadOrderSelect").value;
     var res = await api({
       action: "v2_outbound_load_start",
@@ -1205,9 +1205,9 @@ function startLoadNoOrder() {
   startOutboundLoad();
 }
 
-async function finishOutboundLoad() {
+async function finishOutboundLoad(btnEl) {
   if (!_activeJobId) { alert("没有进行中的任务 / 진행 중인 작업 없음"); return; }
-  withActionLock('finishOutboundLoad', document.querySelector('[onclick*="finishOutboundLoad"], [onclick*="saveOutboundLoadResult"]'), '提交中.../저장중...', async function() {
+  withActionLock('finishOutboundLoad', btnEl || null, '提交中.../저장중...', async function() {
     var box = parseInt(document.getElementById("loadBoxCount").value) || 0;
     var pallet = parseInt(document.getElementById("loadPalletCount").value) || 0;
     var remark = document.getElementById("loadRemark").value.trim();
@@ -1235,8 +1235,8 @@ async function finishOutboundLoad() {
   });
 }
 
-async function saveOutboundLoadResult() {
-  await finishOutboundLoad();
+async function saveOutboundLoadResult(btnEl) {
+  await finishOutboundLoad(btnEl);
 }
 
 async function refreshLoadWorkers() {
@@ -1356,14 +1356,14 @@ async function loadIssueDetail() {
   if (it.status === "pending" || it.status === "processing") {
     html += '<div class="card">';
     if (it.status === "pending") {
-      html += '<button class="btn btn-success" onclick="handleIssueStart()">开始处理 / 처리 시작</button>';
+      html += '<button class="btn btn-success" onclick="handleIssueStart(this)">开始处理 / 처리 시작</button>';
     }
     if (it.status === "processing") {
       html += '<div class="detail-section"><label>反馈内容 / 피드백 내용</label>';
       html += '<textarea id="issueFeedback" rows="3" placeholder="输入处理结果 / 처리 결과를 입력하세요"></textarea>';
       html += '<label>上传照片 / 사진 업로드</label>';
       html += '<div class="photo-upload" id="issuePhotos"><div class="photo-add" onclick="uploadPhoto(\'issue_ticket\',\'feedback_photo\')">+</div></div>';
-      html += '<button class="btn btn-danger mt-10" onclick="handleIssueFinish()">结束处理 / 처리 종료</button>';
+      html += '<button class="btn btn-danger mt-10" onclick="handleIssueFinish(this)">结束处理 / 처리 종료</button>';
       html += '</div>';
     }
     html += '</div>';
@@ -1387,8 +1387,8 @@ async function loadIssueDetail() {
   body.innerHTML = html;
 }
 
-async function handleIssueStart() {
-  withActionLock('handleIssueStart', document.querySelector('[onclick*="handleIssueStart"]'), '提交中.../저장중...', async function() {
+async function handleIssueStart(btnEl) {
+  withActionLock('handleIssueStart', btnEl || null, '提交中.../저장중...', async function() {
     var res = await api({
       action: "v2_issue_handle_start",
       issue_id: _currentIssueId,
@@ -1406,8 +1406,8 @@ async function handleIssueStart() {
   });
 }
 
-async function handleIssueFinish() {
-  withActionLock('handleIssueFinish', document.querySelector('[onclick*="handleIssueFinish"]'), '提交中.../저장중...', async function() {
+async function handleIssueFinish(btnEl) {
+  withActionLock('handleIssueFinish', btnEl || null, '提交中.../저장중...', async function() {
     if (!_currentRunId && _activeJobId) {
       // Try to find the run from job
       var jobRes = await api({ action: "v2_ops_job_detail", job_id: _activeJobId });
@@ -1459,8 +1459,8 @@ function goGenericBack() {
   else goPage("home");
 }
 
-async function startGenericJob() {
-  withActionLock('startGenericJob', document.querySelector('[onclick*="startGenericJob"]'), '提交中.../저장중...', async function() {
+async function startGenericJob(btnEl) {
+  withActionLock('startGenericJob', btnEl || null, '提交中.../저장중...', async function() {
     var res = await api({
       action: "v2_ops_job_start",
       flow_stage: _genericJobCtx.flow_stage || "",
@@ -1483,9 +1483,9 @@ async function startGenericJob() {
   });
 }
 
-async function finishGenericJob() {
+async function finishGenericJob(btnEl) {
   if (!_activeJobId) { alert("没有进行中的任务 / 진행 중인 작업 없음"); return; }
-  withActionLock('finishGenericJob', document.querySelector('[onclick*="finishGenericJob"]'), '提交中.../저장중...', async function() {
+  withActionLock('finishGenericJob', btnEl || null, '提交中.../저장중...', async function() {
     var res = await api({
       action: "v2_ops_job_finish",
       job_id: _activeJobId,

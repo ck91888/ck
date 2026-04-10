@@ -457,41 +457,41 @@ async function loadIssueList() {
 }
 
 // ===== Issue Create =====
-async function submitIssue() {
-  var biz = document.getElementById("ic-biz").value;
-  var customer = document.getElementById("ic-customer").value.trim();
-  var docno = document.getElementById("ic-docno").value.trim();
-  var itype = document.getElementById("ic-type").value.trim();
+async function submitIssue(btnEl) {
   var summary = document.getElementById("ic-summary").value.trim();
-  var desc = document.getElementById("ic-desc").value.trim();
-  var priority = document.getElementById("ic-priority").value;
-
   if (!summary) { alert("请填写问题摘要"); return; }
+  withActionLock('submitIssue', btnEl || null, '提交中.../저장중...', async function() {
+    var biz = document.getElementById("ic-biz").value;
+    var customer = document.getElementById("ic-customer").value.trim();
+    var docno = document.getElementById("ic-docno").value.trim();
+    var itype = document.getElementById("ic-type").value.trim();
+    var desc = document.getElementById("ic-desc").value.trim();
+    var priority = document.getElementById("ic-priority").value;
 
-  var res = await api({
-    action: "v2_issue_create",
-    biz_class: biz,
-    customer: customer,
-    related_doc_no: docno,
-    issue_type: itype,
-    issue_summary: summary,
-    issue_description: desc,
-    priority: priority,
-    submitted_by: getUser()
+    var res = await api({
+      action: "v2_issue_create",
+      biz_class: biz,
+      customer: customer,
+      related_doc_no: docno,
+      issue_type: itype,
+      issue_summary: summary,
+      issue_description: desc,
+      priority: priority,
+      submitted_by: getUser()
+    });
+
+    if (res && res.ok) {
+      alert("已创建: " + res.id);
+      document.getElementById("ic-customer").value = "";
+      document.getElementById("ic-docno").value = "";
+      document.getElementById("ic-type").value = "";
+      document.getElementById("ic-summary").value = "";
+      document.getElementById("ic-desc").value = "";
+      goTab("issue");
+    } else {
+      alert("失败: " + (res ? res.error : "unknown"));
+    }
   });
-
-  if (res && res.ok) {
-    alert("已创建: " + res.id);
-    // Clear form
-    document.getElementById("ic-customer").value = "";
-    document.getElementById("ic-docno").value = "";
-    document.getElementById("ic-type").value = "";
-    document.getElementById("ic-summary").value = "";
-    document.getElementById("ic-desc").value = "";
-    goTab("issue");
-  } else {
-    alert("失败: " + (res ? res.error : "unknown"));
-  }
 }
 
 // ===== Issue Detail =====
@@ -575,9 +575,9 @@ async function loadIssueDetail() {
   if (it.status !== "closed" && it.status !== "cancelled") {
     html += '<div class="card">';
     if (it.status === "responded" || it.status === "pending" || it.status === "processing") {
-      html += '<button class="btn btn-success" onclick="closeIssue()">' + L("close_issue") + '</button> ';
+      html += '<button class="btn btn-success" onclick="closeIssue(this)">' + L("close_issue") + '</button> ';
     }
-    html += '<button class="btn btn-danger" onclick="cancelIssue()">' + L("cancel_issue") + '</button>';
+    html += '<button class="btn btn-danger" onclick="cancelIssue(this)">' + L("cancel_issue") + '</button>';
     html += '<div style="margin-top:10px;"><label>' + L("attachments") + '</label>';
     html += '<div class="att-grid" id="issueDetailAtts">';
     html += '<div class="att-upload" onclick="doUpload(\'issue_ticket\',\'' + esc(it.id) + '\',\'issue_photo\')">+</div>';
@@ -588,26 +588,30 @@ async function loadIssueDetail() {
   body.innerHTML = html;
 }
 
-async function closeIssue() {
+async function closeIssue(btnEl) {
   if (!confirm(L("confirm") + "?")) return;
-  var res = await api({ action: "v2_issue_close", id: _currentIssueId });
-  if (res && res.ok) {
-    alert(L("status_closed"));
-    loadIssueDetail();
-  } else {
-    alert("失败: " + (res ? res.error : "unknown"));
-  }
+  withActionLock('closeIssue', btnEl || null, '提交中.../저장중...', async function() {
+    var res = await api({ action: "v2_issue_close", id: _currentIssueId });
+    if (res && res.ok) {
+      alert(L("status_closed"));
+      loadIssueDetail();
+    } else {
+      alert("失败: " + (res ? res.error : "unknown"));
+    }
+  });
 }
 
-async function cancelIssue() {
+async function cancelIssue(btnEl) {
   if (!confirm(L("confirm") + "?")) return;
-  var res = await api({ action: "v2_issue_cancel", id: _currentIssueId });
-  if (res && res.ok) {
-    alert(L("status_cancelled"));
-    loadIssueDetail();
-  } else {
-    alert("失败: " + (res ? res.error : "unknown"));
-  }
+  withActionLock('cancelIssue', btnEl || null, '提交中.../저장중...', async function() {
+    var res = await api({ action: "v2_issue_cancel", id: _currentIssueId });
+    if (res && res.ok) {
+      alert(L("status_cancelled"));
+      loadIssueDetail();
+    } else {
+      alert("失败: " + (res ? res.error : "unknown"));
+    }
+  });
 }
 
 // ===== Outbound List =====
@@ -662,10 +666,10 @@ function addOutboundLine() {
   tbody.appendChild(tr);
 }
 
-async function submitOutbound() {
+async function submitOutbound(btnEl) {
   var customer = document.getElementById("oc-customer").value.trim();
   if (!customer) { alert("请填写客户名"); return; }
-  withActionLock('submitOutbound', document.querySelector('[onclick*="submitOutbound"]'), '提交中.../저장중...', async function() {
+  withActionLock('submitOutbound', btnEl || null, '提交中.../저장중...', async function() {
     var date = document.getElementById("oc-date").value || kstToday();
     var biz = document.getElementById("oc-biz").value;
     var opmode = document.getElementById("oc-opmode").value.trim();
@@ -794,21 +798,21 @@ async function loadOutboundDetail() {
   if (o.status !== "completed" && o.status !== "cancelled") {
     html += '<div class="card">';
     if (o.status === "draft") {
-      html += '<button class="btn btn-primary" onclick="updateObStatus(\'issued\')">' + L("status_issued") + '</button> ';
+      html += '<button class="btn btn-primary" onclick="updateObStatus(\'issued\', this)">' + L("status_issued") + '</button> ';
     }
     if (o.status === "issued" || o.status === "working") {
-      html += '<button class="btn btn-success" onclick="updateObStatus(\'completed\')">' + L("status_completed") + '</button> ';
+      html += '<button class="btn btn-success" onclick="updateObStatus(\'completed\', this)">' + L("status_completed") + '</button> ';
     }
-    html += '<button class="btn btn-danger" onclick="updateObStatus(\'cancelled\')">' + L("status_cancelled") + '</button>';
+    html += '<button class="btn btn-danger" onclick="updateObStatus(\'cancelled\', this)">' + L("status_cancelled") + '</button>';
     html += '</div>';
   }
 
   body.innerHTML = html;
 }
 
-async function updateObStatus(status) {
+async function updateObStatus(status, btnEl) {
   if (!confirm(L("confirm") + "?")) return;
-  withActionLock('updateObStatus_' + status, null, null, async function() {
+  withActionLock('updateObStatus_' + status, btnEl || null, '提交中.../저장중...', async function() {
     var res = await api({ action: "v2_outbound_order_update_status", id: _currentOutboundId, status: status });
     if (res && res.ok) {
       loadOutboundDetail();
@@ -890,10 +894,10 @@ function toggleIbcAutoOb() {
   document.getElementById("ibcAutoObFields").style.display = checked ? "" : "none";
 }
 
-async function submitInbound() {
+async function submitInbound(btnEl) {
   var customer = document.getElementById("ibc-customer").value.trim();
   if (!customer) { alert(L("customer") + " " + L("required") + "!"); return; }
-  withActionLock('submitInbound', document.querySelector('[onclick*="submitInbound"]'), '提交中.../저장중...', async function() {
+  withActionLock('submitInbound', btnEl || null, '提交中.../저장중...', async function() {
     var date = document.getElementById("ibc-date").value || kstToday();
     var biz = document.getElementById("ibc-biz").value;
     var cargo = document.getElementById("ibc-cargo").value.trim();
@@ -1086,7 +1090,7 @@ async function loadInboundDetail() {
     html += '<div><label><b>' + L("purpose") + '</b></label><input id="dynPurpose" class="input" value="' + esc(p.purpose) + '"></div>';
     html += '<div style="grid-column:1/-1;"><label><b>' + L("remark") + '</b></label><input id="dynRemark" class="input" value="' + esc(p.remark) + '"></div>';
     html += '</div>';
-    html += '<div style="margin-top:10px;"><button class="btn btn-success" onclick="finalizeDynamicPlan()">确认转正为入库单</button></div>';
+    html += '<div style="margin-top:10px;"><button class="btn btn-success" onclick="finalizeDynamicPlan(this)">确认转正为入库单</button></div>';
     html += '</div>';
   }
 
@@ -1094,10 +1098,10 @@ async function loadInboundDetail() {
   html += '<div class="card">';
   html += '<button class="btn btn-outline btn-sm" onclick="printIbQr()">' + L("print") + '</button> ';
   if (p.status === "arrived_pending_putaway") {
-    html += '<button class="btn btn-success" onclick="markInboundCompleted()">文员直接完成入库 / 직접 입고 완료</button> ';
+    html += '<button class="btn btn-success" onclick="markInboundCompleted(this)">文员直接完成入库 / 직접 입고 완료</button> ';
   }
   if (p.status === "pending" || p.status === "arrived_pending_putaway") {
-    html += '<button class="btn btn-danger btn-sm" onclick="cancelInboundPlan()">' + L("status_cancelled") + '</button>';
+    html += '<button class="btn btn-danger btn-sm" onclick="cancelInboundPlan(this)">' + L("status_cancelled") + '</button>';
   }
   html += '</div>';
 
@@ -1122,11 +1126,11 @@ function printIbQr() {
   win.document.close();
 }
 
-async function cancelInboundPlan() {
+async function cancelInboundPlan(btnEl) {
   var reason = prompt("取消原因（可选）/ 취소 사유(선택):", "");
-  if (reason === null) return; // user pressed Cancel on prompt
+  if (reason === null) return;
   if (!confirm("确认取消此入库计划？\n이 입고계획을 취소하시겠습니까?")) return;
-  withActionLock('cancelInboundPlan', document.querySelector('[onclick*="cancelInboundPlan"]'), '提交中.../저장중...', async function() {
+  withActionLock('cancelInboundPlan', btnEl || null, '提交中.../저장중...', async function() {
     var res = await api({
       action: "v2_inbound_plan_cancel",
       inbound_plan_id: _currentInboundId,
@@ -1146,12 +1150,12 @@ async function cancelInboundPlan() {
   });
 }
 
-async function markInboundCompleted() {
+async function markInboundCompleted(btnEl) {
   if (!_currentInboundId) return;
   var remark = prompt("入库完成备注（可选）/ 입고 완료 메모(선택):", "");
   if (remark === null) return;
   if (!confirm("确认将此入库计划标记为\u201C已入库\u201D？\n이 입고계획을 \u201C입고완료\u201D로 변경하시겠습니까?")) return;
-  withActionLock('markInboundCompleted', document.querySelector('[onclick*="markInboundCompleted"]'), '提交中.../저장중...', async function() {
+  withActionLock('markInboundCompleted', btnEl || null, '提交中.../저장중...', async function() {
     var res = await api({
       action: "v2_inbound_mark_completed",
       inbound_plan_id: _currentInboundId,
@@ -1169,11 +1173,11 @@ async function markInboundCompleted() {
   });
 }
 
-async function finalizeDynamicPlan() {
+async function finalizeDynamicPlan(btnEl) {
   var customer = (document.getElementById("dynCustomer") || {}).value || "";
   if (!customer.trim()) { alert("请填写客户名称"); return; }
   if (!confirm("确认将此动态单转正为正式入库单？")) return;
-  withActionLock('finalizeDynamicPlan', document.querySelector('[onclick*="finalizeDynamicPlan"]'), '提交中.../저장중...', async function() {
+  withActionLock('finalizeDynamicPlan', btnEl || null, '提交中.../저장중...', async function() {
     var res = await api({
       action: "v2_inbound_dynamic_finalize",
       id: _currentInboundId,
@@ -1335,7 +1339,7 @@ async function loadFeedbackDetail() {
       html += '</tbody></table></div>';
     }
 
-    html += '<div style="margin-top:12px;"><button class="btn btn-success" onclick="convertFeedbackToInbound()">确认转正为入库计划</button></div>';
+    html += '<div style="margin-top:12px;"><button class="btn btn-success" onclick="convertFeedbackToInbound(this)">确认转正为入库计划</button></div>';
     html += '</div>';
   }
 
@@ -1346,18 +1350,18 @@ async function loadFeedbackDetail() {
     html += '<div class="form-group"><label>' + L("biz_class") + '</label>';
     html += '<select id="fb-conv-biz"><option value="direct_ship">' + L("biz_direct_ship") + '</option><option value="bulk">' + L("biz_bulk") + '</option><option value="return">' + L("biz_return") + '</option><option value="import">' + L("biz_import") + '</option></select></div>';
     html += '<div class="form-group"><label>' + L("cargo_summary") + '</label><input id="fb-conv-cargo" type="text" value="' + esc(fb.title || "") + '"></div>';
-    html += '<button class="btn btn-primary" onclick="convertFeedbackToInbound()">' + L("convert_to_inbound") + '</button>';
+    html += '<button class="btn btn-primary" onclick="convertFeedbackToInbound(this)">' + L("convert_to_inbound") + '</button>';
     html += '</div>';
   }
 
   body.innerHTML = html;
 }
 
-async function convertFeedbackToInbound() {
+async function convertFeedbackToInbound(btnEl) {
   var customer = (document.getElementById("fb-conv-customer") || {}).value || "";
   if (!customer.trim()) { alert(L("customer") + " " + L("required") + "!"); return; }
   if (!confirm("确认将此反馈转正为正式入库计划？")) return;
-  withActionLock('convertFeedbackToInbound', document.querySelector('[onclick*="convertFeedbackToInbound"]'), '提交中.../저장중...', async function() {
+  withActionLock('convertFeedbackToInbound', btnEl || null, '提交中.../저장중...', async function() {
     var biz = (document.getElementById("fb-conv-biz") || {}).value || "";
     var cargo = (document.getElementById("fb-conv-cargo") || {}).value || "";
 

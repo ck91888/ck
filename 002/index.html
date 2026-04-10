@@ -122,7 +122,7 @@
           <option value="low">低</option>
         </select>
       </div>
-      <button class="btn btn-primary btn-full mt-10" onclick="submitIssue()">提交</button>
+      <button class="btn btn-primary btn-full mt-10" onclick="submitIssue(this)">提交</button>
     </div>
   </div>
 
@@ -192,7 +192,7 @@
         <tbody id="ocLinesBody"></tbody>
       </table>
       <button class="btn btn-outline btn-sm mt-10" onclick="addOutboundLine()">+ 添加明细</button>
-      <button class="btn btn-primary btn-full mt-10" onclick="submitOutbound()">提交</button>
+      <button class="btn btn-primary btn-full mt-10" onclick="submitOutbound(this)">提交</button>
     </div>
   </div>
 
@@ -284,7 +284,7 @@
           <textarea id="ibc-ob-instruction" rows="2"></textarea>
         </div>
       </div>
-      <button class="btn btn-primary btn-full mt-10" onclick="submitInbound()">提交</button>
+      <button class="btn btn-primary btn-full mt-10" onclick="submitInbound(this)">提交</button>
     </div>
   </div>
 

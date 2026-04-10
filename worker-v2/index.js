@@ -1463,6 +1463,26 @@ route("v2_unload_job_finish", async (body, env) => {
     }
   }
 
+  // ===== 前置校验：完成卸货前先校验 plan 状态与结果，避免人已退出再报错 =====
+  if (complete_job && !leave_only) {
+    const preJob = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
+    if (!preJob) return err("job not found", 404);
+
+    // 校验 result_lines: 至少一项 > 0
+    const hasAnyQty = result_lines.some(ln => Number(ln.actual_qty || 0) > 0);
+    if (!hasAnyQty) {
+      return json({ ok: false, error: "empty_result", message: "至少填写一项实际数量" });
+    }
+
+    // Plan 状态校验：若关联 inbound_plan，plan 必须为 unloading
+    if (preJob.related_doc_type === 'inbound_plan' && preJob.related_doc_id) {
+      const planCheck = await env.DB.prepare("SELECT status FROM v2_inbound_plans WHERE id=?").bind(preJob.related_doc_id).first();
+      if (planCheck && planCheck.status !== 'unloading') {
+        return json({ ok: false, error: "unload_plan_status_invalid", message: "当前卸货计划状态已变化（" + planCheck.status + "），不能继续完成" });
+      }
+    }
+  }
+
   // 1. 自愈：关闭该 worker 全部 open segments + 重算 count
   await closeAllOpenSegs(env, job_id, worker_id, t, leave_only ? 'leave' : 'finished');
   const realCount = await recalcActiveCount(env, job_id, t);
@@ -1480,20 +1500,6 @@ route("v2_unload_job_finish", async (body, env) => {
     // 4a. Check if others still working — 基于 realCount
     if (realCount > 0) {
       return json({ ok: false, error: "others_still_working", active_count: realCount });
-    }
-
-    // 4b. Validate result_lines: at least one actual_qty > 0
-    const hasAnyQty = result_lines.some(ln => Number(ln.actual_qty || 0) > 0);
-    if (!hasAnyQty) {
-      return json({ ok: false, error: "empty_result", message: "至少填写一项实际数量" });
-    }
-
-    // 4b2. Plan 状态校验：若关联 inbound_plan，plan 必须为 unloading 才允许完成卸货
-    if (job.related_doc_type === 'inbound_plan' && job.related_doc_id) {
-      const planCheck = await env.DB.prepare("SELECT status FROM v2_inbound_plans WHERE id=?").bind(job.related_doc_id).first();
-      if (planCheck && planCheck.status !== 'unloading') {
-        return json({ ok: false, error: "unload_plan_status_invalid", message: "当前卸货计划状态已变化（" + planCheck.status + "），不能继续完成" });
-      }
     }
 
     // 4c. Check diff vs plan and require diff_note
@@ -1685,6 +1691,17 @@ route("v2_inbound_job_finish", async (body, env) => {
     }
   }
 
+  // ===== 前置校验：完成入库前先校验 plan 状态，避免人已退出再报错 =====
+  if (complete_job && !leave_only) {
+    const preJob = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
+    if (preJob && preJob.related_doc_id) {
+      const planCheck = await env.DB.prepare("SELECT status FROM v2_inbound_plans WHERE id=?").bind(preJob.related_doc_id).first();
+      if (planCheck && planCheck.status !== 'putting_away') {
+        return json({ ok: false, error: "inbound_plan_status_invalid", message: "当前入库计划状态不允许完成入库（当前: " + planCheck.status + "）" });
+      }
+    }
+  }
+
   await closeAllOpenSegs(env, job_id, worker_id, t, leave_only ? 'leave' : 'finished');
   const realCount = await recalcActiveCount(env, job_id, t);
 
@@ -1703,14 +1720,7 @@ route("v2_inbound_job_finish", async (body, env) => {
       return json({ ok: false, error: "others_still_working", active_count: realCount });
     }
 
-    // Plan 状态校验：plan 必须为 putting_away 才允许完成入库
     const job = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
-    if (job && job.related_doc_id) {
-      const planCheck = await env.DB.prepare("SELECT status FROM v2_inbound_plans WHERE id=?").bind(job.related_doc_id).first();
-      if (planCheck && planCheck.status !== 'putting_away') {
-        return json({ ok: false, error: "inbound_plan_status_invalid", message: "当前入库计划状态不允许完成入库（当前: " + planCheck.status + "）" });
-      }
-    }
 
     // Save structured result record
     const result_id = "RES-" + uid();
