@@ -197,6 +197,16 @@ function stLabel(status) {
   return L("status_" + status) || status;
 }
 
+function feedbackTitleText(fb) {
+  var title = fb.title || "";
+  var dn = fb.display_no || "";
+  // Strip duplicate display_no prefix from title (legacy data compat)
+  if (dn && title.indexOf(dn) === 0) {
+    title = title.slice(dn.length).replace(/^\s+/, "");
+  }
+  return title || "(无标题)";
+}
+
 function inboundStatusLabel(status) {
   var map = {pending:'待到库',unloading:'卸货中',arrived_pending_putaway:'已到库待入库',putting_away:'入库中',completed:'已入库',cancelled:'已取消'};
   return map[status] || stLabel(status);
@@ -333,7 +343,7 @@ async function loadDashboard() {
     activeFb.slice(0, 3).forEach(function(f) {
       html += '<div style="font-size:12px;padding:2px 0;">' +
         '<span class="st st-' + esc(f.status) + '">' + esc(fbStMap[f.status] || stLabel(f.status)) + '</span> ' +
-        esc(f.display_no || f.id) + ' ' + esc(f.title || "--") + '</div>';
+        '[' + esc(f.display_no || f.id) + '] ' + esc(feedbackTitleText(f)) + '</div>';
     });
   } else {
     html += '<div class="d-empty">' + L("no_data") + '</div>';
@@ -1140,7 +1150,7 @@ async function loadFeedbackList() {
     html += '<div class="item-title">';
     html += '<span class="st st-' + esc(fb.status) + '">' + esc(statusLabel) + '</span> ';
     html += '<span class="biz-tag">' + esc(typeLabel) + '</span> ';
-    html += '[' + esc(fbDisplayNo) + '] ' + esc(fb.title || "(无标题)");
+    html += '[' + esc(fbDisplayNo) + '] ' + esc(feedbackTitleText(fb));
     html += '</div>';
     html += '<div class="item-meta">' + esc(fb.submitted_by || "") + ' · ' + esc(fmtTime(fb.created_at)) + '</div>';
     html += '</div>';
@@ -1181,7 +1191,7 @@ async function loadFeedbackDetail() {
   }
   html += '<div class="detail-field"><b>' + L("status") + ':</b> <span class="st st-' + esc(fb.status) + '">' + esc(statusLabel) + '</span></div>';
   html += '<div class="detail-field"><b>' + L("feedback_type") + ':</b> ' + esc(typeLabel) + '</div>';
-  html += '<div class="detail-field"><b>标题:</b> ' + esc(fb.title) + '</div>';
+  html += '<div class="detail-field"><b>标题:</b> ' + esc(feedbackTitleText(fb)) + '</div>';
   html += '<div class="detail-field"><b>内容:</b> ' + esc(fb.content) + '</div>';
   html += '<div class="detail-field"><b>' + L("submitted_by") + ':</b> ' + esc(fb.submitted_by) + ' · ' + esc(fmtTime(fb.created_at)) + '</div>';
   if (fb.completed_at) {

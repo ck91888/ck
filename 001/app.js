@@ -699,12 +699,14 @@ async function loadInboundPlans(selectId) {
   var sel = document.getElementById(selectId);
   if (!sel) return;
   var isForPutaway = (selectId === "inboundPlanSelect");
+  var isForUnload = (selectId === "unloadPlanSelect");
   var res = await api({ action: "v2_inbound_plan_list", start_date: "", end_date: "", status: "" });
   var opts = '<option value="">-- 选择入库计划/입고계획 선택 --</option>';
   if (res && res.ok && res.items) {
     res.items.forEach(function(p) {
       if (p.status === "completed" || p.status === "cancelled") return;
       if (isForPutaway && p.status !== "arrived_pending_putaway" && p.status !== "putting_away") return;
+      if (isForUnload && p.status !== "pending" && p.status !== "unloading") return;
       var stText = isForPutaway ? '' : (STATUS_LABEL[p.status] ? ' [' + STATUS_LABEL[p.status].split('/')[0] + ']' : '');
       opts += '<option value="' + esc(p.id) + '">[' + esc(p.display_no || p.id) + ']' + stText + ' ' + esc(p.customer) + ' - ' + esc(p.cargo_summary) + '</option>';
     });
@@ -738,6 +740,10 @@ async function startUnload() {
       var jobRes = await api({ action: "v2_ops_job_detail", job_id: res.job_id });
       if (jobRes && jobRes.ok) showUnloadWorking(jobRes.job);
       startJobPoll("unload");
+    } else if (res && res.error === "unload_not_allowed_for_status") {
+      alert("该入库计划已完成卸货，当前不能继续卸货\n이 입고계획은 이미 하차 완료되어 추가 하차 불가");
+    } else if (res && res.error === "unload_status_inconsistent") {
+      alert(res.message || "状态异常，请联系管理员");
     } else {
       alert("失败/실패: " + (res ? res.error : "unknown"));
     }

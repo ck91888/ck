@@ -1049,7 +1049,7 @@ route("v2_unplanned_unload_start", async (body, env) => {
       title, content, submitted_by, status, parent_job_id, interrupt_type, display_no, created_at, updated_at)
     VALUES(?,'unplanned_unload','ops_job','',?,?,?,'field_working',?,?,?,?,?)
   `).bind(fb_id,
-      fb_display_no + " 计划外到货-现场卸货中",
+      "计划外到货-现场卸货中",
       "现场操作人员发起计划外卸货",
       worker_name || worker_id,
       parent_job_id, interrupt_type, fb_display_no, t, t).run();
@@ -1148,7 +1148,7 @@ route("v2_unplanned_unload_finish", async (body, env) => {
     `).bind(
       JSON.stringify(result_lines), diff_note, remark,
       t, worker_id,
-      fbNo + " 计划外卸货完成: " + (cargoSummary || "无明细"), t, fb_id
+      "计划外卸货完成: " + (cargoSummary || "无明细"), t, fb_id
     ).run();
   }
 
@@ -1325,7 +1325,16 @@ route("v2_unload_job_start", async (body, env) => {
 
   const t = now();
 
-  // Check existing job for this plan
+  // Validate plan status before allowing unload
+  if (plan_id) {
+    const plan = await env.DB.prepare("SELECT status FROM v2_inbound_plans WHERE id=?").bind(plan_id).first();
+    if (!plan) return err("plan not found", 404);
+    if (plan.status !== 'pending' && plan.status !== 'unloading') {
+      return json({ ok: false, error: "unload_not_allowed_for_status", message: "当前状态不可继续卸货 / 현재 상태에서 하차 불가", current_status: plan.status });
+    }
+  }
+
+  // Check existing active unload job for this plan
   let job = null;
   if (plan_id) {
     const existing = await env.DB.prepare(
@@ -1344,6 +1353,13 @@ route("v2_unload_job_start", async (body, env) => {
       "UPDATE v2_ops_jobs SET active_worker_count=active_worker_count+1, updated_at=?, status='working' WHERE id=?"
     ).bind(t, job_id).run();
   } else {
+    // Only pending plans can start a new unload job
+    if (plan_id) {
+      const plan2 = await env.DB.prepare("SELECT status FROM v2_inbound_plans WHERE id=?").bind(plan_id).first();
+      if (plan2 && plan2.status === 'unloading') {
+        return json({ ok: false, error: "unload_status_inconsistent", message: "状态为卸货中但无活跃卸货任务，请联系管理员检查" });
+      }
+    }
     job_id = "JOB-" + uid();
     is_new_job = true;
     await env.DB.prepare(`
@@ -1353,7 +1369,7 @@ route("v2_unload_job_start", async (body, env) => {
     `).bind(job_id, biz_class, plan_id, worker_id, t, t).run();
     if (plan_id) {
       await env.DB.prepare(
-        "UPDATE v2_inbound_plans SET status='unloading', updated_at=? WHERE id=? AND status IN ('pending','arrived','arrived_pending_putaway')"
+        "UPDATE v2_inbound_plans SET status='unloading', updated_at=? WHERE id=? AND status='pending'"
       ).bind(t, plan_id).run();
     }
   }
