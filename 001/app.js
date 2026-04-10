@@ -106,8 +106,24 @@ function getWorkerName() {
 }
 
 // ===== API =====
+// 写操作 action 集合 — 自动注入 client_req_id 供后端幂等
+var _WRITE_ACTIONS = [
+  'v2_issue_create','v2_issue_handle_start',
+  'v2_outbound_order_create','v2_outbound_load_start',
+  'v2_inbound_plan_create','v2_inbound_dynamic_finalize',
+  'v2_unplanned_unload_start','v2_unplanned_unload_join',
+  'v2_feedback_finalize_to_inbound','v2_unload_dynamic_start',
+  'v2_unload_job_start','v2_inbound_job_start',
+  'v2_inbound_mark_completed','v2_ops_job_start'
+];
+function _genReqId(action) {
+  return action + '_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+}
 function api(params) {
   params.k = OPS_KEY;
+  if (_WRITE_ACTIONS.indexOf(params.action) !== -1 && !params.client_req_id) {
+    params.client_req_id = _genReqId(params.action);
+  }
   return fetch(V2_API, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -561,7 +577,7 @@ async function showUnloadEntry() {
   document.getElementById("unloadPlanCard").style.display = "none";
   document.getElementById("unloadWorkersCard").style.display = "none";
   document.getElementById("unloadResultCard").style.display = "none";
-  await loadInboundPlans("unloadPlanSelect");
+  await loadUnloadCandidates();
   loadUnplannedActiveList();
 }
 
@@ -729,32 +745,145 @@ async function updateUnloadActions() {
   actionsDiv.innerHTML = html;
 }
 
-async function loadInboundPlans(selectId) {
-  var sel = document.getElementById(selectId);
-  if (!sel) return;
-  var isForPutaway = (selectId === "inboundPlanSelect");
-  var isForUnload = (selectId === "unloadPlanSelect");
-  var res = await api({ action: "v2_inbound_plan_list", start_date: "", end_date: "", status: "" });
-  var opts = '<option value="">-- 选择入库计划/입고계획 선택 --</option>';
-
-  // 入库菜单按业务类型筛选：biz_class 映射
-  var bizFilter = '';
-  if (isForPutaway && _pageParams.biz_class) {
-    bizFilter = _pageParams.biz_class;
+// biz_class 兜底映射：前端 job_type → 后端 biz_class
+function _resolveBizClass() {
+  var bc = _pageParams.biz_class || '';
+  if (!bc) {
+    var jt = _pageParams.job_type || '';
+    if (jt === 'inbound_direct') bc = 'direct_ship';
+    else if (jt === 'inbound_bulk') bc = 'bulk';
   }
+  return bc;
+}
 
+async function loadInboundCandidates() {
+  var sel = document.getElementById("inboundPlanSelect");
+  if (!sel) return;
+  var bc = _resolveBizClass();
+  var res = await api({ action: "v2_inbound_plan_ops_candidates", scene: "putaway", biz_class: bc });
+  var opts = '<option value="">-- 选择系统候选单 / 시스템 후보 선택 --</option>';
   if (res && res.ok && res.items) {
     res.items.forEach(function(p) {
-      if (p.status === "completed" || p.status === "cancelled") return;
-      if (isForPutaway && p.status !== "arrived_pending_putaway" && p.status !== "putting_away") return;
-      if (isForUnload && p.status !== "pending" && p.status !== "unloading") return;
-      // 按业务类型过滤
-      if (bizFilter && p.biz_class && p.biz_class !== bizFilter) return;
-      var stText = isForPutaway ? '' : (STATUS_LABEL[p.status] ? ' [' + STATUS_LABEL[p.status].split('/')[0] + ']' : '');
-      opts += '<option value="' + esc(p.id) + '">[' + esc(p.display_no || p.id) + ']' + stText + ' ' + esc(p.customer) + ' - ' + esc(p.cargo_summary) + '</option>';
+      opts += '<option value="' + esc(p.id) + '" data-display-no="' + esc(p.display_no || '') + '">[' + esc(p.display_no || p.id) + '] ' + esc(p.customer) + ' - ' + esc(p.cargo_summary) + '</option>';
     });
   }
   sel.innerHTML = opts;
+}
+
+async function loadUnloadCandidates() {
+  var sel = document.getElementById("unloadPlanSelect");
+  if (!sel) return;
+  var res = await api({ action: "v2_inbound_plan_ops_candidates", scene: "unload", biz_class: "" });
+  var opts = '<option value="">-- 选择入库计划/입고계획 선택 --</option>';
+  if (res && res.ok && res.items) {
+    res.items.forEach(function(p) {
+      var stText = STATUS_LABEL[p.status] ? ' [' + STATUS_LABEL[p.status].split('/')[0] + ']' : '';
+      opts += '<option value="' + esc(p.id) + '">' + '[' + esc(p.display_no || p.id) + ']' + stText + ' ' + esc(p.customer) + ' - ' + esc(p.cargo_summary) + '</option>';
+    });
+  }
+  sel.innerHTML = opts;
+}
+
+function onInboundCandidateSelect() {
+  var sel = document.getElementById("inboundPlanSelect");
+  if (!sel || !sel.value) return;
+  var opt = sel.options[sel.selectedIndex];
+  var displayNo = (opt && opt.getAttribute('data-display-no')) || sel.value;
+  var inp = document.getElementById("inboundCodeInput");
+  if (inp) inp.value = displayNo;
+  resolveInboundCode();
+}
+
+function clearInboundResolve() {
+  _ibResolvedKind = '';
+  _ibResolvedPlanId = '';
+  _ibResolvedPlan = null;
+  var inp = document.getElementById("inboundCodeInput"); if (inp) inp.value = '';
+  var r = document.getElementById("ibResolveResult"); if (r) r.innerHTML = '';
+  var ef = document.getElementById("ibExternalFields"); if (ef) ef.style.display = 'none';
+  var sel = document.getElementById("inboundPlanSelect"); if (sel) sel.value = '';
+  stopInboundScan();
+}
+
+async function resolveInboundCode(btnEl) {
+  var inp = document.getElementById("inboundCodeInput");
+  var code = (inp ? inp.value : '').trim();
+  if (!code) { alert("请输入或扫描单号 / 번호를 입력하세요"); return; }
+  var resultEl = document.getElementById("ibResolveResult");
+  var extFields = document.getElementById("ibExternalFields");
+  var bc = _resolveBizClass();
+
+  if (btnEl) { btnEl.disabled = true; btnEl.textContent = '识别中...'; }
+  try {
+    var res = await api({ action: "v2_inbound_resolve_code", code: code, biz_class: bc });
+    if (!res || !res.ok) { alert("识别失败 / 인식 실패"); return; }
+
+    if (res.kind === 'system') {
+      _ibResolvedKind = 'system';
+      _ibResolvedPlanId = res.plan.id;
+      _ibResolvedPlan = res.plan;
+      if (resultEl) resultEl.innerHTML = '<div style="background:#e8f5e9;border-radius:6px;padding:8px;"><b>✓ 系统单</b> ' + esc(res.plan.display_no || res.plan.id) + '<br>' + esc(res.plan.customer) + ' · ' + esc(res.plan.cargo_summary || '--') + '</div>';
+      if (extFields) extFields.style.display = 'none';
+    } else if (res.kind === 'external') {
+      _ibResolvedKind = 'external';
+      _ibResolvedPlanId = '';
+      _ibResolvedPlan = null;
+      if (resultEl) resultEl.innerHTML = '<div style="background:#fff3e0;border-radius:6px;padding:8px;"><b>→ 外部单号</b>：' + esc(code) + '<br><span style="font-size:12px;color:#888;">请填写客户名后开始入库</span></div>';
+      if (extFields) extFields.style.display = '';
+    } else if (res.kind === 'biz_mismatch') {
+      _ibResolvedKind = '';
+      if (resultEl) resultEl.innerHTML = '<div style="background:#ffebee;border-radius:6px;padding:8px;color:#c62828;">✗ ' + esc(res.message) + '</div>';
+      if (extFields) extFields.style.display = 'none';
+    } else if (res.kind === 'status_not_allowed') {
+      _ibResolvedKind = '';
+      if (resultEl) resultEl.innerHTML = '<div style="background:#ffebee;border-radius:6px;padding:8px;color:#c62828;">✗ ' + esc(res.message) + '</div>';
+      if (extFields) extFields.style.display = 'none';
+    }
+  } finally {
+    if (btnEl) { btnEl.disabled = false; btnEl.textContent = '识别单号 / 번호 인식'; }
+  }
+}
+
+// ===== 统一扫码器（入库页） =====
+var _inboundScanner = null;
+function startInboundScan() {
+  if (_inboundScanner) { stopInboundScan(); return; }
+  var readerEl = document.getElementById("inboundScanReader");
+  if (!readerEl) return;
+  readerEl.innerHTML = "";
+  var btn = document.getElementById("ibScanBtn");
+  try {
+    _inboundScanner = new Html5Qrcode("inboundScanReader");
+    _inboundScanner.start(
+      { facingMode: "environment" },
+      { fps: 10, qrbox: { width: 250, height: 150 } },
+      function(decoded) {
+        stopInboundScan();
+        var code = String(decoded || "").trim();
+        if (!code) return;
+        var inp = document.getElementById("inboundCodeInput");
+        if (inp) inp.value = code;
+        resolveInboundCode();
+      },
+      function() {}
+    ).catch(function(e) {
+      alert("摄像头启动失败 / 카메라 시작 실패: " + e);
+      _inboundScanner = null;
+    });
+    if (btn) btn.textContent = "取消扫码 / 스캔 취소";
+  } catch(e) {
+    alert("扫码不可用 / 스캔 불가: " + e.message);
+  }
+}
+function stopInboundScan() {
+  if (_inboundScanner) {
+    try { _inboundScanner.stop(); } catch(e) {}
+    _inboundScanner = null;
+    var el = document.getElementById("inboundScanReader");
+    if (el) el.innerHTML = "";
+    var btn = document.getElementById("ibScanBtn");
+    if (btn) btn.textContent = "📷 扫码";
+  }
 }
 
 async function startUnload(btnEl) {
@@ -856,47 +985,7 @@ function stopUnloadScan() {
   }
 }
 
-// ===== External inbound number scanner (standard inbound external mode) =====
-var _inboundExtScanner = null;
-function startInboundExternalScan() {
-  if (_inboundExtScanner) { stopInboundExternalScan(); return; }
-  var readerEl = document.getElementById("inboundExternalScanReader");
-  if (!readerEl) return;
-  readerEl.innerHTML = "";
-  var btn = document.getElementById("ibExtScanBtn");
-  try {
-    _inboundExtScanner = new Html5Qrcode("inboundExternalScanReader");
-    _inboundExtScanner.start(
-      { facingMode: "environment" },
-      { fps: 10, qrbox: { width: 250, height: 150 } },
-      function(decoded) {
-        stopInboundExternalScan();
-        var code = String(decoded || "").trim();
-        if (!code) return;
-        var inp = document.getElementById("inboundExternalNo");
-        if (inp) inp.value = code;
-        alert("已扫到外部单号 / 외부번호 스캔됨: " + code);
-      },
-      function() {} // ignore scan errors
-    ).catch(function(e) {
-      alert("摄像头启动失败 / 카메라 시작 실패: " + e);
-      _inboundExtScanner = null;
-    });
-    if (btn) btn.textContent = "取消扫码 / 스캔 취소";
-  } catch(e) {
-    alert("扫码不可用 / 스캔 불가: " + e.message);
-  }
-}
-function stopInboundExternalScan() {
-  if (_inboundExtScanner) {
-    try { _inboundExtScanner.stop(); } catch(e) {}
-    _inboundExtScanner = null;
-    var el = document.getElementById("inboundExternalScanReader");
-    if (el) el.innerHTML = "";
-    var btn = document.getElementById("ibExtScanBtn");
-    if (btn) btn.textContent = "扫码外部单号 / 외부번호 스캔";
-  }
-}
+// (external scanner removed — replaced by unified inboundScan above)
 
 async function unloadLeave(btnEl) {
   if (!_activeJobId) return;
@@ -1036,29 +1125,10 @@ function renderWorkers(containerId, workers) {
 }
 
 // ===== Inbound (standard: direct_ship + bulk) =====
-var _inboundSource = 'plan'; // 'plan' | 'external'
-
-function switchInboundSource(src) {
-  _inboundSource = src;
-  if (src !== 'external') stopInboundExternalScan();
-  var planBox = document.getElementById("ibSrcPlan");
-  var extBox = document.getElementById("ibSrcExternal");
-  var planBtn = document.getElementById("ibSrcBtnPlan");
-  var extBtn = document.getElementById("ibSrcBtnExternal");
-  if (src === 'external') {
-    if (planBox) planBox.style.display = 'none';
-    if (extBox) extBox.style.display = '';
-    if (planBtn) planBtn.classList.remove('btn-primary');
-    if (extBtn) { extBtn.classList.remove('btn-outline'); extBtn.classList.add('btn-primary'); }
-    if (planBtn) planBtn.classList.add('btn-outline');
-  } else {
-    if (planBox) planBox.style.display = '';
-    if (extBox) extBox.style.display = 'none';
-    if (extBtn) extBtn.classList.remove('btn-primary');
-    if (planBtn) { planBtn.classList.remove('btn-outline'); planBtn.classList.add('btn-primary'); }
-    if (extBtn) extBtn.classList.add('btn-outline');
-  }
-}
+// ===== 统一入库入口：resolve 状态 =====
+var _ibResolvedKind = ''; // 'system' | 'external' | ''
+var _ibResolvedPlanId = '';
+var _ibResolvedPlan = null; // plan summary object from resolve
 
 async function initInbound() {
   var title = document.getElementById("inboundTitle");
@@ -1080,10 +1150,8 @@ async function initInbound() {
 
   document.getElementById("inboundEntryCard").style.display = "";
   document.getElementById("inboundWorkingCard").style.display = "none";
-  _inboundSource = 'plan';
-  switchInboundSource('plan');
-  // Reset external inputs
-  var exNo = document.getElementById("inboundExternalNo"); if (exNo) exNo.value = '';
+  // Reset unified entry
+  clearInboundResolve();
   var exCu = document.getElementById("inboundExternalCustomer"); if (exCu) exCu.value = '';
   var exRe = document.getElementById("inboundExternalRemark"); if (exRe) exRe.value = '';
   // Reset extra_ops inputs
@@ -1093,12 +1161,17 @@ async function initInbound() {
   var eOther = document.getElementById("inboundExtraOther"); if (eOther) eOther.value = '';
   var rNote = document.getElementById("inboundResultNote"); if (rNote) rNote.value = '';
   var rRmk = document.getElementById("inboundRemark"); if (rRmk) rRmk.value = '';
-  await loadInboundPlans("inboundPlanSelect");
+  await loadInboundCandidates();
 }
 
 async function startInbound(btnEl) {
+  if (!_ibResolvedKind) {
+    alert("请先识别单号 / 먼저 번호를 인식하세요");
+    return;
+  }
+
   var jobType = _pageParams.job_type || "inbound_direct";
-  var bizClass = _pageParams.biz_class || "";
+  var bizClass = _resolveBizClass();
 
   var payload = {
     action: "v2_inbound_job_start",
@@ -1108,23 +1181,21 @@ async function startInbound(btnEl) {
     job_type: jobType
   };
 
-  if (_inboundSource === 'external') {
-    var exNo = ((document.getElementById("inboundExternalNo") || {}).value || "").trim();
+  if (_ibResolvedKind === 'system') {
+    payload.plan_id = _ibResolvedPlanId;
+  } else if (_ibResolvedKind === 'external') {
+    var exNo = ((document.getElementById("inboundCodeInput") || {}).value || "").trim();
     var exCu = ((document.getElementById("inboundExternalCustomer") || {}).value || "").trim();
     var exRe = ((document.getElementById("inboundExternalRemark") || {}).value || "").trim();
-    if (!exNo) { alert("请输入外部 WMS 入库单号 / 외부 입고번호를 입력하세요"); return; }
+    if (!exNo) { alert("请输入外部入库单号 / 외부 입고번호를 입력하세요"); return; }
     if (!exCu) { alert("请输入客户名 / 고객명을 입력하세요"); return; }
     payload.external_inbound_no = exNo;
     payload.customer_name = exCu;
     payload.start_remark = exRe;
-  } else {
-    var planId = document.getElementById("inboundPlanSelect").value;
-    if (!planId) { alert("请选择入库计划 / 입고계획을 선택하세요"); return; }
-    payload.plan_id = planId;
   }
 
   withActionLock('startInbound', btnEl || null, '提交中.../저장중...', async function() {
-    stopInboundExternalScan();
+    stopInboundScan();
     var res = await api(payload);
     if (res && res.ok) {
       saveActiveJob(res.job_id, res.worker_seg_id);
@@ -1137,7 +1208,7 @@ async function startInbound(btnEl) {
       refreshInboundWorkers();
       startJobPoll("inbound");
     } else {
-      alert("失败/실패: " + (res ? res.error : "unknown"));
+      alert("失败/실패: " + (res ? (res.message || res.error) : "unknown"));
     }
   });
 }
@@ -1737,63 +1808,65 @@ async function interruptToUnload() {
   if (!_activeJobId) { alert("没有进行中的任务 / 진행 중인 작업 없음"); return; }
   if (!confirm("挂起当前任务，临时去卸货？\n현재 작업을 일시정지하고 임시 하차로 이동하시겠습니까?")) return;
 
-  // Save parent info for later resume
-  localStorage.setItem(V2_INTERRUPT_KEY, JSON.stringify({
-    parent_job_id: _activeJobId,
-    parent_page: _currentPage,
-    parent_params: _pageParams
-  }));
+  withActionLock('interruptToUnload', null, null, async function() {
+    localStorage.setItem(V2_INTERRUPT_KEY, JSON.stringify({
+      parent_job_id: _activeJobId,
+      parent_page: _currentPage,
+      parent_params: _pageParams
+    }));
 
-  // Use feedback-first unplanned unload flow
-  var res = await api({
-    action: "v2_unplanned_unload_start",
-    worker_id: getWorkerId(),
-    worker_name: getWorkerName(),
-    parent_job_id: _activeJobId,
-    interrupt_type: "unload"
+    var res = await api({
+      action: "v2_unplanned_unload_start",
+      worker_id: getWorkerId(),
+      worker_name: getWorkerName(),
+      parent_job_id: _activeJobId,
+      interrupt_type: "unload"
+    });
+
+    if (res && res.ok) {
+      saveActiveJob(res.job_id, res.worker_seg_id);
+      localStorage.setItem('v2_unplanned_fb_id', res.feedback_id || '');
+      _unloadPlanData = null;
+      _navStack = [];
+      goPage("unload");
+    } else {
+      alert("失败/실패: " + (res ? res.error : "unknown"));
+    }
   });
-
-  if (res && res.ok) {
-    saveActiveJob(res.job_id, res.worker_seg_id);
-    localStorage.setItem('v2_unplanned_fb_id', res.feedback_id || '');
-    _unloadPlanData = null;
-    _navStack = [];
-    goPage("unload");
-  } else {
-    alert("失败/실패: " + (res ? res.error : "unknown"));
-  }
 }
 
 async function interruptToLoad() {
   if (!_activeJobId) { alert("没有进行中的任务 / 진행 중인 작업 없음"); return; }
   if (!confirm("挂起当前任务，临时去装货？\n현재 작업을 일시정지하고 임시 상차로 이동하시겠습니까?")) return;
 
-  localStorage.setItem(V2_INTERRUPT_KEY, JSON.stringify({
-    parent_job_id: _activeJobId,
-    parent_page: _currentPage,
-    parent_params: _pageParams
-  }));
+  withActionLock('interruptToLoad', null, null, async function() {
+    localStorage.setItem(V2_INTERRUPT_KEY, JSON.stringify({
+      parent_job_id: _activeJobId,
+      parent_page: _currentPage,
+      parent_params: _pageParams
+    }));
 
-  var res = await api({
-    action: "v2_ops_job_start",
-    flow_stage: "outbound",
-    job_type: "load_outbound",
-    related_doc_type: "",
-    related_doc_id: "",
-    worker_id: getWorkerId(),
-    worker_name: getWorkerName(),
-    parent_job_id: _activeJobId,
-    is_temporary_interrupt: true,
-    interrupt_type: "load"
+    var res = await api({
+      action: "v2_ops_job_start",
+      flow_stage: "outbound",
+      job_type: "load_outbound",
+      related_doc_type: "",
+      related_doc_id: "",
+      worker_id: getWorkerId(),
+      worker_name: getWorkerName(),
+      parent_job_id: _activeJobId,
+      is_temporary_interrupt: true,
+      interrupt_type: "load"
+    });
+
+    if (res && res.ok) {
+      saveActiveJob(res.job_id, res.worker_seg_id);
+      _navStack = [];
+      goPage("outbound_load");
+    } else {
+      alert("失败/실패: " + (res ? res.error : "unknown"));
+    }
   });
-
-  if (res && res.ok) {
-    saveActiveJob(res.job_id, res.worker_seg_id);
-    _navStack = [];
-    goPage("outbound_load");
-  } else {
-    alert("失败/실패: " + (res ? res.error : "unknown"));
-  }
 }
 
 async function checkAndResumeParent() {

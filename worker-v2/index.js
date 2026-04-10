@@ -63,6 +63,48 @@ function isOpsAuth(body, env) {
   return isAuth(body, env) || isOpsKey(body, env);
 }
 
+// ===== Idempotency helper =====
+// 用法：
+//   route("v2_xxx_create", async (body, env) => {
+//     if (!isAuth(body, env)) return err("unauthorized", 401);
+//     return withIdem(env, body, "v2_xxx_create", async () => {
+//       // ... 业务逻辑 ...
+//       return { ok: true, id };   // 返回 plain object，withIdem 会包 json()
+//     });
+//   });
+// client_req_id 由前端生成，一次点击一份。同 key 重入直接返回上次结果，防止网络重发 / 双击穿透前端锁产生多记录。
+async function withIdem(env, body, action, fn) {
+  const key = String((body && body.client_req_id) || "").trim();
+  if (key) {
+    try {
+      const row = await env.DB.prepare(
+        "SELECT response_json FROM v2_idempotency_keys WHERE idem_key=?"
+      ).bind(key).first();
+      if (row && row.response_json) {
+        try {
+          const cached = JSON.parse(row.response_json);
+          return json(cached);
+        } catch (e) { /* fall through */ }
+      }
+    } catch (e) { /* table may not exist yet on first run */ }
+  }
+  let result;
+  try {
+    result = await fn();
+  } catch (e) {
+    // 异常不缓存，让客户端可以重试
+    return json({ ok: false, error: e.message || "internal error" }, 500);
+  }
+  if (key && result && typeof result === 'object') {
+    try {
+      await env.DB.prepare(
+        "INSERT OR IGNORE INTO v2_idempotency_keys(idem_key, action, response_json, created_at) VALUES(?,?,?,?)"
+      ).bind(key, action, JSON.stringify(result), now()).run();
+    } catch (e) { /* ignore idem write failures */ }
+  }
+  return json(result);
+}
+
 // ===== Worker dedup helpers =====
 // 查找某 worker 在某 job 中是否有未关闭的参与段
 async function findOpenSeg(env, jobId, workerId) {
@@ -390,6 +432,15 @@ const MIGRATIONS = [
   // ---- external WMS inbound number (for standard inbound started from external no) ----
   `ALTER TABLE v2_inbound_plans ADD COLUMN external_inbound_no TEXT DEFAULT ''`,
   `CREATE INDEX IF NOT EXISTS idx_v2_inbound_external_no ON v2_inbound_plans(external_inbound_no) WHERE external_inbound_no != ''`,
+
+  // ---- idempotency keys for create/start/convert class writes ----
+  `CREATE TABLE IF NOT EXISTS v2_idempotency_keys (
+    idem_key TEXT PRIMARY KEY,
+    action TEXT,
+    response_json TEXT,
+    created_at TEXT
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_idem_created ON v2_idempotency_keys(created_at)`,
 ];
 
 let _migrated = false;
@@ -422,25 +473,27 @@ route("v2_health_check", async (body, env) => {
 // =====================================================
 route("v2_issue_create", async (body, env) => {
   if (!isAuth(body, env)) return err("unauthorized", 401);
-  const id = "ISS-" + uid();
-  const t = now();
-  await env.DB.prepare(`
-    INSERT INTO v2_issue_tickets(id, biz_class, customer, related_doc_no, issue_type,
-      issue_summary, issue_description, priority, submitted_by, status, created_at, updated_at)
-    VALUES(?,?,?,?,?,?,?,?,?,'pending',?,?)
-  `).bind(
-    id,
-    String(body.biz_class || ""),
-    String(body.customer || ""),
-    String(body.related_doc_no || ""),
-    String(body.issue_type || ""),
-    String(body.issue_summary || ""),
-    String(body.issue_description || ""),
-    String(body.priority || "normal"),
-    String(body.submitted_by || ""),
-    t, t
-  ).run();
-  return json({ ok: true, id });
+  return withIdem(env, body, "v2_issue_create", async () => {
+    const id = "ISS-" + uid();
+    const t = now();
+    await env.DB.prepare(`
+      INSERT INTO v2_issue_tickets(id, biz_class, customer, related_doc_no, issue_type,
+        issue_summary, issue_description, priority, submitted_by, status, created_at, updated_at)
+      VALUES(?,?,?,?,?,?,?,?,?,'pending',?,?)
+    `).bind(
+      id,
+      String(body.biz_class || ""),
+      String(body.customer || ""),
+      String(body.related_doc_no || ""),
+      String(body.issue_type || ""),
+      String(body.issue_summary || ""),
+      String(body.issue_description || ""),
+      String(body.priority || "normal"),
+      String(body.submitted_by || ""),
+      t, t
+    ).run();
+    return { ok: true, id };
+  });
 });
 
 route("v2_issue_list", async (body, env) => {
@@ -521,40 +574,38 @@ route("v2_issue_handle_start", async (body, env) => {
   const handler_name = String(body.handler_name || "").trim();
   if (!issue_id || !handler_id) return err("missing issue_id or handler_id");
 
-  const issue = await env.DB.prepare("SELECT * FROM v2_issue_tickets WHERE id=?").bind(issue_id).first();
-  if (!issue) return err("issue not found", 404);
-  if (issue.status === "closed" || issue.status === "cancelled") return err("issue already " + issue.status);
+  return withIdem(env, body, "v2_issue_handle_start", async () => {
+    const issue = await env.DB.prepare("SELECT * FROM v2_issue_tickets WHERE id=?").bind(issue_id).first();
+    if (!issue) return { ok: false, error: "issue not found" };
+    if (issue.status === "closed" || issue.status === "cancelled") return { ok: false, error: "issue already " + issue.status };
 
-  const t = now();
-  const job_id = "JOB-" + uid();
-  const run_id = "RUN-" + uid();
+    const t = now();
+    const job_id = "JOB-" + uid();
+    const run_id = "RUN-" + uid();
 
-  // Create ops job
-  await env.DB.prepare(`
-    INSERT INTO v2_ops_jobs(id, flow_stage, biz_class, job_type, related_doc_type, related_doc_id,
-      status, created_by, created_at, updated_at, active_worker_count)
-    VALUES(?, 'issue_handle', ?, 'issue_handle', 'issue_ticket', ?, 'working', ?, ?, ?, 1)
-  `).bind(job_id, issue.biz_class || "", issue_id, handler_id, t, t).run();
+    await env.DB.prepare(`
+      INSERT INTO v2_ops_jobs(id, flow_stage, biz_class, job_type, related_doc_type, related_doc_id,
+        status, created_by, created_at, updated_at, active_worker_count)
+      VALUES(?, 'issue_handle', ?, 'issue_handle', 'issue_ticket', ?, 'working', ?, ?, ?, 1)
+    `).bind(job_id, issue.biz_class || "", issue_id, handler_id, t, t).run();
 
-  // Create worker participation segment
-  const worker_seg_id = "WS-" + uid();
-  await env.DB.prepare(`
-    INSERT INTO v2_ops_job_workers(id, job_id, worker_id, worker_name, joined_at)
-    VALUES(?,?,?,?,?)
-  `).bind(worker_seg_id, job_id, handler_id, handler_name, t).run();
+    const worker_seg_id = "WS-" + uid();
+    await env.DB.prepare(`
+      INSERT INTO v2_ops_job_workers(id, job_id, worker_id, worker_name, joined_at)
+      VALUES(?,?,?,?,?)
+    `).bind(worker_seg_id, job_id, handler_id, handler_name, t).run();
 
-  // Create handle run
-  await env.DB.prepare(`
-    INSERT INTO v2_issue_handle_runs(id, issue_id, job_id, handler_id, handler_name, started_at, run_status, created_at)
-    VALUES(?,?,?,?,?,?,'working',?)
-  `).bind(run_id, issue_id, job_id, handler_id, handler_name, t, t).run();
+    await env.DB.prepare(`
+      INSERT INTO v2_issue_handle_runs(id, issue_id, job_id, handler_id, handler_name, started_at, run_status, created_at)
+      VALUES(?,?,?,?,?,?,'working',?)
+    `).bind(run_id, issue_id, job_id, handler_id, handler_name, t, t).run();
 
-  // Update issue status
-  await env.DB.prepare(
-    "UPDATE v2_issue_tickets SET status='processing', updated_at=? WHERE id=?"
-  ).bind(t, issue_id).run();
+    await env.DB.prepare(
+      "UPDATE v2_issue_tickets SET status='processing', updated_at=? WHERE id=?"
+    ).bind(t, issue_id).run();
 
-  return json({ ok: true, job_id, run_id, worker_seg_id });
+    return { ok: true, job_id, run_id, worker_seg_id };
+  });
 });
 
 route("v2_issue_handle_finish", async (body, env) => {
@@ -607,36 +658,37 @@ route("v2_issue_handle_finish", async (body, env) => {
 // =====================================================
 route("v2_outbound_order_create", async (body, env) => {
   if (!isAuth(body, env)) return err("unauthorized", 401);
-  const id = "OB-" + uid();
-  const t = now();
-  await env.DB.prepare(`
-    INSERT INTO v2_outbound_orders(id, order_date, customer, biz_class, operation_mode,
-      outbound_mode, instruction, remark, status, created_by, created_at, updated_at)
-    VALUES(?,?,?,?,?,?,?,?,'draft',?,?,?)
-  `).bind(
-    id,
-    String(body.order_date || kstToday()),
-    String(body.customer || ""),
-    String(body.biz_class || ""),
-    String(body.operation_mode || ""),
-    String(body.outbound_mode || ""),
-    String(body.instruction || ""),
-    String(body.remark || ""),
-    String(body.created_by || ""),
-    t, t
-  ).run();
-
-  // Insert lines
-  const lines = body.lines || [];
-  for (let i = 0; i < lines.length; i++) {
-    const ln = lines[i];
+  return withIdem(env, body, "v2_outbound_order_create", async () => {
+    const id = "OB-" + uid();
+    const t = now();
     await env.DB.prepare(`
-      INSERT INTO v2_outbound_order_lines(id, order_id, line_no, wms_order_no, sku, quantity, remark)
-      VALUES(?,?,?,?,?,?,?)
-    `).bind("OBL-" + uid(), id, i + 1, String(ln.wms_order_no || ""), String(ln.sku || ""), Number(ln.quantity || 0), String(ln.remark || "")).run();
-  }
+      INSERT INTO v2_outbound_orders(id, order_date, customer, biz_class, operation_mode,
+        outbound_mode, instruction, remark, status, created_by, created_at, updated_at)
+      VALUES(?,?,?,?,?,?,?,?,'draft',?,?,?)
+    `).bind(
+      id,
+      String(body.order_date || kstToday()),
+      String(body.customer || ""),
+      String(body.biz_class || ""),
+      String(body.operation_mode || ""),
+      String(body.outbound_mode || ""),
+      String(body.instruction || ""),
+      String(body.remark || ""),
+      String(body.created_by || ""),
+      t, t
+    ).run();
 
-  return json({ ok: true, id });
+    const lines = body.lines || [];
+    for (let i = 0; i < lines.length; i++) {
+      const ln = lines[i];
+      await env.DB.prepare(`
+        INSERT INTO v2_outbound_order_lines(id, order_id, line_no, wms_order_no, sku, quantity, remark)
+        VALUES(?,?,?,?,?,?,?)
+      `).bind("OBL-" + uid(), id, i + 1, String(ln.wms_order_no || ""), String(ln.sku || ""), Number(ln.quantity || 0), String(ln.remark || "")).run();
+    }
+
+    return { ok: true, id };
+  });
 });
 
 route("v2_outbound_order_list", async (body, env) => {
@@ -701,49 +753,48 @@ route("v2_outbound_load_start", async (body, env) => {
   const worker_name = String(body.worker_name || "").trim();
   if (!worker_id) return err("missing worker_id");
 
-  const t = now();
-
-  // Check if there's already an active job for this order
-  let job = null;
-  if (order_id) {
-    const existing = await env.DB.prepare(
-      "SELECT * FROM v2_ops_jobs WHERE related_doc_type='outbound_order' AND related_doc_id=? AND status IN ('pending','working') LIMIT 1"
-    ).bind(order_id).first();
-    if (existing) job = existing;
-  }
-
-  let job_id, is_new_job = false;
-  if (job) {
-    job_id = job.id;
-    // 防重：同一 worker 已有 open segment 则直接返回
-    const dup = await findOpenSeg(env, job_id, worker_id);
-    if (dup) return json({ ok: true, job_id, worker_seg_id: dup.id, is_new_job: false, already_joined: true });
-    await env.DB.prepare(
-      "UPDATE v2_ops_jobs SET active_worker_count=active_worker_count+1, updated_at=?, status='working' WHERE id=?"
-    ).bind(t, job_id).run();
-  } else {
-    job_id = "JOB-" + uid();
-    is_new_job = true;
-    await env.DB.prepare(`
-      INSERT INTO v2_ops_jobs(id, flow_stage, biz_class, job_type, related_doc_type, related_doc_id,
-        status, created_by, created_at, updated_at, active_worker_count)
-      VALUES(?, 'outbound', ?, 'load_outbound', 'outbound_order', ?, 'working', ?, ?, ?, 1)
-    `).bind(job_id, String(body.biz_class || ""), order_id, worker_id, t, t).run();
-
+  return withIdem(env, body, "v2_outbound_load_start", async () => {
+    const t = now();
+    let job = null;
     if (order_id) {
-      await env.DB.prepare(
-        "UPDATE v2_outbound_orders SET status='working', updated_at=? WHERE id=? AND status IN ('draft','issued')"
-      ).bind(t, order_id).run();
+      const existing = await env.DB.prepare(
+        "SELECT * FROM v2_ops_jobs WHERE related_doc_type='outbound_order' AND related_doc_id=? AND status IN ('pending','working') LIMIT 1"
+      ).bind(order_id).first();
+      if (existing) job = existing;
     }
-  }
 
-  const seg_id = "WS-" + uid();
-  await env.DB.prepare(`
-    INSERT INTO v2_ops_job_workers(id, job_id, worker_id, worker_name, joined_at)
-    VALUES(?,?,?,?,?)
-  `).bind(seg_id, job_id, worker_id, worker_name, t).run();
+    let job_id, is_new_job = false;
+    if (job) {
+      job_id = job.id;
+      const dup = await findOpenSeg(env, job_id, worker_id);
+      if (dup) return { ok: true, job_id, worker_seg_id: dup.id, is_new_job: false, already_joined: true };
+      await env.DB.prepare(
+        "UPDATE v2_ops_jobs SET active_worker_count=active_worker_count+1, updated_at=?, status='working' WHERE id=?"
+      ).bind(t, job_id).run();
+    } else {
+      job_id = "JOB-" + uid();
+      is_new_job = true;
+      await env.DB.prepare(`
+        INSERT INTO v2_ops_jobs(id, flow_stage, biz_class, job_type, related_doc_type, related_doc_id,
+          status, created_by, created_at, updated_at, active_worker_count)
+        VALUES(?, 'outbound', ?, 'load_outbound', 'outbound_order', ?, 'working', ?, ?, ?, 1)
+      `).bind(job_id, String(body.biz_class || ""), order_id, worker_id, t, t).run();
 
-  return json({ ok: true, job_id, worker_seg_id: seg_id, is_new_job });
+      if (order_id) {
+        await env.DB.prepare(
+          "UPDATE v2_outbound_orders SET status='working', updated_at=? WHERE id=? AND status IN ('draft','issued')"
+        ).bind(t, order_id).run();
+      }
+    }
+
+    const seg_id = "WS-" + uid();
+    await env.DB.prepare(`
+      INSERT INTO v2_ops_job_workers(id, job_id, worker_id, worker_name, joined_at)
+      VALUES(?,?,?,?,?)
+    `).bind(seg_id, job_id, worker_id, worker_name, t).run();
+
+    return { ok: true, job_id, worker_seg_id: seg_id, is_new_job };
+  });
 });
 
 route("v2_outbound_load_finish", async (body, env) => {
@@ -810,59 +861,59 @@ route("v2_outbound_load_finish", async (body, env) => {
 // =====================================================
 route("v2_inbound_plan_create", async (body, env) => {
   if (!isAuth(body, env)) return err("unauthorized", 401);
-  const id = "IB-" + uid();
-  const t = now();
-  const plan_date = String(body.plan_date || kstToday());
-  const customer = String(body.customer || "");
-  const biz_class = String(body.biz_class || "");
-  const created_by = String(body.created_by || "");
-  const display_no = await nextDisplayNo(env, plan_date);
+  return withIdem(env, body, "v2_inbound_plan_create", async () => {
+    const id = "IB-" + uid();
+    const t = now();
+    const plan_date = String(body.plan_date || kstToday());
+    const customer = String(body.customer || "");
+    const biz_class = String(body.biz_class || "");
+    const created_by = String(body.created_by || "");
+    const display_no = await nextDisplayNo(env, plan_date);
 
-  await env.DB.prepare(`
-    INSERT INTO v2_inbound_plans(id, plan_date, customer, biz_class, cargo_summary,
-      expected_arrival, purpose, remark, status, created_by, created_at, updated_at, display_no)
-    VALUES(?,?,?,?,?,?,?,?,'pending',?,?,?,?)
-  `).bind(
-    id, plan_date,
-    customer, biz_class,
-    String(body.cargo_summary || ""),
-    String(body.expected_arrival || ""),
-    String(body.purpose || ""),
-    String(body.remark || ""),
-    created_by, t, t, display_no
-  ).run();
-
-  // Insert plan lines
-  const lines = body.lines || [];
-  for (let i = 0; i < lines.length; i++) {
-    const ln = lines[i];
     await env.DB.prepare(`
-      INSERT INTO v2_inbound_plan_lines(id, plan_id, line_no, unit_type, planned_qty, remark)
-      VALUES(?,?,?,?,?,?)
-    `).bind("IPL-" + uid(), id, i + 1, String(ln.unit_type || ""), Number(ln.planned_qty || 0), String(ln.remark || "")).run();
-  }
-
-  // Auto-create outbound order if requested
-  let outbound_id = null;
-  if (body.auto_create_outbound) {
-    outbound_id = "OB-" + uid();
-    await env.DB.prepare(`
-      INSERT INTO v2_outbound_orders(id, order_date, customer, biz_class, operation_mode,
-        outbound_mode, instruction, remark, status, source_inbound_plan_id, created_by, created_at, updated_at)
-      VALUES(?,?,?,?,?,?,?,?,'draft',?,?,?,?)
+      INSERT INTO v2_inbound_plans(id, plan_date, customer, biz_class, cargo_summary,
+        expected_arrival, purpose, remark, status, created_by, created_at, updated_at, display_no)
+      VALUES(?,?,?,?,?,?,?,?,'pending',?,?,?,?)
     `).bind(
-      outbound_id,
-      String(body.plan_date || kstToday()),
+      id, plan_date,
       customer, biz_class,
-      String(body.ob_operation_mode || ""),
-      String(body.ob_outbound_mode || ""),
-      String(body.ob_instruction || ""),
-      String(body.ob_remark || ""),
-      id, created_by, t, t
+      String(body.cargo_summary || ""),
+      String(body.expected_arrival || ""),
+      String(body.purpose || ""),
+      String(body.remark || ""),
+      created_by, t, t, display_no
     ).run();
-  }
 
-  return json({ ok: true, id, display_no, outbound_id });
+    const lines = body.lines || [];
+    for (let i = 0; i < lines.length; i++) {
+      const ln = lines[i];
+      await env.DB.prepare(`
+        INSERT INTO v2_inbound_plan_lines(id, plan_id, line_no, unit_type, planned_qty, remark)
+        VALUES(?,?,?,?,?,?)
+      `).bind("IPL-" + uid(), id, i + 1, String(ln.unit_type || ""), Number(ln.planned_qty || 0), String(ln.remark || "")).run();
+    }
+
+    let outbound_id = null;
+    if (body.auto_create_outbound) {
+      outbound_id = "OB-" + uid();
+      await env.DB.prepare(`
+        INSERT INTO v2_outbound_orders(id, order_date, customer, biz_class, operation_mode,
+          outbound_mode, instruction, remark, status, source_inbound_plan_id, created_by, created_at, updated_at)
+        VALUES(?,?,?,?,?,?,?,?,'draft',?,?,?,?)
+      `).bind(
+        outbound_id,
+        String(body.plan_date || kstToday()),
+        customer, biz_class,
+        String(body.ob_operation_mode || ""),
+        String(body.ob_outbound_mode || ""),
+        String(body.ob_instruction || ""),
+        String(body.ob_remark || ""),
+        id, created_by, t, t
+      ).run();
+    }
+
+    return { ok: true, id, display_no, outbound_id };
+  });
 });
 
 route("v2_inbound_plan_list", async (body, env) => {
@@ -970,6 +1021,85 @@ route("v2_inbound_plan_find_by_code", async (body, env) => {
   return json({ ok: true, plan: row });
 });
 
+// ===== Ops candidates: filtered list for putaway/unload scene =====
+route("v2_inbound_plan_ops_candidates", async (body, env) => {
+  if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  const scene = String(body.scene || "").trim();
+  const biz_class = String(body.biz_class || "").trim();
+  const keyword = String(body.keyword || "").trim();
+  const limit = Math.min(Number(body.limit) || 100, 200);
+
+  let statusFilter;
+  if (scene === 'putaway') {
+    statusFilter = "('arrived_pending_putaway','putting_away')";
+  } else if (scene === 'unload') {
+    statusFilter = "('pending','unloading')";
+  } else {
+    return err("scene must be putaway or unload");
+  }
+
+  let sql = `SELECT id, display_no, external_inbound_no, customer, cargo_summary, status, biz_class, plan_date
+    FROM v2_inbound_plans WHERE status IN ${statusFilter}`;
+  const binds = [];
+
+  if (biz_class) {
+    sql += " AND biz_class=?";
+    binds.push(biz_class);
+  }
+  if (keyword) {
+    sql += " AND (display_no LIKE ? OR external_inbound_no LIKE ? OR customer LIKE ?)";
+    const kw = "%" + keyword + "%";
+    binds.push(kw, kw, kw);
+  }
+  sql += " ORDER BY created_at DESC LIMIT ?";
+  binds.push(limit);
+
+  const stmt = env.DB.prepare(sql);
+  const rs = binds.length > 0 ? await stmt.bind(...binds).all() : await stmt.all();
+  return json({ ok: true, items: rs.results || [] });
+});
+
+// ===== Resolve inbound code: identify system plan vs external no =====
+route("v2_inbound_resolve_code", async (body, env) => {
+  if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  const code = String(body.code || "").trim();
+  const biz_class = String(body.biz_class || "").trim();
+  if (!code) return err("missing code");
+
+  // Try to find system plan by display_no, external_inbound_no, or id
+  let plan = await env.DB.prepare(
+    "SELECT id, display_no, external_inbound_no, status, customer, cargo_summary, biz_class, plan_date FROM v2_inbound_plans WHERE display_no=? AND status!='cancelled'"
+  ).bind(code).first();
+  if (!plan) {
+    plan = await env.DB.prepare(
+      "SELECT id, display_no, external_inbound_no, status, customer, cargo_summary, biz_class, plan_date FROM v2_inbound_plans WHERE external_inbound_no=? AND status!='cancelled' ORDER BY created_at DESC LIMIT 1"
+    ).bind(code).first();
+  }
+  if (!plan) {
+    plan = await env.DB.prepare(
+      "SELECT id, display_no, external_inbound_no, status, customer, cargo_summary, biz_class, plan_date FROM v2_inbound_plans WHERE id=? AND status!='cancelled'"
+    ).bind(code).first();
+  }
+
+  if (!plan) {
+    // Not a system plan → treat as external inbound number
+    return json({ ok: true, kind: 'external', code });
+  }
+
+  // Found system plan — check biz_class match
+  if (biz_class && plan.biz_class && plan.biz_class !== biz_class) {
+    return json({ ok: true, kind: 'biz_mismatch', plan, message: "该入库单不属于当前业务（" + plan.biz_class + "），不能在此页面开始入库" });
+  }
+
+  // Check status is putaway-able
+  const putawayStatuses = ['arrived_pending_putaway', 'putting_away'];
+  if (putawayStatuses.indexOf(plan.status) === -1) {
+    return json({ ok: true, kind: 'status_not_allowed', plan, message: "该系统入库单当前状态（" + plan.status + "）不可开始入库" });
+  }
+
+  return json({ ok: true, kind: 'system', plan });
+});
+
 // Upcoming inbound plans (next 3 working days, skip Sundays)
 route("v2_inbound_plan_list_upcoming", async (body, env) => {
   if (!isAuth(body, env)) return err("unauthorized", 401);
@@ -1053,38 +1183,39 @@ route("v2_inbound_dynamic_finalize", async (body, env) => {
   if (!isAuth(body, env)) return err("unauthorized", 401);
   const id = String(body.id || "").trim();
   if (!id) return err("missing id");
-  const plan = await env.DB.prepare("SELECT * FROM v2_inbound_plans WHERE id=?").bind(id).first();
-  if (!plan) return err("not found", 404);
-  if (plan.source_type !== "field_dynamic") return err("not a dynamic plan");
-  if (plan.status !== "unloaded_pending_info") return err("status must be unloaded_pending_info, current: " + plan.status);
+  return withIdem(env, body, "v2_inbound_dynamic_finalize", async () => {
+    const plan = await env.DB.prepare("SELECT * FROM v2_inbound_plans WHERE id=?").bind(id).first();
+    if (!plan) return { ok: false, error: "not found" };
+    if (plan.source_type !== "field_dynamic") return { ok: false, error: "not a dynamic plan" };
+    if (plan.status !== "unloaded_pending_info") return { ok: false, error: "status must be unloaded_pending_info, current: " + plan.status };
 
-  const t = now();
-  const customer = String(body.customer || plan.customer || "").trim();
-  const biz_class = String(body.biz_class || plan.biz_class || "").trim();
-  const cargo_summary = String(body.cargo_summary || plan.cargo_summary || "").trim();
-  const expected_arrival = String(body.expected_arrival || plan.expected_arrival || "").trim();
-  const purpose = String(body.purpose || plan.purpose || "").trim();
-  const remark = String(body.remark || plan.remark || "").trim();
+    const t = now();
+    const customer = String(body.customer || plan.customer || "").trim();
+    const biz_class = String(body.biz_class || plan.biz_class || "").trim();
+    const cargo_summary = String(body.cargo_summary || plan.cargo_summary || "").trim();
+    const expected_arrival = String(body.expected_arrival || plan.expected_arrival || "").trim();
+    const purpose = String(body.purpose || plan.purpose || "").trim();
+    const remark = String(body.remark || plan.remark || "").trim();
 
-  await env.DB.prepare(`
-    UPDATE v2_inbound_plans SET customer=?, biz_class=?, cargo_summary=?,
-      expected_arrival=?, purpose=?, remark=?, status='completed',
-      needs_info_update=0, updated_at=? WHERE id=?
-  `).bind(customer, biz_class, cargo_summary, expected_arrival, purpose, remark, t, id).run();
+    await env.DB.prepare(`
+      UPDATE v2_inbound_plans SET customer=?, biz_class=?, cargo_summary=?,
+        expected_arrival=?, purpose=?, remark=?, status='completed',
+        needs_info_update=0, updated_at=? WHERE id=?
+    `).bind(customer, biz_class, cargo_summary, expected_arrival, purpose, remark, t, id).run();
 
-  // Update lines if provided
-  const newLines = body.lines || [];
-  if (newLines.length > 0) {
-    await env.DB.prepare("DELETE FROM v2_inbound_plan_lines WHERE plan_id=?").bind(id).run();
-    for (let i = 0; i < newLines.length; i++) {
-      const ln = newLines[i];
-      await env.DB.prepare(
-        "INSERT INTO v2_inbound_plan_lines(id, plan_id, line_no, unit_type, planned_qty, actual_qty, remark) VALUES(?,?,?,?,?,?,?)"
-      ).bind("IPL-" + uid(), id, i + 1, String(ln.unit_type || ""), Number(ln.planned_qty || 0), Number(ln.actual_qty || 0), String(ln.remark || "")).run();
+    const newLines = body.lines || [];
+    if (newLines.length > 0) {
+      await env.DB.prepare("DELETE FROM v2_inbound_plan_lines WHERE plan_id=?").bind(id).run();
+      for (let i = 0; i < newLines.length; i++) {
+        const ln = newLines[i];
+        await env.DB.prepare(
+          "INSERT INTO v2_inbound_plan_lines(id, plan_id, line_no, unit_type, planned_qty, actual_qty, remark) VALUES(?,?,?,?,?,?,?)"
+        ).bind("IPL-" + uid(), id, i + 1, String(ln.unit_type || ""), Number(ln.planned_qty || 0), Number(ln.actual_qty || 0), String(ln.remark || "")).run();
+      }
     }
-  }
 
-  return json({ ok: true, id, display_no: plan.display_no });
+    return { ok: true, id, display_no: plan.display_no };
+  });
 });
 
 // =====================================================
@@ -1103,48 +1234,45 @@ route("v2_unplanned_unload_start", async (body, env) => {
   const interrupt_type = String(body.interrupt_type || "").trim();
   if (!worker_id) return err("missing worker_id");
 
-  const t = now();
-  const fb_id = "FB-" + uid();
-  const fb_display_no = await nextFeedbackDisplayNo(env, kstToday(), 'XCXH');
+  return withIdem(env, body, "v2_unplanned_unload_start", async () => {
+    const t = now();
+    const fb_id = "FB-" + uid();
+    const fb_display_no = await nextFeedbackDisplayNo(env, kstToday(), 'XCXH');
 
-  // 1. Create field feedback record
-  await env.DB.prepare(`
-    INSERT INTO v2_field_feedbacks(id, feedback_type, related_doc_type, related_doc_id,
-      title, content, submitted_by, status, parent_job_id, interrupt_type, display_no, created_at, updated_at)
-    VALUES(?,'unplanned_unload','ops_job','',?,?,?,'field_working',?,?,?,?,?)
-  `).bind(fb_id,
-      "计划外到货-现场卸货中",
-      "现场操作人员发起计划外卸货",
-      worker_name || worker_id,
-      parent_job_id, interrupt_type, fb_display_no, t, t).run();
+    await env.DB.prepare(`
+      INSERT INTO v2_field_feedbacks(id, feedback_type, related_doc_type, related_doc_id,
+        title, content, submitted_by, status, parent_job_id, interrupt_type, display_no, created_at, updated_at)
+      VALUES(?,'unplanned_unload','ops_job','',?,?,?,'field_working',?,?,?,?,?)
+    `).bind(fb_id,
+        "计划外到货-现场卸货中",
+        "现场操作人员发起计划外卸货",
+        worker_name || worker_id,
+        parent_job_id, interrupt_type, fb_display_no, t, t).run();
 
-  // 2. Create unload job linked to this feedback
-  const job_id = "JOB-" + uid();
-  await env.DB.prepare(`
-    INSERT INTO v2_ops_jobs(id, flow_stage, biz_class, job_type, related_doc_type, related_doc_id,
-      status, parent_job_id, is_temporary_interrupt, interrupt_type, created_by, created_at, updated_at, active_worker_count)
-    VALUES(?, 'unload', '', 'unload', 'field_feedback', ?, 'working', ?, ?, ?, ?, ?, ?, 1)
-  `).bind(job_id, fb_id, parent_job_id, parent_job_id ? 1 : 0, interrupt_type, worker_id, t, t).run();
+    const job_id = "JOB-" + uid();
+    await env.DB.prepare(`
+      INSERT INTO v2_ops_jobs(id, flow_stage, biz_class, job_type, related_doc_type, related_doc_id,
+        status, parent_job_id, is_temporary_interrupt, interrupt_type, created_by, created_at, updated_at, active_worker_count)
+      VALUES(?, 'unload', '', 'unload', 'field_feedback', ?, 'working', ?, ?, ?, ?, ?, ?, 1)
+    `).bind(job_id, fb_id, parent_job_id, parent_job_id ? 1 : 0, interrupt_type, worker_id, t, t).run();
 
-  // Update feedback with job reference
-  await env.DB.prepare(
-    "UPDATE v2_field_feedbacks SET related_doc_id=? WHERE id=?"
-  ).bind(job_id, fb_id).run();
+    await env.DB.prepare(
+      "UPDATE v2_field_feedbacks SET related_doc_id=? WHERE id=?"
+    ).bind(job_id, fb_id).run();
 
-  // 3. If this is an interrupt, pause the parent job for this worker
-  if (parent_job_id) {
-    await closeAllOpenSegs(env, parent_job_id, worker_id, t, 'interrupted');
-    await recalcActiveCount(env, parent_job_id, t);
-  }
+    if (parent_job_id) {
+      await closeAllOpenSegs(env, parent_job_id, worker_id, t, 'interrupted');
+      await recalcActiveCount(env, parent_job_id, t);
+    }
 
-  // 4. Create worker segment
-  const seg_id = "WS-" + uid();
-  await env.DB.prepare(`
-    INSERT INTO v2_ops_job_workers(id, job_id, worker_id, worker_name, joined_at)
-    VALUES(?,?,?,?,?)
-  `).bind(seg_id, job_id, worker_id, worker_name, t).run();
+    const seg_id = "WS-" + uid();
+    await env.DB.prepare(`
+      INSERT INTO v2_ops_job_workers(id, job_id, worker_id, worker_name, joined_at)
+      VALUES(?,?,?,?,?)
+    `).bind(seg_id, job_id, worker_id, worker_name, t).run();
 
-  return json({ ok: true, feedback_id: fb_id, display_no: fb_display_no, job_id, worker_seg_id: seg_id });
+    return { ok: true, feedback_id: fb_id, display_no: fb_display_no, job_id, worker_seg_id: seg_id };
+  });
 });
 
 // Step 2: Finish unplanned unload — save result to feedback, do NOT create inbound_plan
@@ -1267,29 +1395,29 @@ route("v2_unplanned_unload_join", async (body, env) => {
   const worker_name = String(body.worker_name || "").trim();
   if (!feedback_id || !worker_id) return err("missing feedback_id or worker_id");
 
-  const fb = await env.DB.prepare("SELECT * FROM v2_field_feedbacks WHERE id=?").bind(feedback_id).first();
-  if (!fb) return err("feedback not found", 404);
-  if (fb.status !== 'field_working') return err("feedback is not in field_working status");
+  return withIdem(env, body, "v2_unplanned_unload_join", async () => {
+    const fb = await env.DB.prepare("SELECT * FROM v2_field_feedbacks WHERE id=?").bind(feedback_id).first();
+    if (!fb) return { ok: false, error: "feedback not found" };
+    if (fb.status !== 'field_working') return { ok: false, error: "feedback is not in field_working status" };
 
-  const job_id = fb.related_doc_id || '';
-  if (!job_id) return err("no related job found");
+    const job_id = fb.related_doc_id || '';
+    if (!job_id) return { ok: false, error: "no related job found" };
 
-  const t = now();
+    const t = now();
 
-  // Check if worker already has open segment
-  const existing = await findOpenSeg(env, job_id, worker_id);
-  if (existing) {
-    return json({ ok: true, feedback_id, display_no: fb.display_no || fb.id, job_id, worker_seg_id: existing.id, already_joined: true });
-  }
+    const existing = await findOpenSeg(env, job_id, worker_id);
+    if (existing) {
+      return { ok: true, feedback_id, display_no: fb.display_no || fb.id, job_id, worker_seg_id: existing.id, already_joined: true };
+    }
 
-  // Create new worker segment
-  const seg_id = "WS-" + uid();
-  await env.DB.prepare(
-    "INSERT INTO v2_ops_job_workers(id, job_id, worker_id, worker_name, joined_at) VALUES(?,?,?,?,?)"
-  ).bind(seg_id, job_id, worker_id, worker_name, t).run();
-  await recalcActiveCount(env, job_id, t);
+    const seg_id = "WS-" + uid();
+    await env.DB.prepare(
+      "INSERT INTO v2_ops_job_workers(id, job_id, worker_id, worker_name, joined_at) VALUES(?,?,?,?,?)"
+    ).bind(seg_id, job_id, worker_id, worker_name, t).run();
+    await recalcActiveCount(env, job_id, t);
 
-  return json({ ok: true, feedback_id, display_no: fb.display_no || fb.id, job_id, worker_seg_id: seg_id, already_joined: false });
+    return { ok: true, feedback_id, display_no: fb.display_no || fb.id, job_id, worker_seg_id: seg_id, already_joined: false };
+  });
 });
 
 // Step 3: Finalize feedback → create formal inbound plan with lines
@@ -1297,55 +1425,52 @@ route("v2_feedback_finalize_to_inbound", async (body, env) => {
   if (!isAuth(body, env)) return err("unauthorized", 401);
   const feedback_id = String(body.feedback_id || "").trim();
   if (!feedback_id) return err("missing feedback_id");
-
-  const fb = await env.DB.prepare("SELECT * FROM v2_field_feedbacks WHERE id=?").bind(feedback_id).first();
-  if (!fb) return err("feedback not found", 404);
-  if (fb.status !== 'unloaded_pending_info') return err("feedback status must be unloaded_pending_info, current: " + fb.status);
-
-  const t = now();
-  const plan_date = kstToday();
-  const plan_id = "IB-" + uid();
-  const display_no = await nextDisplayNo(env, plan_date);
-
   const customer = String(body.customer || "").trim();
-  const biz_class = String(body.biz_class || "").trim();
-  const cargo_summary = String(body.cargo_summary || "").trim();
-  const expected_arrival = String(body.expected_arrival || "").trim();
-  const purpose = String(body.purpose || "").trim();
-  const remark = String(body.remark || "").trim();
-  const created_by = String(body.created_by || "").trim();
-
   if (!customer) return err("customer is required");
 
-  // 1. Create formal inbound plan
-  await env.DB.prepare(`
-    INSERT INTO v2_inbound_plans(id, plan_date, customer, biz_class, cargo_summary,
-      expected_arrival, purpose, remark, status, source_feedback_id, created_by, created_at, updated_at, display_no, source_type)
-    VALUES(?,?,?,?,?,?,?,?,'arrived_pending_putaway',?,?,?,?,?,'from_feedback')
-  `).bind(plan_id, plan_date, customer, biz_class, cargo_summary,
-      expected_arrival, purpose, remark,
-      feedback_id, created_by, t, t, display_no).run();
+  return withIdem(env, body, "v2_feedback_finalize_to_inbound", async () => {
+    const fb = await env.DB.prepare("SELECT * FROM v2_field_feedbacks WHERE id=?").bind(feedback_id).first();
+    if (!fb) return { ok: false, error: "feedback not found" };
+    if (fb.status !== 'unloaded_pending_info') return { ok: false, error: "feedback status must be unloaded_pending_info, current: " + fb.status };
 
-  // 2. Create inbound plan lines from feedback result or provided lines
-  let lines = body.lines || [];
-  // If no lines provided from frontend, fall back to feedback's result_lines
-  if (lines.length === 0) {
-    try { lines = JSON.parse(fb.result_lines_json || "[]"); } catch(e) { lines = []; }
-  }
-  for (let i = 0; i < lines.length; i++) {
-    const ln = lines[i];
-    const actual = Number(ln.actual_qty || ln.planned_qty || 0);
-    await env.DB.prepare(
-      "INSERT INTO v2_inbound_plan_lines(id, plan_id, line_no, unit_type, planned_qty, actual_qty, remark) VALUES(?,?,?,?,?,?,?)"
-    ).bind("IPL-" + uid(), plan_id, i + 1, String(ln.unit_type || ""), actual, actual, String(ln.remark || "")).run();
-  }
+    const t = now();
+    const plan_date = kstToday();
+    const plan_id = "IB-" + uid();
+    const display_no = await nextDisplayNo(env, plan_date);
 
-  // 3. Update feedback to converted
-  await env.DB.prepare(`
-    UPDATE v2_field_feedbacks SET status='converted', inbound_plan_id=?, updated_at=? WHERE id=?
-  `).bind(plan_id, t, feedback_id).run();
+    const biz_class = String(body.biz_class || "").trim();
+    const cargo_summary = String(body.cargo_summary || "").trim();
+    const expected_arrival = String(body.expected_arrival || "").trim();
+    const purpose = String(body.purpose || "").trim();
+    const remark = String(body.remark || "").trim();
+    const created_by = String(body.created_by || "").trim();
 
-  return json({ ok: true, inbound_plan_id: plan_id, display_no });
+    await env.DB.prepare(`
+      INSERT INTO v2_inbound_plans(id, plan_date, customer, biz_class, cargo_summary,
+        expected_arrival, purpose, remark, status, source_feedback_id, created_by, created_at, updated_at, display_no, source_type)
+      VALUES(?,?,?,?,?,?,?,?,'arrived_pending_putaway',?,?,?,?,?,'from_feedback')
+    `).bind(plan_id, plan_date, customer, biz_class, cargo_summary,
+        expected_arrival, purpose, remark,
+        feedback_id, created_by, t, t, display_no).run();
+
+    let lines = body.lines || [];
+    if (lines.length === 0) {
+      try { lines = JSON.parse(fb.result_lines_json || "[]"); } catch(e) { lines = []; }
+    }
+    for (let i = 0; i < lines.length; i++) {
+      const ln = lines[i];
+      const actual = Number(ln.actual_qty || ln.planned_qty || 0);
+      await env.DB.prepare(
+        "INSERT INTO v2_inbound_plan_lines(id, plan_id, line_no, unit_type, planned_qty, actual_qty, remark) VALUES(?,?,?,?,?,?,?)"
+      ).bind("IPL-" + uid(), plan_id, i + 1, String(ln.unit_type || ""), actual, actual, String(ln.remark || "")).run();
+    }
+
+    await env.DB.prepare(`
+      UPDATE v2_field_feedbacks SET status='converted', inbound_plan_id=?, updated_at=? WHERE id=?
+    `).bind(plan_id, t, feedback_id).run();
+
+    return { ok: true, inbound_plan_id: plan_id, display_no };
+  });
 });
 
 // ===== [DEPRECATED] Dynamic no-doc unload: create plan + job in one shot =====
@@ -1357,34 +1482,33 @@ route("v2_unload_dynamic_start", async (body, env) => {
   const worker_name = String(body.worker_name || "").trim();
   if (!worker_id) return err("missing worker_id");
 
-  const t = now();
-  const plan_date = kstToday();
-  const plan_id = "IB-" + uid();
-  const display_no = await nextDisplayNo(env, plan_date);
+  return withIdem(env, body, "v2_unload_dynamic_start", async () => {
+    const t = now();
+    const plan_date = kstToday();
+    const plan_id = "IB-" + uid();
+    const display_no = await nextDisplayNo(env, plan_date);
 
-  // 1. Create dynamic inbound plan
-  await env.DB.prepare(`
-    INSERT INTO v2_inbound_plans(id, plan_date, customer, biz_class, cargo_summary,
-      expected_arrival, purpose, remark, status, created_by, created_at, updated_at, display_no, source_type, needs_info_update)
-    VALUES(?,?,'待补充','','现场无单卸货','','','','field_working',?,?,?,?,'field_dynamic',1)
-  `).bind(plan_id, plan_date, worker_name || worker_id, t, t, display_no).run();
+    await env.DB.prepare(`
+      INSERT INTO v2_inbound_plans(id, plan_date, customer, biz_class, cargo_summary,
+        expected_arrival, purpose, remark, status, created_by, created_at, updated_at, display_no, source_type, needs_info_update)
+      VALUES(?,?,'待补充','','现场无单卸货','','','','field_working',?,?,?,?,'field_dynamic',1)
+    `).bind(plan_id, plan_date, worker_name || worker_id, t, t, display_no).run();
 
-  // 2. Create unload job bound to this plan
-  const job_id = "JOB-" + uid();
-  await env.DB.prepare(`
-    INSERT INTO v2_ops_jobs(id, flow_stage, biz_class, job_type, related_doc_type, related_doc_id,
-      status, created_by, created_at, updated_at, active_worker_count)
-    VALUES(?, 'unload', '', 'unload', 'inbound_plan', ?, 'working', ?, ?, ?, 1)
-  `).bind(job_id, plan_id, worker_id, t, t).run();
+    const job_id = "JOB-" + uid();
+    await env.DB.prepare(`
+      INSERT INTO v2_ops_jobs(id, flow_stage, biz_class, job_type, related_doc_type, related_doc_id,
+        status, created_by, created_at, updated_at, active_worker_count)
+      VALUES(?, 'unload', '', 'unload', 'inbound_plan', ?, 'working', ?, ?, ?, 1)
+    `).bind(job_id, plan_id, worker_id, t, t).run();
 
-  // 3. Create worker segment
-  const seg_id = "WS-" + uid();
-  await env.DB.prepare(`
-    INSERT INTO v2_ops_job_workers(id, job_id, worker_id, worker_name, joined_at)
-    VALUES(?,?,?,?,?)
-  `).bind(seg_id, job_id, worker_id, worker_name, t).run();
+    const seg_id = "WS-" + uid();
+    await env.DB.prepare(`
+      INSERT INTO v2_ops_job_workers(id, job_id, worker_id, worker_name, joined_at)
+      VALUES(?,?,?,?,?)
+    `).bind(seg_id, job_id, worker_id, worker_name, t).run();
 
-  return json({ ok: true, plan_id, display_no, job_id, worker_seg_id: seg_id });
+    return { ok: true, plan_id, display_no, job_id, worker_seg_id: seg_id };
+  });
 });
 
 route("v2_unload_job_start", async (body, env) => {
@@ -1395,64 +1519,62 @@ route("v2_unload_job_start", async (body, env) => {
   const biz_class = String(body.biz_class || "").trim();
   if (!worker_id) return err("missing worker_id");
 
-  const t = now();
+  return withIdem(env, body, "v2_unload_job_start", async () => {
+    const t = now();
 
-  // Validate plan status before allowing unload
-  if (plan_id) {
-    const plan = await env.DB.prepare("SELECT status FROM v2_inbound_plans WHERE id=?").bind(plan_id).first();
-    if (!plan) return err("plan not found", 404);
-    if (plan.status !== 'pending' && plan.status !== 'unloading') {
-      return json({ ok: false, error: "unload_not_allowed_for_status", message: "当前状态不可继续卸货 / 현재 상태에서 하차 불가", current_status: plan.status });
-    }
-  }
-
-  // Check existing active unload job for this plan
-  let job = null;
-  if (plan_id) {
-    const existing = await env.DB.prepare(
-      "SELECT * FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type='unload' AND status IN ('pending','working') LIMIT 1"
-    ).bind(plan_id).first();
-    if (existing) job = existing;
-  }
-
-  let job_id, is_new_job = false;
-  if (job) {
-    job_id = job.id;
-    // 防重：同一 worker 已有 open segment 则直接返回
-    const dup = await findOpenSeg(env, job_id, worker_id);
-    if (dup) return json({ ok: true, job_id, worker_seg_id: dup.id, is_new_job: false, already_joined: true });
-    await env.DB.prepare(
-      "UPDATE v2_ops_jobs SET active_worker_count=active_worker_count+1, updated_at=?, status='working' WHERE id=?"
-    ).bind(t, job_id).run();
-  } else {
-    // Only pending plans can start a new unload job
     if (plan_id) {
-      const plan2 = await env.DB.prepare("SELECT status FROM v2_inbound_plans WHERE id=?").bind(plan_id).first();
-      if (plan2 && plan2.status === 'unloading') {
-        return json({ ok: false, error: "unload_status_inconsistent", message: "状态为卸货中但无活跃卸货任务，请联系管理员检查" });
+      const plan = await env.DB.prepare("SELECT status FROM v2_inbound_plans WHERE id=?").bind(plan_id).first();
+      if (!plan) return { ok: false, error: "plan not found" };
+      if (plan.status !== 'pending' && plan.status !== 'unloading') {
+        return { ok: false, error: "unload_not_allowed_for_status", message: "当前状态不可继续卸货 / 현재 상태에서 하차 불가", current_status: plan.status };
       }
     }
-    job_id = "JOB-" + uid();
-    is_new_job = true;
-    await env.DB.prepare(`
-      INSERT INTO v2_ops_jobs(id, flow_stage, biz_class, job_type, related_doc_type, related_doc_id,
-        status, created_by, created_at, updated_at, active_worker_count)
-      VALUES(?, 'unload', ?, 'unload', 'inbound_plan', ?, 'working', ?, ?, ?, 1)
-    `).bind(job_id, biz_class, plan_id, worker_id, t, t).run();
+
+    let job = null;
     if (plan_id) {
-      await env.DB.prepare(
-        "UPDATE v2_inbound_plans SET status='unloading', updated_at=? WHERE id=? AND status='pending'"
-      ).bind(t, plan_id).run();
+      const existing = await env.DB.prepare(
+        "SELECT * FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type='unload' AND status IN ('pending','working') LIMIT 1"
+      ).bind(plan_id).first();
+      if (existing) job = existing;
     }
-  }
 
-  const seg_id = "WS-" + uid();
-  await env.DB.prepare(`
-    INSERT INTO v2_ops_job_workers(id, job_id, worker_id, worker_name, joined_at)
-    VALUES(?,?,?,?,?)
-  `).bind(seg_id, job_id, worker_id, worker_name, t).run();
+    let job_id, is_new_job = false;
+    if (job) {
+      job_id = job.id;
+      const dup = await findOpenSeg(env, job_id, worker_id);
+      if (dup) return { ok: true, job_id, worker_seg_id: dup.id, is_new_job: false, already_joined: true };
+      await env.DB.prepare(
+        "UPDATE v2_ops_jobs SET active_worker_count=active_worker_count+1, updated_at=?, status='working' WHERE id=?"
+      ).bind(t, job_id).run();
+    } else {
+      if (plan_id) {
+        const plan2 = await env.DB.prepare("SELECT status FROM v2_inbound_plans WHERE id=?").bind(plan_id).first();
+        if (plan2 && plan2.status === 'unloading') {
+          return { ok: false, error: "unload_status_inconsistent", message: "状态为卸货中但无活跃卸货任务，请联系管理员检查" };
+        }
+      }
+      job_id = "JOB-" + uid();
+      is_new_job = true;
+      await env.DB.prepare(`
+        INSERT INTO v2_ops_jobs(id, flow_stage, biz_class, job_type, related_doc_type, related_doc_id,
+          status, created_by, created_at, updated_at, active_worker_count)
+        VALUES(?, 'unload', ?, 'unload', 'inbound_plan', ?, 'working', ?, ?, ?, 1)
+      `).bind(job_id, biz_class, plan_id, worker_id, t, t).run();
+      if (plan_id) {
+        await env.DB.prepare(
+          "UPDATE v2_inbound_plans SET status='unloading', updated_at=? WHERE id=? AND status='pending'"
+        ).bind(t, plan_id).run();
+      }
+    }
 
-  return json({ ok: true, job_id, worker_seg_id: seg_id, is_new_job });
+    const seg_id = "WS-" + uid();
+    await env.DB.prepare(`
+      INSERT INTO v2_ops_job_workers(id, job_id, worker_id, worker_name, joined_at)
+      VALUES(?,?,?,?,?)
+    `).bind(seg_id, job_id, worker_id, worker_name, t).run();
+
+    return { ok: true, job_id, worker_seg_id: seg_id, is_new_job };
+  });
 });
 
 route("v2_unload_job_finish", async (body, env) => {
@@ -1629,7 +1751,6 @@ route("v2_unload_job_finish", async (body, env) => {
 
 route("v2_inbound_job_start", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
-  let plan_id = String(body.plan_id || "").trim();
   const worker_id = String(body.worker_id || "").trim();
   const worker_name = String(body.worker_name || "").trim();
   const biz_class = String(body.biz_class || "").trim();
@@ -1644,7 +1765,6 @@ route("v2_inbound_job_start", async (body, env) => {
   const isReturn = (job_type === 'inbound_return');
   const isStandard = (job_type === 'inbound_direct' || job_type === 'inbound_bulk');
 
-  // biz_class sanity
   if (isReturn && biz_class && biz_class !== 'return') {
     return err("biz_class mismatch for inbound_return: " + biz_class);
   }
@@ -1652,104 +1772,103 @@ route("v2_inbound_job_start", async (body, env) => {
     return err("biz_class must be direct_ship or bulk for standard inbound, got: " + biz_class);
   }
 
-  const t = now();
-  const today = kstToday();
+  return withIdem(env, body, "v2_inbound_job_start", async () => {
+    let plan_id = String(body.plan_id || "").trim();
+    const t = now();
+    const today = kstToday();
 
-  // ===== Path A: start from existing system inbound plan (standard only) =====
-  if (plan_id && isStandard) {
-    const plan = await env.DB.prepare("SELECT status, biz_class FROM v2_inbound_plans WHERE id=?").bind(plan_id).first();
-    if (!plan) return err("plan not found", 404);
-    if (plan.status !== 'arrived_pending_putaway' && plan.status !== 'putting_away') {
-      return err("plan status must be arrived_pending_putaway, current: " + plan.status);
+    // ===== Path A: start from existing system inbound plan (standard only) =====
+    if (plan_id && isStandard) {
+      const plan = await env.DB.prepare("SELECT status, biz_class FROM v2_inbound_plans WHERE id=?").bind(plan_id).first();
+      if (!plan) return { ok: false, error: "plan not found" };
+      if (plan.status !== 'arrived_pending_putaway' && plan.status !== 'putting_away') {
+        return { ok: false, error: "plan_status_invalid", message: "plan status must be arrived_pending_putaway, current: " + plan.status };
+      }
+      if (plan.biz_class && biz_class && plan.biz_class !== biz_class) {
+        return { ok: false, error: "biz_class_mismatch", message: "plan biz_class mismatch: plan=" + plan.biz_class + " req=" + biz_class };
+      }
     }
-    if (plan.biz_class && biz_class && plan.biz_class !== biz_class) {
-      return err("plan biz_class mismatch: plan=" + plan.biz_class + " req=" + biz_class);
+    // ===== Path B: start from external WMS inbound number (standard only) =====
+    else if (!plan_id && isStandard) {
+      if (!external_inbound_no) return { ok: false, error: "missing plan_id or external_inbound_no" };
+      if (!customer_name) return { ok: false, error: "missing customer_name for external inbound" };
+      const dupPlan = await env.DB.prepare(
+        "SELECT id FROM v2_inbound_plans WHERE source_type='external_inbound' AND external_inbound_no=? AND status='putting_away' ORDER BY created_at DESC LIMIT 1"
+      ).bind(external_inbound_no).first();
+      if (dupPlan) {
+        plan_id = dupPlan.id;
+      } else {
+        plan_id = "IB-" + uid();
+        const display_no = await nextDisplayNo(env, today);
+        await env.DB.prepare(`
+          INSERT INTO v2_inbound_plans(id, plan_date, customer, biz_class, cargo_summary,
+            expected_arrival, purpose, remark, status, created_by, created_at, updated_at,
+            display_no, source_type, external_inbound_no)
+          VALUES(?,?,?,?,'外部WMS入库单','','',?, 'putting_away',?,?,?,?,'external_inbound',?)
+        `).bind(plan_id, today, customer_name, biz_class, start_remark, worker_id, t, t, display_no, external_inbound_no).run();
+      }
     }
-  }
-  // ===== Path B: start from external WMS inbound number (standard only) =====
-  else if (!plan_id && isStandard) {
-    if (!external_inbound_no) return err("missing plan_id or external_inbound_no");
-    if (!customer_name) return err("missing customer_name for external inbound");
-    // Dedupe: if there's an active external plan with same external_no still putting_away, reuse it
-    const dupPlan = await env.DB.prepare(
-      "SELECT id FROM v2_inbound_plans WHERE source_type='external_inbound' AND external_inbound_no=? AND status='putting_away' ORDER BY created_at DESC LIMIT 1"
-    ).bind(external_inbound_no).first();
-    if (dupPlan) {
-      plan_id = dupPlan.id;
+    // ===== Path C: return inbound lightweight session =====
+    else if (isReturn) {
+      if (!plan_id) {
+        plan_id = "IB-" + uid();
+        const display_no = await nextDisplayNo(env, today);
+        await env.DB.prepare(`
+          INSERT INTO v2_inbound_plans(id, plan_date, customer, biz_class, cargo_summary,
+            expected_arrival, purpose, remark, status, created_by, created_at, updated_at,
+            display_no, source_type)
+          VALUES(?,?,?,'return','退件入库会话','','',?, 'putting_away',?,?,?,?,'return_session')
+        `).bind(plan_id, today, customer_name || '未指定', start_remark, worker_id, t, t, display_no).run();
+      } else {
+        const rp = await env.DB.prepare(
+          "SELECT status, source_type, biz_class FROM v2_inbound_plans WHERE id=?"
+        ).bind(plan_id).first();
+        if (!rp) return { ok: false, error: "return session not found" };
+        if (rp.status !== 'putting_away') return { ok: false, error: "return session status invalid: " + rp.status };
+        if (rp.biz_class !== 'return') return { ok: false, error: "not a return session" };
+      }
     } else {
-      plan_id = "IB-" + uid();
-      const display_no = await nextDisplayNo(env, today);
-      await env.DB.prepare(`
-        INSERT INTO v2_inbound_plans(id, plan_date, customer, biz_class, cargo_summary,
-          expected_arrival, purpose, remark, status, created_by, created_at, updated_at,
-          display_no, source_type, external_inbound_no)
-        VALUES(?,?,?,?,'外部WMS入库单','','',?, 'putting_away',?,?,?,?,'external_inbound',?)
-      `).bind(plan_id, today, customer_name, biz_class, start_remark, worker_id, t, t, display_no, external_inbound_no).run();
+      return { ok: false, error: "missing plan_id" };
     }
-  }
-  // ===== Path C: return inbound lightweight session =====
-  else if (isReturn) {
-    if (!plan_id) {
-      plan_id = "IB-" + uid();
-      const display_no = await nextDisplayNo(env, today);
-      await env.DB.prepare(`
-        INSERT INTO v2_inbound_plans(id, plan_date, customer, biz_class, cargo_summary,
-          expected_arrival, purpose, remark, status, created_by, created_at, updated_at,
-          display_no, source_type)
-        VALUES(?,?,?,'return','退件入库会话','','',?, 'putting_away',?,?,?,?,'return_session')
-      `).bind(plan_id, today, customer_name || '未指定', start_remark, worker_id, t, t, display_no).run();
-    } else {
-      // Join existing return session: verify it's putting_away and is a return_session
-      const rp = await env.DB.prepare(
-        "SELECT status, source_type, biz_class FROM v2_inbound_plans WHERE id=?"
-      ).bind(plan_id).first();
-      if (!rp) return err("return session not found", 404);
-      if (rp.status !== 'putting_away') return err("return session status invalid: " + rp.status);
-      if (rp.biz_class !== 'return') return err("not a return session");
-    }
-  } else {
-    return err("missing plan_id");
-  }
 
-  // ===== Find / create job bound to plan_id =====
-  let job = null;
-  const existing = await env.DB.prepare(
-    "SELECT * FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type=? AND status IN ('pending','working') LIMIT 1"
-  ).bind(plan_id, job_type).first();
-  if (existing) job = existing;
+    // ===== Find / create job bound to plan_id =====
+    let job = null;
+    const existing = await env.DB.prepare(
+      "SELECT * FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type=? AND status IN ('pending','working') LIMIT 1"
+    ).bind(plan_id, job_type).first();
+    if (existing) job = existing;
 
-  let job_id, is_new_job = false;
-  if (job) {
-    job_id = job.id;
-    const dup = await findOpenSeg(env, job_id, worker_id);
-    if (dup) return json({ ok: true, job_id, worker_seg_id: dup.id, is_new_job: false, already_joined: true, plan_id });
-    await env.DB.prepare(
-      "UPDATE v2_ops_jobs SET active_worker_count=active_worker_count+1, updated_at=?, status='working' WHERE id=?"
-    ).bind(t, job_id).run();
-  } else {
-    job_id = "JOB-" + uid();
-    is_new_job = true;
-    await env.DB.prepare(`
-      INSERT INTO v2_ops_jobs(id, flow_stage, biz_class, job_type, related_doc_type, related_doc_id,
-        status, created_by, created_at, updated_at, active_worker_count)
-      VALUES(?, 'inbound', ?, ?, 'inbound_plan', ?, 'working', ?, ?, ?, 1)
-    `).bind(job_id, biz_class, job_type, plan_id, worker_id, t, t).run();
-    // Only standard inbound flips plan from arrived_pending_putaway → putting_away.
-    // External/return paths already created plan in putting_away state.
-    if (isStandard) {
+    let job_id, is_new_job = false;
+    if (job) {
+      job_id = job.id;
+      const dup = await findOpenSeg(env, job_id, worker_id);
+      if (dup) return { ok: true, job_id, worker_seg_id: dup.id, is_new_job: false, already_joined: true, plan_id };
       await env.DB.prepare(
-        "UPDATE v2_inbound_plans SET status='putting_away', updated_at=? WHERE id=? AND status='arrived_pending_putaway'"
-      ).bind(t, plan_id).run();
+        "UPDATE v2_ops_jobs SET active_worker_count=active_worker_count+1, updated_at=?, status='working' WHERE id=?"
+      ).bind(t, job_id).run();
+    } else {
+      job_id = "JOB-" + uid();
+      is_new_job = true;
+      await env.DB.prepare(`
+        INSERT INTO v2_ops_jobs(id, flow_stage, biz_class, job_type, related_doc_type, related_doc_id,
+          status, created_by, created_at, updated_at, active_worker_count)
+        VALUES(?, 'inbound', ?, ?, 'inbound_plan', ?, 'working', ?, ?, ?, 1)
+      `).bind(job_id, biz_class, job_type, plan_id, worker_id, t, t).run();
+      if (isStandard) {
+        await env.DB.prepare(
+          "UPDATE v2_inbound_plans SET status='putting_away', updated_at=? WHERE id=? AND status='arrived_pending_putaway'"
+        ).bind(t, plan_id).run();
+      }
     }
-  }
 
-  const seg_id = "WS-" + uid();
-  await env.DB.prepare(`
-    INSERT INTO v2_ops_job_workers(id, job_id, worker_id, worker_name, joined_at)
-    VALUES(?,?,?,?,?)
-  `).bind(seg_id, job_id, worker_id, worker_name, t).run();
+    const seg_id = "WS-" + uid();
+    await env.DB.prepare(`
+      INSERT INTO v2_ops_job_workers(id, job_id, worker_id, worker_name, joined_at)
+      VALUES(?,?,?,?,?)
+    `).bind(seg_id, job_id, worker_id, worker_name, t).run();
 
-  return json({ ok: true, job_id, worker_seg_id: seg_id, is_new_job, plan_id });
+    return { ok: true, job_id, worker_seg_id: seg_id, is_new_job, plan_id };
+  });
 });
 
 route("v2_inbound_job_finish", async (body, env) => {
@@ -1863,32 +1982,34 @@ route("v2_inbound_mark_completed", async (body, env) => {
   if (!isAuth(body, env)) return err("unauthorized", 401);
   const plan_id = String(body.inbound_plan_id || "").trim();
   if (!plan_id) return err("missing inbound_plan_id");
-  const operator = String(body.operator_name || "").trim();
-  const remark = String(body.remark || "").trim();
 
-  const plan = await env.DB.prepare("SELECT status FROM v2_inbound_plans WHERE id=?").bind(plan_id).first();
-  if (!plan) return err("plan not found", 404);
-  if (plan.status !== 'arrived_pending_putaway') {
-    return err("only arrived_pending_putaway can be marked completed, current: " + plan.status);
-  }
+  return withIdem(env, body, "v2_inbound_mark_completed", async () => {
+    const operator = String(body.operator_name || "").trim();
+    const remark = String(body.remark || "").trim();
 
-  // Block if there's an active inbound job
-  const activeJob = await env.DB.prepare(
-    "SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type LIKE 'inbound%' AND status IN ('pending','working','awaiting_close') LIMIT 1"
-  ).bind(plan_id).first();
-  if (activeJob) {
-    return json({ ok: false, error: "inbound_job_still_active", message: "当前仍有进行中的入库任务，不能直接完结" });
-  }
+    const plan = await env.DB.prepare("SELECT status FROM v2_inbound_plans WHERE id=?").bind(plan_id).first();
+    if (!plan) return { ok: false, error: "plan not found" };
+    if (plan.status !== 'arrived_pending_putaway') {
+      return { ok: false, error: "status_invalid", message: "only arrived_pending_putaway can be marked completed, current: " + plan.status };
+    }
 
-  const t = now();
-  let updateSql = "UPDATE v2_inbound_plans SET status='completed', updated_at=?, manual_completed_by=?, manual_completed_at=?";
-  const binds = [t, operator, t];
-  if (remark) { updateSql += ", remark=?"; binds.push(remark); }
-  updateSql += " WHERE id=?";
-  binds.push(plan_id);
-  await env.DB.prepare(updateSql).bind(...binds).run();
+    const activeJob = await env.DB.prepare(
+      "SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type LIKE 'inbound%' AND status IN ('pending','working','awaiting_close') LIMIT 1"
+    ).bind(plan_id).first();
+    if (activeJob) {
+      return { ok: false, error: "inbound_job_still_active", message: "当前仍有进行中的入库任务，不能直接完结" };
+    }
 
-  return json({ ok: true, operator, completed_at: t });
+    const t = now();
+    let updateSql = "UPDATE v2_inbound_plans SET status='completed', updated_at=?, manual_completed_by=?, manual_completed_at=?";
+    const binds = [t, operator, t];
+    if (remark) { updateSql += ", remark=?"; binds.push(remark); }
+    updateSql += " WHERE id=?";
+    binds.push(plan_id);
+    await env.DB.prepare(updateSql).bind(...binds).run();
+
+    return { ok: true, operator, completed_at: t };
+  });
 });
 
 // =====================================================
@@ -1908,50 +2029,49 @@ route("v2_ops_job_start", async (body, env) => {
   const interrupt_type = String(body.interrupt_type || "").trim();
   if (!worker_id) return err("missing worker_id");
 
-  const t = now();
+  return withIdem(env, body, "v2_ops_job_start", async () => {
+    const t = now();
 
-  // Check for existing job on same doc
-  let job = null;
-  if (related_doc_type && related_doc_id) {
-    const existing = await env.DB.prepare(
-      "SELECT * FROM v2_ops_jobs WHERE related_doc_type=? AND related_doc_id=? AND job_type=? AND status IN ('pending','working') AND is_temporary_interrupt=0 LIMIT 1"
-    ).bind(related_doc_type, related_doc_id, job_type).first();
-    if (existing) job = existing;
-  }
+    let job = null;
+    if (related_doc_type && related_doc_id) {
+      const existing = await env.DB.prepare(
+        "SELECT * FROM v2_ops_jobs WHERE related_doc_type=? AND related_doc_id=? AND job_type=? AND status IN ('pending','working') AND is_temporary_interrupt=0 LIMIT 1"
+      ).bind(related_doc_type, related_doc_id, job_type).first();
+      if (existing) job = existing;
+    }
 
-  let job_id, is_new_job = false;
-  if (job) {
-    job_id = job.id;
-    // 防重：同一 worker 已有 open segment 则直接返回
-    const dup = await findOpenSeg(env, job_id, worker_id);
-    if (dup) return json({ ok: true, job_id, worker_seg_id: dup.id, is_new_job: false, already_joined: true });
-    await env.DB.prepare(
-      "UPDATE v2_ops_jobs SET active_worker_count=active_worker_count+1, updated_at=?, status='working' WHERE id=?"
-    ).bind(t, job_id).run();
-  } else {
-    job_id = "JOB-" + uid();
-    is_new_job = true;
+    let job_id, is_new_job = false;
+    if (job) {
+      job_id = job.id;
+      const dup = await findOpenSeg(env, job_id, worker_id);
+      if (dup) return { ok: true, job_id, worker_seg_id: dup.id, is_new_job: false, already_joined: true };
+      await env.DB.prepare(
+        "UPDATE v2_ops_jobs SET active_worker_count=active_worker_count+1, updated_at=?, status='working' WHERE id=?"
+      ).bind(t, job_id).run();
+    } else {
+      job_id = "JOB-" + uid();
+      is_new_job = true;
+      await env.DB.prepare(`
+        INSERT INTO v2_ops_jobs(id, flow_stage, biz_class, job_type, related_doc_type, related_doc_id,
+          status, parent_job_id, is_temporary_interrupt, interrupt_type, created_by, created_at, updated_at, active_worker_count)
+        VALUES(?,?,?,?,?,?,'working',?,?,?,?,?,?,1)
+      `).bind(job_id, flow_stage, biz_class, job_type, related_doc_type, related_doc_id,
+          parent_job_id, is_temporary_interrupt, interrupt_type, worker_id, t, t).run();
+    }
+
+    if (is_temporary_interrupt && parent_job_id) {
+      await closeAllOpenSegs(env, parent_job_id, worker_id, t, 'interrupted');
+      await recalcActiveCount(env, parent_job_id, t);
+    }
+
+    const seg_id = "WS-" + uid();
     await env.DB.prepare(`
-      INSERT INTO v2_ops_jobs(id, flow_stage, biz_class, job_type, related_doc_type, related_doc_id,
-        status, parent_job_id, is_temporary_interrupt, interrupt_type, created_by, created_at, updated_at, active_worker_count)
-      VALUES(?,?,?,?,?,?,'working',?,?,?,?,?,?,1)
-    `).bind(job_id, flow_stage, biz_class, job_type, related_doc_type, related_doc_id,
-        parent_job_id, is_temporary_interrupt, interrupt_type, worker_id, t, t).run();
-  }
+      INSERT INTO v2_ops_job_workers(id, job_id, worker_id, worker_name, joined_at)
+      VALUES(?,?,?,?,?)
+    `).bind(seg_id, job_id, worker_id, worker_name, t).run();
 
-  // If this is an interrupt, pause the parent job for this worker — 自愈式关闭
-  if (is_temporary_interrupt && parent_job_id) {
-    await closeAllOpenSegs(env, parent_job_id, worker_id, t, 'interrupted');
-    await recalcActiveCount(env, parent_job_id, t);
-  }
-
-  const seg_id = "WS-" + uid();
-  await env.DB.prepare(`
-    INSERT INTO v2_ops_job_workers(id, job_id, worker_id, worker_name, joined_at)
-    VALUES(?,?,?,?,?)
-  `).bind(seg_id, job_id, worker_id, worker_name, t).run();
-
-  return json({ ok: true, job_id, worker_seg_id: seg_id, is_new_job });
+    return { ok: true, job_id, worker_seg_id: seg_id, is_new_job };
+  });
 });
 
 route("v2_ops_job_leave", async (body, env) => {

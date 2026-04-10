@@ -50,8 +50,24 @@ function setKey(k) { try { localStorage.setItem(V2_KEY_STORAGE, k); } catch(e) {
 function getUser() { try { return localStorage.getItem(V2_USER_KEY) || ""; } catch(e) { return ""; } }
 function setUser(u) { try { localStorage.setItem(V2_USER_KEY, u); } catch(e) {} }
 
+// 写操作 action 集合 — 自动注入 client_req_id 供后端幂等
+var _WRITE_ACTIONS = [
+  'v2_issue_create','v2_issue_handle_start',
+  'v2_outbound_order_create','v2_outbound_load_start',
+  'v2_inbound_plan_create','v2_inbound_dynamic_finalize',
+  'v2_unplanned_unload_start','v2_unplanned_unload_join',
+  'v2_feedback_finalize_to_inbound','v2_unload_dynamic_start',
+  'v2_unload_job_start','v2_inbound_job_start',
+  'v2_inbound_mark_completed','v2_ops_job_start'
+];
+function _genReqId(action) {
+  return action + '_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+}
 async function api(params) {
   params.k = getKey();
+  if (_WRITE_ACTIONS.indexOf(params.action) !== -1 && !params.client_req_id) {
+    params.client_req_id = _genReqId(params.action);
+  }
   try {
     var res = await fetch(V2_API, {
       method: "POST",

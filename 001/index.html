@@ -107,7 +107,7 @@
       <div id="unloadScanReader" style="width:280px;margin:6px 0;"></div>
     </div>
     <select id="unloadPlanSelect"><option value="">-- 选择/선택 --</option></select>
-    <button class="btn btn-outline btn-sm mt-10" onclick="loadInboundPlans('unloadPlanSelect')">刷新列表 / 새로고침</button>
+    <button class="btn btn-outline btn-sm mt-10" onclick="loadUnloadCandidates()">刷新列表 / 새로고침</button>
     <div style="height:10px"></div>
     <button class="btn btn-success" onclick="startUnload(this)">开始卸货 / 하차 시작</button>
     <div style="height:8px"></div>
@@ -167,24 +167,30 @@
     <div class="page-title" id="inboundTitle">入库 / 입고</div>
   </div>
   <div id="inboundEntryCard" class="card">
-    <div style="display:flex;gap:6px;margin-bottom:10px;">
-      <button class="btn btn-outline btn-sm" id="ibSrcBtnPlan" onclick="switchInboundSource('plan')" style="flex:1;">系统入库计划 / 시스템계획</button>
-      <button class="btn btn-outline btn-sm" id="ibSrcBtnExternal" onclick="switchInboundSource('external')" style="flex:1;">外部入库单号 / 외부번호</button>
+    <!-- 统一入口：手输/扫码/候选下拉 -->
+    <label style="font-weight:700;">输入或扫描入库单号 / 입고번호 입력 또는 스캔</label>
+    <div style="display:flex;gap:6px;margin-bottom:6px;">
+      <input id="inboundCodeInput" type="text" placeholder="系统单号或外部WMS单号 / 시스템 또는 외부번호" style="flex:1;">
+      <button class="btn btn-outline btn-sm" onclick="startInboundScan()" id="ibScanBtn" style="white-space:nowrap;">📷 扫码</button>
     </div>
-    <div id="ibSrcPlan">
-      <label style="font-weight:700;">选择已到库待入库的计划 / 입고대기 계획 선택</label>
-      <select id="inboundPlanSelect"><option value="">-- 选择/선택 --</option></select>
-      <button class="btn btn-outline btn-sm mt-10" onclick="loadInboundPlans('inboundPlanSelect')">刷新列表 / 새로고침</button>
+    <div id="inboundScanReader" style="margin-top:4px;"></div>
+    <div style="display:flex;gap:6px;margin-bottom:8px;">
+      <button class="btn btn-outline btn-sm" onclick="resolveInboundCode(this)" style="flex:1;">识别单号 / 번호 인식</button>
+      <button class="btn btn-outline btn-sm" onclick="clearInboundResolve()" style="flex:1;">清空重选 / 초기화</button>
     </div>
-    <div id="ibSrcExternal" style="display:none;">
-      <label style="font-weight:700;">外部 WMS 入库单号 / 외부 WMS 입고번호 <span style="color:#e74c3c;">*</span></label>
-      <input id="inboundExternalNo" type="text" placeholder="请手动输入或扫描 / 입력 또는 스캔">
-      <button class="btn btn-outline btn-sm mt-10" onclick="startInboundExternalScan()" id="ibExtScanBtn">扫码外部单号 / 외부번호 스캔</button>
-      <div id="inboundExternalScanReader" style="margin-top:8px;"></div>
-      <label style="margin-top:8px;font-weight:700;">客户名 / 고객명 <span style="color:#e74c3c;">*</span></label>
+    <div id="ibResolveResult" style="margin-bottom:8px;font-size:13px;"></div>
+    <!-- 外部单号时需要填客户名 -->
+    <div id="ibExternalFields" style="display:none;">
+      <label style="font-weight:700;">客户名 / 고객명 <span style="color:#e74c3c;">*</span></label>
       <input id="inboundExternalCustomer" type="text" placeholder="必填 / 필수">
       <label style="margin-top:8px;">开始备注（可选）/ 시작 비고 (선택)</label>
       <input id="inboundExternalRemark" type="text" placeholder="例如：先处理 A 区 / 예: A구역 먼저">
+    </div>
+    <!-- 系统候选单（辅助） -->
+    <div style="margin-top:8px;">
+      <label style="font-size:12px;color:#888;">或从系统候选单选择 / 또는 시스템 후보 선택:</label>
+      <select id="inboundPlanSelect" onchange="onInboundCandidateSelect()"><option value="">-- 选择/선택 --</option></select>
+      <button class="btn btn-outline btn-sm mt-10" onclick="loadInboundCandidates()" style="font-size:11px;">刷新 / 새로고침</button>
     </div>
     <div style="height:10px"></div>
     <button class="btn btn-success" onclick="startInbound(this)">开始入库 / 입고 시작</button>
@@ -435,7 +441,7 @@
 <input type="file" id="photoInput" accept="image/*" capture="environment" style="display:none;" onchange="handlePhotoUpload(this)">
 
 <script src="config.js"></script>
-<script src="app.js?v=20260410b"></script>
+<script src="app.js?v=20260410c"></script>
 <script src="patch.js?v=20260408d"></script>
 </body>
 </html>
