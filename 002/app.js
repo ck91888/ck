@@ -1638,7 +1638,7 @@ async function loadOrderOpsDetail() {
 
   // Load pick docs if applicable
   if (j.job_type === 'pick_direct') {
-    var pdRes = await api({ action: "v2_pick_job_add_docs", job_id: j.id, pick_doc_nos: [] });
+    var pdRes = await api({ action: "v2_pick_job_docs_list", job_id: j.id });
     var pdEl = document.getElementById("orderOpsPickDocs");
     if (pdEl && pdRes && pdRes.ok && pdRes.docs) {
       if (pdRes.docs.length > 0) {

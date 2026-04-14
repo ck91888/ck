@@ -2536,6 +2536,16 @@ route("v2_pick_job_start", async (body, env) => {
   });
 });
 
+route("v2_pick_job_docs_list", async (body, env) => {
+  if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  const job_id = String(body.job_id || "").trim();
+  if (!job_id) return err("missing job_id");
+  const allDocs = await env.DB.prepare(
+    "SELECT pick_doc_no, created_at FROM v2_ops_job_pick_docs WHERE job_id=? ORDER BY created_at"
+  ).bind(job_id).all();
+  return json({ ok: true, docs: allDocs.results || [] });
+});
+
 route("v2_pick_job_add_docs", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
   const job_id = String(body.job_id || "").trim();
@@ -2582,14 +2592,23 @@ route("v2_pick_job_finish", async (body, env) => {
     return json({ ok: false, error: "already_completed", message: "任务已完成，请勿重复提交" });
   }
 
-  // Close this worker's segments
+  // 1. Close this worker's segments only
   await closeAllOpenSegs(env, job_id, worker_id, t, 'finished');
 
-  // Save result
+  // 2. Recalc active count
+  const realCount = await recalcActiveCount(env, job_id, t);
+
+  // 3. If others still working, block completion
+  if (realCount > 0) {
+    return json({ ok: false, error: "others_still_working",
+      message: "还有 " + realCount + " 人正在参与此任务，暂不能完成",
+      active_worker_count: realCount });
+  }
+
+  // 4. Last person — save result and complete
   const remark = String(body.remark || "").trim();
   const result_note = String(body.result_note || "").trim();
 
-  // Get all pick doc nos for result record
   const allDocs = await env.DB.prepare(
     "SELECT pick_doc_no FROM v2_ops_job_pick_docs WHERE job_id=? ORDER BY created_at"
   ).bind(job_id).all();
@@ -2604,7 +2623,7 @@ route("v2_pick_job_finish", async (body, env) => {
     pick_doc_nos: docNos
   }), '[]', worker_id, t).run();
 
-  // Complete job — close all remaining open segments
+  // Complete job — close any stale open segments (safety net)
   await env.DB.prepare(
     "UPDATE v2_ops_jobs SET status='completed', active_worker_count=0, updated_at=? WHERE id=?"
   ).bind(t, job_id).run();
@@ -2624,6 +2643,7 @@ route("v2_bulk_op_job_start", async (body, env) => {
   const worker_name = String(body.worker_name || "").trim();
   const work_order_no = String(body.work_order_no || "").trim();
   if (!worker_id) return err("missing worker_id");
+  if (!work_order_no) return err("missing work_order_no");
 
   return withIdem(env, body, "v2_bulk_op_job_start", async () => {
     const t = now();
@@ -2678,9 +2698,20 @@ route("v2_bulk_op_job_finish", async (body, env) => {
     return json({ ok: false, error: "already_completed", message: "任务已完成，请勿重复提交" });
   }
 
+  // 1. Close this worker's segments only
   await closeAllOpenSegs(env, job_id, worker_id, t, 'finished');
 
-  // Build structured result from body
+  // 2. Recalc active count
+  const realCount = await recalcActiveCount(env, job_id, t);
+
+  // 3. If others still working, block completion
+  if (realCount > 0) {
+    return json({ ok: false, error: "others_still_working",
+      message: "还有 " + realCount + " 人正在参与此任务，暂不能完成",
+      active_worker_count: realCount });
+  }
+
+  // 4. Last person — save result and complete
   const resultData = {
     packed_sku_count: Number(body.packed_sku_count || 0),
     packed_box_count: Number(body.packed_box_count || 0),
@@ -2702,6 +2733,7 @@ route("v2_bulk_op_job_finish", async (body, env) => {
     VALUES(?,?,?,?,?,?,?)
   `).bind(result_id, job_id, String(body.remark || ""), JSON.stringify(resultData), '[]', worker_id, t).run();
 
+  // Complete job — close any stale open segments (safety net)
   await env.DB.prepare(
     "UPDATE v2_ops_jobs SET status='completed', active_worker_count=0, updated_at=? WHERE id=?"
   ).bind(t, job_id).run();

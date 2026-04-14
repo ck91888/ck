@@ -1764,7 +1764,7 @@ function initPickDirect() {
   if (_activeJobId) {
     document.getElementById("pickResultCard").style.display = "";
     // Load existing pick docs for this job
-    api({ action: "v2_pick_job_add_docs", job_id: _activeJobId, pick_doc_nos: [] }).then(function(res) {
+    api({ action: "v2_pick_job_docs_list", job_id: _activeJobId }).then(function(res) {
       if (res && res.ok && res.docs) {
         _pickDocNos = res.docs.map(function(d) { return d.pick_doc_no; });
         renderPickDocList();
@@ -1894,6 +1894,9 @@ async function finishPickJob(btnEl) {
       alert("任务已完成，请勿重复提交\n작업이 이미 완료되었습니다");
       clearActiveJob();
       goPage("order_op_menu");
+    } else if (res && res.error === "others_still_working") {
+      alert("还有其他人正在参与此任务，暂不能完成\n다른 작업자가 아직 참여 중이라 완료할 수 없습니다\n\n当前参与人数: " + (res.active_worker_count || "?"));
+      refreshPickWorkers();
     } else {
       alert("失败/실패: " + (res ? res.error : "unknown"));
     }
@@ -1965,6 +1968,10 @@ function stopBulkScan() {
 
 async function startBulkJob(btnEl) {
   var workOrderNo = (document.getElementById("bulkOrderInput") || {}).value.trim();
+  if (!workOrderNo) {
+    alert("请输入或扫描工单号\n작업지시 번호를 입력하거나 스캔하세요");
+    return;
+  }
   withActionLock('startBulkJob', btnEl || null, '提交中.../저장중...', async function() {
     var res = await api({
       action: "v2_bulk_op_job_start",
@@ -2016,6 +2023,9 @@ async function finishBulkJob(btnEl) {
       alert("任务已完成，请勿重复提交\n작업이 이미 완료되었습니다");
       clearActiveJob();
       goPage("order_op_menu");
+    } else if (res && res.error === "others_still_working") {
+      alert("还有其他人正在参与此任务，暂不能完成\n다른 작업자가 아직 참여 중이라 완료할 수 없습니다\n\n当前参与人数: " + (res.active_worker_count || "?"));
+      refreshBulkWorkers();
     } else {
       alert("失败/실패: " + (res ? res.error : "unknown"));
     }
