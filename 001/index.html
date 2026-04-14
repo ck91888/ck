@@ -293,41 +293,66 @@
   </div>
 </div>
 
-<!-- Pick Direct (代发拣货) -->
+<!-- Pick Direct (代发拣货 — 趟次制) -->
 <div id="page-pick_direct" class="page">
   <div class="topbar">
     <button class="back-btn" onclick="goPage('order_op_menu')">← 返回/뒤로</button>
     <div class="page-title">代发拣货 / 직배송 피킹</div>
   </div>
-  <div class="card">
-    <div class="card-title">拣货单号 / 피킹 번호</div>
-    <div style="display:flex;gap:6px;">
-      <input type="text" id="pickDocInput" placeholder="输入或扫码拣货单号 / 피킹번호 입력" style="flex:1;">
-      <button class="btn btn-outline btn-sm" onclick="addPickDoc()">添加/추가</button>
+
+  <!-- Section A: 新建趟次 / 가입 활성 트립 -->
+  <div id="pickNewSection">
+    <div class="card">
+      <div class="card-title">新建趟次 / 새 트립 생성</div>
+      <div style="display:flex;gap:6px;">
+        <input type="text" id="pickDocInput" placeholder="输入或扫码拣货单号 / 피킹번호 입력" style="flex:1;">
+        <button class="btn btn-outline btn-sm" onclick="addPickDoc()">添加/추가</button>
+      </div>
+      <div style="height:6px;"></div>
+      <div id="pickScanReader" style="width:100%;max-width:280px;margin:0 auto;"></div>
+      <button class="btn btn-outline btn-sm" id="pickScanBtn" onclick="startPickScan()">扫码 / 스캔</button>
+      <div id="pickDocList" style="margin-top:8px;font-size:13px;"></div>
+      <div style="height:8px;"></div>
+      <button class="btn btn-success" onclick="startPickJob(this)">创建趟次 / 트립 생성</button>
     </div>
-    <div style="height:6px;"></div>
-    <div id="pickScanReader" style="width:100%;max-width:280px;margin:0 auto;"></div>
-    <button class="btn btn-outline btn-sm" id="pickScanBtn" onclick="startPickScan()">扫码 / 스캔</button>
-    <div id="pickDocList" style="margin-top:8px;font-size:13px;"></div>
+
+    <div class="card">
+      <div class="card-title">进行中趟次 / 진행중 트립 <button class="btn btn-outline btn-sm" style="float:right;font-size:11px;" onclick="loadPickActiveList()">刷新/새로고침</button></div>
+      <div id="pickActiveList"><span class="muted">加载中.../로딩중...</span></div>
+    </div>
   </div>
-  <div class="card">
-    <button class="btn btn-success" onclick="startPickJob(this)">开始拣货 / 피킹 시작</button>
-    <button class="btn btn-danger" onclick="finishPickJob(this)">完成拣货 / 피킹 완료</button>
-  </div>
-  <div class="card">
-    <div class="card-title">当前参与人员 / 현재 참여 인원</div>
-    <div id="pickWorkers" class="workers-panel"><span class="muted">--</span></div>
-  </div>
-  <div class="card" id="pickResultCard" style="display:none;">
-    <div class="card-title">拣货结果 / 피킹 결과</div>
-    <label>备注 / 비고</label>
-    <textarea id="pickRemark" rows="2" placeholder="可选备注 / 선택 비고"></textarea>
-    <label>结果说明 / 결과 설명</label>
-    <textarea id="pickResultNote" rows="2" placeholder="可选说明 / 선택 설명"></textarea>
-  </div>
-  <div class="interrupt-bar">
-    <button class="btn btn-warning btn-sm" onclick="interruptToUnload()">挂起→临时卸货 / 임시 하차</button>
-    <button class="btn btn-warning btn-sm" onclick="interruptToLoad()">挂起→临时装货 / 임시 상차</button>
+
+  <!-- Section B: 趟次作业中 (joined a trip) -->
+  <div id="pickWorkingSection" style="display:none;">
+    <div class="card">
+      <div class="card-title" id="pickTripTitle">趟次 --</div>
+      <div style="display:flex;gap:6px;">
+        <input type="text" id="pickAddDocInput" placeholder="追加拣货单号 / 피킹번호 추가" style="flex:1;">
+        <button class="btn btn-outline btn-sm" onclick="addPickDocToTrip()">添加/추가</button>
+      </div>
+      <div style="height:6px;"></div>
+      <div id="pickTripScanReader" style="width:100%;max-width:280px;margin:0 auto;"></div>
+      <button class="btn btn-outline btn-sm" id="pickTripScanBtn" onclick="startPickTripScan()">扫码 / 스캔</button>
+      <div id="pickTripDocList" style="margin-top:8px;font-size:13px;"></div>
+    </div>
+    <div class="card">
+      <button class="btn btn-danger" onclick="finishPickJob(this)">完成拣货 / 피킹 완료</button>
+    </div>
+    <div class="card">
+      <div class="card-title">当前参与人员 / 현재 참여 인원</div>
+      <div id="pickWorkers" class="workers-panel"><span class="muted">--</span></div>
+    </div>
+    <div class="card" id="pickResultCard" style="display:none;">
+      <div class="card-title">拣货结果 / 피킹 결과</div>
+      <label>备注 / 비고</label>
+      <textarea id="pickRemark" rows="2" placeholder="可选备注 / 선택 비고"></textarea>
+      <label>结果说明 / 결과 설명</label>
+      <textarea id="pickResultNote" rows="2" placeholder="可选说明 / 선택 설명"></textarea>
+    </div>
+    <div class="interrupt-bar">
+      <button class="btn btn-warning btn-sm" onclick="interruptToUnload()">挂起→临时卸货 / 임시 하차</button>
+      <button class="btn btn-warning btn-sm" onclick="interruptToLoad()">挂起→临시装货 / 임시 상차</button>
+    </div>
   </div>
 </div>
 
@@ -530,7 +555,7 @@
 <input type="file" id="photoInput" accept="image/*" capture="environment" style="display:none;" onchange="handlePhotoUpload(this)">
 
 <script src="config.js"></script>
-<script src="app.js?v=20260414a"></script>
+<script src="app.js?v=20260414b"></script>
 <script src="patch.js?v=20260408d"></script>
 </body>
 </html>

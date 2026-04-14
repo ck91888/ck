@@ -188,6 +188,29 @@ async function nextDisplayNo(env, planDate) {
   return 'RU-' + dateStr + '-' + Date.now().toString(36).slice(-4);
 }
 
+// ===== Pick Trip No helper =====
+// PK-YYYYMMDD-001 format, based on v2_ops_jobs.display_no
+async function nextPickTripNo(env) {
+  const dateStr = kstToday().replace(/-/g, '');
+  const prefix = 'PK-' + dateStr + '-';
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const row = await env.DB.prepare(
+      "SELECT display_no FROM v2_ops_jobs WHERE job_type='pick_direct' AND display_no LIKE ? ORDER BY display_no DESC LIMIT 1"
+    ).bind(prefix + '%').first();
+    let seq = 1;
+    if (row && row.display_no) {
+      const tail = row.display_no.split('-').pop();
+      seq = (parseInt(tail, 10) || 0) + 1;
+    }
+    const no = prefix + String(seq).padStart(3, '0');
+    const dup = await env.DB.prepare(
+      "SELECT 1 FROM v2_ops_jobs WHERE display_no=? LIMIT 1"
+    ).bind(no).first();
+    if (!dup) return no;
+  }
+  return 'PK-' + dateStr + '-' + Date.now().toString(36).slice(-4);
+}
+
 // ===== Auto-migration =====
 const MIGRATIONS = [
   // v2_inbound_plans
@@ -464,6 +487,9 @@ const MIGRATIONS = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_v2_pick_docs_job ON v2_ops_job_pick_docs(job_id)`,
   `CREATE INDEX IF NOT EXISTS idx_v2_pick_docs_no ON v2_ops_job_pick_docs(pick_doc_no)`,
+
+  // ---- display_no on v2_ops_jobs for trip numbers (PK-YYYYMMDD-NNN) ----
+  `ALTER TABLE v2_ops_jobs ADD COLUMN display_no TEXT DEFAULT ''`,
 ];
 
 let _migrated = false;
@@ -2461,78 +2487,53 @@ route("v2_pick_job_start", async (body, env) => {
   if (typeof pick_doc_nos === 'string') {
     pick_doc_nos = pick_doc_nos.split(',').map(s => s.trim()).filter(Boolean);
   }
+  if (pick_doc_nos.length === 0) return err("missing pick_doc_nos");
 
   return withIdem(env, body, "v2_pick_job_start", async () => {
     const t = now();
 
-    // Try to join an existing active pick_direct job that shares any of the same pick_doc_nos
-    let job = null;
-    if (pick_doc_nos.length > 0) {
-      // Find active pick jobs that have any of these doc nos
-      const placeholders = pick_doc_nos.map(() => '?').join(',');
-      const existing = await env.DB.prepare(
-        `SELECT DISTINCT j.* FROM v2_ops_jobs j
+    // Conflict check: reject if any doc_no is already in an active trip
+    for (const docNo of pick_doc_nos) {
+      const conflict = await env.DB.prepare(
+        `SELECT j.id, j.display_no FROM v2_ops_jobs j
          JOIN v2_ops_job_pick_docs pd ON pd.job_id = j.id
          WHERE j.job_type='pick_direct' AND j.status IN ('pending','working')
-         AND j.is_temporary_interrupt=0 AND pd.pick_doc_no IN (${placeholders})
+         AND j.is_temporary_interrupt=0 AND pd.pick_doc_no=?
          LIMIT 1`
-      ).bind(...pick_doc_nos).first();
-      if (existing) job = existing;
+      ).bind(docNo).first();
+      if (conflict) {
+        return { ok: false, error: "doc_conflict",
+          message: "拣货单 " + docNo + " 已在活跃趟次 " + (conflict.display_no || conflict.id) + " 中",
+          conflict_doc_no: docNo, conflict_trip: conflict.display_no || conflict.id };
+      }
     }
 
-    let job_id, is_new_job = false;
-    if (job) {
-      job_id = job.id;
-      const dup = await findOpenSeg(env, job_id, worker_id);
-      if (dup) {
-        // Still insert any new doc nos
-        const existingDocs = await env.DB.prepare(
-          "SELECT pick_doc_no FROM v2_ops_job_pick_docs WHERE job_id=?"
-        ).bind(job_id).all();
-        const existingSet = new Set((existingDocs.results || []).map(r => r.pick_doc_no));
-        for (const docNo of pick_doc_nos) {
-          if (!existingSet.has(docNo)) {
-            await env.DB.prepare(
-              "INSERT INTO v2_ops_job_pick_docs(id, job_id, pick_doc_no, created_at) VALUES(?,?,?,?)"
-            ).bind("PD-" + uid(), job_id, docNo, t).run();
-          }
-        }
-        return { ok: true, job_id, worker_seg_id: dup.id, is_new_job: false, already_joined: true };
-      }
-      await env.DB.prepare(
-        "UPDATE v2_ops_jobs SET active_worker_count=active_worker_count+1, updated_at=?, status='working' WHERE id=?"
-      ).bind(t, job_id).run();
-    } else {
-      job_id = "JOB-" + uid();
-      is_new_job = true;
-      await env.DB.prepare(`
-        INSERT INTO v2_ops_jobs(id, flow_stage, biz_class, job_type, related_doc_type, related_doc_id,
-          status, parent_job_id, is_temporary_interrupt, interrupt_type, created_by, created_at, updated_at, active_worker_count)
-        VALUES(?,'order_op','direct_ship','pick_direct','','','working','',0,'',?,?,?,1)
-      `).bind(job_id, worker_id, t, t).run();
-    }
+    // Generate trip number
+    const trip_no = await nextPickTripNo(env);
+    const job_id = "JOB-" + uid();
+
+    await env.DB.prepare(`
+      INSERT INTO v2_ops_jobs(id, flow_stage, biz_class, job_type, related_doc_type, related_doc_id,
+        status, parent_job_id, is_temporary_interrupt, interrupt_type, created_by, created_at, updated_at,
+        active_worker_count, display_no)
+      VALUES(?,'order_op','direct_ship','pick_direct','','','working','',0,'',?,?,?,1,?)
+    `).bind(job_id, worker_id, t, t, trip_no).run();
 
     // Insert pick doc nos
-    const existingDocs = await env.DB.prepare(
-      "SELECT pick_doc_no FROM v2_ops_job_pick_docs WHERE job_id=?"
-    ).bind(job_id).all();
-    const existingSet = new Set((existingDocs.results || []).map(r => r.pick_doc_no));
     for (const docNo of pick_doc_nos) {
-      if (!existingSet.has(docNo)) {
-        await env.DB.prepare(
-          "INSERT INTO v2_ops_job_pick_docs(id, job_id, pick_doc_no, created_at) VALUES(?,?,?,?)"
-        ).bind("PD-" + uid(), job_id, docNo, t).run();
-      }
+      await env.DB.prepare(
+        "INSERT INTO v2_ops_job_pick_docs(id, job_id, pick_doc_no, created_at) VALUES(?,?,?,?)"
+      ).bind("PD-" + uid(), job_id, docNo, t).run();
     }
 
-    // Add worker segment
+    // Add creator as first worker
     const seg_id = "WS-" + uid();
     await env.DB.prepare(`
       INSERT INTO v2_ops_job_workers(id, job_id, worker_id, worker_name, joined_at)
       VALUES(?,?,?,?,?)
     `).bind(seg_id, job_id, worker_id, worker_name, t).run();
 
-    return { ok: true, job_id, worker_seg_id: seg_id, is_new_job };
+    return { ok: true, job_id, worker_seg_id: seg_id, trip_no, is_new_job: true };
   });
 });
 
@@ -2558,6 +2559,23 @@ route("v2_pick_job_add_docs", async (body, env) => {
   if (pick_doc_nos.length === 0) return err("missing pick_doc_nos");
 
   const t = now();
+
+  // Conflict check: reject if any doc_no is in another active trip
+  for (const docNo of pick_doc_nos) {
+    const conflict = await env.DB.prepare(
+      `SELECT j.id, j.display_no FROM v2_ops_jobs j
+       JOIN v2_ops_job_pick_docs pd ON pd.job_id = j.id
+       WHERE j.job_type='pick_direct' AND j.status IN ('pending','working')
+       AND j.is_temporary_interrupt=0 AND pd.pick_doc_no=? AND j.id!=?
+       LIMIT 1`
+    ).bind(docNo, job_id).first();
+    if (conflict) {
+      return json({ ok: false, error: "doc_conflict",
+        message: "拣货单 " + docNo + " 已在趟次 " + (conflict.display_no || conflict.id) + " 中",
+        conflict_doc_no: docNo, conflict_trip: conflict.display_no || conflict.id });
+    }
+  }
+
   const existingDocs = await env.DB.prepare(
     "SELECT pick_doc_no FROM v2_ops_job_pick_docs WHERE job_id=?"
   ).bind(job_id).all();
@@ -2632,6 +2650,79 @@ route("v2_pick_job_finish", async (body, env) => {
   ).bind(t, job_id).run();
 
   return json({ ok: true });
+});
+
+// =====================================================
+// PICK DIRECT — 活跃趟次列表
+// =====================================================
+route("v2_pick_job_active_list", async (body, env) => {
+  if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+
+  const rs = await env.DB.prepare(
+    `SELECT * FROM v2_ops_jobs
+     WHERE job_type='pick_direct' AND status IN ('pending','working')
+     AND is_temporary_interrupt=0
+     ORDER BY created_at DESC LIMIT 50`
+  ).all();
+
+  const items = [];
+  for (const job of (rs.results || [])) {
+    const pds = await env.DB.prepare(
+      "SELECT pick_doc_no FROM v2_ops_job_pick_docs WHERE job_id=? ORDER BY created_at"
+    ).bind(job.id).all();
+    const workers = await env.DB.prepare(
+      "SELECT worker_id, worker_name FROM v2_ops_job_workers WHERE job_id=? AND left_at=''"
+    ).bind(job.id).all();
+    items.push({
+      id: job.id,
+      display_no: job.display_no || '',
+      status: job.status,
+      active_worker_count: job.active_worker_count || 0,
+      created_by: job.created_by || '',
+      created_at: job.created_at,
+      pick_doc_nos: (pds.results || []).map(r => r.pick_doc_no),
+      workers: (workers.results || []).map(w => ({ id: w.worker_id, name: w.worker_name }))
+    });
+  }
+  return json({ ok: true, items });
+});
+
+// =====================================================
+// PICK DIRECT — 加入已有趟次
+// =====================================================
+route("v2_pick_job_join", async (body, env) => {
+  if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  const job_id = String(body.job_id || "").trim();
+  const worker_id = String(body.worker_id || "").trim();
+  const worker_name = String(body.worker_name || "").trim();
+  if (!job_id || !worker_id) return err("missing job_id or worker_id");
+
+  const t = now();
+  const job = await env.DB.prepare(
+    "SELECT * FROM v2_ops_jobs WHERE id=? AND job_type='pick_direct'"
+  ).bind(job_id).first();
+  if (!job) return err("trip not found", 404);
+  if (job.status === 'completed') return err("trip_already_completed");
+
+  // Dedup: already has open segment
+  const dup = await findOpenSeg(env, job_id, worker_id);
+  if (dup) {
+    return json({ ok: true, job_id, worker_seg_id: dup.id, already_joined: true,
+      trip_no: job.display_no || '' });
+  }
+
+  // Add worker segment
+  const seg_id = "WS-" + uid();
+  await env.DB.prepare(`
+    INSERT INTO v2_ops_job_workers(id, job_id, worker_id, worker_name, joined_at)
+    VALUES(?,?,?,?,?)
+  `).bind(seg_id, job_id, worker_id, worker_name, t).run();
+
+  await env.DB.prepare(
+    "UPDATE v2_ops_jobs SET active_worker_count=active_worker_count+1, updated_at=?, status='working' WHERE id=?"
+  ).bind(t, job_id).run();
+
+  return json({ ok: true, job_id, worker_seg_id: seg_id, trip_no: job.display_no || '' });
 });
 
 // =====================================================

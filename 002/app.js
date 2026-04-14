@@ -1513,22 +1513,24 @@ async function loadOrderOpsList() {
   }
 
   var html = '<table class="simple-table"><thead><tr>';
-  html += '<th>类型</th><th>工单/拣货单</th><th>参与人员</th><th>工时(分钟)</th><th>状态</th><th>创建时间</th><th>操作</th>';
+  html += '<th>类型</th><th>趟次/工单</th><th>拣货单</th><th>参与人员</th><th>工时(分钟)</th><th>状态</th><th>创建时间</th><th>操作</th>';
   html += '</tr></thead><tbody>';
 
   items.forEach(function(j) {
     var typeText = _orderOpsJobType[j.job_type] || j.job_type;
+    var tripText = j.display_no || "--";
     var docText = "--";
     if (j.job_type === "pick_direct" && j.pick_doc_nos && j.pick_doc_nos.length > 0) {
       docText = j.pick_doc_nos.join(", ");
     } else if (j.related_doc_id) {
-      docText = j.related_doc_id;
+      tripText = j.related_doc_id;
     }
     var stText = _orderOpsStatus[j.status] || j.status;
     var stClass = j.status === 'completed' ? 'st-completed' : (j.status === 'working' ? 'st-putting_away' : 'st-pending');
 
     html += '<tr>';
     html += '<td>' + esc(typeText) + '</td>';
+    html += '<td>' + esc(tripText) + '</td>';
     html += '<td style="max-width:200px;word-break:break-all;">' + esc(docText) + '</td>';
     html += '<td>' + esc(j.worker_names_text || "--") + '</td>';
     html += '<td>' + (j.total_minutes_worked || 0) + '</td>';
@@ -1567,10 +1569,13 @@ async function loadOrderOpsDetail() {
   var stText = _orderOpsStatus[j.status] || j.status;
 
   var html = '<div class="card">';
-  html += '<div class="card-title">' + esc(typeText) + ' · ' + esc(j.id) + '</div>';
+  html += '<div class="card-title">' + esc(typeText) + ' · ' + esc(j.display_no || j.id) + '</div>';
   html += '<div class="detail-grid">';
   html += '<div class="detail-field"><b>状态:</b> <span class="st st-' + esc(j.status) + '">' + esc(stText) + '</span></div>';
   html += '<div class="detail-field"><b>业务:</b> ' + esc(bizLabel(j.biz_class)) + '</div>';
+  if (j.display_no) {
+    html += '<div class="detail-field"><b>趟次号:</b> ' + esc(j.display_no) + '</div>';
+  }
   html += '<div class="detail-field"><b>阶段:</b> ' + esc(j.flow_stage || "--") + '</div>';
   if (j.related_doc_id) {
     html += '<div class="detail-field"><b>关联单号:</b> ' + esc(j.related_doc_id) + '</div>';
