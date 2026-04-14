@@ -1490,6 +1490,19 @@ var _orderOpsStatus = {
   awaiting_close: "待收尾",
   completed: "已完成"
 };
+var _flowStageLabel = {
+  order_op: "按单操作",
+  inbound: "入库",
+  outbound: "出库",
+  internal: "库内作业"
+};
+var _leaveReasonLabel = {
+  finished: "正常完成",
+  job_completed: "任务完成",
+  interrupted: "中断离开",
+  left: "主动离开",
+  "": "--"
+};
 
 async function loadOrderOpsList() {
   var body = document.getElementById("orderOpsListBody");
@@ -1513,30 +1526,42 @@ async function loadOrderOpsList() {
   }
 
   var html = '<table class="simple-table"><thead><tr>';
-  html += '<th>类型</th><th>趟次/工单</th><th>拣货单</th><th>参与人员</th><th>工时(分钟)</th><th>状态</th><th>创建时间</th><th>操作</th>';
+  html += '<th>类型</th><th>趟次/工单</th><th>关联单号</th><th>参与人员</th><th>工时</th><th>状态</th><th>创建时间</th><th>操作</th>';
   html += '</tr></thead><tbody>';
 
   items.forEach(function(j) {
     var typeText = _orderOpsJobType[j.job_type] || j.job_type;
-    var tripText = j.display_no || "--";
-    var docText = "--";
-    if (j.job_type === "pick_direct" && j.pick_doc_nos && j.pick_doc_nos.length > 0) {
-      docText = j.pick_doc_nos.join(", ");
+
+    // Trip/work order column
+    var tripHtml = '--';
+    if (j.display_no) {
+      tripHtml = '<span class="trip-tag">' + esc(j.display_no) + '</span>';
     } else if (j.related_doc_id) {
-      tripText = j.related_doc_id;
+      tripHtml = '<span class="doc-tag">' + esc(j.related_doc_id) + '</span>';
     }
+
+    // Doc nos column (pick docs or --)
+    var docHtml = '<span class="muted">--</span>';
+    if (j.job_type === "pick_direct" && j.pick_doc_nos && j.pick_doc_nos.length > 0) {
+      docHtml = '<div class="tag-wrap">' + j.pick_doc_nos.map(function(d) {
+        return '<span class="doc-tag">' + esc(d) + '</span>';
+      }).join('') + '</div>';
+    } else if (j.related_doc_id && j.display_no) {
+      docHtml = '<span class="doc-tag">' + esc(j.related_doc_id) + '</span>';
+    }
+
     var stText = _orderOpsStatus[j.status] || j.status;
-    var stClass = j.status === 'completed' ? 'st-completed' : (j.status === 'working' ? 'st-putting_away' : 'st-pending');
+    var stClass = 'st st-' + j.status;
 
     html += '<tr>';
     html += '<td>' + esc(typeText) + '</td>';
-    html += '<td>' + esc(tripText) + '</td>';
-    html += '<td style="max-width:200px;word-break:break-all;">' + esc(docText) + '</td>';
-    html += '<td>' + esc(j.worker_names_text || "--") + '</td>';
-    html += '<td>' + (j.total_minutes_worked || 0) + '</td>';
-    html += '<td><span class="st ' + stClass + '">' + esc(stText) + '</span></td>';
-    html += '<td>' + esc(fmtTime(j.created_at)) + '</td>';
-    html += '<td><a href="#" onclick="openOrderOpsDetail(\'' + esc(j.id) + '\');return false;">详情</a></td>';
+    html += '<td class="col-trip">' + tripHtml + '</td>';
+    html += '<td class="col-doc">' + docHtml + '</td>';
+    html += '<td class="col-people">' + esc(j.worker_names_text || "--") + '</td>';
+    html += '<td class="col-num">' + (j.total_minutes_worked || 0) + '分</td>';
+    html += '<td><span class="' + stClass + '">' + esc(stText) + '</span></td>';
+    html += '<td class="col-time">' + esc(fmtTime(j.created_at)) + '</td>';
+    html += '<td class="col-op"><a href="#" onclick="openOrderOpsDetail(\'' + esc(j.id) + '\');return false;">详情</a></td>';
     html += '</tr>';
   });
 
@@ -1568,35 +1593,46 @@ async function loadOrderOpsDetail() {
   var typeText = _orderOpsJobType[j.job_type] || j.job_type;
   var stText = _orderOpsStatus[j.status] || j.status;
 
+  // === Card 1: Basic Info ===
+  var flowLabel = _flowStageLabel[j.flow_stage] || j.flow_stage || "--";
   var html = '<div class="card">';
-  html += '<div class="card-title">' + esc(typeText) + ' · ' + esc(j.display_no || j.id) + '</div>';
+  html += '<div class="card-title">' + esc(typeText);
+  if (j.display_no) html += ' · <span style="font-family:monospace;color:#2f54eb;">' + esc(j.display_no) + '</span>';
+  html += '</div>';
   html += '<div class="detail-grid">';
   html += '<div class="detail-field"><b>状态:</b> <span class="st st-' + esc(j.status) + '">' + esc(stText) + '</span></div>';
-  html += '<div class="detail-field"><b>业务:</b> ' + esc(bizLabel(j.biz_class)) + '</div>';
+  html += '<div class="detail-field"><b>业务分类:</b> ' + esc(bizLabel(j.biz_class)) + '</div>';
   if (j.display_no) {
-    html += '<div class="detail-field"><b>趟次号:</b> ' + esc(j.display_no) + '</div>';
+    html += '<div class="detail-field"><b>趟次号:</b> <span class="trip-tag">' + esc(j.display_no) + '</span></div>';
   }
-  html += '<div class="detail-field"><b>阶段:</b> ' + esc(j.flow_stage || "--") + '</div>';
+  html += '<div class="detail-field"><b>作业阶段:</b> ' + esc(flowLabel) + '</div>';
   if (j.related_doc_id) {
-    html += '<div class="detail-field"><b>关联单号:</b> ' + esc(j.related_doc_id) + '</div>';
+    html += '<div class="detail-field"><b>关联单号:</b> <span class="doc-tag">' + esc(j.related_doc_id) + '</span></div>';
   }
+  html += '<div class="detail-field"><b>创建人:</b> ' + esc(j.created_by || "--") + '</div>';
   html += '<div class="detail-field"><b>创建时间:</b> ' + esc(fmtTime(j.created_at)) + '</div>';
   html += '</div></div>';
 
-  // Pick docs (if applicable)
+  // === Card 2: Pick Docs (if applicable) ===
   if (j.job_type === 'pick_direct') {
     html += '<div class="card"><div class="card-title">拣货单号</div><div id="orderOpsPickDocs"><span class="muted">加载中...</span></div></div>';
   }
 
-  // Workers
+  // === Card 3: Workers ===
   html += '<div class="card"><div class="card-title">参与人员</div>';
   if (workers.length > 0) {
-    html += '<table class="simple-table"><thead><tr><th>姓名</th><th>加入时间</th><th>离开时间</th><th>工时(分钟)</th><th>原因</th></tr></thead><tbody>';
+    html += '<table class="simple-table"><thead><tr>';
+    html += '<th>姓名</th><th>加入时间</th><th>离开时间</th><th>工时</th><th>离开原因</th>';
+    html += '</tr></thead><tbody>';
     workers.forEach(function(w) {
-      html += '<tr><td>' + esc(w.worker_name) + '</td><td>' + esc(fmtTime(w.joined_at)) + '</td>';
-      html += '<td>' + (w.left_at ? esc(fmtTime(w.left_at)) : '<span class="muted">仍在进行</span>') + '</td>';
-      html += '<td>' + (w.minutes_worked ? Math.round(w.minutes_worked) : "--") + '</td>';
-      html += '<td>' + esc(w.leave_reason || "--") + '</td></tr>';
+      var reasonText = _leaveReasonLabel[w.leave_reason] || w.leave_reason || "--";
+      html += '<tr>';
+      html += '<td>' + esc(w.worker_name || "--") + '</td>';
+      html += '<td class="col-time">' + esc(fmtTime(w.joined_at)) + '</td>';
+      html += '<td class="col-time">' + (w.left_at ? esc(fmtTime(w.left_at)) : '<span class="st st-working">进行中</span>') + '</td>';
+      html += '<td class="col-num">' + (w.minutes_worked ? Math.round(w.minutes_worked) + '分' : "--") + '</td>';
+      html += '<td>' + esc(reasonText) + '</td>';
+      html += '</tr>';
     });
     html += '</tbody></table>';
   } else {
@@ -1604,33 +1640,41 @@ async function loadOrderOpsDetail() {
   }
   html += '</div>';
 
-  // Results
+  // === Card 4: Results ===
   if (results.length > 0) {
     html += '<div class="card"><div class="card-title">操作结果</div>';
     results.forEach(function(r) {
-      html += '<div style="border-bottom:1px solid #f0f0f0;padding:8px 0;">';
-      html += '<div style="font-size:12px;color:#888;">记录时间: ' + esc(fmtTime(r.created_at)) + ' · 记录人: ' + esc(r.created_by || "--") + '</div>';
-      if (r.remark) html += '<div><b>备注:</b> ' + esc(r.remark) + '</div>';
+      html += '<div style="border-bottom:1px solid #f0f0f0;padding:10px 0;">';
+      html += '<div style="font-size:12px;color:#888;margin-bottom:6px;">记录时间: ' + esc(fmtTime(r.created_at)) + ' · 记录人: ' + esc(r.created_by || "--") + '</div>';
+      if (r.remark) html += '<div class="detail-field"><b>备注:</b> ' + esc(r.remark) + '</div>';
       if (r.result_json) {
         try {
           var rd = JSON.parse(r.result_json);
-          if (j.job_type === 'pick_direct' && rd.pick_doc_nos) {
-            html += '<div><b>拣货单:</b> ' + esc(rd.pick_doc_nos.join(", ")) + '</div>';
+          if (j.job_type === 'pick_direct' && rd.pick_doc_nos && rd.pick_doc_nos.length > 0) {
+            html += '<div class="detail-field"><b>拣货单:</b> <div class="tag-wrap" style="margin-top:4px;">' +
+              rd.pick_doc_nos.map(function(d) { return '<span class="doc-tag">' + esc(d) + '</span>'; }).join('') +
+              '</div></div>';
           }
-          if (rd.result_note) html += '<div><b>结果说明:</b> ' + esc(rd.result_note) + '</div>';
-          // Bulk op fields
+          if (rd.result_note) html += '<div class="detail-field"><b>结果说明:</b> ' + esc(rd.result_note) + '</div>';
+          // Bulk op fields — structured grid
           if (j.job_type === 'bulk_op') {
             var fields = [
               ["品数", rd.packed_sku_count], ["打包箱数", rd.packed_box_count],
               ["大纸箱", rd.used_carton_large_count], ["小纸箱", rd.used_carton_small_count],
               ["修补箱数", rd.repaired_box_count], ["换箱数", rd.reboxed_count],
               ["标签数", rd.label_count], ["操作总箱数", rd.total_operated_box_count],
-              ["打托数", rd.pallet_count], ["叉车", rd.used_forklift ? "是" : "否"],
+              ["打托数", rd.pallet_count], ["使用叉车", rd.used_forklift ? "是" : "否"],
               ["叉车货位数", rd.forklift_location_count]
             ];
-            var parts = fields.filter(function(f) { return f[1] !== undefined && f[1] !== 0 && f[1] !== "否"; })
-              .map(function(f) { return f[0] + ": " + f[1]; });
-            if (parts.length > 0) html += '<div><b>产出:</b> ' + esc(parts.join(" / ")) + '</div>';
+            var validFields = fields.filter(function(f) { return f[1] !== undefined && f[1] !== 0 && f[1] !== "否"; });
+            if (validFields.length > 0) {
+              html += '<div class="detail-field" style="margin-top:6px;"><b>作业产出:</b></div>';
+              html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:4px 12px;font-size:12px;margin-top:4px;">';
+              validFields.forEach(function(f) {
+                html += '<div><span style="color:#888;">' + esc(f[0]) + ':</span> <b>' + esc(String(f[1])) + '</b></div>';
+              });
+              html += '</div>';
+            }
           }
         } catch(e) {}
       }
@@ -1647,9 +1691,9 @@ async function loadOrderOpsDetail() {
     var pdEl = document.getElementById("orderOpsPickDocs");
     if (pdEl && pdRes && pdRes.ok && pdRes.docs) {
       if (pdRes.docs.length > 0) {
-        pdEl.innerHTML = pdRes.docs.map(function(d) {
-          return '<span style="background:#e6f4ff;color:#1677ff;padding:2px 8px;border-radius:3px;font-size:12px;margin-right:4px;">' + esc(d.pick_doc_no) + '</span>';
-        }).join(' ');
+        pdEl.innerHTML = '<div class="tag-wrap">' + pdRes.docs.map(function(d) {
+          return '<span class="doc-tag">' + esc(d.pick_doc_no) + '</span>';
+        }).join('') + '</div>';
       } else {
         pdEl.innerHTML = '<span class="muted">无拣货单号</span>';
       }

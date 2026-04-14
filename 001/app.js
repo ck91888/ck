@@ -1825,13 +1825,23 @@ async function loadPickActiveList() {
   }
   var html = '';
   items.forEach(function(t) {
-    var docs = (t.pick_doc_nos || []).join(", ") || "--";
-    var wNames = (t.workers || []).map(function(w) { return w.name || w.id; }).join(", ") || "--";
-    html += '<div style="border:1px solid #e8e8e8;border-radius:6px;padding:10px;margin-bottom:8px;">';
-    html += '<div style="font-weight:600;font-size:14px;">' + esc(t.display_no || t.id) + '</div>';
-    html += '<div style="font-size:12px;color:#666;margin-top:4px;">拣货单/피킹번호: ' + esc(docs) + '</div>';
-    html += '<div style="font-size:12px;color:#666;">参与人/참여자: ' + esc(wNames) + ' (' + (t.active_worker_count || 0) + '人/명)</div>';
-    html += '<div style="margin-top:6px;"><button class="btn btn-primary btn-sm" onclick="joinPickTrip(\'' + esc(t.id) + '\',this)">加入此趟次 / 이 트립 참여</button></div>';
+    var docsHtml = '--';
+    if (t.pick_doc_nos && t.pick_doc_nos.length > 0) {
+      docsHtml = '<div class="tag-wrap">' + t.pick_doc_nos.map(function(d) {
+        return '<span class="doc-tag">' + esc(d) + '</span>';
+      }).join('') + '</div>';
+    }
+    var wNames = (t.workers || []).map(function(w) { return w.name || w.id; });
+    var wHtml = wNames.length > 0 ? wNames.map(function(n) {
+      return '<span class="worker-tag">' + esc(n) + '</span>';
+    }).join('') : '<span class="muted">--</span>';
+
+    html += '<div class="trip-card">';
+    html += '<div class="trip-card-header"><span class="trip-tag">' + esc(t.display_no || t.id) + '</span>';
+    html += '<span class="st st-working">' + (t.active_worker_count || 0) + '人参与</span></div>';
+    html += '<div class="trip-card-meta">拣货单/피킹번호:</div>' + docsHtml;
+    html += '<div class="trip-card-meta" style="margin-top:6px;">参与人/참여자:</div><div style="margin-top:2px;">' + wHtml + '</div>';
+    html += '<div style="margin-top:8px;"><button class="btn btn-primary btn-sm" onclick="joinPickTrip(\'' + esc(t.id) + '\',this)">加入此趟次 / 이 트립 참여</button></div>';
     html += '</div>';
   });
   el.innerHTML = html;
@@ -1844,11 +1854,11 @@ function renderPickDocList(containerId, docs, removable) {
     el.innerHTML = '<span class="muted">未添加拣货单号 / 피킹번호 미추가</span>';
     return;
   }
-  var html = '<div style="display:flex;flex-wrap:wrap;gap:4px;">';
+  var html = '<div class="tag-wrap">';
   docs.forEach(function(no, i) {
-    html += '<span style="background:#e6f4ff;color:#1677ff;padding:3px 10px;border-radius:4px;font-size:12px;">' + esc(no);
+    html += '<span class="doc-tag">' + esc(no);
     if (removable) {
-      html += ' <span onclick="_pickDocNos.splice(' + i + ',1);renderPickDocList(\'pickDocList\',_pickDocNos,true);" style="cursor:pointer;margin-left:4px;color:#ff4d4f;">&times;</span>';
+      html += ' <span class="remove" onclick="_pickDocNos.splice(' + i + ',1);renderPickDocList(\'pickDocList\',_pickDocNos,true);">&times;</span>';
     }
     html += '</span>';
   });
