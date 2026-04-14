@@ -2138,14 +2138,43 @@ async function startBulkJob(btnEl) {
       }
       document.getElementById("bulkResultCard").style.display = "";
       refreshBulkWorkers();
+    } else if (res && res.error === "worker_already_in_other_bulk_job") {
+      var otherNo = res.other_work_order_no || "";
+      alert("当前已在其他大货工单作业中，请先退出或完成当前工单"
+        + (otherNo ? "\n当前工单号: " + otherNo : "")
+        + "\n현재 다른 대량화물 작업에 참여 중입니다. 먼저 퇴장하거나 완료한 후 다시 시도하세요");
     } else {
       alert("失败/실패: " + (res ? res.error : "unknown"));
     }
   });
 }
 
+// Bulk-op output fields (used by both pre-check and submission)
+var _bulkOutputFieldIds = [
+  "bulkPackedSku", "bulkPackedBox", "bulkCartonLarge", "bulkCartonSmall",
+  "bulkRepairedBox", "bulkReboxed", "bulkLabelCount", "bulkTotalBox",
+  "bulkPalletCount", "bulkForkliftLoc"
+];
+
+function _hasBulkOutput() {
+  for (var i = 0; i < _bulkOutputFieldIds.length; i++) {
+    var el = document.getElementById(_bulkOutputFieldIds[i]);
+    if (el && (parseInt(el.value) || 0) > 0) return true;
+  }
+  var fk = document.getElementById("bulkUsedForklift");
+  if (fk && fk.checked) return true;
+  return false;
+}
+
 async function finishBulkJob(btnEl) {
   if (!_activeJobId) { alert("没有进行中的任务 / 진행 중인 작업 없음"); return; }
+
+  // Frontend pre-check: must record at least one valid output
+  if (!_hasBulkOutput()) {
+    alert("请先记录操作产出后再完成\n작업 산출물(품수/박스수/팔레트 등)을 먼저 기록한 후 완료하세요");
+    return;
+  }
+
   if (!confirm("确认完成本次大货操作？\n이번 대량화물 작업을 완료하시겠습니까?")) return;
   withActionLock('finishBulkJob', btnEl || null, '提交中.../저장중...', async function() {
     var res = await api({
@@ -2176,8 +2205,14 @@ async function finishBulkJob(btnEl) {
       clearActiveJob();
       goPage("order_op_menu");
     } else if (res && res.error === "others_still_working") {
-      alert("还有其他人正在参与此任务，暂不能完成\n다른 작업자가 아직 참여 중이라 완료할 수 없습니다\n\n当前参与人数: " + (res.active_worker_count || "?"));
-      refreshBulkWorkers();
+      alert("还有其他人参与中，不能完成，已暂时退出该工单"
+        + "\n当前剩余参与人数: " + (res.active_worker_count || "?") + " 人"
+        + "\n다른 작업자가 아직 참여 중이라 완료할 수 없으며, 현재 사용자는 이 공정에서 일시 퇴장 처리되었습니다");
+      stopBulkScan();
+      clearActiveJob();
+      goPage("order_op_menu");
+    } else if (res && res.error === "missing_bulk_output") {
+      alert("请先记录操作产出后再完成\n작업 산출물을 먼저 기록한 후 완료하세요");
     } else {
       alert("失败/실패: " + (res ? res.error : "unknown"));
     }

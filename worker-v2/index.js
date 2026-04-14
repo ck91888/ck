@@ -2743,9 +2743,28 @@ route("v2_bulk_op_job_start", async (body, env) => {
     let job = null;
     if (work_order_no) {
       const existing = await env.DB.prepare(
-        "SELECT * FROM v2_ops_jobs WHERE job_type='bulk_op' AND related_doc_id=? AND status IN ('pending','working') AND is_temporary_interrupt=0 LIMIT 1"
+        "SELECT * FROM v2_ops_jobs WHERE job_type='bulk_op' AND related_doc_id=? AND status IN ('pending','working','awaiting_close') AND is_temporary_interrupt=0 LIMIT 1"
       ).bind(work_order_no).first();
       if (existing) job = existing;
+    }
+
+    // Cross-job guard: worker must not be active in ANOTHER bulk_op job
+    const targetJobId = job ? job.id : null;
+    const otherActive = await env.DB.prepare(
+      `SELECT j.id, j.related_doc_id FROM v2_ops_job_workers w
+       JOIN v2_ops_jobs j ON j.id = w.job_id
+       WHERE w.worker_id=? AND w.left_at=''
+       AND j.job_type='bulk_op'
+       AND j.status IN ('pending','working','awaiting_close')
+       LIMIT 5`
+    ).bind(worker_id).all();
+    const otherRows = (otherActive && otherActive.results) || [];
+    const blocking = otherRows.find(r => r.id !== targetJobId);
+    if (blocking) {
+      return { ok: false, error: "worker_already_in_other_bulk_job",
+        message: "当前已在其他大货工单作业中，请先退出或完成当前工单",
+        other_job_id: blocking.id,
+        other_work_order_no: blocking.related_doc_id || "" };
     }
 
     let job_id, is_new_job = false;
@@ -2789,16 +2808,43 @@ route("v2_bulk_op_job_finish", async (body, env) => {
     return json({ ok: false, error: "already_completed", message: "任务已完成，请勿重复提交" });
   }
 
+  // Pre-check: if this user is the only active worker, they MUST record output
+  // (Done before closing segments — otherwise user gets kicked out on validation failure)
+  const othersRow = await env.DB.prepare(
+    "SELECT COUNT(*) as c FROM v2_ops_job_workers WHERE job_id=? AND worker_id!=? AND left_at=''"
+  ).bind(job_id, worker_id).first();
+  const willBeLastPerson = (Number((othersRow && othersRow.c) || 0) === 0);
+
+  if (willBeLastPerson) {
+    const numFields = [
+      Number(body.packed_sku_count || 0),
+      Number(body.packed_box_count || 0),
+      Number(body.used_carton_large_count || 0),
+      Number(body.used_carton_small_count || 0),
+      Number(body.repaired_box_count || 0),
+      Number(body.reboxed_count || 0),
+      Number(body.label_count || 0),
+      Number(body.total_operated_box_count || 0),
+      Number(body.pallet_count || 0),
+      Number(body.forklift_location_count || 0)
+    ];
+    const hasOutput = numFields.some(v => v > 0) || !!body.used_forklift;
+    if (!hasOutput) {
+      return json({ ok: false, error: "missing_bulk_output",
+        message: "请先记录操作产出后再完成" });
+    }
+  }
+
   // 1. Close this worker's segments only
   await closeAllOpenSegs(env, job_id, worker_id, t, 'finished');
 
   // 2. Recalc active count
   const realCount = await recalcActiveCount(env, job_id, t);
 
-  // 3. If others still working, block completion
+  // 3. If others still working, block completion (this worker has been kicked out)
   if (realCount > 0) {
     return json({ ok: false, error: "others_still_working",
-      message: "还有 " + realCount + " 人正在参与此任务，暂不能完成",
+      message: "还有其他人参与中（剩余 " + realCount + " 人），不能完成，您已暂时退出该工单",
       active_worker_count: realCount });
   }
 
