@@ -1,0 +1,449 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>仓库数据看板 — CK Warehouse</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- Login -->
+<div id="loginWrap" class="login-wrap">
+  <div class="login-card">
+    <h1>仓库数据看板</h1>
+    <div class="sub">CK Warehouse Data Dashboard</div>
+    <input id="loginKey" type="password" placeholder="请输入访问码">
+    <button onclick="doLogin()">进入</button>
+    <div id="loginError" class="login-error" style="display:none;"></div>
+  </div>
+</div>
+
+<!-- Main App -->
+<div id="appWrap" style="display:none;">
+  <div class="app-header">
+    <h1>仓库数据看板</h1>
+    <div class="header-right">
+      <span id="headerClock">--</span>
+      <a href="../002/">协同中心</a>
+      <a href="../001/">现场系统</a>
+      <button class="header-btn" onclick="doLogout()">退出</button>
+    </div>
+  </div>
+
+  <div class="tab-bar">
+    <button class="active" onclick="switchTab('realtime',this)">实时总览</button>
+    <button onclick="switchTab('orders',this)">单子数据</button>
+    <button onclick="switchTab('workhours',this)">工时分析</button>
+    <button onclick="switchTab('wms',this)">WMS导入</button>
+    <button onclick="switchTab('management',this)">管理看板</button>
+  </div>
+
+  <!-- ===== Tab: 实时总览 ===== -->
+  <div id="tab-realtime" class="tab-content">
+    <!-- A. 核心指标卡片 -->
+    <div class="stat-row">
+      <div class="stat-card">
+        <div class="stat-label">当前在岗人数</div>
+        <div class="stat-value" id="statActiveWorkers">--</div>
+        <div class="stat-sub">有未退出任务的 distinct 人数</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">今日上岗人数</div>
+        <div class="stat-value" id="statTodayLogins">--</div>
+        <div class="stat-sub">今天登录执行系统的 distinct 人数</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">当前活跃任务数</div>
+        <div class="stat-value" id="statActiveJobs">--</div>
+        <div class="stat-sub">有人正在执行的任务数</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">当前活跃单数</div>
+        <div class="stat-value" id="statActiveDocs">--</div>
+        <div class="stat-sub">活跃任务关联的 distinct 单据数</div>
+      </div>
+    </div>
+
+    <!-- B. 当前谁在干什么 -->
+    <div class="section-card">
+      <div class="section-title">
+        <span>当前谁在干什么</span>
+        <button class="refresh-btn" onclick="loadRealtime()">刷新</button>
+      </div>
+      <div style="overflow-x:auto;">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>员工</th>
+              <th>当前业务</th>
+              <th>当前阶段</th>
+              <th>任务类型</th>
+              <th>关联单号</th>
+              <th>开始时间</th>
+              <th>已持续(分钟)</th>
+              <th>状态</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="workerLiveBody">
+            <tr><td colspan="9" class="muted" style="text-align:center;">加载中...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- C. 当前业务分布 -->
+    <div class="section-card">
+      <div class="section-title"><span>当前业务分布</span></div>
+      <div class="biz-grid" id="bizBreakdown">
+        <div class="muted" style="padding:20px;text-align:center;">加载中...</div>
+      </div>
+    </div>
+
+    <!-- D. 当前进行中的单子 -->
+    <div class="section-card">
+      <div class="section-title">
+        <span>当前进行中的单子</span>
+        <button class="refresh-btn" onclick="loadLiveDocs()">刷新</button>
+      </div>
+      <div style="overflow-x:auto;">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>单号</th>
+              <th>业务</th>
+              <th>当前阶段</th>
+              <th>参与人员</th>
+              <th>开始时间</th>
+              <th>已持续(分钟)</th>
+              <th>状态</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="liveDocsBody">
+            <tr><td colspan="8" class="muted" style="text-align:center;">加载中...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== Tab: 单子数据 ===== -->
+  <div id="tab-orders" class="tab-content" style="display:none;">
+    <div class="placeholder-tab">
+      <div class="ph-icon">&#128203;</div>
+      <div class="ph-title">单子数据</div>
+      <div class="ph-desc">
+        以「单」为维度，查看每一笔作业的完整数据。
+        <br>支持按日期、业务类型、客户筛选，后续支持导出用于财务计费。
+      </div>
+      <ul class="ph-modules">
+        <li>按单查看作业明细（谁做了多久、做了什么）</li>
+        <li>按客户/业务汇总单量与工时</li>
+        <li>支持导出 Excel（财务计费用途）</li>
+        <li>历史单据回溯与异常标记</li>
+      </ul>
+      <div style="margin-top:24px;color:#bbb;font-size:12px;">此模块正在建设中，将在后续版本上线</div>
+    </div>
+  </div>
+
+  <!-- ===== Tab: 工时分析 ===== -->
+  <div id="tab-workhours" class="tab-content" style="display:none;">
+    <div class="placeholder-tab">
+      <div class="ph-icon">&#9201;</div>
+      <div class="ph-title">工时分析</div>
+      <div class="ph-desc">
+        以「业务维度」汇总工时数据。
+        <br>尤其适用于只记录工时的业务（代发打包、质检、换单等），一眼看到某天各业务干了多久。
+      </div>
+      <ul class="ph-modules">
+        <li>按天/按周查看各业务工时汇总</li>
+        <li>工时趋势图（日/周对比）</li>
+        <li>按员工查看个人工时分布</li>
+        <li>异常工时标记（超长/超短）</li>
+      </ul>
+      <div style="margin-top:24px;color:#bbb;font-size:12px;">此模块正在建设中，将在后续版本上线</div>
+    </div>
+  </div>
+
+  <!-- ===== Tab: WMS导入 ===== -->
+  <div id="tab-wms" class="tab-content" style="display:none;">
+    <div class="placeholder-tab">
+      <div class="ph-icon">&#128230;</div>
+      <div class="ph-title">WMS 数据导入</div>
+      <div class="ph-desc">
+        导入外部 WMS 系统的出入库数据，自动匹配对应业务工时记录，计算劳效。
+      </div>
+      <ul class="ph-modules">
+        <li>上传/粘贴外部 WMS 导出数据</li>
+        <li>自动匹配 CK 系统工时记录</li>
+        <li>计算各业务/员工劳效指标</li>
+        <li>劳效异常预警</li>
+      </ul>
+      <div style="margin-top:24px;color:#bbb;font-size:12px;">此模块正在建设中，将在后续版本上线</div>
+    </div>
+  </div>
+
+  <!-- ===== Tab: 管理看板 ===== -->
+  <div id="tab-management" class="tab-content" style="display:none;">
+    <div class="placeholder-tab">
+      <div class="ph-icon">&#128200;</div>
+      <div class="ph-title">管理看板</div>
+      <div class="ph-desc">
+        管理者视角的经营数据总览。
+        <br>当天工时、劳效、成本、收入等核心经营指标。
+      </div>
+      <ul class="ph-modules">
+        <li>当天各业务总工时与人效</li>
+        <li>劳效排名（基于 WMS 数据）</li>
+        <li>用工成本估算</li>
+        <li>收入与利润追踪（需对接外部数据）</li>
+        <li>异常与风险提醒</li>
+      </ul>
+      <div style="margin-top:24px;color:#bbb;font-size:12px;">此模块正在建设中，将在后续版本上线</div>
+    </div>
+  </div>
+</div>
+
+<script>
+var V2_API = "https://ck-v2-api.ck91888.workers.dev";
+var SHUJU_KEY_STORAGE = "ck_v2_shuju_k";
+var _currentTab = "realtime";
+var _refreshTimer = null;
+
+function esc(s) {
+  return String(s || "").replace(/[&<>"']/g, function(c) {
+    return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c];
+  });
+}
+
+function getKey() { return localStorage.getItem(SHUJU_KEY_STORAGE) || ""; }
+function setKey(k) { localStorage.setItem(SHUJU_KEY_STORAGE, k); }
+
+async function api(params) {
+  params.k = getKey();
+  try {
+    var res = await fetch(V2_API, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params)
+    });
+    return await res.json();
+  } catch(e) { return { ok: false, error: e.message }; }
+}
+
+// ===== Login =====
+function doLogin() {
+  var key = document.getElementById("loginKey").value.trim();
+  if (!key) return;
+  setKey(key);
+  // Verify
+  api({ action: "v2_dashboard_realtime_overview" }).then(function(res) {
+    if (res && res.ok) {
+      showApp();
+    } else {
+      document.getElementById("loginError").style.display = "";
+      document.getElementById("loginError").textContent = "访问码错误或网络异常";
+    }
+  });
+}
+
+function doLogout() {
+  localStorage.removeItem(SHUJU_KEY_STORAGE);
+  location.reload();
+}
+
+function checkAuth() {
+  var k = getKey();
+  if (k) {
+    api({ action: "v2_health_check" }).then(function(res) {
+      if (res && res.ok) showApp();
+    });
+  }
+}
+
+function showApp() {
+  document.getElementById("loginWrap").style.display = "none";
+  document.getElementById("appWrap").style.display = "";
+  startClock();
+  loadRealtime();
+  loadLiveDocs();
+  // Auto refresh every 30s
+  _refreshTimer = setInterval(function() {
+    if (_currentTab === "realtime") {
+      loadRealtime();
+      loadLiveDocs();
+    }
+  }, 30000);
+}
+
+function startClock() {
+  function tick() {
+    var d = new Date(Date.now() + 9 * 3600 * 1000);
+    document.getElementById("headerClock").textContent =
+      d.toISOString().slice(0,10) + " " + d.toISOString().slice(11,19) + " KST";
+  }
+  tick();
+  setInterval(tick, 1000);
+}
+
+// ===== Tab switch =====
+function switchTab(tab, btn) {
+  _currentTab = tab;
+  var tabs = document.querySelectorAll(".tab-bar button");
+  for (var i = 0; i < tabs.length; i++) tabs[i].classList.remove("active");
+  if (btn) btn.classList.add("active");
+  var contents = ["realtime","orders","workhours","wms","management"];
+  contents.forEach(function(t) {
+    var el = document.getElementById("tab-" + t);
+    if (el) el.style.display = (t === tab) ? "" : "none";
+  });
+  if (tab === "realtime") { loadRealtime(); loadLiveDocs(); }
+}
+
+// ===== Job type / biz class labels =====
+var JOB_TYPE_LABELS = {
+  unload: "卸货", inbound_direct: "代发入库", inbound_bulk: "大货入库",
+  inbound_return: "退件入库", load_outbound: "出库装货",
+  pick_direct: "代发拣货", bulk_op: "大货操作",
+  pack_direct: "代发打包", inventory: "盘点", disposal: "废弃处理",
+  qc: "质检", other_internal: "其他库内", scan_pallet: "过机扫描",
+  load_import: "装柜出货", issue_handle: "问题件处理"
+};
+var FLOW_LABELS = {
+  unload: "卸货", inbound: "入库", order_op: "按单操作",
+  outbound: "出库", internal: "库内操作", import: "进口专区", issue: "问题件"
+};
+var BIZ_LABELS = {
+  direct_ship: "代发", bulk: "大货", return: "退件", import: "进口"
+};
+var STATUS_LABELS = {
+  working: "作业中", awaiting_close: "待收尾", pending: "待开始", completed: "已完成"
+};
+
+function jobTypeLabel(jt) { return JOB_TYPE_LABELS[jt] || jt || "--"; }
+function flowLabel(f) { return FLOW_LABELS[f] || f || "--"; }
+function bizLabel(b) { return BIZ_LABELS[b] || b || ""; }
+function statusLabel(s) { return STATUS_LABELS[s] || s || "--"; }
+
+function statusTag(s) {
+  var cls = "tag-gray";
+  if (s === "working") cls = "tag-green";
+  else if (s === "awaiting_close") cls = "tag-orange";
+  else if (s === "pending") cls = "tag-blue";
+  return '<span class="tag ' + cls + '">' + esc(statusLabel(s)) + '</span>';
+}
+
+function minutesSince(isoStr) {
+  if (!isoStr) return "--";
+  var t = new Date(isoStr).getTime();
+  if (isNaN(t)) return "--";
+  return Math.round((Date.now() - t) / 60000);
+}
+
+function fmtTime(isoStr) {
+  if (!isoStr) return "--";
+  try {
+    var d = new Date(isoStr);
+    var kst = new Date(d.getTime() + 9 * 3600 * 1000);
+    return kst.toISOString().slice(5, 16).replace("T", " ");
+  } catch(e) { return isoStr; }
+}
+
+// ===== Realtime overview =====
+async function loadRealtime() {
+  var res = await api({ action: "v2_dashboard_realtime_overview" });
+  if (!res || !res.ok) return;
+
+  document.getElementById("statActiveWorkers").textContent = res.current_active_workers || 0;
+  document.getElementById("statTodayLogins").textContent = res.today_login_workers || 0;
+  document.getElementById("statActiveJobs").textContent = res.current_active_jobs || 0;
+  document.getElementById("statActiveDocs").textContent = res.current_active_docs || 0;
+
+  // B. Worker live status
+  var workers = res.worker_live_status || [];
+  var tbody = document.getElementById("workerLiveBody");
+  if (workers.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="9" class="muted" style="text-align:center;">当前没有在岗人员</td></tr>';
+  } else {
+    var html = "";
+    workers.forEach(function(w) {
+      html += "<tr>";
+      html += "<td><b>" + esc(w.worker_name) + "</b></td>";
+      html += "<td>" + esc(bizLabel(w.biz_class)) + "</td>";
+      html += "<td>" + esc(flowLabel(w.flow_stage)) + "</td>";
+      html += "<td>" + esc(jobTypeLabel(w.job_type)) + "</td>";
+      html += "<td>" + esc(w.related_doc_id || "--") + "</td>";
+      html += "<td>" + esc(fmtTime(w.joined_at)) + "</td>";
+      html += "<td>" + minutesSince(w.joined_at) + "</td>";
+      html += "<td>" + statusTag(w.job_status) + "</td>";
+      html += '<td><button class="row-action warn" onclick="markAnomaly(\'worker\',\'' + esc(w.worker_id) + '\')">标记异常</button></td>';
+      html += "</tr>";
+    });
+    tbody.innerHTML = html;
+  }
+
+  // C. Biz breakdown
+  var breakdown = res.biz_breakdown || [];
+  var grid = document.getElementById("bizBreakdown");
+  if (breakdown.length === 0) {
+    grid.innerHTML = '<div class="muted" style="padding:20px;text-align:center;">当前无活跃业务</div>';
+  } else {
+    var bhtml = "";
+    breakdown.forEach(function(b) {
+      bhtml += '<div class="biz-item">';
+      bhtml += '<div class="biz-name">' + esc(jobTypeLabel(b.job_type) || flowLabel(b.flow_stage)) + '</div>';
+      bhtml += '<div class="biz-nums"><b>' + (b.worker_count || 0) + '</b> 人 / <b>' + (b.job_count || 0) + '</b> 个任务</div>';
+      bhtml += '</div>';
+    });
+    grid.innerHTML = bhtml;
+  }
+}
+
+// ===== Live docs =====
+async function loadLiveDocs() {
+  var res = await api({ action: "v2_dashboard_live_docs" });
+  var tbody = document.getElementById("liveDocsBody");
+  if (!res || !res.ok) {
+    tbody.innerHTML = '<tr><td colspan="8" class="muted" style="text-align:center;">加载失败</td></tr>';
+    return;
+  }
+  var docs = res.docs || [];
+  if (docs.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="8" class="muted" style="text-align:center;">当前没有进行中的单子</td></tr>';
+    return;
+  }
+  var html = "";
+  docs.forEach(function(d) {
+    html += "<tr>";
+    html += "<td><b>" + esc(d.related_doc_id || d.job_id) + "</b></td>";
+    html += "<td>" + esc(bizLabel(d.biz_class)) + "</td>";
+    html += "<td>" + esc(flowLabel(d.flow_stage)) + "</td>";
+    html += "<td>" + esc(d.worker_names || "--") + "</td>";
+    html += "<td>" + esc(fmtTime(d.created_at)) + "</td>";
+    html += "<td>" + minutesSince(d.created_at) + "</td>";
+    html += "<td>" + statusTag(d.status) + "</td>";
+    html += '<td><button class="row-action warn" onclick="markAnomaly(\'doc\',\'' + esc(d.job_id) + '\')">标记异常</button>';
+    html += ' <button class="row-action" onclick="requestCorrection(\'' + esc(d.job_id) + '\')">发起修正</button></td>';
+    html += "</tr>";
+  });
+  tbody.innerHTML = html;
+}
+
+// ===== Correction placeholders =====
+function markAnomaly(type, id) {
+  alert("已标记异常：" + type + " / " + id + "\n\n后续将接入主管修正流，当前仅做标记记录。");
+}
+function requestCorrection(jobId) {
+  alert("发起修正：任务 " + jobId + "\n\n后续将接入主管修正流，支持修改工时、人员、结果数据。\n当前版本暂不直接修改正式数据。");
+}
+
+// ===== Init =====
+checkAuth();
+document.getElementById("loginKey").addEventListener("keydown", function(e) {
+  if (e.key === "Enter") doLogin();
+});
+</script>
+</body>
+</html>

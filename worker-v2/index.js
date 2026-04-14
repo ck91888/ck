@@ -441,6 +441,19 @@ const MIGRATIONS = [
     created_at TEXT
   )`,
   `CREATE INDEX IF NOT EXISTS idx_v2_idem_created ON v2_idempotency_keys(created_at)`,
+
+  // ---- v2_ops_login_events: 记录每次现场系统登录 ----
+  `CREATE TABLE IF NOT EXISTS v2_ops_login_events (
+    id TEXT PRIMARY KEY,
+    worker_id TEXT DEFAULT '',
+    worker_name TEXT DEFAULT '',
+    login_at TEXT,
+    login_date TEXT DEFAULT '',
+    page_source TEXT DEFAULT '',
+    device_info TEXT DEFAULT ''
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_login_date ON v2_ops_login_events(login_date)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_login_worker ON v2_ops_login_events(worker_id, login_date)`,
 ];
 
 let _migrated = false;
@@ -2422,6 +2435,124 @@ route("v2_scan_batch_list", async (body, env) => {
     "SELECT * FROM v2_scan_batches ORDER BY created_at DESC LIMIT 200"
   ).all();
   return json({ ok: true, items: rs.results || [] });
+});
+
+// =====================================================
+// OPS LOGIN EVENT — 现场系统登录事件记录
+// =====================================================
+route("v2_ops_login_mark", async (body, env) => {
+  if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  const worker_id = String(body.worker_id || "").trim();
+  const worker_name = String(body.worker_name || "").trim();
+  if (!worker_id) return err("missing worker_id");
+
+  const t = now();
+  const login_date = kstToday();
+  const id = "LOGIN-" + uid();
+  await env.DB.prepare(`
+    INSERT INTO v2_ops_login_events(id, worker_id, worker_name, login_at, login_date, page_source, device_info)
+    VALUES(?,?,?,?,?,?,?)
+  `).bind(id, worker_id, worker_name, t, login_date,
+      String(body.page_source || ""), String(body.device_info || "")).run();
+  return json({ ok: true, id });
+});
+
+// =====================================================
+// DASHBOARD — 仓库数据看板接口
+// =====================================================
+route("v2_dashboard_realtime_overview", async (body, env) => {
+  if (!isAuth(body, env)) return err("unauthorized", 401);
+  const today = kstToday();
+
+  // 1. 当前在岗人数 = distinct worker_id with open segments (left_at='')
+  const activeWorkers = await env.DB.prepare(
+    "SELECT COUNT(DISTINCT worker_id) as c FROM v2_ops_job_workers WHERE left_at=''"
+  ).first();
+
+  // 2. 今日上岗人数 = distinct worker_id from login events today
+  const todayLogins = await env.DB.prepare(
+    "SELECT COUNT(DISTINCT worker_id) as c FROM v2_ops_login_events WHERE login_date=?"
+  ).bind(today).first();
+
+  // 3. 当前活跃任务数 = working/awaiting_close jobs with active_worker_count > 0
+  const activeJobs = await env.DB.prepare(
+    "SELECT COUNT(*) as c FROM v2_ops_jobs WHERE status IN ('working','awaiting_close') AND active_worker_count > 0"
+  ).first();
+
+  // 4. 当前活跃单数 = distinct related_doc_id from active jobs (non-empty)
+  const activeDocs = await env.DB.prepare(
+    "SELECT COUNT(DISTINCT related_doc_id) as c FROM v2_ops_jobs WHERE status IN ('working','awaiting_close') AND active_worker_count > 0 AND related_doc_id != ''"
+  ).first();
+
+  // 5. Worker live status — each open segment joined with its job
+  const liveWorkers = await env.DB.prepare(`
+    SELECT w.worker_id, w.worker_name, w.joined_at, w.job_id,
+           j.flow_stage, j.biz_class, j.job_type, j.related_doc_type, j.related_doc_id, j.status as job_status
+    FROM v2_ops_job_workers w
+    JOIN v2_ops_jobs j ON w.job_id = j.id
+    WHERE w.left_at=''
+    ORDER BY w.joined_at DESC
+  `).all();
+
+  // 6. Biz breakdown — group active workers by job_type
+  const bizBreak = await env.DB.prepare(`
+    SELECT j.job_type, j.flow_stage,
+           COUNT(DISTINCT w.worker_id) as worker_count,
+           COUNT(DISTINCT j.id) as job_count
+    FROM v2_ops_job_workers w
+    JOIN v2_ops_jobs j ON w.job_id = j.id
+    WHERE w.left_at='' AND j.status IN ('working','awaiting_close')
+    GROUP BY j.job_type, j.flow_stage
+    ORDER BY worker_count DESC
+  `).all();
+
+  return json({
+    ok: true,
+    current_active_workers: (activeWorkers && activeWorkers.c) || 0,
+    today_login_workers: (todayLogins && todayLogins.c) || 0,
+    current_active_jobs: (activeJobs && activeJobs.c) || 0,
+    current_active_docs: (activeDocs && activeDocs.c) || 0,
+    worker_live_status: liveWorkers.results || [],
+    biz_breakdown: bizBreak.results || []
+  });
+});
+
+route("v2_dashboard_live_docs", async (body, env) => {
+  if (!isAuth(body, env)) return err("unauthorized", 401);
+
+  // Active jobs that have related_doc_id, grouped by doc
+  const jobs = await env.DB.prepare(`
+    SELECT j.id as job_id, j.flow_stage, j.biz_class, j.job_type,
+           j.related_doc_type, j.related_doc_id, j.status, j.created_at, j.active_worker_count
+    FROM v2_ops_jobs j
+    WHERE j.status IN ('working','awaiting_close') AND j.active_worker_count > 0
+    ORDER BY j.created_at DESC
+    LIMIT 100
+  `).all();
+
+  const docs = [];
+  for (const job of (jobs.results || [])) {
+    // Get current worker names
+    const ws = await env.DB.prepare(
+      "SELECT DISTINCT worker_name FROM v2_ops_job_workers WHERE job_id=? AND left_at=''"
+    ).bind(job.job_id).all();
+    const names = (ws.results || []).map(function(r) { return r.worker_name; }).filter(Boolean);
+
+    docs.push({
+      job_id: job.job_id,
+      flow_stage: job.flow_stage,
+      biz_class: job.biz_class,
+      job_type: job.job_type,
+      related_doc_type: job.related_doc_type,
+      related_doc_id: job.related_doc_id,
+      status: job.status,
+      created_at: job.created_at,
+      active_worker_count: job.active_worker_count,
+      worker_names: names.join(", ")
+    });
+  }
+
+  return json({ ok: true, docs });
 });
 
 // =====================================================

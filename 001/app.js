@@ -227,6 +227,15 @@ function applyBadge(raw) {
   setBadge(raw);
   setAuthDay(kstToday());
   updateHeaderBadge();
+  // 记录登录事件（fire-and-forget，不阻塞登录流程）
+  var parsed = parseBadge(raw);
+  api({
+    action: "v2_ops_login_mark",
+    worker_id: parsed.id,
+    worker_name: parsed.name,
+    page_source: "001",
+    device_info: navigator.userAgent || ""
+  }).catch(function() {});
   return true;
 }
 
