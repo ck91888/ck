@@ -921,7 +921,8 @@ route("v2_inbound_plan_list", async (body, env) => {
   const start = String(body.start_date || "").trim();
   const end = String(body.end_date || "").trim();
   const status = String(body.status || "").trim();
-  let sql = "SELECT * FROM v2_inbound_plans WHERE 1=1";
+  // 排除退件入库会话：return_session 不属于正式入库计划口径
+  let sql = "SELECT * FROM v2_inbound_plans WHERE source_type != 'return_session'";
   const binds = [];
   if (start) { sql += " AND plan_date>=?"; binds.push(start); }
   if (end) { sql += " AND plan_date<=?"; binds.push(end); }
@@ -938,6 +939,8 @@ route("v2_inbound_plan_detail", async (body, env) => {
   if (!id) return err("missing id");
   const row = await env.DB.prepare("SELECT * FROM v2_inbound_plans WHERE id=?").bind(id).first();
   if (!row) return err("not found", 404);
+  // 退件入库会话不属于正式入库计划口径，协同中心不应打开
+  if (row.source_type === 'return_session') return err("not found", 404);
   const planLines = await env.DB.prepare(
     "SELECT * FROM v2_inbound_plan_lines WHERE plan_id=? ORDER BY line_no"
   ).bind(id).all();
@@ -1119,7 +1122,7 @@ route("v2_inbound_plan_list_upcoming", async (body, env) => {
   const first = dates[0];
   const last = dates[dates.length - 1];
   const rs = await env.DB.prepare(
-    "SELECT * FROM v2_inbound_plans WHERE plan_date>=? AND plan_date<=? AND status NOT IN ('completed','cancelled') ORDER BY plan_date ASC, created_at ASC"
+    "SELECT * FROM v2_inbound_plans WHERE plan_date>=? AND plan_date<=? AND status NOT IN ('completed','cancelled') AND source_type != 'return_session' ORDER BY plan_date ASC, created_at ASC"
   ).bind(first, last).all();
   return json({ ok: true, items: rs.results || [], dates });
 });

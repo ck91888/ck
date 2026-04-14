@@ -328,7 +328,7 @@ async function loadDashboard() {
 
   var issueItems = (issues && issues.items) || [];
   var obItems = (outbounds && outbounds.items) || [];
-  var ibItems = (inbounds && inbounds.items) || [];
+  var ibItems = ((inbounds && inbounds.items) || []).filter(function(p) { return p.source_type !== 'return_session'; });
 
   var pendingIssues = issueItems.filter(function(i) { return i.status === "pending" || i.status === "processing"; });
   var pendingOb = obItems.filter(function(o) { return o.status === "draft" || o.status === "issued" || o.status === "working"; });
@@ -400,7 +400,7 @@ async function loadDashboard() {
   html += '</div>';
 
   // Upcoming inbound card (next 3 working days)
-  var upcomingItems = (upcoming && upcoming.items) || [];
+  var upcomingItems = ((upcoming && upcoming.items) || []).filter(function(p) { return p.source_type !== 'return_session'; });
   var upcomingDates = (upcoming && upcoming.dates) || [];
   html += '<div class="dash-card" onclick="goTab(\'inbound\')">';
   html += '<div class="d-title">📅 ' + L("upcoming_inbound") + '</div>';
@@ -854,7 +854,7 @@ async function loadInboundList() {
     return;
   }
 
-  var items = res.items || [];
+  var items = (res.items || []).filter(function(p) { return p.source_type !== 'return_session'; });
   if (items.length === 0) {
     body.innerHTML = '<div class="card muted">' + L("no_data") + '</div>';
     return;
