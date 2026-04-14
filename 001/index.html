@@ -288,8 +288,97 @@
     <div class="page-title">按单操作 / 주문별 작업</div>
   </div>
   <div style="padding:12px;">
-    <button class="btn btn-primary" onclick="goPage('generic_job',{flow_stage:'order_op',job_type:'pick_direct',title:'代发拣货/직배송 피킹'})">代发拣货 / 직배송 피킹</button>
-    <button class="btn btn-primary" onclick="goPage('generic_job',{flow_stage:'order_op',job_type:'bulk_op',title:'大货操作/대량화물 작업'})">大货操作 / 대량화물 작업</button>
+    <button class="btn btn-primary" onclick="goPage('pick_direct')">代发拣货 / 직배송 피킹</button>
+    <button class="btn btn-primary" onclick="goPage('bulk_op')">大货操作 / 대량화물 작업</button>
+  </div>
+</div>
+
+<!-- Pick Direct (代发拣货) -->
+<div id="page-pick_direct" class="page">
+  <div class="topbar">
+    <button class="back-btn" onclick="goPage('order_op_menu')">← 返回/뒤로</button>
+    <div class="page-title">代发拣货 / 직배송 피킹</div>
+  </div>
+  <div class="card">
+    <div class="card-title">拣货单号 / 피킹 번호</div>
+    <div style="display:flex;gap:6px;">
+      <input type="text" id="pickDocInput" placeholder="输入或扫码拣货单号 / 피킹번호 입력" style="flex:1;">
+      <button class="btn btn-outline btn-sm" onclick="addPickDoc()">添加/추가</button>
+    </div>
+    <div style="height:6px;"></div>
+    <div id="pickScanReader" style="width:100%;max-width:280px;margin:0 auto;"></div>
+    <button class="btn btn-outline btn-sm" id="pickScanBtn" onclick="startPickScan()">扫码 / 스캔</button>
+    <div id="pickDocList" style="margin-top:8px;font-size:13px;"></div>
+  </div>
+  <div class="card">
+    <button class="btn btn-success" onclick="startPickJob(this)">开始拣货 / 피킹 시작</button>
+    <button class="btn btn-danger" onclick="finishPickJob(this)">完成拣货 / 피킹 완료</button>
+  </div>
+  <div class="card">
+    <div class="card-title">当前参与人员 / 현재 참여 인원</div>
+    <div id="pickWorkers" class="workers-panel"><span class="muted">--</span></div>
+  </div>
+  <div class="card" id="pickResultCard" style="display:none;">
+    <div class="card-title">拣货结果 / 피킹 결과</div>
+    <label>备注 / 비고</label>
+    <textarea id="pickRemark" rows="2" placeholder="可选备注 / 선택 비고"></textarea>
+    <label>结果说明 / 결과 설명</label>
+    <textarea id="pickResultNote" rows="2" placeholder="可选说明 / 선택 설명"></textarea>
+  </div>
+  <div class="interrupt-bar">
+    <button class="btn btn-warning btn-sm" onclick="interruptToUnload()">挂起→临时卸货 / 임시 하차</button>
+    <button class="btn btn-warning btn-sm" onclick="interruptToLoad()">挂起→临时装货 / 임시 상차</button>
+  </div>
+</div>
+
+<!-- Bulk Op (大货操作) -->
+<div id="page-bulk_op" class="page">
+  <div class="topbar">
+    <button class="back-btn" onclick="goPage('order_op_menu')">← 返回/뒤로</button>
+    <div class="page-title">大货操作 / 대량화물 작업</div>
+  </div>
+  <div class="card">
+    <div class="card-title">工单号 / 작업지시 번호</div>
+    <div style="display:flex;gap:6px;">
+      <input type="text" id="bulkOrderInput" placeholder="输入或扫码工单号 / 작업번호 입력" style="flex:1;">
+    </div>
+    <div style="height:6px;"></div>
+    <div id="bulkScanReader" style="width:100%;max-width:280px;margin:0 auto;"></div>
+    <button class="btn btn-outline btn-sm" id="bulkScanBtn" onclick="startBulkScan()">扫码 / 스캔</button>
+  </div>
+  <div class="card">
+    <button class="btn btn-success" onclick="startBulkJob(this)">开始操作 / 작업 시작</button>
+    <button class="btn btn-danger" onclick="finishBulkJob(this)">完成操作 / 작업 완료</button>
+  </div>
+  <div class="card">
+    <div class="card-title">当前参与人员 / 현재 참여 인원</div>
+    <div id="bulkWorkers" class="workers-panel"><span class="muted">--</span></div>
+  </div>
+  <div class="card" id="bulkResultCard" style="display:none;">
+    <div class="card-title">操作产出 / 작업 산출</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+      <div><label>品数 / 품목수</label><input type="number" id="bulkPackedSku" placeholder="0"></div>
+      <div><label>打包箱数 / 포장박스수</label><input type="number" id="bulkPackedBox" placeholder="0"></div>
+      <div><label>大纸箱 / 대형박스</label><input type="number" id="bulkCartonLarge" placeholder="0"></div>
+      <div><label>小纸箱 / 소형박스</label><input type="number" id="bulkCartonSmall" placeholder="0"></div>
+      <div><label>修补箱数 / 수리박스수</label><input type="number" id="bulkRepairedBox" placeholder="0"></div>
+      <div><label>换箱数 / 교체박스수</label><input type="number" id="bulkReboxed" placeholder="0"></div>
+      <div><label>标签数 / 라벨수</label><input type="number" id="bulkLabelCount" placeholder="0"></div>
+      <div><label>操作总箱数 / 총 박스수</label><input type="number" id="bulkTotalBox" placeholder="0"></div>
+      <div><label>打托数 / 팔레트수</label><input type="number" id="bulkPalletCount" placeholder="0"></div>
+      <div><label>叉车货位数 / 지게차 위치수</label><input type="number" id="bulkForkliftLoc" placeholder="0"></div>
+    </div>
+    <div style="margin-top:8px;">
+      <label><input type="checkbox" id="bulkUsedForklift"> 使用了叉车 / 지게차 사용</label>
+    </div>
+    <label style="margin-top:8px;">备注 / 비고</label>
+    <textarea id="bulkRemark" rows="2" placeholder="可选备注 / 선택 비고"></textarea>
+    <label>结果说明 / 결과 설명</label>
+    <textarea id="bulkResultNote" rows="2" placeholder="可选说明 / 선택 설명"></textarea>
+  </div>
+  <div class="interrupt-bar">
+    <button class="btn btn-warning btn-sm" onclick="interruptToUnload()">挂起→临时卸货 / 임시 하차</button>
+    <button class="btn btn-warning btn-sm" onclick="interruptToLoad()">挂起→临时装货 / 임시 상차</button>
   </div>
 </div>
 
@@ -441,7 +530,7 @@
 <input type="file" id="photoInput" accept="image/*" capture="environment" style="display:none;" onchange="handlePhotoUpload(this)">
 
 <script src="config.js"></script>
-<script src="app.js?v=20260410c"></script>
+<script src="app.js?v=20260414a"></script>
 <script src="patch.js?v=20260408d"></script>
 </body>
 </html>

@@ -454,6 +454,16 @@ const MIGRATIONS = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_v2_login_date ON v2_ops_login_events(login_date)`,
   `CREATE INDEX IF NOT EXISTS idx_v2_login_worker ON v2_ops_login_events(worker_id, login_date)`,
+
+  // ---- v2_ops_job_pick_docs: 拣货任务关联的拣货单号 ----
+  `CREATE TABLE IF NOT EXISTS v2_ops_job_pick_docs (
+    id TEXT PRIMARY KEY,
+    job_id TEXT DEFAULT '',
+    pick_doc_no TEXT DEFAULT '',
+    created_at TEXT
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_pick_docs_job ON v2_ops_job_pick_docs(job_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_pick_docs_no ON v2_ops_job_pick_docs(pick_doc_no)`,
 ];
 
 let _migrated = false;
@@ -2435,6 +2445,333 @@ route("v2_scan_batch_list", async (body, env) => {
     "SELECT * FROM v2_scan_batches ORDER BY created_at DESC LIMIT 200"
   ).all();
   return json({ ok: true, items: rs.results || [] });
+});
+
+// =====================================================
+// PICK DIRECT — 代发拣货
+// =====================================================
+route("v2_pick_job_start", async (body, env) => {
+  if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  const worker_id = String(body.worker_id || "").trim();
+  const worker_name = String(body.worker_name || "").trim();
+  if (!worker_id) return err("missing worker_id");
+
+  // pick_doc_nos: array of pick document numbers
+  let pick_doc_nos = body.pick_doc_nos || [];
+  if (typeof pick_doc_nos === 'string') {
+    pick_doc_nos = pick_doc_nos.split(',').map(s => s.trim()).filter(Boolean);
+  }
+
+  return withIdem(env, body, "v2_pick_job_start", async () => {
+    const t = now();
+
+    // Try to join an existing active pick_direct job that shares any of the same pick_doc_nos
+    let job = null;
+    if (pick_doc_nos.length > 0) {
+      // Find active pick jobs that have any of these doc nos
+      const placeholders = pick_doc_nos.map(() => '?').join(',');
+      const existing = await env.DB.prepare(
+        `SELECT DISTINCT j.* FROM v2_ops_jobs j
+         JOIN v2_ops_job_pick_docs pd ON pd.job_id = j.id
+         WHERE j.job_type='pick_direct' AND j.status IN ('pending','working')
+         AND j.is_temporary_interrupt=0 AND pd.pick_doc_no IN (${placeholders})
+         LIMIT 1`
+      ).bind(...pick_doc_nos).first();
+      if (existing) job = existing;
+    }
+
+    let job_id, is_new_job = false;
+    if (job) {
+      job_id = job.id;
+      const dup = await findOpenSeg(env, job_id, worker_id);
+      if (dup) {
+        // Still insert any new doc nos
+        const existingDocs = await env.DB.prepare(
+          "SELECT pick_doc_no FROM v2_ops_job_pick_docs WHERE job_id=?"
+        ).bind(job_id).all();
+        const existingSet = new Set((existingDocs.results || []).map(r => r.pick_doc_no));
+        for (const docNo of pick_doc_nos) {
+          if (!existingSet.has(docNo)) {
+            await env.DB.prepare(
+              "INSERT INTO v2_ops_job_pick_docs(id, job_id, pick_doc_no, created_at) VALUES(?,?,?,?)"
+            ).bind("PD-" + uid(), job_id, docNo, t).run();
+          }
+        }
+        return { ok: true, job_id, worker_seg_id: dup.id, is_new_job: false, already_joined: true };
+      }
+      await env.DB.prepare(
+        "UPDATE v2_ops_jobs SET active_worker_count=active_worker_count+1, updated_at=?, status='working' WHERE id=?"
+      ).bind(t, job_id).run();
+    } else {
+      job_id = "JOB-" + uid();
+      is_new_job = true;
+      await env.DB.prepare(`
+        INSERT INTO v2_ops_jobs(id, flow_stage, biz_class, job_type, related_doc_type, related_doc_id,
+          status, parent_job_id, is_temporary_interrupt, interrupt_type, created_by, created_at, updated_at, active_worker_count)
+        VALUES(?,'order_op','direct_ship','pick_direct','','','working','',0,'',?,?,?,1)
+      `).bind(job_id, worker_id, t, t).run();
+    }
+
+    // Insert pick doc nos
+    const existingDocs = await env.DB.prepare(
+      "SELECT pick_doc_no FROM v2_ops_job_pick_docs WHERE job_id=?"
+    ).bind(job_id).all();
+    const existingSet = new Set((existingDocs.results || []).map(r => r.pick_doc_no));
+    for (const docNo of pick_doc_nos) {
+      if (!existingSet.has(docNo)) {
+        await env.DB.prepare(
+          "INSERT INTO v2_ops_job_pick_docs(id, job_id, pick_doc_no, created_at) VALUES(?,?,?,?)"
+        ).bind("PD-" + uid(), job_id, docNo, t).run();
+      }
+    }
+
+    // Add worker segment
+    const seg_id = "WS-" + uid();
+    await env.DB.prepare(`
+      INSERT INTO v2_ops_job_workers(id, job_id, worker_id, worker_name, joined_at)
+      VALUES(?,?,?,?,?)
+    `).bind(seg_id, job_id, worker_id, worker_name, t).run();
+
+    return { ok: true, job_id, worker_seg_id: seg_id, is_new_job };
+  });
+});
+
+route("v2_pick_job_add_docs", async (body, env) => {
+  if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  const job_id = String(body.job_id || "").trim();
+  if (!job_id) return err("missing job_id");
+
+  let pick_doc_nos = body.pick_doc_nos || [];
+  if (typeof pick_doc_nos === 'string') {
+    pick_doc_nos = pick_doc_nos.split(',').map(s => s.trim()).filter(Boolean);
+  }
+  if (pick_doc_nos.length === 0) return err("missing pick_doc_nos");
+
+  const t = now();
+  const existingDocs = await env.DB.prepare(
+    "SELECT pick_doc_no FROM v2_ops_job_pick_docs WHERE job_id=?"
+  ).bind(job_id).all();
+  const existingSet = new Set((existingDocs.results || []).map(r => r.pick_doc_no));
+  let added = 0;
+  for (const docNo of pick_doc_nos) {
+    if (!existingSet.has(docNo)) {
+      await env.DB.prepare(
+        "INSERT INTO v2_ops_job_pick_docs(id, job_id, pick_doc_no, created_at) VALUES(?,?,?,?)"
+      ).bind("PD-" + uid(), job_id, docNo, t).run();
+      added++;
+    }
+  }
+  // Return all docs for this job
+  const allDocs = await env.DB.prepare(
+    "SELECT pick_doc_no, created_at FROM v2_ops_job_pick_docs WHERE job_id=? ORDER BY created_at"
+  ).bind(job_id).all();
+  return json({ ok: true, added, docs: allDocs.results || [] });
+});
+
+route("v2_pick_job_finish", async (body, env) => {
+  if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  const job_id = String(body.job_id || "").trim();
+  const worker_id = String(body.worker_id || "").trim();
+  if (!job_id) return err("missing job_id");
+
+  const t = now();
+
+  // Idempotency: already completed
+  const jobCheck = await env.DB.prepare("SELECT status FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
+  if (jobCheck && jobCheck.status === 'completed') {
+    return json({ ok: false, error: "already_completed", message: "任务已完成，请勿重复提交" });
+  }
+
+  // Close this worker's segments
+  await closeAllOpenSegs(env, job_id, worker_id, t, 'finished');
+
+  // Save result
+  const remark = String(body.remark || "").trim();
+  const result_note = String(body.result_note || "").trim();
+
+  // Get all pick doc nos for result record
+  const allDocs = await env.DB.prepare(
+    "SELECT pick_doc_no FROM v2_ops_job_pick_docs WHERE job_id=? ORDER BY created_at"
+  ).bind(job_id).all();
+  const docNos = (allDocs.results || []).map(r => r.pick_doc_no);
+
+  const result_id = "RES-" + uid();
+  await env.DB.prepare(`
+    INSERT INTO v2_ops_job_results(id, job_id, remark, result_json, result_lines_json, created_by, created_at)
+    VALUES(?,?,?,?,?,?,?)
+  `).bind(result_id, job_id, remark, JSON.stringify({
+    result_note,
+    pick_doc_nos: docNos
+  }), '[]', worker_id, t).run();
+
+  // Complete job — close all remaining open segments
+  await env.DB.prepare(
+    "UPDATE v2_ops_jobs SET status='completed', active_worker_count=0, updated_at=? WHERE id=?"
+  ).bind(t, job_id).run();
+  await env.DB.prepare(
+    "UPDATE v2_ops_job_workers SET left_at=?, leave_reason='job_completed' WHERE job_id=? AND left_at=''"
+  ).bind(t, job_id).run();
+
+  return json({ ok: true });
+});
+
+// =====================================================
+// BULK OP — 大货操作
+// =====================================================
+route("v2_bulk_op_job_start", async (body, env) => {
+  if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  const worker_id = String(body.worker_id || "").trim();
+  const worker_name = String(body.worker_name || "").trim();
+  const work_order_no = String(body.work_order_no || "").trim();
+  if (!worker_id) return err("missing worker_id");
+
+  return withIdem(env, body, "v2_bulk_op_job_start", async () => {
+    const t = now();
+
+    // Try to join existing bulk_op job for same work_order_no
+    let job = null;
+    if (work_order_no) {
+      const existing = await env.DB.prepare(
+        "SELECT * FROM v2_ops_jobs WHERE job_type='bulk_op' AND related_doc_id=? AND status IN ('pending','working') AND is_temporary_interrupt=0 LIMIT 1"
+      ).bind(work_order_no).first();
+      if (existing) job = existing;
+    }
+
+    let job_id, is_new_job = false;
+    if (job) {
+      job_id = job.id;
+      const dup = await findOpenSeg(env, job_id, worker_id);
+      if (dup) return { ok: true, job_id, worker_seg_id: dup.id, is_new_job: false, already_joined: true };
+      await env.DB.prepare(
+        "UPDATE v2_ops_jobs SET active_worker_count=active_worker_count+1, updated_at=?, status='working' WHERE id=?"
+      ).bind(t, job_id).run();
+    } else {
+      job_id = "JOB-" + uid();
+      is_new_job = true;
+      await env.DB.prepare(`
+        INSERT INTO v2_ops_jobs(id, flow_stage, biz_class, job_type, related_doc_type, related_doc_id,
+          status, parent_job_id, is_temporary_interrupt, interrupt_type, created_by, created_at, updated_at, active_worker_count)
+        VALUES(?,'order_op','bulk','bulk_op','work_order',?,'working','',0,'',?,?,?,1)
+      `).bind(job_id, work_order_no, worker_id, t, t).run();
+    }
+
+    const seg_id = "WS-" + uid();
+    await env.DB.prepare(`
+      INSERT INTO v2_ops_job_workers(id, job_id, worker_id, worker_name, joined_at)
+      VALUES(?,?,?,?,?)
+    `).bind(seg_id, job_id, worker_id, worker_name, t).run();
+
+    return { ok: true, job_id, worker_seg_id: seg_id, is_new_job };
+  });
+});
+
+route("v2_bulk_op_job_finish", async (body, env) => {
+  if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  const job_id = String(body.job_id || "").trim();
+  const worker_id = String(body.worker_id || "").trim();
+  if (!job_id) return err("missing job_id");
+
+  const t = now();
+
+  const jobCheck = await env.DB.prepare("SELECT status FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
+  if (jobCheck && jobCheck.status === 'completed') {
+    return json({ ok: false, error: "already_completed", message: "任务已完成，请勿重复提交" });
+  }
+
+  await closeAllOpenSegs(env, job_id, worker_id, t, 'finished');
+
+  // Build structured result from body
+  const resultData = {
+    packed_sku_count: Number(body.packed_sku_count || 0),
+    packed_box_count: Number(body.packed_box_count || 0),
+    used_carton_large_count: Number(body.used_carton_large_count || 0),
+    used_carton_small_count: Number(body.used_carton_small_count || 0),
+    repaired_box_count: Number(body.repaired_box_count || 0),
+    reboxed_count: Number(body.reboxed_count || 0),
+    label_count: Number(body.label_count || 0),
+    total_operated_box_count: Number(body.total_operated_box_count || 0),
+    pallet_count: Number(body.pallet_count || 0),
+    used_forklift: body.used_forklift ? 1 : 0,
+    forklift_location_count: Number(body.forklift_location_count || 0),
+    result_note: String(body.result_note || "")
+  };
+
+  const result_id = "RES-" + uid();
+  await env.DB.prepare(`
+    INSERT INTO v2_ops_job_results(id, job_id, remark, result_json, result_lines_json, created_by, created_at)
+    VALUES(?,?,?,?,?,?,?)
+  `).bind(result_id, job_id, String(body.remark || ""), JSON.stringify(resultData), '[]', worker_id, t).run();
+
+  await env.DB.prepare(
+    "UPDATE v2_ops_jobs SET status='completed', active_worker_count=0, updated_at=? WHERE id=?"
+  ).bind(t, job_id).run();
+  await env.DB.prepare(
+    "UPDATE v2_ops_job_workers SET left_at=?, leave_reason='job_completed' WHERE job_id=? AND left_at=''"
+  ).bind(t, job_id).run();
+
+  return json({ ok: true });
+});
+
+// =====================================================
+// ORDER OPS — 按单操作 job 列表查询（协同中心/看板用）
+// =====================================================
+route("v2_order_ops_job_list", async (body, env) => {
+  if (!isAuth(body, env)) return err("unauthorized", 401);
+  const start = String(body.start_date || "").trim();
+  const end = String(body.end_date || "").trim();
+  const job_type = String(body.job_type || "").trim();
+
+  let sql = "SELECT * FROM v2_ops_jobs WHERE flow_stage='order_op'";
+  const binds = [];
+  if (job_type) { sql += " AND job_type=?"; binds.push(job_type); }
+  if (start) { sql += " AND created_at>=?"; binds.push(start + "T00:00:00.000Z"); }
+  if (end) { sql += " AND created_at<=?"; binds.push(end + "T23:59:59.999Z"); }
+  sql += " ORDER BY created_at DESC LIMIT 200";
+  const stmt = env.DB.prepare(sql);
+  const rs = binds.length > 0 ? await stmt.bind(...binds).all() : await stmt.all();
+
+  // Enrich with worker names, pick docs, result
+  const items = [];
+  for (const job of (rs.results || [])) {
+    const workers = await env.DB.prepare(
+      "SELECT worker_name, minutes_worked, left_at FROM v2_ops_job_workers WHERE job_id=? ORDER BY joined_at"
+    ).bind(job.id).all();
+    const workerRows = workers.results || [];
+    const names = [...new Set(workerRows.map(w => w.worker_name).filter(Boolean))];
+    const totalMin = workerRows.reduce((s, w) => s + (Number(w.minutes_worked) || 0), 0);
+
+    // Pick docs (if pick_direct)
+    let pickDocs = [];
+    if (job.job_type === 'pick_direct') {
+      const pds = await env.DB.prepare(
+        "SELECT pick_doc_no FROM v2_ops_job_pick_docs WHERE job_id=? ORDER BY created_at"
+      ).bind(job.id).all();
+      pickDocs = (pds.results || []).map(r => r.pick_doc_no);
+    }
+
+    // Latest result
+    const latestResult = await env.DB.prepare(
+      "SELECT remark, result_json, created_at FROM v2_ops_job_results WHERE job_id=? ORDER BY created_at DESC LIMIT 1"
+    ).bind(job.id).first();
+
+    let resultData = null, remark = "";
+    if (latestResult) {
+      remark = latestResult.remark || "";
+      try { resultData = JSON.parse(latestResult.result_json); } catch(e) {}
+    }
+
+    items.push({
+      ...job,
+      worker_names: names,
+      worker_names_text: names.join(", "),
+      total_minutes_worked: Math.round(totalMin),
+      pick_doc_nos: pickDocs,
+      result_data: resultData,
+      result_remark: remark
+    });
+  }
+
+  return json({ ok: true, items });
 });
 
 // =====================================================

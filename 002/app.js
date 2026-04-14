@@ -301,6 +301,7 @@ function goTab(tab, btn) {
   if (tab === "outbound") loadOutboundList();
   if (tab === "inbound") loadInboundList();
   if (tab === "feedback") loadFeedbackList();
+  if (tab === "order_ops") loadOrderOpsList();
 }
 
 function goView(name) {
@@ -1476,6 +1477,179 @@ async function handleFileUpload(input) {
 function showLightbox(url) {
   document.getElementById("lightboxImg").src = url;
   document.getElementById("lightbox").classList.add("show");
+}
+
+// ===== Order Ops (按单操作) =====
+var _orderOpsJobType = {
+  pick_direct: "代发拣货",
+  bulk_op: "大货操作"
+};
+var _orderOpsStatus = {
+  pending: "待开始",
+  working: "作业中",
+  awaiting_close: "待收尾",
+  completed: "已完成"
+};
+
+async function loadOrderOpsList() {
+  var body = document.getElementById("orderOpsListBody");
+  if (!body) return;
+  body.innerHTML = '<span class="muted">' + L("loading") + '</span>';
+
+  var job_type = (document.getElementById("orderOpsTypeFilter") || {}).value || "";
+  var start = (document.getElementById("orderOpsStartDate") || {}).value || "";
+  var end = (document.getElementById("orderOpsEndDate") || {}).value || "";
+
+  var res = await api({ action: "v2_order_ops_job_list", job_type: job_type, start_date: start, end_date: end });
+  if (!res || !res.ok) {
+    body.innerHTML = '<span class="muted">加载失败</span>';
+    return;
+  }
+
+  var items = res.items || [];
+  if (items.length === 0) {
+    body.innerHTML = '<span class="muted">' + L("no_data") + '</span>';
+    return;
+  }
+
+  var html = '<table class="simple-table"><thead><tr>';
+  html += '<th>类型</th><th>工单/拣货单</th><th>参与人员</th><th>工时(分钟)</th><th>状态</th><th>创建时间</th><th>操作</th>';
+  html += '</tr></thead><tbody>';
+
+  items.forEach(function(j) {
+    var typeText = _orderOpsJobType[j.job_type] || j.job_type;
+    var docText = "--";
+    if (j.job_type === "pick_direct" && j.pick_doc_nos && j.pick_doc_nos.length > 0) {
+      docText = j.pick_doc_nos.join(", ");
+    } else if (j.related_doc_id) {
+      docText = j.related_doc_id;
+    }
+    var stText = _orderOpsStatus[j.status] || j.status;
+    var stClass = j.status === 'completed' ? 'st-completed' : (j.status === 'working' ? 'st-putting_away' : 'st-pending');
+
+    html += '<tr>';
+    html += '<td>' + esc(typeText) + '</td>';
+    html += '<td style="max-width:200px;word-break:break-all;">' + esc(docText) + '</td>';
+    html += '<td>' + esc(j.worker_names_text || "--") + '</td>';
+    html += '<td>' + (j.total_minutes_worked || 0) + '</td>';
+    html += '<td><span class="st ' + stClass + '">' + esc(stText) + '</span></td>';
+    html += '<td>' + esc(fmtTime(j.created_at)) + '</td>';
+    html += '<td><a href="#" onclick="openOrderOpsDetail(\'' + esc(j.id) + '\');return false;">详情</a></td>';
+    html += '</tr>';
+  });
+
+  html += '</tbody></table>';
+  body.innerHTML = html;
+}
+
+var _currentOrderOpsId = null;
+function openOrderOpsDetail(id) {
+  _currentOrderOpsId = id;
+  goView("order_ops_detail");
+  loadOrderOpsDetail();
+}
+
+async function loadOrderOpsDetail() {
+  var body = document.getElementById("orderOpsDetailBody");
+  if (!body || !_currentOrderOpsId) return;
+  body.innerHTML = '<span class="muted">' + L("loading") + '</span>';
+
+  var res = await api({ action: "v2_ops_job_detail", job_id: _currentOrderOpsId });
+  if (!res || !res.ok || !res.job) {
+    body.innerHTML = '<span class="muted">加载失败或未找到</span>';
+    return;
+  }
+
+  var j = res.job;
+  var workers = res.workers || [];
+  var results = res.results || [];
+  var typeText = _orderOpsJobType[j.job_type] || j.job_type;
+  var stText = _orderOpsStatus[j.status] || j.status;
+
+  var html = '<div class="card">';
+  html += '<div class="card-title">' + esc(typeText) + ' · ' + esc(j.id) + '</div>';
+  html += '<div class="detail-grid">';
+  html += '<div class="detail-field"><b>状态:</b> <span class="st st-' + esc(j.status) + '">' + esc(stText) + '</span></div>';
+  html += '<div class="detail-field"><b>业务:</b> ' + esc(bizLabel(j.biz_class)) + '</div>';
+  html += '<div class="detail-field"><b>阶段:</b> ' + esc(j.flow_stage || "--") + '</div>';
+  if (j.related_doc_id) {
+    html += '<div class="detail-field"><b>关联单号:</b> ' + esc(j.related_doc_id) + '</div>';
+  }
+  html += '<div class="detail-field"><b>创建时间:</b> ' + esc(fmtTime(j.created_at)) + '</div>';
+  html += '</div></div>';
+
+  // Pick docs (if applicable)
+  if (j.job_type === 'pick_direct') {
+    html += '<div class="card"><div class="card-title">拣货单号</div><div id="orderOpsPickDocs"><span class="muted">加载中...</span></div></div>';
+  }
+
+  // Workers
+  html += '<div class="card"><div class="card-title">参与人员</div>';
+  if (workers.length > 0) {
+    html += '<table class="simple-table"><thead><tr><th>姓名</th><th>加入时间</th><th>离开时间</th><th>工时(分钟)</th><th>原因</th></tr></thead><tbody>';
+    workers.forEach(function(w) {
+      html += '<tr><td>' + esc(w.worker_name) + '</td><td>' + esc(fmtTime(w.joined_at)) + '</td>';
+      html += '<td>' + (w.left_at ? esc(fmtTime(w.left_at)) : '<span class="muted">仍在进行</span>') + '</td>';
+      html += '<td>' + (w.minutes_worked ? Math.round(w.minutes_worked) : "--") + '</td>';
+      html += '<td>' + esc(w.leave_reason || "--") + '</td></tr>';
+    });
+    html += '</tbody></table>';
+  } else {
+    html += '<span class="muted">无参与人员记录</span>';
+  }
+  html += '</div>';
+
+  // Results
+  if (results.length > 0) {
+    html += '<div class="card"><div class="card-title">操作结果</div>';
+    results.forEach(function(r) {
+      html += '<div style="border-bottom:1px solid #f0f0f0;padding:8px 0;">';
+      html += '<div style="font-size:12px;color:#888;">记录时间: ' + esc(fmtTime(r.created_at)) + ' · 记录人: ' + esc(r.created_by || "--") + '</div>';
+      if (r.remark) html += '<div><b>备注:</b> ' + esc(r.remark) + '</div>';
+      if (r.result_json) {
+        try {
+          var rd = JSON.parse(r.result_json);
+          if (j.job_type === 'pick_direct' && rd.pick_doc_nos) {
+            html += '<div><b>拣货单:</b> ' + esc(rd.pick_doc_nos.join(", ")) + '</div>';
+          }
+          if (rd.result_note) html += '<div><b>结果说明:</b> ' + esc(rd.result_note) + '</div>';
+          // Bulk op fields
+          if (j.job_type === 'bulk_op') {
+            var fields = [
+              ["品数", rd.packed_sku_count], ["打包箱数", rd.packed_box_count],
+              ["大纸箱", rd.used_carton_large_count], ["小纸箱", rd.used_carton_small_count],
+              ["修补箱数", rd.repaired_box_count], ["换箱数", rd.reboxed_count],
+              ["标签数", rd.label_count], ["操作总箱数", rd.total_operated_box_count],
+              ["打托数", rd.pallet_count], ["叉车", rd.used_forklift ? "是" : "否"],
+              ["叉车货位数", rd.forklift_location_count]
+            ];
+            var parts = fields.filter(function(f) { return f[1] !== undefined && f[1] !== 0 && f[1] !== "否"; })
+              .map(function(f) { return f[0] + ": " + f[1]; });
+            if (parts.length > 0) html += '<div><b>产出:</b> ' + esc(parts.join(" / ")) + '</div>';
+          }
+        } catch(e) {}
+      }
+      html += '</div>';
+    });
+    html += '</div>';
+  }
+
+  body.innerHTML = html;
+
+  // Load pick docs if applicable
+  if (j.job_type === 'pick_direct') {
+    var pdRes = await api({ action: "v2_pick_job_add_docs", job_id: j.id, pick_doc_nos: [] });
+    var pdEl = document.getElementById("orderOpsPickDocs");
+    if (pdEl && pdRes && pdRes.ok && pdRes.docs) {
+      if (pdRes.docs.length > 0) {
+        pdEl.innerHTML = pdRes.docs.map(function(d) {
+          return '<span style="background:#e6f4ff;color:#1677ff;padding:2px 8px;border-radius:3px;font-size:12px;margin-right:4px;">' + esc(d.pick_doc_no) + '</span>';
+        }).join(' ');
+      } else {
+        pdEl.innerHTML = '<span class="muted">无拣货单号</span>';
+      }
+    }
+  }
 }
 
 // ===== Init =====

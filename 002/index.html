@@ -43,6 +43,7 @@
     <button onclick="goTab('inbound',this)" data-tab="inbound">入库计划</button>
     <button onclick="goTab('feedback',this)" data-tab="feedback">现场反馈</button>
     <button onclick="goTab('check',this)" data-tab="check">核对中心</button>
+    <button onclick="goTab('order_ops',this)" data-tab="order_ops">按单操作</button>
   </div>
 
   <!-- Actions -->
@@ -326,6 +327,32 @@
     <div class="card"><span class="muted">核对中心模块 — 下一轮完善</span></div>
   </div>
 
+  <!-- Order Ops (按单操作) -->
+  <div id="view-order_ops" class="view" style="display:none;">
+    <div class="card">
+      <div class="card-title">按单操作记录</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
+        <select id="orderOpsTypeFilter">
+          <option value="">全部类型</option>
+          <option value="pick_direct">代发拣货</option>
+          <option value="bulk_op">大货操作</option>
+        </select>
+        <input type="date" id="orderOpsStartDate">
+        <input type="date" id="orderOpsEndDate">
+        <button class="btn btn-primary btn-sm" onclick="loadOrderOpsList()">查询</button>
+      </div>
+      <div id="orderOpsListBody"><span class="muted">点击查询加载数据</span></div>
+    </div>
+  </div>
+
+  <!-- Order Ops Detail -->
+  <div id="view-order_ops_detail" class="view" style="display:none;">
+    <div class="card">
+      <button class="btn btn-outline btn-sm" onclick="goTab('order_ops')">← 返回列表</button>
+    </div>
+    <div id="orderOpsDetailBody"><span class="muted">加载中...</span></div>
+  </div>
+
 </div>
 
 <!-- Lightbox -->
@@ -337,7 +364,7 @@
 
 <script src="config.js"></script>
 <script src="../shared/qrcode.min.js"></script>
-<script src="app.js?v=20260410c"></script>
+<script src="app.js?v=20260414a"></script>
 <script src="patch.js?v=20260408f"></script>
 </body>
 </html>

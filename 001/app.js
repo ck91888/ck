@@ -185,6 +185,8 @@ function showPage(name) {
   if (name === "issue_list") loadIssueList();
   if (name === "issue_detail") loadIssueDetail();
   if (name === "generic_job") initGenericJob();
+  if (name === "pick_direct") initPickDirect();
+  if (name === "bulk_op") initBulkOp();
 }
 
 // ===== Badge Entry (replaces old login) =====
@@ -211,6 +213,8 @@ function resumeActiveOrHome() {
       else if (jt === "inbound_return") showPage("inbound_return");
       else if (jt === "inbound_direct" || jt === "inbound_bulk") { _pageParams = { job_type: jt, biz_class: res.job.biz_class || "" }; showPage("inbound"); }
       else if (jt === "load_outbound") showPage("outbound_load");
+      else if (jt === "pick_direct") showPage("pick_direct");
+      else if (jt === "bulk_op") showPage("bulk_op");
       else if (jt === "issue_handle") { _currentIssueId = res.job.related_doc_id || null; showPage("issue_detail"); }
       else { _pageParams = { flow_stage: res.job.flow_stage || "", biz_class: res.job.biz_class || "", job_type: jt, title: JOB_TYPE_LABEL[jt] || jt }; showPage("generic_job"); }
     } else {
@@ -487,6 +491,8 @@ function goMyTask() {
     else if (jt === "inbound_return") goPage("inbound_return");
     else if (jt.indexOf("inbound") === 0) goPage("inbound", { job_type: jt, biz_class: res.job.biz_class || "" });
     else if (jt === "load_outbound") goPage("outbound_load");
+    else if (jt === "pick_direct") goPage("pick_direct");
+    else if (jt === "bulk_op") goPage("bulk_op");
     else if (jt === "issue_handle") goPage("issue_detail");
     else goPage("generic_job");
   });
@@ -1107,6 +1113,8 @@ function startJobPoll(type) {
     if (type === "inbound") refreshInboundWorkers();
     if (type === "inbound_return") refreshInboundReturnWorkers();
     if (type === "generic") refreshGenericWorkers();
+    if (type === "pick") refreshPickWorkers();
+    if (type === "bulk") refreshBulkWorkers();
   }, 5000);
 }
 
@@ -1740,6 +1748,284 @@ async function handleIssueFinish(btnEl) {
       alert("失败/실패: " + (res ? res.error : "unknown"));
     }
   });
+}
+
+// ===== Pick Direct (代发拣货) =====
+var _pickDocNos = [];
+var _pickScanner = null;
+
+function initPickDirect() {
+  _pickDocNos = [];
+  renderPickDocList();
+  document.getElementById("pickResultCard").style.display = "none";
+  // Enter key to add doc
+  var inp = document.getElementById("pickDocInput");
+  if (inp) inp.onkeydown = function(e) { if (e.key === "Enter") { e.preventDefault(); addPickDoc(); } };
+  if (_activeJobId) {
+    document.getElementById("pickResultCard").style.display = "";
+    // Load existing pick docs for this job
+    api({ action: "v2_pick_job_add_docs", job_id: _activeJobId, pick_doc_nos: [] }).then(function(res) {
+      if (res && res.ok && res.docs) {
+        _pickDocNos = res.docs.map(function(d) { return d.pick_doc_no; });
+        renderPickDocList();
+      }
+    });
+    refreshPickWorkers();
+  }
+  startJobPoll("pick");
+}
+
+function renderPickDocList() {
+  var el = document.getElementById("pickDocList");
+  if (!el) return;
+  if (_pickDocNos.length === 0) {
+    el.innerHTML = '<span class="muted">未添加拣货单号 / 피킹번호 미추가</span>';
+    return;
+  }
+  var html = '<div style="display:flex;flex-wrap:wrap;gap:4px;">';
+  _pickDocNos.forEach(function(no, i) {
+    html += '<span style="background:#e6f4ff;color:#1677ff;padding:3px 10px;border-radius:4px;font-size:12px;">' +
+      esc(no) + ' <span onclick="_pickDocNos.splice(' + i + ',1);renderPickDocList();" style="cursor:pointer;margin-left:4px;color:#ff4d4f;">&times;</span></span>';
+  });
+  html += '</div>';
+  el.innerHTML = html;
+}
+
+function addPickDoc() {
+  var inp = document.getElementById("pickDocInput");
+  var val = (inp ? inp.value : "").trim();
+  if (!val) return;
+  if (_pickDocNos.indexOf(val) === -1) {
+    _pickDocNos.push(val);
+    renderPickDocList();
+    // If job already active, add to backend immediately
+    if (_activeJobId) {
+      api({ action: "v2_pick_job_add_docs", job_id: _activeJobId, pick_doc_nos: [val] });
+    }
+  }
+  if (inp) inp.value = "";
+  inp.focus();
+}
+
+function startPickScan() {
+  if (_pickScanner) { stopPickScan(); return; }
+  var readerEl = document.getElementById("pickScanReader");
+  if (!readerEl) return;
+  readerEl.innerHTML = "";
+  try {
+    _pickScanner = new Html5Qrcode("pickScanReader");
+    _pickScanner.start(
+      { facingMode: "environment" },
+      { fps: 10, qrbox: { width: 250, height: 150 } },
+      function(decoded) {
+        var code = String(decoded || "").trim();
+        if (!code) return;
+        if (_pickDocNos.indexOf(code) === -1) {
+          _pickDocNos.push(code);
+          renderPickDocList();
+          if (_activeJobId) {
+            api({ action: "v2_pick_job_add_docs", job_id: _activeJobId, pick_doc_nos: [code] });
+          }
+        }
+      },
+      function() {}
+    ).catch(function(e) {
+      alert("摄像头启动失败 / 카메라 시작 실패: " + e);
+      _pickScanner = null;
+    });
+    document.getElementById("pickScanBtn").textContent = "停止扫码 / 스캔 중지";
+  } catch(e) {
+    alert("扫码不可用 / 스캔 불가: " + e.message);
+  }
+}
+
+function stopPickScan() {
+  if (_pickScanner) {
+    try { _pickScanner.stop(); } catch(e) {}
+    _pickScanner = null;
+    var el = document.getElementById("pickScanReader");
+    if (el) el.innerHTML = "";
+    document.getElementById("pickScanBtn").textContent = "扫码 / 스캔";
+  }
+}
+
+async function startPickJob(btnEl) {
+  if (_pickDocNos.length === 0) {
+    alert("请先添加至少一个拣货单号\n최소 하나의 피킹번호를 추가하세요");
+    return;
+  }
+  withActionLock('startPickJob', btnEl || null, '提交中.../저장중...', async function() {
+    var res = await api({
+      action: "v2_pick_job_start",
+      pick_doc_nos: _pickDocNos,
+      worker_id: getWorkerId(),
+      worker_name: getWorkerName()
+    });
+    if (res && res.ok) {
+      saveActiveJob(res.job_id, res.worker_seg_id);
+      if (!res.already_joined) {
+        alert(res.is_new_job ? "已创建拣货任务 / 피킹 작업 생성됨" : "已加入拣货任务 / 피킹 작업 참여됨");
+      }
+      document.getElementById("pickResultCard").style.display = "";
+      refreshPickWorkers();
+    } else {
+      alert("失败/실패: " + (res ? res.error : "unknown"));
+    }
+  });
+}
+
+async function finishPickJob(btnEl) {
+  if (!_activeJobId) { alert("没有进行中的任务 / 진행 중인 작업 없음"); return; }
+  if (!confirm("确认完成本次拣货？\n이번 피킹을 완료하시겠습니까?")) return;
+  withActionLock('finishPickJob', btnEl || null, '提交中.../저장중...', async function() {
+    var res = await api({
+      action: "v2_pick_job_finish",
+      job_id: _activeJobId,
+      worker_id: getWorkerId(),
+      remark: (document.getElementById("pickRemark") || {}).value || "",
+      result_note: (document.getElementById("pickResultNote") || {}).value || ""
+    });
+    if (res && res.ok) {
+      alert("拣货已完成 / 피킹 완료");
+      stopPickScan();
+      clearActiveJob();
+      goPage("order_op_menu");
+    } else if (res && res.error === "already_completed") {
+      alert("任务已完成，请勿重复提交\n작업이 이미 완료되었습니다");
+      clearActiveJob();
+      goPage("order_op_menu");
+    } else {
+      alert("失败/실패: " + (res ? res.error : "unknown"));
+    }
+  });
+}
+
+async function refreshPickWorkers() {
+  if (!_activeJobId) return;
+  var res = await api({ action: "v2_ops_job_detail", job_id: _activeJobId });
+  if (res && res.ok) renderWorkers("pickWorkers", res.workers);
+}
+
+// ===== Bulk Op (大货操作) =====
+var _bulkScanner = null;
+
+function initBulkOp() {
+  document.getElementById("bulkResultCard").style.display = "none";
+  if (_activeJobId) {
+    document.getElementById("bulkResultCard").style.display = "";
+    refreshBulkWorkers();
+    // Show the work_order_no from the job
+    api({ action: "v2_ops_job_detail", job_id: _activeJobId }).then(function(res) {
+      if (res && res.ok && res.job && res.job.related_doc_id) {
+        var inp = document.getElementById("bulkOrderInput");
+        if (inp) inp.value = res.job.related_doc_id;
+      }
+    });
+  }
+  startJobPoll("bulk");
+}
+
+function startBulkScan() {
+  if (_bulkScanner) { stopBulkScan(); return; }
+  var readerEl = document.getElementById("bulkScanReader");
+  if (!readerEl) return;
+  readerEl.innerHTML = "";
+  try {
+    _bulkScanner = new Html5Qrcode("bulkScanReader");
+    _bulkScanner.start(
+      { facingMode: "environment" },
+      { fps: 10, qrbox: { width: 250, height: 150 } },
+      function(decoded) {
+        stopBulkScan();
+        var code = String(decoded || "").trim();
+        if (!code) return;
+        var inp = document.getElementById("bulkOrderInput");
+        if (inp) inp.value = code;
+      },
+      function() {}
+    ).catch(function(e) {
+      alert("摄像头启动失败 / 카메라 시작 실패: " + e);
+      _bulkScanner = null;
+    });
+    document.getElementById("bulkScanBtn").textContent = "停止扫码 / 스캔 중지";
+  } catch(e) {
+    alert("扫码不可用 / 스캔 불가: " + e.message);
+  }
+}
+
+function stopBulkScan() {
+  if (_bulkScanner) {
+    try { _bulkScanner.stop(); } catch(e) {}
+    _bulkScanner = null;
+    var el = document.getElementById("bulkScanReader");
+    if (el) el.innerHTML = "";
+    document.getElementById("bulkScanBtn").textContent = "扫码 / 스캔";
+  }
+}
+
+async function startBulkJob(btnEl) {
+  var workOrderNo = (document.getElementById("bulkOrderInput") || {}).value.trim();
+  withActionLock('startBulkJob', btnEl || null, '提交中.../저장중...', async function() {
+    var res = await api({
+      action: "v2_bulk_op_job_start",
+      work_order_no: workOrderNo,
+      worker_id: getWorkerId(),
+      worker_name: getWorkerName()
+    });
+    if (res && res.ok) {
+      saveActiveJob(res.job_id, res.worker_seg_id);
+      if (!res.already_joined) {
+        alert(res.is_new_job ? "已创建大货任务 / 대량화물 작업 생성됨" : "已加入大货任务 / 대량화물 작업 참여됨");
+      }
+      document.getElementById("bulkResultCard").style.display = "";
+      refreshBulkWorkers();
+    } else {
+      alert("失败/실패: " + (res ? res.error : "unknown"));
+    }
+  });
+}
+
+async function finishBulkJob(btnEl) {
+  if (!_activeJobId) { alert("没有进行中的任务 / 진행 중인 작업 없음"); return; }
+  if (!confirm("确认完成本次大货操作？\n이번 대량화물 작업을 완료하시겠습니까?")) return;
+  withActionLock('finishBulkJob', btnEl || null, '提交中.../저장중...', async function() {
+    var res = await api({
+      action: "v2_bulk_op_job_finish",
+      job_id: _activeJobId,
+      worker_id: getWorkerId(),
+      packed_sku_count: parseInt(document.getElementById("bulkPackedSku").value) || 0,
+      packed_box_count: parseInt(document.getElementById("bulkPackedBox").value) || 0,
+      used_carton_large_count: parseInt(document.getElementById("bulkCartonLarge").value) || 0,
+      used_carton_small_count: parseInt(document.getElementById("bulkCartonSmall").value) || 0,
+      repaired_box_count: parseInt(document.getElementById("bulkRepairedBox").value) || 0,
+      reboxed_count: parseInt(document.getElementById("bulkReboxed").value) || 0,
+      label_count: parseInt(document.getElementById("bulkLabelCount").value) || 0,
+      total_operated_box_count: parseInt(document.getElementById("bulkTotalBox").value) || 0,
+      pallet_count: parseInt(document.getElementById("bulkPalletCount").value) || 0,
+      used_forklift: document.getElementById("bulkUsedForklift").checked ? 1 : 0,
+      forklift_location_count: parseInt(document.getElementById("bulkForkliftLoc").value) || 0,
+      remark: (document.getElementById("bulkRemark") || {}).value || "",
+      result_note: (document.getElementById("bulkResultNote") || {}).value || ""
+    });
+    if (res && res.ok) {
+      alert("大货操作已完成 / 대량화물 작업 완료");
+      stopBulkScan();
+      clearActiveJob();
+      goPage("order_op_menu");
+    } else if (res && res.error === "already_completed") {
+      alert("任务已完成，请勿重复提交\n작업이 이미 완료되었습니다");
+      clearActiveJob();
+      goPage("order_op_menu");
+    } else {
+      alert("失败/실패: " + (res ? res.error : "unknown"));
+    }
+  });
+}
+
+async function refreshBulkWorkers() {
+  if (!_activeJobId) return;
+  var res = await api({ action: "v2_ops_job_detail", job_id: _activeJobId });
+  if (res && res.ok) renderWorkers("bulkWorkers", res.workers);
 }
 
 // ===== Generic Job =====
