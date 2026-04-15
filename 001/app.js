@@ -2169,12 +2169,8 @@ function _hasBulkOutput() {
 async function finishBulkJob(btnEl) {
   if (!_activeJobId) { alert("没有进行中的任务 / 진행 중인 작업 없음"); return; }
 
-  // Frontend pre-check: must record at least one valid output
-  if (!_hasBulkOutput()) {
-    alert("请先记录操作产出后再完成\n작업 산출물(품수/박스수/팔레트 등)을 먼저 기록한 후 완료하세요");
-    return;
-  }
-
+  // No unconditional output pre-check here: backend decides whether this user is
+  // the last person. Non-last person must be able to leave without recording output.
   if (!confirm("确认完成本次大货操作？\n이번 대량화물 작업을 완료하시겠습니까?")) return;
   withActionLock('finishBulkJob', btnEl || null, '提交中.../저장중...', async function() {
     var res = await api({
