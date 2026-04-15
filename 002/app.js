@@ -52,13 +52,21 @@ function setUser(u) { try { localStorage.setItem(V2_USER_KEY, u); } catch(e) {} 
 
 // 写操作 action 集合 — 自动注入 client_req_id 供后端幂等
 var _WRITE_ACTIONS = [
-  'v2_issue_create','v2_issue_handle_start',
-  'v2_outbound_order_create','v2_outbound_load_start',
-  'v2_inbound_plan_create','v2_inbound_dynamic_finalize',
-  'v2_unplanned_unload_start','v2_unplanned_unload_join',
+  'v2_issue_create','v2_issue_handle_start','v2_issue_handle_finish',
+  'v2_issue_close','v2_issue_cancel',
+  'v2_outbound_order_create','v2_outbound_order_update_status',
+  'v2_outbound_load_start','v2_outbound_load_finish',
+  'v2_inbound_plan_create','v2_inbound_plan_update_status','v2_inbound_plan_cancel',
+  'v2_inbound_dynamic_finalize',
+  'v2_unplanned_unload_start','v2_unplanned_unload_join','v2_unplanned_unload_finish',
   'v2_feedback_finalize_to_inbound','v2_unload_dynamic_start',
-  'v2_unload_job_start','v2_inbound_job_start',
-  'v2_inbound_mark_completed','v2_ops_job_start'
+  'v2_unload_job_start','v2_unload_job_finish',
+  'v2_inbound_job_start','v2_inbound_job_finish',
+  'v2_inbound_mark_completed',
+  'v2_ops_job_start','v2_ops_job_leave','v2_ops_job_finish','v2_ops_job_resume',
+  'v2_pick_job_start','v2_pick_job_join','v2_pick_job_add_docs','v2_pick_job_finish',
+  'v2_bulk_op_job_start','v2_bulk_op_job_finish',
+  'v2_correction_request_create','v2_admin_dirty_data_cleanup'
 ];
 function _genReqId(action) {
   return action + '_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
@@ -216,6 +224,8 @@ function toggleLang() {
   if (_currentTab === "issue") loadIssueList();
   if (_currentTab === "outbound") loadOutboundList();
   if (_currentTab === "inbound") loadInboundList();
+  if (_currentTab === "order_ops") loadOrderOpsList();
+  if (_currentTab === "order_ops_detail" && _currentOrderOpsJobId) loadOrderOpsDetail(_currentOrderOpsJobId);
 }
 
 function applyLang() {
@@ -238,6 +248,18 @@ function applyLang() {
   tabs.forEach(function(btn) {
     var key = btn.getAttribute("data-tab");
     if (key && tabMap[key]) btn.textContent = L(tabMap[key]);
+  });
+
+  // Generic data-i18n pass (for order_ops view + future views)
+  var els = document.querySelectorAll("[data-i18n]");
+  els.forEach(function(el) {
+    var key = el.getAttribute("data-i18n");
+    if (!key) return;
+    if (el.tagName === "INPUT" || el.tagName === "TEXTAREA") {
+      el.placeholder = L(key);
+    } else {
+      el.textContent = L(key);
+    }
   });
 }
 
@@ -1480,29 +1502,28 @@ function showLightbox(url) {
 }
 
 // ===== Order Ops (按单操作) =====
-var _orderOpsJobType = {
-  pick_direct: "代发拣货",
-  bulk_op: "大货操作"
-};
-var _orderOpsStatus = {
-  pending: "待开始",
-  working: "作业中",
-  awaiting_close: "待收尾",
-  completed: "已完成"
-};
-var _flowStageLabel = {
-  order_op: "按单操作",
-  inbound: "入库",
-  outbound: "出库",
-  internal: "库内作业"
-};
-var _leaveReasonLabel = {
-  finished: "正常完成",
-  job_completed: "任务完成",
-  interrupted: "中断离开",
-  left: "主动离开",
-  "": "--"
-};
+var _currentOrderOpsJobId = null;
+function orderOpsJobTypeText(t) {
+  var k = "order_ops_job_type_" + t;
+  var v = L(k);
+  return v === k ? (t || "--") : v;
+}
+function orderOpsStatusText(s) {
+  var k = "order_ops_status_" + s;
+  var v = L(k);
+  return v === k ? (s || "--") : v;
+}
+function orderOpsFlowText(f) {
+  var k = "order_ops_flow_" + f;
+  var v = L(k);
+  return v === k ? (f || "--") : v;
+}
+function orderOpsLeaveReasonText(r) {
+  if (!r) return "--";
+  var k = "order_ops_leave_reason_" + r;
+  var v = L(k);
+  return v === k ? r : v;
+}
 
 async function loadOrderOpsList() {
   var body = document.getElementById("orderOpsListBody");
@@ -1515,7 +1536,7 @@ async function loadOrderOpsList() {
 
   var res = await api({ action: "v2_order_ops_job_list", job_type: job_type, start_date: start, end_date: end });
   if (!res || !res.ok) {
-    body.innerHTML = '<span class="muted">加载失败</span>';
+    body.innerHTML = '<span class="muted">' + L("loading") + '</span>';
     return;
   }
 
@@ -1526,11 +1547,18 @@ async function loadOrderOpsList() {
   }
 
   var html = '<table class="simple-table"><thead><tr>';
-  html += '<th>类型</th><th>趟次/工单</th><th>关联单号</th><th>参与人员</th><th>工时</th><th>状态</th><th>创建时间</th><th>操作</th>';
+  html += '<th>' + L("order_ops_col_type") + '</th>';
+  html += '<th>' + L("order_ops_col_trip_or_work") + '</th>';
+  html += '<th>' + L("order_ops_col_doc") + '</th>';
+  html += '<th>' + L("order_ops_col_people") + '</th>';
+  html += '<th>' + L("total_work_time") + '</th>';
+  html += '<th>' + L("order_ops_col_status") + '</th>';
+  html += '<th>' + L("created_at") + '</th>';
+  html += '<th>' + L("order_ops_col_ops") + '</th>';
   html += '</tr></thead><tbody>';
 
   items.forEach(function(j) {
-    var typeText = _orderOpsJobType[j.job_type] || j.job_type;
+    var typeText = orderOpsJobTypeText(j.job_type);
 
     // Trip/work order column
     var tripHtml = '--';
@@ -1550,7 +1578,7 @@ async function loadOrderOpsList() {
       docHtml = '<span class="doc-tag">' + esc(j.related_doc_id) + '</span>';
     }
 
-    var stText = _orderOpsStatus[j.status] || j.status;
+    var stText = orderOpsStatusText(j.status);
     var stClass = 'st st-' + j.status;
 
     html += '<tr>';
@@ -1558,10 +1586,10 @@ async function loadOrderOpsList() {
     html += '<td class="col-trip">' + tripHtml + '</td>';
     html += '<td class="col-doc">' + docHtml + '</td>';
     html += '<td class="col-people">' + esc(j.worker_names_text || "--") + '</td>';
-    html += '<td class="col-num">' + (j.total_minutes_worked || 0) + '分</td>';
+    html += '<td class="col-num">' + (j.total_minutes_worked || 0) + L("minutes") + '</td>';
     html += '<td><span class="' + stClass + '">' + esc(stText) + '</span></td>';
     html += '<td class="col-time">' + esc(fmtTime(j.created_at)) + '</td>';
-    html += '<td class="col-op"><a href="#" onclick="openOrderOpsDetail(\'' + esc(j.id) + '\');return false;">详情</a></td>';
+    html += '<td class="col-op"><a href="#" onclick="openOrderOpsDetail(\'' + esc(j.id) + '\');return false;">' + L("order_ops_view_detail") + '</a></td>';
     html += '</tr>';
   });
 
@@ -1569,80 +1597,86 @@ async function loadOrderOpsList() {
   body.innerHTML = html;
 }
 
-var _currentOrderOpsId = null;
 function openOrderOpsDetail(id) {
-  _currentOrderOpsId = id;
+  _currentOrderOpsJobId = id;
   goView("order_ops_detail");
-  loadOrderOpsDetail();
+  loadOrderOpsDetail(id);
 }
 
-async function loadOrderOpsDetail() {
+async function loadOrderOpsDetail(id) {
   var body = document.getElementById("orderOpsDetailBody");
-  if (!body || !_currentOrderOpsId) return;
+  var jobId = id || _currentOrderOpsJobId;
+  if (!body || !jobId) return;
+  _currentOrderOpsJobId = jobId;
   body.innerHTML = '<span class="muted">' + L("loading") + '</span>';
 
-  var res = await api({ action: "v2_ops_job_detail", job_id: _currentOrderOpsId });
+  var res = await api({ action: "v2_ops_job_detail", job_id: jobId });
   if (!res || !res.ok || !res.job) {
-    body.innerHTML = '<span class="muted">加载失败或未找到</span>';
+    body.innerHTML = '<span class="muted">' + L("no_data") + '</span>';
     return;
   }
 
   var j = res.job;
   var workers = res.workers || [];
   var results = res.results || [];
-  var typeText = _orderOpsJobType[j.job_type] || j.job_type;
-  var stText = _orderOpsStatus[j.status] || j.status;
+  var typeText = orderOpsJobTypeText(j.job_type);
+  var stText = orderOpsStatusText(j.status);
 
   // === Card 1: Basic Info ===
-  var flowLabel = _flowStageLabel[j.flow_stage] || j.flow_stage || "--";
+  var flowLabel = orderOpsFlowText(j.flow_stage);
   var html = '<div class="card">';
   html += '<div class="card-title">' + esc(typeText);
   if (j.display_no) html += ' · <span style="font-family:monospace;color:#2f54eb;">' + esc(j.display_no) + '</span>';
   html += '</div>';
   html += '<div class="detail-grid">';
-  html += '<div class="detail-field"><b>状态:</b> <span class="st st-' + esc(j.status) + '">' + esc(stText) + '</span></div>';
-  html += '<div class="detail-field"><b>业务分类:</b> ' + esc(bizLabel(j.biz_class)) + '</div>';
+  html += '<div class="detail-field"><b>' + L("order_ops_field_status") + ':</b> <span class="st st-' + esc(j.status) + '">' + esc(stText) + '</span></div>';
+  html += '<div class="detail-field"><b>' + L("order_ops_field_biz_class") + ':</b> ' + esc(bizLabel(j.biz_class)) + '</div>';
   if (j.display_no) {
-    html += '<div class="detail-field"><b>趟次号:</b> <span class="trip-tag">' + esc(j.display_no) + '</span></div>';
+    var tripLabel = (j.job_type === 'bulk_op') ? L("order_ops_field_work_order") : L("order_ops_field_trip_no");
+    html += '<div class="detail-field"><b>' + tripLabel + ':</b> <span class="trip-tag">' + esc(j.display_no) + '</span></div>';
   }
-  html += '<div class="detail-field"><b>作业阶段:</b> ' + esc(flowLabel) + '</div>';
+  html += '<div class="detail-field"><b>' + L("order_ops_field_job_type") + ':</b> ' + esc(flowLabel) + '</div>';
   if (j.related_doc_id) {
-    html += '<div class="detail-field"><b>关联单号:</b> <span class="doc-tag">' + esc(j.related_doc_id) + '</span></div>';
+    html += '<div class="detail-field"><b>' + L("related_doc_no") + ':</b> <span class="doc-tag">' + esc(j.related_doc_id) + '</span></div>';
   }
-  html += '<div class="detail-field"><b>创建人:</b> ' + esc(j.created_by || "--") + '</div>';
-  html += '<div class="detail-field"><b>创建时间:</b> ' + esc(fmtTime(j.created_at)) + '</div>';
+  html += '<div class="detail-field"><b>' + L("order_ops_field_creator") + ':</b> ' + esc(j.created_by || "--") + '</div>';
+  html += '<div class="detail-field"><b>' + L("order_ops_field_started_at") + ':</b> ' + esc(fmtTime(j.created_at)) + '</div>';
   html += '</div></div>';
 
   // === Card 2: Pick Docs (if applicable) ===
   if (j.job_type === 'pick_direct') {
-    html += '<div class="card"><div class="card-title">拣货单号</div><div id="orderOpsPickDocs"><span class="muted">加载中...</span></div></div>';
+    html += '<div class="card"><div class="card-title">' + L("order_ops_detail_pick_docs") + '</div><div id="orderOpsPickDocs"><span class="muted">' + L("loading") + '</span></div></div>';
   }
 
   // === Card 3: Workers ===
-  html += '<div class="card"><div class="card-title">参与人员</div>';
+  html += '<div class="card"><div class="card-title">' + L("order_ops_detail_workers") + '</div>';
   if (workers.length > 0) {
     html += '<table class="simple-table"><thead><tr>';
-    html += '<th>姓名</th><th>加入时间</th><th>离开时间</th><th>工时</th><th>离开原因</th>';
+    html += '<th>' + L("submitted_by") + '</th>';
+    html += '<th>' + L("order_ops_field_started_at") + '</th>';
+    html += '<th>' + L("order_ops_leave_reason_leave") + '</th>';
+    html += '<th>' + L("total_work_time") + '</th>';
+    html += '<th>' + L("remark") + '</th>';
     html += '</tr></thead><tbody>';
     workers.forEach(function(w) {
-      var reasonText = _leaveReasonLabel[w.leave_reason] || w.leave_reason || "--";
+      var reasonText = orderOpsLeaveReasonText(w.leave_reason);
       html += '<tr>';
       html += '<td>' + esc(w.worker_name || "--") + '</td>';
       html += '<td class="col-time">' + esc(fmtTime(w.joined_at)) + '</td>';
-      html += '<td class="col-time">' + (w.left_at ? esc(fmtTime(w.left_at)) : '<span class="st st-working">进行中</span>') + '</td>';
-      html += '<td class="col-num">' + (w.minutes_worked ? Math.round(w.minutes_worked) + '分' : "--") + '</td>';
+      html += '<td class="col-time">' + (w.left_at ? esc(fmtTime(w.left_at)) : '<span class="st st-working">' + L("order_ops_status_working") + '</span>') + '</td>';
+      html += '<td class="col-num">' + (w.minutes_worked ? Math.round(w.minutes_worked) + L("minutes") : "--") + '</td>';
       html += '<td>' + esc(reasonText) + '</td>';
       html += '</tr>';
     });
     html += '</tbody></table>';
   } else {
-    html += '<span class="muted">无参与人员记录</span>';
+    html += '<span class="muted">' + L("no_data") + '</span>';
   }
   html += '</div>';
 
   // === Card 4: Results ===
   if (results.length > 0) {
-    html += '<div class="card"><div class="card-title">操作结果</div>';
+    html += '<div class="card"><div class="card-title">' + L("order_ops_detail_results") + '</div>';
     results.forEach(function(r) {
       html += '<div style="border-bottom:1px solid #f0f0f0;padding:10px 0;">';
       html += '<div style="font-size:12px;color:#888;margin-bottom:6px;">记录时间: ' + esc(fmtTime(r.created_at)) + ' · 记录人: ' + esc(r.created_by || "--") + '</div>';

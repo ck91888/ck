@@ -374,7 +374,7 @@ async function loadRealtime() {
       html += "<td>" + esc(bizLabel(w.biz_class)) + "</td>";
       html += "<td>" + esc(flowLabel(w.flow_stage)) + "</td>";
       html += "<td>" + esc(jobTypeLabel(w.job_type)) + "</td>";
-      html += "<td>" + esc(w.related_doc_id || "--") + "</td>";
+      html += "<td>" + esc(w.display_no || w.related_doc_id || "--") + "</td>";
       html += "<td>" + esc(fmtTime(w.joined_at)) + "</td>";
       html += "<td>" + minutesSince(w.joined_at) + "</td>";
       html += "<td>" + statusTag(w.job_status) + "</td>";
@@ -417,7 +417,7 @@ async function loadLiveDocs() {
   var html = "";
   docs.forEach(function(d) {
     html += "<tr>";
-    html += "<td><b>" + esc(d.related_doc_id || d.job_id) + "</b></td>";
+    html += "<td><b>" + esc(d.display_no || d.related_doc_id || d.job_id) + "</b></td>";
     html += "<td>" + esc(bizLabel(d.biz_class)) + "</td>";
     html += "<td>" + esc(flowLabel(d.flow_stage)) + "</td>";
     html += "<td>" + esc(d.worker_names || "--") + "</td>";
@@ -431,12 +431,42 @@ async function loadLiveDocs() {
   tbody.innerHTML = html;
 }
 
-// ===== Correction placeholders =====
-function markAnomaly(type, id) {
-  alert("已标记异常：" + type + " / " + id + "\n\n后续将接入主管修正流，当前仅做标记记录。");
+// ===== Correction request — 真实落库 =====
+async function markAnomaly(type, id) {
+  var reason = prompt("请填写异常说明（将记入修正申请表）:");
+  if (!reason || !reason.trim()) return;
+  var reporter = prompt("您的姓名/工号:");
+  if (!reporter || !reporter.trim()) return;
+  var res = await api({
+    action: "v2_correction_request_create",
+    type: type,
+    target_id: id,
+    reporter: reporter.trim(),
+    reason: reason.trim()
+  });
+  if (res && res.ok) {
+    alert("已提交修正申请 #" + res.id + "\n主管将另行处理，不会直接修改业务数据");
+  } else {
+    alert("提交失败：" + (res ? (res.message || res.error) : "unknown"));
+  }
 }
-function requestCorrection(jobId) {
-  alert("发起修正：任务 " + jobId + "\n\n后续将接入主管修正流，支持修改工时、人员、结果数据。\n当前版本暂不直接修改正式数据。");
+async function requestCorrection(jobId) {
+  var reason = prompt("请填写修正诉求（工时/人员/结果 等）:");
+  if (!reason || !reason.trim()) return;
+  var reporter = prompt("您的姓名/工号:");
+  if (!reporter || !reporter.trim()) return;
+  var res = await api({
+    action: "v2_correction_request_create",
+    type: "job",
+    target_id: jobId,
+    reporter: reporter.trim(),
+    reason: reason.trim()
+  });
+  if (res && res.ok) {
+    alert("已提交修正申请 #" + res.id + "\n主管将另行处理，不会直接修改业务数据");
+  } else {
+    alert("提交失败：" + (res ? (res.message || res.error) : "unknown"));
+  }
 }
 
 // ===== Init =====

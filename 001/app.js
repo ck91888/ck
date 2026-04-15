@@ -108,13 +108,21 @@ function getWorkerName() {
 // ===== API =====
 // 写操作 action 集合 — 自动注入 client_req_id 供后端幂等
 var _WRITE_ACTIONS = [
-  'v2_issue_create','v2_issue_handle_start',
-  'v2_outbound_order_create','v2_outbound_load_start',
-  'v2_inbound_plan_create','v2_inbound_dynamic_finalize',
-  'v2_unplanned_unload_start','v2_unplanned_unload_join',
+  'v2_issue_create','v2_issue_handle_start','v2_issue_handle_finish',
+  'v2_issue_close','v2_issue_cancel',
+  'v2_outbound_order_create','v2_outbound_order_update_status',
+  'v2_outbound_load_start','v2_outbound_load_finish',
+  'v2_inbound_plan_create','v2_inbound_plan_update_status','v2_inbound_plan_cancel',
+  'v2_inbound_dynamic_finalize',
+  'v2_unplanned_unload_start','v2_unplanned_unload_join','v2_unplanned_unload_finish',
   'v2_feedback_finalize_to_inbound','v2_unload_dynamic_start',
-  'v2_unload_job_start','v2_inbound_job_start',
-  'v2_inbound_mark_completed','v2_ops_job_start'
+  'v2_unload_job_start','v2_unload_job_finish',
+  'v2_inbound_job_start','v2_inbound_job_finish',
+  'v2_inbound_mark_completed',
+  'v2_ops_job_start','v2_ops_job_leave','v2_ops_job_finish','v2_ops_job_resume',
+  'v2_pick_job_start','v2_pick_job_join','v2_pick_job_add_docs','v2_pick_job_finish',
+  'v2_bulk_op_job_start','v2_bulk_op_job_finish',
+  'v2_correction_request_create','v2_admin_dirty_data_cleanup'
 ];
 function _genReqId(action) {
   return action + '_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
@@ -1077,7 +1085,11 @@ async function unloadComplete(btnEl) {
       _unloadPlanData = null;
       goPage("home");
     } else if (res && res.error === "others_still_working") {
-      alert("还有" + res.active_count + "人参与中，无法完成 / 아직 " + res.active_count + "명 참여 중, 완료 불가");
+      var _n1 = res.active_worker_count || res.active_count || "?";
+      alert("您已退出此任务，还有 " + _n1 + " 人继续作业\n현재 작업에서 퇴장했습니다. " + _n1 + "명이 계속 작업 중입니다");
+      clearActiveJob();
+      _unloadPlanData = null;
+      goPage("home");
     } else if (res && res.error === "empty_result") {
       alert(res.message || "至少填写一项实际数量");
     } else {
@@ -1341,7 +1353,11 @@ async function finishInbound(btnEl) {
       _inboundPlanData = null;
       goPage("home");
     } else if (res && res.error === "others_still_working") {
-      alert("还有" + res.active_count + "人参与中，无法完成 / 아직 " + res.active_count + "명 참여 중, 완료 불가");
+      var _n2 = res.active_worker_count || res.active_count || "?";
+      alert("您已退出此任务，还有 " + _n2 + " 人继续作业\n현재 작업에서 퇴장했습니다. " + _n2 + "명이 계속 작업 중입니다");
+      clearActiveJob();
+      _inboundPlanData = null;
+      goPage("home");
     } else {
       alert("失败/실패: " + (res ? res.error : "unknown"));
     }
@@ -1452,7 +1468,10 @@ async function finishInboundReturn(btnEl) {
       clearActiveJob();
       goPage("home");
     } else if (res && res.error === "others_still_working") {
-      alert("还有" + res.active_count + "人参与中，无法完成 / 아직 " + res.active_count + "명 참여 중, 완료 불가");
+      var _n3 = res.active_worker_count || res.active_count || "?";
+      alert("您已退出此任务，还有 " + _n3 + " 人继续作业\n현재 작업에서 퇴장했습니다. " + _n3 + "명이 계속 작업 중입니다");
+      clearActiveJob();
+      goPage("home");
     } else {
       alert("失败/실패: " + (res ? res.error : "unknown"));
     }
@@ -1998,6 +2017,8 @@ async function startPickJob(btnEl) {
       showPickWorkingSection();
     } else if (res && res.error === "doc_conflict") {
       alert(res.message || "拣货单号冲突 / 피킹번호 충돌");
+    } else if (res && res.error === "worker_already_in_pick_trip") {
+      alert(res.message || "您已在另一个趟次中，请先完成\n이미 다른 트립에 참여 중입니다");
     } else {
       alert("失败/실패: " + (res ? (res.message || res.error) : "unknown"));
     }
@@ -2019,6 +2040,8 @@ async function joinPickTrip(jobId, btnEl) {
         alert("已加入趟次 / 트립 참여됨: " + (_pickTripNo || jobId));
       }
       showPickWorkingSection();
+    } else if (res && res.error === "worker_already_in_pick_trip") {
+      alert(res.message || "您已在另一个趟次中，请先完成\n이미 다른 트립에 참여 중입니다");
     } else {
       alert("失败/실패: " + (res ? (res.message || res.error) : "unknown"));
     }
@@ -2047,8 +2070,10 @@ async function finishPickJob(btnEl) {
       clearActiveJob();
       goPage("order_op_menu");
     } else if (res && res.error === "others_still_working") {
-      alert("还有其他人正在参与此任务，暂不能完成\n다른 작업자가 아직 참여 중이라 완료할 수 없습니다\n\n当前参与人数: " + (res.active_worker_count || "?"));
-      refreshPickWorkers();
+      var _np = res.active_worker_count || "?";
+      alert("您已退出此趟次，还有 " + _np + " 人继续作业\n현재 트립에서 퇴장했습니다. " + _np + "명이 계속 작업 중입니다");
+      clearActiveJob();
+      goPage("order_op_menu");
     } else {
       alert("失败/실패: " + (res ? res.error : "unknown"));
     }
@@ -2201,9 +2226,8 @@ async function finishBulkJob(btnEl) {
       clearActiveJob();
       goPage("order_op_menu");
     } else if (res && res.error === "others_still_working") {
-      alert("还有其他人参与中，不能完成，已暂时退出该工单"
-        + "\n当前剩余参与人数: " + (res.active_worker_count || "?") + " 人"
-        + "\n다른 작업자가 아직 참여 중이라 완료할 수 없으며, 현재 사용자는 이 공정에서 일시 퇴장 처리되었습니다");
+      var _nb = res.active_worker_count || "?";
+      alert("您已退出此工单，还有 " + _nb + " 人继续作业\n현재 공정에서 퇴장했습니다. " + _nb + "명이 계속 작업 중입니다");
       stopBulkScan();
       clearActiveJob();
       goPage("order_op_menu");

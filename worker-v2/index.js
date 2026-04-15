@@ -490,6 +490,36 @@ const MIGRATIONS = [
 
   // ---- display_no on v2_ops_jobs for trip numbers (PK-YYYYMMDD-NNN) ----
   `ALTER TABLE v2_ops_jobs ADD COLUMN display_no TEXT DEFAULT ''`,
+
+  // ---- v2_correction_requests: 主管修正申请（由看板发起，不直接修改业务数据） ----
+  `CREATE TABLE IF NOT EXISTS v2_correction_requests (
+    id TEXT PRIMARY KEY,
+    type TEXT DEFAULT '',
+    target_id TEXT DEFAULT '',
+    target_label TEXT DEFAULT '',
+    reporter TEXT DEFAULT '',
+    reason TEXT DEFAULT '',
+    status TEXT DEFAULT 'open',
+    handled_by TEXT DEFAULT '',
+    handled_at TEXT DEFAULT '',
+    handle_note TEXT DEFAULT '',
+    created_at TEXT,
+    updated_at TEXT
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_corr_status ON v2_correction_requests(status, created_at)`,
+
+  // ---- v2_admin_cleanup_logs: 脏数据清理操作审计 ----
+  `CREATE TABLE IF NOT EXISTS v2_admin_cleanup_logs (
+    id TEXT PRIMARY KEY,
+    operator TEXT DEFAULT '',
+    action_type TEXT DEFAULT '',
+    target_job_id TEXT DEFAULT '',
+    target_worker_id TEXT DEFAULT '',
+    reason TEXT DEFAULT '',
+    detail_json TEXT DEFAULT '',
+    created_at TEXT
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_cleanup_log_time ON v2_admin_cleanup_logs(created_at)`,
 ];
 
 let _migrated = false;
@@ -1334,77 +1364,73 @@ route("v2_unplanned_unload_finish", async (body, env) => {
   const worker_id = String(body.worker_id || "").trim();
   if (!job_id) return err("missing job_id");
 
-  const t = now();
-  const result_lines = body.result_lines || [];
-  const diff_note = String(body.diff_note || "").trim();
-  const remark = String(body.remark || "").trim();
-  const leave_only = body.leave_only === true;
+  return withIdem(env, body, "v2_unplanned_unload_finish", async () => {
+    const t = now();
+    const result_lines = body.result_lines || [];
+    const diff_note = String(body.diff_note || "").trim();
+    const remark = String(body.remark || "").trim();
+    const leave_only = body.leave_only === true;
 
-  // 终态幂等保护：已完成的 job 不再重复写（leave_only 不受限）
-  if (!leave_only) {
-    const jobCheck = await env.DB.prepare("SELECT status FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
-    if (jobCheck && jobCheck.status === 'completed') {
-      return json({ ok: false, error: "already_completed", message: "任务已完成，请勿重复提交" });
+    if (!leave_only) {
+      const jobCheck = await env.DB.prepare("SELECT status FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
+      if (jobCheck && jobCheck.status === 'completed') {
+        return { ok: false, error: "already_completed", message: "任务已完成，请勿重复提交" };
+      }
     }
-  }
 
-  // Close worker segments + recalc
-  await closeAllOpenSegs(env, job_id, worker_id, t, leave_only ? 'leave' : 'finished');
-  const realCount = await recalcActiveCount(env, job_id, t);
+    await closeAllOpenSegs(env, job_id, worker_id, t, leave_only ? 'leave' : 'finished');
+    const realCount = await recalcActiveCount(env, job_id, t);
 
-  if (leave_only) {
-    return json({ ok: true, left: true });
-  }
+    if (leave_only) {
+      return { ok: true, left: true };
+    }
 
-  // Validate
-  if (realCount > 0) {
-    return json({ ok: false, error: "others_still_working", active_count: realCount });
-  }
-  const hasAnyQty = result_lines.some(ln => Number(ln.actual_qty || 0) > 0);
-  if (!hasAnyQty) {
-    return json({ ok: false, error: "empty_result", message: "至少填写一项实际数量" });
-  }
+    if (realCount > 0) {
+      return { ok: false, error: "others_still_working",
+        message: "您已退出此任务，还有 " + realCount + " 人继续作业",
+        active_worker_count: realCount };
+    }
+    const hasAnyQty = result_lines.some(ln => Number(ln.actual_qty || 0) > 0);
+    if (!hasAnyQty) {
+      return { ok: false, error: "empty_result", message: "至少填写一项实际数量" };
+    }
 
-  const job = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
-  if (!job) return err("job not found", 404);
+    const job = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
+    if (!job) return { ok: false, error: "job not found" };
 
-  // Save result record
-  const result_id = "RES-" + uid();
-  await env.DB.prepare(`
-    INSERT INTO v2_ops_job_results(id, job_id, box_count, pallet_count, remark, result_json, result_lines_json, diff_note, created_by, created_at)
-    VALUES(?,?,0,0,?,?,?,?,?,?)
-  `).bind(result_id, job_id, remark,
-      JSON.stringify({ result_lines, diff_note, remark }),
-      JSON.stringify(result_lines), diff_note, worker_id, t).run();
-
-  // Complete the job
-  const sharedResult = JSON.stringify({ result_lines, diff_note, remark });
-  await env.DB.prepare(
-    "UPDATE v2_ops_jobs SET status='completed', shared_result_json=?, active_worker_count=0, updated_at=? WHERE id=?"
-  ).bind(sharedResult, t, job_id).run();
-  await env.DB.prepare(
-    "UPDATE v2_ops_job_workers SET left_at=?, leave_reason='job_completed' WHERE job_id=? AND left_at=''"
-  ).bind(t, job_id).run();
-
-  // Update feedback: save result + set status to unloaded_pending_info
-  const fb_id = (job.related_doc_type === 'field_feedback') ? job.related_doc_id : '';
-  if (fb_id) {
-    const cargoSummary = result_lines.map(rl => (rl.unit_type || "") + " " + (rl.actual_qty || 0)).join(" / ");
-    const fbRow = await env.DB.prepare("SELECT display_no FROM v2_field_feedbacks WHERE id=?").bind(fb_id).first();
-    const fbNo = (fbRow && fbRow.display_no) || fb_id;
+    const result_id = "RES-" + uid();
     await env.DB.prepare(`
-      UPDATE v2_field_feedbacks SET status='unloaded_pending_info',
-        result_lines_json=?, diff_note=?, remark=?,
-        completed_at=?, completed_by=?,
-        title=?, updated_at=? WHERE id=?
-    `).bind(
-      JSON.stringify(result_lines), diff_note, remark,
-      t, worker_id,
-      "计划外卸货完成: " + (cargoSummary || "无明细"), t, fb_id
-    ).run();
-  }
+      INSERT INTO v2_ops_job_results(id, job_id, box_count, pallet_count, remark, result_json, result_lines_json, diff_note, created_by, created_at)
+      VALUES(?,?,0,0,?,?,?,?,?,?)
+    `).bind(result_id, job_id, remark,
+        JSON.stringify({ result_lines, diff_note, remark }),
+        JSON.stringify(result_lines), diff_note, worker_id, t).run();
 
-  return json({ ok: true, result_id, feedback_id: fb_id });
+    const sharedResult = JSON.stringify({ result_lines, diff_note, remark });
+    await env.DB.prepare(
+      "UPDATE v2_ops_jobs SET status='completed', shared_result_json=?, active_worker_count=0, updated_at=? WHERE id=?"
+    ).bind(sharedResult, t, job_id).run();
+    await env.DB.prepare(
+      "UPDATE v2_ops_job_workers SET left_at=?, leave_reason='job_completed' WHERE job_id=? AND left_at=''"
+    ).bind(t, job_id).run();
+
+    const fb_id = (job.related_doc_type === 'field_feedback') ? job.related_doc_id : '';
+    if (fb_id) {
+      const cargoSummary = result_lines.map(rl => (rl.unit_type || "") + " " + (rl.actual_qty || 0)).join(" / ");
+      await env.DB.prepare(`
+        UPDATE v2_field_feedbacks SET status='unloaded_pending_info',
+          result_lines_json=?, diff_note=?, remark=?,
+          completed_at=?, completed_by=?,
+          title=?, updated_at=? WHERE id=?
+      `).bind(
+        JSON.stringify(result_lines), diff_note, remark,
+        t, worker_id,
+        "计划外卸货完成: " + (cargoSummary || "无明细"), t, fb_id
+      ).run();
+    }
+
+    return { ok: true, result_id, feedback_id: fb_id };
+  });
 });
 
 // List active (field_working) unplanned unload feedbacks for join
@@ -1635,6 +1661,7 @@ route("v2_unload_job_finish", async (body, env) => {
   const worker_id = String(body.worker_id || "").trim();
   if (!job_id) return err("missing job_id");
 
+  return withIdem(env, body, "v2_unload_job_finish", async () => {
   const t = now();
   const leave_only = body.leave_only === true;
   const complete_job = body.complete_job === true;
@@ -1642,51 +1669,45 @@ route("v2_unload_job_finish", async (body, env) => {
   const diff_note = String(body.diff_note || "").trim();
   const remark = String(body.remark || "");
 
-  // 终态幂等保护：已完成的 job 不再重复写（leave_only 不受限）
   if (!leave_only) {
     const jobCheck = await env.DB.prepare("SELECT status FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
     if (jobCheck && jobCheck.status === 'completed') {
-      return json({ ok: false, error: "already_completed", message: "任务已完成，请勿重复提交" });
+      return { ok: false, error: "already_completed", message: "任务已完成，请勿重复提交" };
     }
   }
 
-  // ===== 前置校验：完成卸货前先校验 plan 状态与结果，避免人已退出再报错 =====
   if (complete_job && !leave_only) {
     const preJob = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
-    if (!preJob) return err("job not found", 404);
+    if (!preJob) return { ok: false, error: "job not found" };
 
-    // 校验 result_lines: 至少一项 > 0
     const hasAnyQty = result_lines.some(ln => Number(ln.actual_qty || 0) > 0);
     if (!hasAnyQty) {
-      return json({ ok: false, error: "empty_result", message: "至少填写一项实际数量" });
+      return { ok: false, error: "empty_result", message: "至少填写一项实际数量" };
     }
 
-    // Plan 状态校验：若关联 inbound_plan，plan 必须为 unloading
     if (preJob.related_doc_type === 'inbound_plan' && preJob.related_doc_id) {
       const planCheck = await env.DB.prepare("SELECT status FROM v2_inbound_plans WHERE id=?").bind(preJob.related_doc_id).first();
       if (planCheck && planCheck.status !== 'unloading') {
-        return json({ ok: false, error: "unload_plan_status_invalid", message: "当前卸货计划状态已变化（" + planCheck.status + "），不能继续完成" });
+        return { ok: false, error: "unload_plan_status_invalid", message: "当前卸货计划状态已变化（" + planCheck.status + "），不能继续完成" };
       }
     }
   }
 
-  // 1. 自愈：关闭该 worker 全部 open segments + 重算 count
   await closeAllOpenSegs(env, job_id, worker_id, t, leave_only ? 'leave' : 'finished');
   const realCount = await recalcActiveCount(env, job_id, t);
 
-  // 3. If leave_only → done, no result validation
   if (leave_only) {
-    return json({ ok: true, left: true });
+    return { ok: true, left: true };
   }
 
-  // 4. complete_job logic
   if (complete_job) {
     const job = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
-    if (!job) return err("job not found", 404);
+    if (!job) return { ok: false, error: "job not found" };
 
-    // 4a. Check if others still working — 基于 realCount
     if (realCount > 0) {
-      return json({ ok: false, error: "others_still_working", active_count: realCount });
+      return { ok: false, error: "others_still_working",
+        message: "您已退出此任务，还有 " + realCount + " 人继续作业",
+        active_worker_count: realCount };
     }
 
     // 4c. Check diff vs plan and require diff_note
@@ -1772,7 +1793,7 @@ route("v2_unload_job_finish", async (body, env) => {
         await env.DB.prepare(
           "UPDATE v2_inbound_plans SET status='unloaded_pending_info', cargo_summary=?, updated_at=? WHERE id=?"
         ).bind(cargoSummary || "现场无单卸货", t, plan_id).run();
-        return json({ ok: true, result_id, dynamic_plan: true, plan_id });
+        return { ok: true, result_id, dynamic_plan: true, plan_id };
       } else {
         await env.DB.prepare(
           "UPDATE v2_inbound_plans SET status='arrived_pending_putaway', updated_at=? WHERE id=?"
@@ -1780,7 +1801,6 @@ route("v2_unload_job_finish", async (body, env) => {
       }
     }
 
-    // 4g. No-doc unload (legacy: no plan_id at all) → auto-create feedback
     if (!plan_id || plan_id === "") {
       const fb_id = "FB-" + uid();
       await env.DB.prepare(`
@@ -1791,14 +1811,14 @@ route("v2_unload_job_finish", async (body, env) => {
           "无单卸货结果待转正",
           "卸货数量: " + JSON.stringify(result_lines) + (diff_note ? " | 备注: " + diff_note : ""),
           worker_id, t, t).run();
-      return json({ ok: true, result_id, feedback_id: fb_id, no_doc: true });
+      return { ok: true, result_id, feedback_id: fb_id, no_doc: true };
     }
 
-    return json({ ok: true, result_id });
+    return { ok: true, result_id };
   }
 
-  // Neither leave_only nor complete_job — just left
-  return json({ ok: true });
+  return { ok: true };
+  });
 });
 
 route("v2_inbound_job_start", async (body, env) => {
@@ -1931,102 +1951,96 @@ route("v2_inbound_job_finish", async (body, env) => {
   const leave_only = body.leave_only === true;
   if (!job_id) return err("missing job_id");
 
-  const t = now();
-  const remark = String(body.remark || "");
-  const result_note = String(body.result_note || "");
-  const result_lines = Array.isArray(body.result_lines) ? body.result_lines : [];
+  return withIdem(env, body, "v2_inbound_job_finish", async () => {
+    const t = now();
+    const remark = String(body.remark || "");
+    const result_note = String(body.result_note || "");
+    const result_lines = Array.isArray(body.result_lines) ? body.result_lines : [];
 
-  // Sanitize extra_ops (standard inbound only — ignored for return)
-  const rawExtra = body.extra_ops || {};
-  const extra_ops = {
-    sort_qty: Number(rawExtra.sort_qty || 0) || 0,
-    label_qty: Number(rawExtra.label_qty || 0) || 0,
-    repair_box_qty: Number(rawExtra.repair_box_qty || 0) || 0,
-    other_op_remark: String(rawExtra.other_op_remark || "")
-  };
+    const rawExtra = body.extra_ops || {};
+    const extra_ops = {
+      sort_qty: Number(rawExtra.sort_qty || 0) || 0,
+      label_qty: Number(rawExtra.label_qty || 0) || 0,
+      repair_box_qty: Number(rawExtra.repair_box_qty || 0) || 0,
+      other_op_remark: String(rawExtra.other_op_remark || "")
+    };
 
-  // 终态幂等保护：已完成的 job 不再重复写（leave_only 不受限）
-  if (!leave_only) {
-    const jobCheck = await env.DB.prepare("SELECT status, job_type FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
-    if (jobCheck && jobCheck.status === 'completed') {
-      return json({ ok: false, error: "already_completed", message: "任务已完成，请勿重复提交" });
-    }
-  }
-
-  // Read job early — we need job_type to branch
-  const jobRow = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
-  if (!jobRow) return err("job not found", 404);
-  const isReturnJob = (jobRow.job_type === 'inbound_return');
-
-  // ===== 前置校验：完成入库前先校验 plan 状态，避免人已退出再报错 =====
-  // 退件入库是轻量会话，使用 return_session 计划但不走正式状态机，跳过此校验
-  if (complete_job && !leave_only && !isReturnJob) {
-    if (jobRow.related_doc_id) {
-      const planCheck = await env.DB.prepare("SELECT status FROM v2_inbound_plans WHERE id=?").bind(jobRow.related_doc_id).first();
-      if (planCheck && planCheck.status !== 'putting_away') {
-        return json({ ok: false, error: "inbound_plan_status_invalid", message: "当前入库计划状态不允许完成入库（当前: " + planCheck.status + "）" });
+    if (!leave_only) {
+      const jobCheck = await env.DB.prepare("SELECT status, job_type FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
+      if (jobCheck && jobCheck.status === 'completed') {
+        return { ok: false, error: "already_completed", message: "任务已完成，请勿重复提交" };
       }
     }
-  }
 
-  await closeAllOpenSegs(env, job_id, worker_id, t, leave_only ? 'leave' : 'finished');
-  const realCount = await recalcActiveCount(env, job_id, t);
+    const jobRow = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
+    if (!jobRow) return { ok: false, error: "job not found" };
+    const isReturnJob = (jobRow.job_type === 'inbound_return');
 
-  if (leave_only) {
-    return json({ ok: true, left: true });
-  }
-
-  // Persist shared result — return inbound stores no result_lines / extra_ops
-  const resultData = isReturnJob
-    ? { remark, result_note, result_lines: [], is_return: true }
-    : { remark, result_note, result_lines, extra_ops };
-  await env.DB.prepare(
-    "UPDATE v2_ops_jobs SET shared_result_json=?, updated_at=? WHERE id=?"
-  ).bind(JSON.stringify(resultData), t, job_id).run();
-
-  if (complete_job) {
-    if (realCount > 0) {
-      return json({ ok: false, error: "others_still_working", active_count: realCount });
-    }
-
-    // Save structured result record
-    const result_id = "RES-" + uid();
-    await env.DB.prepare(
-      "INSERT INTO v2_ops_job_results(id, job_id, box_count, pallet_count, remark, result_json, result_lines_json, created_by, created_at) VALUES(?,?,0,0,?,?,?,?,?)"
-    ).bind(result_id, job_id, remark, JSON.stringify(resultData),
-           JSON.stringify(isReturnJob ? [] : result_lines), worker_id, t).run();
-
-    await env.DB.prepare(
-      "UPDATE v2_ops_jobs SET status='completed', updated_at=? WHERE id=?"
-    ).bind(t, job_id).run();
-    await env.DB.prepare(
-      "UPDATE v2_ops_job_workers SET left_at=?, leave_reason='job_completed' WHERE job_id=? AND left_at=''"
-    ).bind(t, job_id).run();
-
-    // Write back putaway_qty + mark plan completed — standard inbound only
-    if (!isReturnJob && jobRow.related_doc_id) {
-      for (const rl of result_lines) {
-        if (rl && rl.unit_type && Number(rl.putaway_qty || 0) > 0) {
-          await env.DB.prepare(
-            "UPDATE v2_inbound_plan_lines SET putaway_qty=?, putaway_remark=? WHERE plan_id=? AND unit_type=?"
-          ).bind(Number(rl.putaway_qty || 0), String(rl.putaway_remark || ""), jobRow.related_doc_id, String(rl.unit_type)).run();
+    if (complete_job && !leave_only && !isReturnJob) {
+      if (jobRow.related_doc_id) {
+        const planCheck = await env.DB.prepare("SELECT status FROM v2_inbound_plans WHERE id=?").bind(jobRow.related_doc_id).first();
+        if (planCheck && planCheck.status !== 'putting_away') {
+          return { ok: false, error: "inbound_plan_status_invalid", message: "当前入库计划状态不允许完成入库（当前: " + planCheck.status + "）" };
         }
       }
-      await env.DB.prepare(
-        "UPDATE v2_inbound_plans SET status='completed', updated_at=? WHERE id=?"
-      ).bind(t, jobRow.related_doc_id).run();
     }
-    // Return inbound: close the return_session plan too so it doesn't clutter the list.
-    // Each return session is per-worker-start and completes with its job.
-    if (isReturnJob && jobRow.related_doc_id) {
-      await env.DB.prepare(
-        "UPDATE v2_inbound_plans SET status='completed', updated_at=? WHERE id=? AND source_type='return_session'"
-      ).bind(t, jobRow.related_doc_id).run();
-    }
-    return json({ ok: true, result_id });
-  }
 
-  return json({ ok: true });
+    await closeAllOpenSegs(env, job_id, worker_id, t, leave_only ? 'leave' : 'finished');
+    const realCount = await recalcActiveCount(env, job_id, t);
+
+    if (leave_only) {
+      return { ok: true, left: true };
+    }
+
+    const resultData = isReturnJob
+      ? { remark, result_note, result_lines: [], is_return: true }
+      : { remark, result_note, result_lines, extra_ops };
+    await env.DB.prepare(
+      "UPDATE v2_ops_jobs SET shared_result_json=?, updated_at=? WHERE id=?"
+    ).bind(JSON.stringify(resultData), t, job_id).run();
+
+    if (complete_job) {
+      if (realCount > 0) {
+        return { ok: false, error: "others_still_working",
+          message: "您已退出此任务，还有 " + realCount + " 人继续作业",
+          active_worker_count: realCount };
+      }
+
+      const result_id = "RES-" + uid();
+      await env.DB.prepare(
+        "INSERT INTO v2_ops_job_results(id, job_id, box_count, pallet_count, remark, result_json, result_lines_json, created_by, created_at) VALUES(?,?,0,0,?,?,?,?,?)"
+      ).bind(result_id, job_id, remark, JSON.stringify(resultData),
+             JSON.stringify(isReturnJob ? [] : result_lines), worker_id, t).run();
+
+      await env.DB.prepare(
+        "UPDATE v2_ops_jobs SET status='completed', updated_at=? WHERE id=?"
+      ).bind(t, job_id).run();
+      await env.DB.prepare(
+        "UPDATE v2_ops_job_workers SET left_at=?, leave_reason='job_completed' WHERE job_id=? AND left_at=''"
+      ).bind(t, job_id).run();
+
+      if (!isReturnJob && jobRow.related_doc_id) {
+        for (const rl of result_lines) {
+          if (rl && rl.unit_type && Number(rl.putaway_qty || 0) > 0) {
+            await env.DB.prepare(
+              "UPDATE v2_inbound_plan_lines SET putaway_qty=?, putaway_remark=? WHERE plan_id=? AND unit_type=?"
+            ).bind(Number(rl.putaway_qty || 0), String(rl.putaway_remark || ""), jobRow.related_doc_id, String(rl.unit_type)).run();
+          }
+        }
+        await env.DB.prepare(
+          "UPDATE v2_inbound_plans SET status='completed', updated_at=? WHERE id=?"
+        ).bind(t, jobRow.related_doc_id).run();
+      }
+      if (isReturnJob && jobRow.related_doc_id) {
+        await env.DB.prepare(
+          "UPDATE v2_inbound_plans SET status='completed', updated_at=? WHERE id=? AND source_type='return_session'"
+        ).bind(t, jobRow.related_doc_id).run();
+      }
+      return { ok: true, result_id };
+    }
+
+    return { ok: true };
+  });
 });
 
 // ===== Clerk direct mark completed =====
@@ -2132,22 +2146,22 @@ route("v2_ops_job_leave", async (body, env) => {
   const worker_id = String(body.worker_id || "").trim();
   if (!job_id || !worker_id) return err("missing job_id or worker_id");
 
-  const t = now();
-  // 自愈：关闭该 worker 全部 open segments + 重算 count
-  await closeAllOpenSegs(env, job_id, worker_id, t, String(body.leave_reason || 'leave'));
-  const realCount = await recalcActiveCount(env, job_id, t);
+  return withIdem(env, body, "v2_ops_job_leave", async () => {
+    const t = now();
+    await closeAllOpenSegs(env, job_id, worker_id, t, String(body.leave_reason || 'leave'));
+    const realCount = await recalcActiveCount(env, job_id, t);
 
-  // Check if job should go to awaiting_close — 基于 realCount
-  if (realCount <= 0) {
-    const job = await env.DB.prepare("SELECT status FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
-    if (job && job.status === "working") {
-      await env.DB.prepare(
-        "UPDATE v2_ops_jobs SET status='awaiting_close', updated_at=? WHERE id=?"
-      ).bind(t, job_id).run();
+    if (realCount <= 0) {
+      const job = await env.DB.prepare("SELECT status FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
+      if (job && job.status === "working") {
+        await env.DB.prepare(
+          "UPDATE v2_ops_jobs SET status='awaiting_close', updated_at=? WHERE id=?"
+        ).bind(t, job_id).run();
+      }
     }
-  }
 
-  return json({ ok: true });
+    return { ok: true };
+  });
 });
 
 route("v2_ops_job_finish", async (body, env) => {
@@ -2156,44 +2170,41 @@ route("v2_ops_job_finish", async (body, env) => {
   const worker_id = String(body.worker_id || "").trim();
   if (!job_id) return err("missing job_id");
 
-  const t = now();
+  return withIdem(env, body, "v2_ops_job_finish", async () => {
+    const t = now();
 
-  // 终态幂等保护：已完成的 job 不再重复写
-  const jobCheck = await env.DB.prepare("SELECT status FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
-  if (jobCheck && jobCheck.status === 'completed') {
-    return json({ ok: false, error: "already_completed", message: "任务已完成，请勿重复提交" });
-  }
+    const jobCheck = await env.DB.prepare("SELECT status FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
+    if (jobCheck && jobCheck.status === 'completed') {
+      return { ok: false, error: "already_completed", message: "任务已完成，请勿重复提交" };
+    }
 
-  // 自愈：关闭该 worker 全部 open segments
-  await closeAllOpenSegs(env, job_id, worker_id, t, 'finished');
+    await closeAllOpenSegs(env, job_id, worker_id, t, 'finished');
 
-  // Save shared result
-  const shared = body.shared_result || {};
-  if (Object.keys(shared).length > 0) {
+    const shared = body.shared_result || {};
+    if (Object.keys(shared).length > 0) {
+      await env.DB.prepare(
+        "UPDATE v2_ops_jobs SET shared_result_json=?, updated_at=? WHERE id=?"
+      ).bind(JSON.stringify(shared), t, job_id).run();
+    }
+
+    if (body.box_count != null || body.pallet_count != null || body.remark) {
+      const result_id = "RES-" + uid();
+      await env.DB.prepare(`
+        INSERT INTO v2_ops_job_results(id, job_id, box_count, pallet_count, remark, result_json, created_by, created_at)
+        VALUES(?,?,?,?,?,?,?,?)
+      `).bind(result_id, job_id, Number(body.box_count || 0), Number(body.pallet_count || 0),
+          String(body.remark || ""), JSON.stringify(shared), worker_id, t).run();
+    }
+
     await env.DB.prepare(
-      "UPDATE v2_ops_jobs SET shared_result_json=?, updated_at=? WHERE id=?"
-    ).bind(JSON.stringify(shared), t, job_id).run();
-  }
+      "UPDATE v2_ops_jobs SET status='completed', active_worker_count=0, updated_at=? WHERE id=?"
+    ).bind(t, job_id).run();
+    await env.DB.prepare(
+      "UPDATE v2_ops_job_workers SET left_at=?, leave_reason='job_completed' WHERE job_id=? AND left_at=''"
+    ).bind(t, job_id).run();
 
-  // Save result record if provided
-  if (body.box_count != null || body.pallet_count != null || body.remark) {
-    const result_id = "RES-" + uid();
-    await env.DB.prepare(`
-      INSERT INTO v2_ops_job_results(id, job_id, box_count, pallet_count, remark, result_json, created_by, created_at)
-      VALUES(?,?,?,?,?,?,?,?)
-    `).bind(result_id, job_id, Number(body.box_count || 0), Number(body.pallet_count || 0),
-        String(body.remark || ""), JSON.stringify(shared), worker_id, t).run();
-  }
-
-  // Complete the job — 关闭所有剩余 open segments + 重算归零
-  await env.DB.prepare(
-    "UPDATE v2_ops_jobs SET status='completed', active_worker_count=0, updated_at=? WHERE id=?"
-  ).bind(t, job_id).run();
-  await env.DB.prepare(
-    "UPDATE v2_ops_job_workers SET left_at=?, leave_reason='job_completed' WHERE job_id=? AND left_at=''"
-  ).bind(t, job_id).run();
-
-  return json({ ok: true });
+    return { ok: true };
+  });
 });
 
 route("v2_ops_job_detail", async (body, env) => {
@@ -2247,39 +2258,38 @@ route("v2_ops_job_resume", async (body, env) => {
   const worker_name = String(body.worker_name || "").trim();
   if (!parent_job_id || !worker_id) return err("missing parent_job_id or worker_id");
 
-  const t = now();
-  const job = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(parent_job_id).first();
-  if (!job) return err("parent job not found", 404);
+  return withIdem(env, body, "v2_ops_job_resume", async () => {
+    const t = now();
+    const job = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(parent_job_id).first();
+    if (!job) return { ok: false, error: "parent job not found" };
 
-  // 防重：同一 worker 已有 open segment 则不重复插入
-  const dup = await findOpenSeg(env, parent_job_id, worker_id);
-  if (dup) {
-    // 仍需确保 status 从 awaiting_close 恢复
-    if (job.status === "awaiting_close") {
-      await recalcActiveCount(env, parent_job_id, t);
-      const rc = await env.DB.prepare("SELECT active_worker_count as c FROM v2_ops_jobs WHERE id=?").bind(parent_job_id).first();
-      if (rc && rc.c > 0) {
-        await env.DB.prepare("UPDATE v2_ops_jobs SET status='working', resumed_at=?, updated_at=? WHERE id=?").bind(t, t, parent_job_id).run();
+    const dup = await findOpenSeg(env, parent_job_id, worker_id);
+    if (dup) {
+      if (job.status === "awaiting_close") {
+        await recalcActiveCount(env, parent_job_id, t);
+        const rc = await env.DB.prepare("SELECT active_worker_count as c FROM v2_ops_jobs WHERE id=?").bind(parent_job_id).first();
+        if (rc && rc.c > 0) {
+          await env.DB.prepare("UPDATE v2_ops_jobs SET status='working', resumed_at=?, updated_at=? WHERE id=?").bind(t, t, parent_job_id).run();
+        }
       }
+      return { ok: true, worker_seg_id: dup.id, already_joined: true };
     }
-    return json({ ok: true, worker_seg_id: dup.id, already_joined: true });
-  }
 
-  const seg_id = "WS-" + uid();
-  await env.DB.prepare(`
-    INSERT INTO v2_ops_job_workers(id, job_id, worker_id, worker_name, joined_at)
-    VALUES(?,?,?,?,?)
-  `).bind(seg_id, parent_job_id, worker_id, worker_name, t).run();
+    const seg_id = "WS-" + uid();
+    await env.DB.prepare(`
+      INSERT INTO v2_ops_job_workers(id, job_id, worker_id, worker_name, joined_at)
+      VALUES(?,?,?,?,?)
+    `).bind(seg_id, parent_job_id, worker_id, worker_name, t).run();
 
-  // 重算 count + 恢复 status
-  const realCount = await recalcActiveCount(env, parent_job_id, t);
-  if (job.status === "awaiting_close" && realCount > 0) {
-    await env.DB.prepare(
-      "UPDATE v2_ops_jobs SET status='working', resumed_at=?, updated_at=? WHERE id=?"
-    ).bind(t, t, parent_job_id).run();
-  }
+    const realCount = await recalcActiveCount(env, parent_job_id, t);
+    if (job.status === "awaiting_close" && realCount > 0) {
+      await env.DB.prepare(
+        "UPDATE v2_ops_jobs SET status='working', resumed_at=?, updated_at=? WHERE id=?"
+      ).bind(t, t, parent_job_id).run();
+    }
 
-  return json({ ok: true, worker_seg_id: seg_id });
+    return { ok: true, worker_seg_id: seg_id };
+  });
 });
 
 // =====================================================
@@ -2492,6 +2502,20 @@ route("v2_pick_job_start", async (body, env) => {
   return withIdem(env, body, "v2_pick_job_start", async () => {
     const t = now();
 
+    // Cross-trip worker exclusion: same worker cannot be in 2 active pick trips
+    const workerConflict = await env.DB.prepare(
+      `SELECT j.id, j.display_no FROM v2_ops_jobs j
+       JOIN v2_ops_job_workers w ON w.job_id = j.id
+       WHERE j.job_type='pick_direct' AND j.status IN ('pending','working')
+       AND j.is_temporary_interrupt=0 AND w.worker_id=? AND w.left_at=''
+       LIMIT 1`
+    ).bind(worker_id).first();
+    if (workerConflict) {
+      return { ok: false, error: "worker_already_in_pick_trip",
+        message: "您已在趟次 " + (workerConflict.display_no || workerConflict.id) + " 中，请先完成后再开始新趟次",
+        conflict_trip: workerConflict.display_no || workerConflict.id };
+    }
+
     // Conflict check: reject if any doc_no is already in an active trip
     for (const docNo of pick_doc_nos) {
       const conflict = await env.DB.prepare(
@@ -2558,42 +2582,44 @@ route("v2_pick_job_add_docs", async (body, env) => {
   }
   if (pick_doc_nos.length === 0) return err("missing pick_doc_nos");
 
-  const t = now();
+  return withIdem(env, body, "v2_pick_job_add_docs", async () => {
+    const t = now();
 
-  // Conflict check: reject if any doc_no is in another active trip
-  for (const docNo of pick_doc_nos) {
-    const conflict = await env.DB.prepare(
-      `SELECT j.id, j.display_no FROM v2_ops_jobs j
-       JOIN v2_ops_job_pick_docs pd ON pd.job_id = j.id
-       WHERE j.job_type='pick_direct' AND j.status IN ('pending','working')
-       AND j.is_temporary_interrupt=0 AND pd.pick_doc_no=? AND j.id!=?
-       LIMIT 1`
-    ).bind(docNo, job_id).first();
-    if (conflict) {
-      return json({ ok: false, error: "doc_conflict",
-        message: "拣货单 " + docNo + " 已在趟次 " + (conflict.display_no || conflict.id) + " 中",
-        conflict_doc_no: docNo, conflict_trip: conflict.display_no || conflict.id });
+    // Conflict check: reject if any doc_no is in another active trip
+    for (const docNo of pick_doc_nos) {
+      const conflict = await env.DB.prepare(
+        `SELECT j.id, j.display_no FROM v2_ops_jobs j
+         JOIN v2_ops_job_pick_docs pd ON pd.job_id = j.id
+         WHERE j.job_type='pick_direct' AND j.status IN ('pending','working')
+         AND j.is_temporary_interrupt=0 AND pd.pick_doc_no=? AND j.id!=?
+         LIMIT 1`
+      ).bind(docNo, job_id).first();
+      if (conflict) {
+        return { ok: false, error: "doc_conflict",
+          message: "拣货单 " + docNo + " 已在趟次 " + (conflict.display_no || conflict.id) + " 中",
+          conflict_doc_no: docNo, conflict_trip: conflict.display_no || conflict.id };
+      }
     }
-  }
 
-  const existingDocs = await env.DB.prepare(
-    "SELECT pick_doc_no FROM v2_ops_job_pick_docs WHERE job_id=?"
-  ).bind(job_id).all();
-  const existingSet = new Set((existingDocs.results || []).map(r => r.pick_doc_no));
-  let added = 0;
-  for (const docNo of pick_doc_nos) {
-    if (!existingSet.has(docNo)) {
-      await env.DB.prepare(
-        "INSERT INTO v2_ops_job_pick_docs(id, job_id, pick_doc_no, created_at) VALUES(?,?,?,?)"
-      ).bind("PD-" + uid(), job_id, docNo, t).run();
-      added++;
+    const existingDocs = await env.DB.prepare(
+      "SELECT pick_doc_no FROM v2_ops_job_pick_docs WHERE job_id=?"
+    ).bind(job_id).all();
+    const existingSet = new Set((existingDocs.results || []).map(r => r.pick_doc_no));
+    let added = 0;
+    for (const docNo of pick_doc_nos) {
+      if (!existingSet.has(docNo)) {
+        await env.DB.prepare(
+          "INSERT INTO v2_ops_job_pick_docs(id, job_id, pick_doc_no, created_at) VALUES(?,?,?,?)"
+        ).bind("PD-" + uid(), job_id, docNo, t).run();
+        added++;
+      }
     }
-  }
-  // Return all docs for this job
-  const allDocs = await env.DB.prepare(
-    "SELECT pick_doc_no, created_at FROM v2_ops_job_pick_docs WHERE job_id=? ORDER BY created_at"
-  ).bind(job_id).all();
-  return json({ ok: true, added, docs: allDocs.results || [] });
+    // Return all docs for this job
+    const allDocs = await env.DB.prepare(
+      "SELECT pick_doc_no, created_at FROM v2_ops_job_pick_docs WHERE job_id=? ORDER BY created_at"
+    ).bind(job_id).all();
+    return { ok: true, added, docs: allDocs.results || [] };
+  });
 });
 
 route("v2_pick_job_finish", async (body, env) => {
@@ -2602,54 +2628,56 @@ route("v2_pick_job_finish", async (body, env) => {
   const worker_id = String(body.worker_id || "").trim();
   if (!job_id) return err("missing job_id");
 
-  const t = now();
+  return withIdem(env, body, "v2_pick_job_finish", async () => {
+    const t = now();
 
-  // Idempotency: already completed
-  const jobCheck = await env.DB.prepare("SELECT status FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
-  if (jobCheck && jobCheck.status === 'completed') {
-    return json({ ok: false, error: "already_completed", message: "任务已完成，请勿重复提交" });
-  }
+    // Idempotency fallback: already completed
+    const jobCheck = await env.DB.prepare("SELECT status FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
+    if (jobCheck && jobCheck.status === 'completed') {
+      return { ok: false, error: "already_completed", message: "任务已完成，请勿重复提交" };
+    }
 
-  // 1. Close this worker's segments only
-  await closeAllOpenSegs(env, job_id, worker_id, t, 'finished');
+    // 1. Close this worker's segments only
+    await closeAllOpenSegs(env, job_id, worker_id, t, 'finished');
 
-  // 2. Recalc active count
-  const realCount = await recalcActiveCount(env, job_id, t);
+    // 2. Recalc active count
+    const realCount = await recalcActiveCount(env, job_id, t);
 
-  // 3. If others still working, block completion
-  if (realCount > 0) {
-    return json({ ok: false, error: "others_still_working",
-      message: "还有 " + realCount + " 人正在参与此任务，暂不能完成",
-      active_worker_count: realCount });
-  }
+    // 3. If others still working, block completion
+    if (realCount > 0) {
+      return { ok: false, error: "others_still_working",
+        message: "您已退出此趟次，还有 " + realCount + " 人继续作业",
+        active_worker_count: realCount };
+    }
 
-  // 4. Last person — save result and complete
-  const remark = String(body.remark || "").trim();
-  const result_note = String(body.result_note || "").trim();
+    // 4. Last person — save result and complete
+    const remark = String(body.remark || "").trim();
+    const result_note = String(body.result_note || "").trim();
 
-  const allDocs = await env.DB.prepare(
-    "SELECT pick_doc_no FROM v2_ops_job_pick_docs WHERE job_id=? ORDER BY created_at"
-  ).bind(job_id).all();
-  const docNos = (allDocs.results || []).map(r => r.pick_doc_no);
+    const allDocs = await env.DB.prepare(
+      "SELECT pick_doc_no FROM v2_ops_job_pick_docs WHERE job_id=? ORDER BY created_at"
+    ).bind(job_id).all();
+    const docNos = (allDocs.results || []).map(r => r.pick_doc_no);
 
-  const result_id = "RES-" + uid();
-  await env.DB.prepare(`
-    INSERT INTO v2_ops_job_results(id, job_id, remark, result_json, result_lines_json, created_by, created_at)
-    VALUES(?,?,?,?,?,?,?)
-  `).bind(result_id, job_id, remark, JSON.stringify({
-    result_note,
-    pick_doc_nos: docNos
-  }), '[]', worker_id, t).run();
+    const result_id = "RES-" + uid();
+    await env.DB.prepare(`
+      INSERT INTO v2_ops_job_results(id, job_id, remark, result_json, result_lines_json, created_by, created_at)
+      VALUES(?,?,?,?,?,?,?)
+    `).bind(result_id, job_id, remark, JSON.stringify({
+      result_note,
+      pick_doc_nos: docNos
+    }), '[]', worker_id, t).run();
 
-  // Complete job — close any stale open segments (safety net)
-  await env.DB.prepare(
-    "UPDATE v2_ops_jobs SET status='completed', active_worker_count=0, updated_at=? WHERE id=?"
-  ).bind(t, job_id).run();
-  await env.DB.prepare(
-    "UPDATE v2_ops_job_workers SET left_at=?, leave_reason='job_completed' WHERE job_id=? AND left_at=''"
-  ).bind(t, job_id).run();
+    // Complete job — close any stale open segments (safety net)
+    await env.DB.prepare(
+      "UPDATE v2_ops_jobs SET status='completed', active_worker_count=0, updated_at=? WHERE id=?"
+    ).bind(t, job_id).run();
+    await env.DB.prepare(
+      "UPDATE v2_ops_job_workers SET left_at=?, leave_reason='job_completed' WHERE job_id=? AND left_at=''"
+    ).bind(t, job_id).run();
 
-  return json({ ok: true });
+    return { ok: true };
+  });
 });
 
 // =====================================================
@@ -2697,32 +2725,48 @@ route("v2_pick_job_join", async (body, env) => {
   const worker_name = String(body.worker_name || "").trim();
   if (!job_id || !worker_id) return err("missing job_id or worker_id");
 
-  const t = now();
-  const job = await env.DB.prepare(
-    "SELECT * FROM v2_ops_jobs WHERE id=? AND job_type='pick_direct'"
-  ).bind(job_id).first();
-  if (!job) return err("trip not found", 404);
-  if (job.status === 'completed') return err("trip_already_completed");
+  return withIdem(env, body, "v2_pick_job_join", async () => {
+    const t = now();
+    const job = await env.DB.prepare(
+      "SELECT * FROM v2_ops_jobs WHERE id=? AND job_type='pick_direct'"
+    ).bind(job_id).first();
+    if (!job) return { ok: false, error: "trip not found" };
+    if (job.status === 'completed') return { ok: false, error: "trip_already_completed" };
 
-  // Dedup: already has open segment
-  const dup = await findOpenSeg(env, job_id, worker_id);
-  if (dup) {
-    return json({ ok: true, job_id, worker_seg_id: dup.id, already_joined: true,
-      trip_no: job.display_no || '' });
-  }
+    // Dedup: already has open segment in this same trip
+    const dup = await findOpenSeg(env, job_id, worker_id);
+    if (dup) {
+      return { ok: true, job_id, worker_seg_id: dup.id, already_joined: true,
+        trip_no: job.display_no || '' };
+    }
 
-  // Add worker segment
-  const seg_id = "WS-" + uid();
-  await env.DB.prepare(`
-    INSERT INTO v2_ops_job_workers(id, job_id, worker_id, worker_name, joined_at)
-    VALUES(?,?,?,?,?)
-  `).bind(seg_id, job_id, worker_id, worker_name, t).run();
+    // Cross-trip worker exclusion: same worker cannot be in 2 active pick trips
+    const workerConflict = await env.DB.prepare(
+      `SELECT j.id, j.display_no FROM v2_ops_jobs j
+       JOIN v2_ops_job_workers w ON w.job_id = j.id
+       WHERE j.job_type='pick_direct' AND j.status IN ('pending','working')
+       AND j.is_temporary_interrupt=0 AND w.worker_id=? AND w.left_at='' AND j.id!=?
+       LIMIT 1`
+    ).bind(worker_id, job_id).first();
+    if (workerConflict) {
+      return { ok: false, error: "worker_already_in_pick_trip",
+        message: "您已在趟次 " + (workerConflict.display_no || workerConflict.id) + " 中，请先完成后再加入其他趟次",
+        conflict_trip: workerConflict.display_no || workerConflict.id };
+    }
 
-  await env.DB.prepare(
-    "UPDATE v2_ops_jobs SET active_worker_count=active_worker_count+1, updated_at=?, status='working' WHERE id=?"
-  ).bind(t, job_id).run();
+    // Add worker segment
+    const seg_id = "WS-" + uid();
+    await env.DB.prepare(`
+      INSERT INTO v2_ops_job_workers(id, job_id, worker_id, worker_name, joined_at)
+      VALUES(?,?,?,?,?)
+    `).bind(seg_id, job_id, worker_id, worker_name, t).run();
 
-  return json({ ok: true, job_id, worker_seg_id: seg_id, trip_no: job.display_no || '' });
+    await env.DB.prepare(
+      "UPDATE v2_ops_jobs SET active_worker_count=active_worker_count+1, updated_at=?, status='working' WHERE id=?"
+    ).bind(t, job_id).run();
+
+    return { ok: true, job_id, worker_seg_id: seg_id, trip_no: job.display_no || '' };
+  });
 });
 
 // =====================================================
@@ -2801,84 +2845,84 @@ route("v2_bulk_op_job_finish", async (body, env) => {
   const worker_id = String(body.worker_id || "").trim();
   if (!job_id) return err("missing job_id");
 
-  const t = now();
+  return withIdem(env, body, "v2_bulk_op_job_finish", async () => {
+    const t = now();
 
-  const jobCheck = await env.DB.prepare("SELECT status FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
-  if (jobCheck && jobCheck.status === 'completed') {
-    return json({ ok: false, error: "already_completed", message: "任务已完成，请勿重复提交" });
-  }
-
-  // Pre-check: if this user is the only active worker, they MUST record output
-  // (Done before closing segments — otherwise user gets kicked out on validation failure)
-  const othersRow = await env.DB.prepare(
-    "SELECT COUNT(*) as c FROM v2_ops_job_workers WHERE job_id=? AND worker_id!=? AND left_at=''"
-  ).bind(job_id, worker_id).first();
-  const willBeLastPerson = (Number((othersRow && othersRow.c) || 0) === 0);
-
-  if (willBeLastPerson) {
-    const numFields = [
-      Number(body.packed_sku_count || 0),
-      Number(body.packed_box_count || 0),
-      Number(body.used_carton_large_count || 0),
-      Number(body.used_carton_small_count || 0),
-      Number(body.repaired_box_count || 0),
-      Number(body.reboxed_count || 0),
-      Number(body.label_count || 0),
-      Number(body.total_operated_box_count || 0),
-      Number(body.pallet_count || 0),
-      Number(body.forklift_location_count || 0)
-    ];
-    const hasOutput = numFields.some(v => v > 0) || !!body.used_forklift;
-    if (!hasOutput) {
-      return json({ ok: false, error: "missing_bulk_output",
-        message: "请先记录操作产出后再完成" });
+    const jobCheck = await env.DB.prepare("SELECT status FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
+    if (jobCheck && jobCheck.status === 'completed') {
+      return { ok: false, error: "already_completed", message: "任务已完成，请勿重复提交" };
     }
-  }
 
-  // 1. Close this worker's segments only
-  await closeAllOpenSegs(env, job_id, worker_id, t, 'finished');
+    // Pre-check: if this user is the only active worker, they MUST record output
+    const othersRow = await env.DB.prepare(
+      "SELECT COUNT(*) as c FROM v2_ops_job_workers WHERE job_id=? AND worker_id!=? AND left_at=''"
+    ).bind(job_id, worker_id).first();
+    const willBeLastPerson = (Number((othersRow && othersRow.c) || 0) === 0);
 
-  // 2. Recalc active count
-  const realCount = await recalcActiveCount(env, job_id, t);
+    if (willBeLastPerson) {
+      const numFields = [
+        Number(body.packed_sku_count || 0),
+        Number(body.packed_box_count || 0),
+        Number(body.used_carton_large_count || 0),
+        Number(body.used_carton_small_count || 0),
+        Number(body.repaired_box_count || 0),
+        Number(body.reboxed_count || 0),
+        Number(body.label_count || 0),
+        Number(body.total_operated_box_count || 0),
+        Number(body.pallet_count || 0),
+        Number(body.forklift_location_count || 0)
+      ];
+      const hasOutput = numFields.some(v => v > 0) || !!body.used_forklift;
+      if (!hasOutput) {
+        return { ok: false, error: "missing_bulk_output",
+          message: "请先记录操作产出后再完成" };
+      }
+    }
 
-  // 3. If others still working, block completion (this worker has been kicked out)
-  if (realCount > 0) {
-    return json({ ok: false, error: "others_still_working",
-      message: "还有其他人参与中（剩余 " + realCount + " 人），不能完成，您已暂时退出该工单",
-      active_worker_count: realCount });
-  }
+    // 1. Close this worker's segments only
+    await closeAllOpenSegs(env, job_id, worker_id, t, 'finished');
 
-  // 4. Last person — save result and complete
-  const resultData = {
-    packed_sku_count: Number(body.packed_sku_count || 0),
-    packed_box_count: Number(body.packed_box_count || 0),
-    used_carton_large_count: Number(body.used_carton_large_count || 0),
-    used_carton_small_count: Number(body.used_carton_small_count || 0),
-    repaired_box_count: Number(body.repaired_box_count || 0),
-    reboxed_count: Number(body.reboxed_count || 0),
-    label_count: Number(body.label_count || 0),
-    total_operated_box_count: Number(body.total_operated_box_count || 0),
-    pallet_count: Number(body.pallet_count || 0),
-    used_forklift: body.used_forklift ? 1 : 0,
-    forklift_location_count: Number(body.forklift_location_count || 0),
-    result_note: String(body.result_note || "")
-  };
+    // 2. Recalc active count
+    const realCount = await recalcActiveCount(env, job_id, t);
 
-  const result_id = "RES-" + uid();
-  await env.DB.prepare(`
-    INSERT INTO v2_ops_job_results(id, job_id, remark, result_json, result_lines_json, created_by, created_at)
-    VALUES(?,?,?,?,?,?,?)
-  `).bind(result_id, job_id, String(body.remark || ""), JSON.stringify(resultData), '[]', worker_id, t).run();
+    // 3. If others still working, this worker has been kicked out
+    if (realCount > 0) {
+      return { ok: false, error: "others_still_working",
+        message: "您已退出此工单，还有 " + realCount + " 人继续作业",
+        active_worker_count: realCount };
+    }
 
-  // Complete job — close any stale open segments (safety net)
-  await env.DB.prepare(
-    "UPDATE v2_ops_jobs SET status='completed', active_worker_count=0, updated_at=? WHERE id=?"
-  ).bind(t, job_id).run();
-  await env.DB.prepare(
-    "UPDATE v2_ops_job_workers SET left_at=?, leave_reason='job_completed' WHERE job_id=? AND left_at=''"
-  ).bind(t, job_id).run();
+    // 4. Last person — save result and complete
+    const resultData = {
+      packed_sku_count: Number(body.packed_sku_count || 0),
+      packed_box_count: Number(body.packed_box_count || 0),
+      used_carton_large_count: Number(body.used_carton_large_count || 0),
+      used_carton_small_count: Number(body.used_carton_small_count || 0),
+      repaired_box_count: Number(body.repaired_box_count || 0),
+      reboxed_count: Number(body.reboxed_count || 0),
+      label_count: Number(body.label_count || 0),
+      total_operated_box_count: Number(body.total_operated_box_count || 0),
+      pallet_count: Number(body.pallet_count || 0),
+      used_forklift: body.used_forklift ? 1 : 0,
+      forklift_location_count: Number(body.forklift_location_count || 0),
+      result_note: String(body.result_note || "")
+    };
 
-  return json({ ok: true });
+    const result_id = "RES-" + uid();
+    await env.DB.prepare(`
+      INSERT INTO v2_ops_job_results(id, job_id, remark, result_json, result_lines_json, created_by, created_at)
+      VALUES(?,?,?,?,?,?,?)
+    `).bind(result_id, job_id, String(body.remark || ""), JSON.stringify(resultData), '[]', worker_id, t).run();
+
+    await env.DB.prepare(
+      "UPDATE v2_ops_jobs SET status='completed', active_worker_count=0, updated_at=? WHERE id=?"
+    ).bind(t, job_id).run();
+    await env.DB.prepare(
+      "UPDATE v2_ops_job_workers SET left_at=?, leave_reason='job_completed' WHERE job_id=? AND left_at=''"
+    ).bind(t, job_id).run();
+
+    return { ok: true };
+  });
 });
 
 // =====================================================
@@ -2990,15 +3034,23 @@ route("v2_dashboard_realtime_overview", async (body, env) => {
     "SELECT COUNT(DISTINCT related_doc_id) as c FROM v2_ops_jobs WHERE status IN ('working','awaiting_close') AND active_worker_count > 0 AND related_doc_id != ''"
   ).first();
 
-  // 5. Worker live status — each open segment joined with its job
+  // 5. Worker live status — each open segment joined with its job + best display_no
   const liveWorkers = await env.DB.prepare(`
     SELECT w.worker_id, w.worker_name, w.joined_at, w.job_id,
-           j.flow_stage, j.biz_class, j.job_type, j.related_doc_type, j.related_doc_id, j.status as job_status
+           j.flow_stage, j.biz_class, j.job_type, j.related_doc_type, j.related_doc_id,
+           j.display_no as job_display_no, j.status as job_status,
+           p.display_no as plan_display_no
     FROM v2_ops_job_workers w
     JOIN v2_ops_jobs j ON w.job_id = j.id
+    LEFT JOIN v2_inbound_plans p ON j.related_doc_type='inbound_plan' AND j.related_doc_id = p.id
     WHERE w.left_at=''
     ORDER BY w.joined_at DESC
   `).all();
+  // Inject unified display_no: priority = plan_display_no > job_display_no > related_doc_id > job_id
+  const liveWorkerRows = (liveWorkers.results || []).map(function(r) {
+    r.display_no = r.plan_display_no || r.job_display_no || r.related_doc_id || r.job_id || '';
+    return r;
+  });
 
   // 6. Biz breakdown — group active workers by job_type
   const bizBreak = await env.DB.prepare(`
@@ -3018,7 +3070,7 @@ route("v2_dashboard_realtime_overview", async (body, env) => {
     today_login_workers: (todayLogins && todayLogins.c) || 0,
     current_active_jobs: (activeJobs && activeJobs.c) || 0,
     current_active_docs: (activeDocs && activeDocs.c) || 0,
-    worker_live_status: liveWorkers.results || [],
+    worker_live_status: liveWorkerRows,
     biz_breakdown: bizBreak.results || []
   });
 });
@@ -3029,8 +3081,11 @@ route("v2_dashboard_live_docs", async (body, env) => {
   // Active jobs that have related_doc_id, grouped by doc
   const jobs = await env.DB.prepare(`
     SELECT j.id as job_id, j.flow_stage, j.biz_class, j.job_type,
-           j.related_doc_type, j.related_doc_id, j.status, j.created_at, j.active_worker_count
+           j.related_doc_type, j.related_doc_id, j.status, j.created_at, j.active_worker_count,
+           j.display_no as job_display_no,
+           p.display_no as plan_display_no
     FROM v2_ops_jobs j
+    LEFT JOIN v2_inbound_plans p ON j.related_doc_type='inbound_plan' AND j.related_doc_id = p.id
     WHERE j.status IN ('working','awaiting_close') AND j.active_worker_count > 0
     ORDER BY j.created_at DESC
     LIMIT 100
@@ -3044,6 +3099,9 @@ route("v2_dashboard_live_docs", async (body, env) => {
     ).bind(job.job_id).all();
     const names = (ws.results || []).map(function(r) { return r.worker_name; }).filter(Boolean);
 
+    // Unified display_no: plan_display_no > job_display_no > related_doc_id > job_id
+    const display_no = job.plan_display_no || job.job_display_no || job.related_doc_id || job.job_id || '';
+
     docs.push({
       job_id: job.job_id,
       flow_stage: job.flow_stage,
@@ -3051,6 +3109,7 @@ route("v2_dashboard_live_docs", async (body, env) => {
       job_type: job.job_type,
       related_doc_type: job.related_doc_type,
       related_doc_id: job.related_doc_id,
+      display_no: display_no,
       status: job.status,
       created_at: job.created_at,
       active_worker_count: job.active_worker_count,
@@ -3059,6 +3118,165 @@ route("v2_dashboard_live_docs", async (body, env) => {
   }
 
   return json({ ok: true, docs });
+});
+
+// =====================================================
+// ADMIN — 脏数据诊断 + 清理
+// =====================================================
+route("v2_admin_dirty_data_diagnose", async (body, env) => {
+  if (!isAuth(body, env)) return err("unauthorized", 401);
+
+  // 1. Worker with multiple open segments
+  const multiSegs = await env.DB.prepare(`
+    SELECT worker_id, worker_name, COUNT(*) as seg_count,
+           GROUP_CONCAT(job_id) as job_ids
+    FROM v2_ops_job_workers
+    WHERE left_at=''
+    GROUP BY worker_id
+    HAVING seg_count > 1
+  `).all();
+
+  // 2. Same worker in multiple active jobs of same non-parallel type (bulk_op, inbound, unload)
+  // pick_direct is parallel — allow multiple trips under legacy data but flagged via cross-trip check
+  const crossJob = await env.DB.prepare(`
+    SELECT w.worker_id, w.worker_name, j.job_type, COUNT(DISTINCT j.id) as job_count,
+           GROUP_CONCAT(DISTINCT j.id) as job_ids
+    FROM v2_ops_job_workers w
+    JOIN v2_ops_jobs j ON w.job_id = j.id
+    WHERE w.left_at='' AND j.status IN ('working','awaiting_close','pending')
+      AND j.job_type IN ('bulk_op','inbound_direct','inbound_return','unload')
+    GROUP BY w.worker_id, j.job_type
+    HAVING job_count > 1
+  `).all();
+
+  // 3. Open segments on completed/cancelled jobs
+  const orphanSegs = await env.DB.prepare(`
+    SELECT w.id as seg_id, w.worker_id, w.worker_name, w.job_id, w.joined_at, j.status as job_status
+    FROM v2_ops_job_workers w
+    JOIN v2_ops_jobs j ON w.job_id = j.id
+    WHERE w.left_at='' AND j.status IN ('completed','cancelled')
+    ORDER BY w.joined_at DESC LIMIT 200
+  `).all();
+
+  // 4. Jobs with active_worker_count > 0 but no open segments (count drift)
+  const countDrift = await env.DB.prepare(`
+    SELECT j.id as job_id, j.job_type, j.status, j.active_worker_count,
+           (SELECT COUNT(*) FROM v2_ops_job_workers w WHERE w.job_id=j.id AND w.left_at='') as real_count
+    FROM v2_ops_jobs j
+    WHERE j.active_worker_count > 0 AND j.status IN ('working','awaiting_close')
+  `).all();
+  const drifts = (countDrift.results || []).filter(function(r) { return r.real_count !== r.active_worker_count; });
+
+  return json({
+    ok: true,
+    multi_open_segments: multiSegs.results || [],
+    cross_job_workers: crossJob.results || [],
+    orphan_open_segments: orphanSegs.results || [],
+    count_drift_jobs: drifts
+  });
+});
+
+route("v2_admin_dirty_data_cleanup", async (body, env) => {
+  if (!isAuth(body, env)) return err("unauthorized", 401);
+  const operator = String(body.operator || "").trim();
+  const reason = String(body.reason || "").trim();
+  const action_type = String(body.action_type || "").trim();
+  if (!operator) return err("missing operator");
+  if (!reason) return err("missing reason");
+  if (!action_type) return err("missing action_type");
+
+  return withIdem(env, body, "v2_admin_dirty_data_cleanup", async () => {
+    const t = now();
+    const log_id = "CLN-" + uid();
+    const detail = {};
+
+    if (action_type === "close_orphan_segment") {
+      const seg_id = String(body.seg_id || "").trim();
+      if (!seg_id) return { ok: false, error: "missing seg_id" };
+      const seg = await env.DB.prepare("SELECT * FROM v2_ops_job_workers WHERE id=?").bind(seg_id).first();
+      if (!seg) return { ok: false, error: "segment not found" };
+      await env.DB.prepare(
+        "UPDATE v2_ops_job_workers SET left_at=?, leave_reason='admin_cleanup' WHERE id=?"
+      ).bind(t, seg_id).run();
+      await recalcActiveCount(env, seg.job_id, t);
+      detail.seg = seg;
+    } else if (action_type === "recalc_job_count") {
+      const job_id = String(body.job_id || "").trim();
+      if (!job_id) return { ok: false, error: "missing job_id" };
+      const rc = await recalcActiveCount(env, job_id, t);
+      detail.job_id = job_id;
+      detail.recalc_result = rc;
+    } else if (action_type === "close_worker_all_open") {
+      const worker_id = String(body.worker_id || "").trim();
+      if (!worker_id) return { ok: false, error: "missing worker_id" };
+      const segs = await env.DB.prepare(
+        "SELECT id, job_id FROM v2_ops_job_workers WHERE worker_id=? AND left_at=''"
+      ).bind(worker_id).all();
+      const rows = segs.results || [];
+      for (const s of rows) {
+        await env.DB.prepare(
+          "UPDATE v2_ops_job_workers SET left_at=?, leave_reason='admin_cleanup' WHERE id=?"
+        ).bind(t, s.id).run();
+        await recalcActiveCount(env, s.job_id, t);
+      }
+      detail.closed_count = rows.length;
+      detail.worker_id = worker_id;
+    } else {
+      return { ok: false, error: "unknown action_type" };
+    }
+
+    await env.DB.prepare(`
+      INSERT INTO v2_admin_cleanup_logs(id, operator, action_type, target_job_id, target_worker_id, reason, detail_json, created_at)
+      VALUES(?,?,?,?,?,?,?,?)
+    `).bind(log_id, operator, action_type,
+        String(body.job_id || ""), String(body.worker_id || ""),
+        reason, JSON.stringify(detail), t).run();
+
+    return { ok: true, log_id, detail };
+  });
+});
+
+route("v2_admin_cleanup_log_list", async (body, env) => {
+  if (!isAuth(body, env)) return err("unauthorized", 401);
+  const rs = await env.DB.prepare(
+    "SELECT * FROM v2_admin_cleanup_logs ORDER BY created_at DESC LIMIT 100"
+  ).all();
+  return json({ ok: true, items: rs.results || [] });
+});
+
+// =====================================================
+// CORRECTION REQUESTS — 看板主管修正申请（不直接改业务数据）
+// =====================================================
+route("v2_correction_request_create", async (body, env) => {
+  if (!isAuth(body, env)) return err("unauthorized", 401);
+  const type = String(body.type || "").trim();
+  const target_id = String(body.target_id || "").trim();
+  const reporter = String(body.reporter || "").trim();
+  const reason = String(body.reason || "").trim();
+  if (!type || !target_id) return err("missing type or target_id");
+  if (!reason) return err("missing reason");
+
+  return withIdem(env, body, "v2_correction_request_create", async () => {
+    const t = now();
+    const id = "CR-" + uid();
+    await env.DB.prepare(`
+      INSERT INTO v2_correction_requests(id, type, target_id, target_label, reporter, reason, status, created_at, updated_at)
+      VALUES(?,?,?,?,?,?,'open',?,?)
+    `).bind(id, type, target_id, String(body.target_label || ""), reporter, reason, t, t).run();
+    return { ok: true, id };
+  });
+});
+
+route("v2_correction_request_list", async (body, env) => {
+  if (!isAuth(body, env)) return err("unauthorized", 401);
+  const status = String(body.status || "").trim();
+  let sql = "SELECT * FROM v2_correction_requests";
+  const binds = [];
+  if (status) { sql += " WHERE status=?"; binds.push(status); }
+  sql += " ORDER BY created_at DESC LIMIT 200";
+  const stmt = env.DB.prepare(sql);
+  const rs = binds.length > 0 ? await stmt.bind(...binds).all() : await stmt.all();
+  return json({ ok: true, items: rs.results || [] });
 });
 
 // =====================================================

@@ -330,27 +330,27 @@
   <!-- Order Ops (按单操作) -->
   <div id="view-order_ops" class="view" style="display:none;">
     <div class="card">
-      <div class="card-title">按单操作记录</div>
+      <div class="card-title" data-i18n="order_ops_title">按单操作记录</div>
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">
         <select id="orderOpsTypeFilter">
-          <option value="">全部类型</option>
-          <option value="pick_direct">代发拣货</option>
-          <option value="bulk_op">大货操作</option>
+          <option value="" data-i18n="order_ops_filter_all">全部类型</option>
+          <option value="pick_direct" data-i18n="order_ops_job_type_pick_direct">代发拣货</option>
+          <option value="bulk_op" data-i18n="order_ops_job_type_bulk_op">大货操作</option>
         </select>
         <input type="date" id="orderOpsStartDate">
         <input type="date" id="orderOpsEndDate">
-        <button class="btn btn-primary btn-sm" onclick="loadOrderOpsList()">查询</button>
+        <button class="btn btn-primary btn-sm" onclick="loadOrderOpsList()" data-i18n="order_ops_search">查询</button>
       </div>
-      <div id="orderOpsListBody"><span class="muted">点击查询加载数据</span></div>
+      <div id="orderOpsListBody"><span class="muted" data-i18n="loading">加载中...</span></div>
     </div>
   </div>
 
   <!-- Order Ops Detail -->
   <div id="view-order_ops_detail" class="view" style="display:none;">
     <div class="card">
-      <button class="btn btn-outline btn-sm" onclick="goTab('order_ops')">← 返回列表</button>
+      <button class="btn btn-outline btn-sm" onclick="goTab('order_ops')" data-i18n="order_ops_back_to_list">← 返回列表</button>
     </div>
-    <div id="orderOpsDetailBody"><span class="muted">加载中...</span></div>
+    <div id="orderOpsDetailBody"><span class="muted" data-i18n="loading">加载中...</span></div>
   </div>
 
 </div>
