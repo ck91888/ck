@@ -23,7 +23,7 @@
     if(lines.length===0){ alert(L('plan_lines')+' '+L('required')+'!'); return; }
     if(!cargo){ cargo=lines.map(function(ln){ return unitLabelSafe(ln.unit_type)+' '+ln.planned_qty; }).join(' / '); }
     var payload={ action:'v2_inbound_plan_create', plan_date:date, customer:customer, biz_class:biz, cargo_summary:cargo, expected_arrival:arrival, purpose:purpose, remark:remark, lines:lines, created_by:getUser() };
-    if(autoOb){ payload.auto_create_outbound=true; payload.ob_operation_mode=(document.getElementById('ibc-ob-opmode')||{}).value||''; payload.ob_outbound_mode=(document.getElementById('ibc-ob-outmode')||{}).value||''; payload.ob_instruction=(document.getElementById('ibc-ob-instruction')||{}).value||''; }
+    if(autoOb){ payload.auto_create_outbound=true; payload.ob_destination=(document.getElementById('ibc-ob-destination')||{}).value||''; payload.ob_po_no=(document.getElementById('ibc-ob-po')||{}).value||''; payload.ob_wms_work_order_no=(document.getElementById('ibc-ob-wms-wo')||{}).value||''; payload.ob_outbound_mode=(document.getElementById('ibc-ob-outmode')||{}).value||''; payload.ob_instruction=(document.getElementById('ibc-ob-instruction')||{}).value||''; payload.ob_planned_box_count=parseInt((document.getElementById('ibc-ob-planned-box')||{}).value)||0; payload.ob_planned_pallet_count=parseInt((document.getElementById('ibc-ob-planned-pallet')||{}).value)||0; }
     var res=await api(payload);
     if(res&&res.ok){
       var msg=L('success')+': '+(res.display_no||res.id);

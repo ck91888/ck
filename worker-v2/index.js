@@ -520,6 +520,16 @@ const MIGRATIONS = [
     created_at TEXT
   )`,
   `CREATE INDEX IF NOT EXISTS idx_v2_cleanup_log_time ON v2_admin_cleanup_logs(created_at)`,
+
+  // ---- 出库作业单口径调整：单头字段扩充（destination/po_no/wms_work_order_no + 计划/实际 箱托）----
+  `ALTER TABLE v2_outbound_orders ADD COLUMN destination TEXT DEFAULT ''`,
+  `ALTER TABLE v2_outbound_orders ADD COLUMN po_no TEXT DEFAULT ''`,
+  `ALTER TABLE v2_outbound_orders ADD COLUMN wms_work_order_no TEXT DEFAULT ''`,
+  `ALTER TABLE v2_outbound_orders ADD COLUMN planned_box_count INTEGER DEFAULT 0`,
+  `ALTER TABLE v2_outbound_orders ADD COLUMN planned_pallet_count INTEGER DEFAULT 0`,
+  `ALTER TABLE v2_outbound_orders ADD COLUMN actual_box_count INTEGER DEFAULT 0`,
+  `ALTER TABLE v2_outbound_orders ADD COLUMN actual_pallet_count INTEGER DEFAULT 0`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_outbound_wms_wo ON v2_outbound_orders(wms_work_order_no) WHERE wms_work_order_no != ''`,
 ];
 
 let _migrated = false;
@@ -740,30 +750,37 @@ route("v2_outbound_order_create", async (body, env) => {
   return withIdem(env, body, "v2_outbound_order_create", async () => {
     const id = "OB-" + uid();
     const t = now();
+    // 口径调整：所有出库单均联动大货操作，biz_class 固定 'bulk'；
+    // 不再从前端接收 biz_class / operation_mode / remark
     await env.DB.prepare(`
       INSERT INTO v2_outbound_orders(id, order_date, customer, biz_class, operation_mode,
-        outbound_mode, instruction, remark, status, created_by, created_at, updated_at)
-      VALUES(?,?,?,?,?,?,?,?,'draft',?,?,?)
+        outbound_mode, instruction, remark, status, created_by, created_at, updated_at,
+        destination, po_no, wms_work_order_no,
+        planned_box_count, planned_pallet_count, actual_box_count, actual_pallet_count)
+      VALUES(?,?,?,'bulk','',?,?,'','draft',?,?,?,?,?,?,?,?,0,0)
     `).bind(
       id,
       String(body.order_date || kstToday()),
       String(body.customer || ""),
-      String(body.biz_class || ""),
-      String(body.operation_mode || ""),
       String(body.outbound_mode || ""),
       String(body.instruction || ""),
-      String(body.remark || ""),
       String(body.created_by || ""),
-      t, t
+      t, t,
+      String(body.destination || ""),
+      String(body.po_no || ""),
+      String(body.wms_work_order_no || ""),
+      Number(body.planned_box_count || 0),
+      Number(body.planned_pallet_count || 0)
     ).run();
 
     const lines = body.lines || [];
     for (let i = 0; i < lines.length; i++) {
       const ln = lines[i];
+      // 行级 wms_order_no 已废弃；单头承载 wms_work_order_no，这里写空保留兼容列
       await env.DB.prepare(`
         INSERT INTO v2_outbound_order_lines(id, order_id, line_no, wms_order_no, sku, quantity, remark)
-        VALUES(?,?,?,?,?,?,?)
-      `).bind("OBL-" + uid(), id, i + 1, String(ln.wms_order_no || ""), String(ln.sku || ""), Number(ln.quantity || 0), String(ln.remark || "")).run();
+        VALUES(?,?,?,'',?,?,?)
+      `).bind("OBL-" + uid(), id, i + 1, String(ln.sku || ""), Number(ln.quantity || 0), String(ln.remark || "")).run();
     }
 
     return { ok: true, id };
@@ -921,9 +938,10 @@ route("v2_outbound_load_finish", async (body, env) => {
       ).bind(t, job_id).run();
       const job = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
       if (job && job.related_doc_id) {
+        // 口径联动：完成时回写 actual_box_count / actual_pallet_count
         await env.DB.prepare(
-          "UPDATE v2_outbound_orders SET status='completed', updated_at=? WHERE id=?"
-        ).bind(t, job.related_doc_id).run();
+          "UPDATE v2_outbound_orders SET status='completed', actual_box_count=?, actual_pallet_count=?, updated_at=? WHERE id=?"
+        ).bind(box_count, pallet_count, t, job.related_doc_id).run();
       }
     } else {
       await env.DB.prepare(
@@ -975,19 +993,25 @@ route("v2_inbound_plan_create", async (body, env) => {
     let outbound_id = null;
     if (body.auto_create_outbound) {
       outbound_id = "OB-" + uid();
+      // 口径调整：auto-create outbound 同步新字段；biz_class 固定 'bulk'，不再接 op_mode/remark
       await env.DB.prepare(`
         INSERT INTO v2_outbound_orders(id, order_date, customer, biz_class, operation_mode,
-          outbound_mode, instruction, remark, status, source_inbound_plan_id, created_by, created_at, updated_at)
-        VALUES(?,?,?,?,?,?,?,?,'draft',?,?,?,?)
+          outbound_mode, instruction, remark, status, source_inbound_plan_id, created_by, created_at, updated_at,
+          destination, po_no, wms_work_order_no,
+          planned_box_count, planned_pallet_count, actual_box_count, actual_pallet_count)
+        VALUES(?,?,?,'bulk','',?,?,'','draft',?,?,?,?,?,?,?,?,?,0,0)
       `).bind(
         outbound_id,
         String(body.plan_date || kstToday()),
-        customer, biz_class,
-        String(body.ob_operation_mode || ""),
+        customer,
         String(body.ob_outbound_mode || ""),
         String(body.ob_instruction || ""),
-        String(body.ob_remark || ""),
-        id, created_by, t, t
+        id, created_by, t, t,
+        String(body.ob_destination || ""),
+        String(body.ob_po_no || ""),
+        String(body.ob_wms_work_order_no || ""),
+        Number(body.ob_planned_box_count || 0),
+        Number(body.ob_planned_pallet_count || 0)
       ).run();
     }
 
@@ -2835,9 +2859,37 @@ route("v2_bulk_op_job_start", async (body, env) => {
       VALUES(?,?,?,?,?)
     `).bind(seg_id, job_id, worker_id, worker_name, t).run();
 
-    return { ok: true, job_id, worker_seg_id: seg_id, is_new_job };
+    // 口径联动：若 work_order_no 匹配某出库单（id 或 wms_work_order_no），返回该出库单参考信息
+    const linkedOb = await findOutboundByWorkOrder(env, work_order_no);
+    const ret = { ok: true, job_id, worker_seg_id: seg_id, is_new_job };
+    if (linkedOb) {
+      ret.linked_outbound = {
+        id: linkedOb.id,
+        customer: linkedOb.customer || "",
+        destination: linkedOb.destination || "",
+        po_no: linkedOb.po_no || "",
+        wms_work_order_no: linkedOb.wms_work_order_no || "",
+        planned_box_count: Number(linkedOb.planned_box_count || 0),
+        planned_pallet_count: Number(linkedOb.planned_pallet_count || 0),
+        instruction: linkedOb.instruction || ""
+      };
+    }
+    return ret;
   });
 });
+
+// 出库单查找 helper：优先匹配 id，其次匹配 wms_work_order_no
+async function findOutboundByWorkOrder(env, workOrderNo) {
+  if (!workOrderNo) return null;
+  let row = await env.DB.prepare(
+    "SELECT * FROM v2_outbound_orders WHERE id=? LIMIT 1"
+  ).bind(workOrderNo).first();
+  if (row) return row;
+  row = await env.DB.prepare(
+    "SELECT * FROM v2_outbound_orders WHERE wms_work_order_no=? ORDER BY created_at DESC LIMIT 1"
+  ).bind(workOrderNo).first();
+  return row || null;
+}
 
 route("v2_bulk_op_job_finish", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
@@ -2920,6 +2972,17 @@ route("v2_bulk_op_job_finish", async (body, env) => {
     await env.DB.prepare(
       "UPDATE v2_ops_job_workers SET left_at=?, leave_reason='job_completed' WHERE job_id=? AND left_at=''"
     ).bind(t, job_id).run();
+
+    // 口径联动：大货操作完成 → 回写关联出库单的 actual_box_count / actual_pallet_count
+    const finishedJob = await env.DB.prepare("SELECT related_doc_id FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
+    if (finishedJob && finishedJob.related_doc_id) {
+      const linkedOb = await findOutboundByWorkOrder(env, finishedJob.related_doc_id);
+      if (linkedOb) {
+        await env.DB.prepare(
+          "UPDATE v2_outbound_orders SET actual_box_count=?, actual_pallet_count=?, status='completed', updated_at=? WHERE id=?"
+        ).bind(resultData.total_operated_box_count, resultData.pallet_count, t, linkedOb.id).run();
+      }
+    }
 
     return { ok: true };
   });

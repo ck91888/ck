@@ -2162,6 +2162,23 @@ async function startBulkJob(btnEl) {
         alert(res.is_new_job ? "已创建大货任务 / 대량화물 작업 생성됨" : "已加入大货任务 / 대량화물 작업 참여됨");
       }
       document.getElementById("bulkResultCard").style.display = "";
+      // 展示关联出库单参考信息
+      var obCard = document.getElementById("bulkLinkedObCard");
+      var obBody = document.getElementById("bulkLinkedObBody");
+      if (obCard && obBody && res.linked_outbound) {
+        var ob = res.linked_outbound;
+        var h = '';
+        if (ob.customer) h += '<div><b>客户/고객:</b> ' + esc(ob.customer) + '</div>';
+        if (ob.destination) h += '<div><b>目的地/목적지:</b> ' + esc(ob.destination) + '</div>';
+        if (ob.po_no) h += '<div><b>PO号/발주번호:</b> ' + esc(ob.po_no) + '</div>';
+        if (ob.planned_box_count) h += '<div><b>计划箱数/계획 박스:</b> ' + ob.planned_box_count + '</div>';
+        if (ob.planned_pallet_count) h += '<div><b>计划托数/계획 팔레트:</b> ' + ob.planned_pallet_count + '</div>';
+        if (ob.instruction) h += '<div><b>作业说明/작업 설명:</b> ' + esc(ob.instruction) + '</div>';
+        obBody.innerHTML = h || '<span class="muted">无关联出库单</span>';
+        obCard.style.display = "";
+      } else if (obCard) {
+        obCard.style.display = "none";
+      }
       refreshBulkWorkers();
     } else if (res && res.error === "worker_already_in_other_bulk_job") {
       var otherNo = res.other_work_order_no || "";
