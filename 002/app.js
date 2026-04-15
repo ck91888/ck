@@ -684,7 +684,7 @@ async function loadOutboundList() {
     html += '<div class="list-item" onclick="openOutboundDetail(\'' + esc(o.id) + '\')">';
     html += '<div class="item-title">';
     html += '<span class="st st-' + esc(o.status) + '">' + esc(stLabel(o.status)) + '</span> ';
-    html += esc(o.customer || "--");
+    html += esc(o.display_no || o.id) + ' · ' + esc(o.customer || "--");
     html += '</div>';
     var meta = esc(o.order_date || "");
     if (o.destination) meta += ' · ' + esc(o.destination);
@@ -755,7 +755,7 @@ async function submitOutbound(btnEl) {
     });
 
     if (res && res.ok) {
-      alert("已创建: " + res.id);
+      alert("已创建: " + (res.display_no || res.id));
       document.getElementById("oc-customer").value = "";
       document.getElementById("oc-destination").value = "";
       document.getElementById("oc-po").value = "";
@@ -796,8 +796,13 @@ async function loadOutboundDetail() {
   var jobs = res.jobs || [];
   var atts = res.attachments || [];
 
+  // Cache order data for printing
+  window._currentOutboundOrderCache = o;
+  window._currentOutboundLinesCache = lines;
+
+  var obDisplayNo = o.display_no || o.id;
   var html = '<div class="card">';
-  html += '<div style="font-size:16px;font-weight:700;margin-bottom:8px;">' + esc(o.id) + '</div>';
+  html += '<div style="font-size:16px;font-weight:700;margin-bottom:8px;">' + esc(obDisplayNo) + '</div>';
   html += '<div class="detail-field"><b>' + L("status") + ':</b> <span class="st st-' + esc(o.status) + '">' + esc(stLabel(o.status)) + '</span></div>';
   html += '<div class="detail-field"><b>' + L("order_date") + ':</b> ' + esc(o.order_date) + '</div>';
   html += '<div class="detail-field"><b>' + L("customer") + ':</b> ' + esc(o.customer) + '</div>';
@@ -852,9 +857,10 @@ async function loadOutboundDetail() {
     html += '</div></div>';
   }
 
-  // Status actions
+  // Print + Status actions
+  html += '<div class="card">';
+  html += '<button class="btn btn-outline btn-sm" onclick="printOutboundOrder()">' + L("print") + '</button> ';
   if (o.status !== "completed" && o.status !== "cancelled") {
-    html += '<div class="card">';
     if (o.status === "draft") {
       html += '<button class="btn btn-primary" onclick="updateObStatus(\'issued\', this)">' + L("status_issued") + '</button> ';
     }
@@ -862,8 +868,8 @@ async function loadOutboundDetail() {
       html += '<button class="btn btn-success" onclick="updateObStatus(\'completed\', this)">' + L("status_completed") + '</button> ';
     }
     html += '<button class="btn btn-danger" onclick="updateObStatus(\'cancelled\', this)">' + L("status_cancelled") + '</button>';
-    html += '</div>';
   }
+  html += '</div>';
 
   body.innerHTML = html;
 }
@@ -878,6 +884,104 @@ async function updateObStatus(status, btnEl) {
       alert("失败: " + (res ? res.error : "unknown"));
     }
   });
+}
+
+// ===== Outbound Print =====
+function printOutboundOrder() {
+  var o = window._currentOutboundOrderCache;
+  var lines = window._currentOutboundLinesCache || [];
+  if (!o) { alert("无数据"); return; }
+
+  var displayNo = o.display_no || o.id;
+
+  // QR code
+  var qrHtml = '';
+  try { qrHtml = buildInboundQrHtml(displayNo, 3); } catch(e) { qrHtml = ''; }
+
+  // Outbound mode label
+  var modeText = outModeLabel(o.outbound_mode);
+
+  // Lines table
+  var linesHtml = '';
+  if (lines.length > 0) {
+    linesHtml = '<table><thead><tr><th>SKU</th><th>' + L("quantity") + '</th></tr></thead><tbody>';
+    lines.forEach(function(ln) {
+      linesHtml += '<tr><td>' + esc(ln.sku || '') + '</td><td>' + (ln.quantity || 0) + '</td></tr>';
+    });
+    linesHtml += '</tbody></table>';
+  }
+
+  var win = window.open('', '_blank');
+  var html = '<!doctype html><html><head><meta charset="utf-8"/><title>' + esc(displayNo) + '</title>' +
+    '<style>' +
+    'body{font-family:"Microsoft YaHei","Helvetica Neue",Arial,sans-serif;margin:20px 30px;color:#000;}' +
+    '.print-header{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:3px solid #000;padding-bottom:10px;margin-bottom:14px;}' +
+    '.print-title{font-size:22px;font-weight:900;}' +
+    '.print-sub{font-size:13px;color:#333;margin-top:4px;}' +
+    '.qr-box{text-align:center;flex-shrink:0;margin-left:20px;}' +
+    '.qr-box svg{width:100px;height:100px;}' +
+    '.qr-label{font-size:10px;color:#666;margin-top:2px;line-height:1.3;}' +
+    '.info-grid{display:grid;grid-template-columns:1fr 1fr;gap:4px 24px;font-size:13px;margin-bottom:14px;}' +
+    '.info-grid .label{font-weight:700;}' +
+    'table{width:100%;border-collapse:collapse;font-size:12px;margin-bottom:14px;}' +
+    'th,td{border:1px solid #333;padding:5px 6px;text-align:left;}' +
+    'th{background:#eee;font-weight:700;}' +
+    '.count-grid{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:4px 16px;font-size:13px;margin-bottom:14px;border:1px solid #999;padding:8px 12px;}' +
+    '.count-grid .label{font-weight:700;}' +
+    '.count-grid .val{font-size:18px;font-weight:900;}' +
+    '.sig-row{display:flex;gap:40px;margin-top:30px;font-size:13px;}' +
+    '.sig-item{flex:1;}' +
+    '.sig-line{border-bottom:1px solid #333;height:30px;margin-top:4px;}' +
+    '.footer{margin-top:16px;font-size:11px;color:#888;text-align:center;border-top:1px dashed #ccc;padding-top:6px;}' +
+    '@media print{@page{size:A4;margin:15mm 20mm;} body{margin:0;}}' +
+    '</style></head><body>' +
+
+    // Header
+    '<div class="print-header">' +
+      '<div>' +
+        '<div class="print-title">出库作业单</div>' +
+        '<div class="print-sub">CK 仓储</div>' +
+      '</div>' +
+      '<div class="qr-box">' + qrHtml + '<div class="qr-label">' + esc(displayNo) + '</div></div>' +
+    '</div>' +
+
+    // Info grid
+    '<div class="info-grid">' +
+      '<div><span class="label">出库单号：</span>' + esc(displayNo) + '</div>' +
+      '<div><span class="label">日期：</span>' + esc(o.order_date || '') + '</div>' +
+      '<div><span class="label">客户：</span>' + esc(o.customer || '') + '</div>' +
+      '<div><span class="label">出库模式：</span>' + esc(modeText) + '</div>' +
+      (o.destination ? '<div><span class="label">目的地：</span>' + esc(o.destination) + '</div>' : '') +
+      (o.po_no ? '<div><span class="label">PO号/발주번호：</span>' + esc(o.po_no) + '</div>' : '') +
+      (o.wms_work_order_no ? '<div><span class="label">WMS工单号：</span>' + esc(o.wms_work_order_no) + '</div>' : '') +
+      '<div><span class="label">提出人：</span>' + esc(o.created_by || '') + '</div>' +
+      (o.instruction ? '<div style="grid-column:1/-1;"><span class="label">作业说明：</span>' + esc(o.instruction) + '</div>' : '') +
+    '</div>' +
+
+    // Box/pallet counts
+    '<div class="count-grid">' +
+      '<div><div class="label">计划箱数</div><div class="val">' + (o.planned_box_count || 0) + '</div></div>' +
+      '<div><div class="label">计划托数</div><div class="val">' + (o.planned_pallet_count || 0) + '</div></div>' +
+      '<div><div class="label">实际箱数</div><div class="val">' + (o.actual_box_count || 0) + '</div></div>' +
+      '<div><div class="label">实际托数</div><div class="val">' + (o.actual_pallet_count || 0) + '</div></div>' +
+    '</div>' +
+
+    // Lines table
+    linesHtml +
+
+    // Signature row
+    '<div class="sig-row">' +
+      '<div class="sig-item"><span class="label">制单人：</span>' + esc(o.created_by || '') + '<div class="sig-line"></div></div>' +
+      '<div class="sig-item"><span class="label">仓库确认：</span><div class="sig-line"></div></div>' +
+      '<div class="sig-item"><span class="label">客户签收：</span><div class="sig-line"></div></div>' +
+      '<div class="sig-item"><span class="label">日期：</span><div class="sig-line"></div></div>' +
+    '</div>' +
+
+    '<div class="footer">Printed from CK Warehouse V2</div>' +
+    '<script>window.onload=function(){window.print();}<\/script>' +
+    '</body></html>';
+  win.document.write(html);
+  win.document.close();
 }
 
 // ===== Inbound List =====
@@ -995,7 +1099,7 @@ async function submitInbound(btnEl) {
 
     if (res && res.ok) {
       var msg = L("success") + ": " + res.id;
-      if (res.outbound_id) msg += "\n" + L("auto_create_outbound") + ": " + res.outbound_id;
+      if (res.outbound_id) msg += "\n" + L("auto_create_outbound") + ": " + (res.outbound_display_no || res.outbound_id);
       alert(msg);
       document.getElementById("ibc-customer").value = "";
       document.getElementById("ibc-cargo").value = "";

@@ -211,6 +211,29 @@ async function nextPickTripNo(env) {
   return 'PK-' + dateStr + '-' + Date.now().toString(36).slice(-4);
 }
 
+// ===== Outbound Display No helper =====
+// CHU-YYYYMMDD-001 format
+async function nextOutboundDisplayNo(env, orderDate) {
+  const dateStr = String(orderDate || kstToday()).replace(/-/g, '');
+  const prefix = 'CHU-' + dateStr + '-';
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const row = await env.DB.prepare(
+      "SELECT display_no FROM v2_outbound_orders WHERE display_no LIKE ? ORDER BY display_no DESC LIMIT 1"
+    ).bind(prefix + '%').first();
+    let seq = 1;
+    if (row && row.display_no) {
+      const tail = row.display_no.split('-').pop();
+      seq = (parseInt(tail, 10) || 0) + 1;
+    }
+    const no = prefix + String(seq).padStart(3, '0');
+    const dup = await env.DB.prepare(
+      "SELECT 1 FROM v2_outbound_orders WHERE display_no=? LIMIT 1"
+    ).bind(no).first();
+    if (!dup) return no;
+  }
+  return 'CHU-' + dateStr + '-' + Date.now().toString(36).slice(-4);
+}
+
 // ===== Auto-migration =====
 const MIGRATIONS = [
   // v2_inbound_plans
@@ -530,6 +553,10 @@ const MIGRATIONS = [
   `ALTER TABLE v2_outbound_orders ADD COLUMN actual_box_count INTEGER DEFAULT 0`,
   `ALTER TABLE v2_outbound_orders ADD COLUMN actual_pallet_count INTEGER DEFAULT 0`,
   `CREATE INDEX IF NOT EXISTS idx_v2_outbound_wms_wo ON v2_outbound_orders(wms_work_order_no) WHERE wms_work_order_no != ''`,
+
+  // ---- display_no for outbound orders (CHU-YYYYMMDD-NNN) ----
+  `ALTER TABLE v2_outbound_orders ADD COLUMN display_no TEXT DEFAULT ''`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_outbound_display_no ON v2_outbound_orders(display_no) WHERE display_no != ''`,
 ];
 
 let _migrated = false;
@@ -753,17 +780,19 @@ route("v2_outbound_order_create", async (body, env) => {
     if (!outbound_mode || !VALID_MODES.includes(outbound_mode)) return err("invalid outbound_mode");
     const id = "OB-" + uid();
     const t = now();
+    const order_date = String(body.order_date || kstToday());
+    const display_no = await nextOutboundDisplayNo(env, order_date);
     // 口径调整：所有出库单均联动大货操作，biz_class 固定 'bulk'；
     // 不再从前端接收 biz_class / operation_mode / remark
     await env.DB.prepare(`
       INSERT INTO v2_outbound_orders(id, order_date, customer, biz_class, operation_mode,
         outbound_mode, instruction, remark, status, created_by, created_at, updated_at,
         destination, po_no, wms_work_order_no,
-        planned_box_count, planned_pallet_count, actual_box_count, actual_pallet_count)
-      VALUES(?,?,?,'bulk','',?,?,'','draft',?,?,?,?,?,?,?,?,0,0)
+        planned_box_count, planned_pallet_count, actual_box_count, actual_pallet_count, display_no)
+      VALUES(?,?,?,'bulk','',?,?,'','draft',?,?,?,?,?,?,?,?,0,0,?)
     `).bind(
       id,
-      String(body.order_date || kstToday()),
+      order_date,
       String(body.customer || ""),
       outbound_mode,
       String(body.instruction || ""),
@@ -773,7 +802,8 @@ route("v2_outbound_order_create", async (body, env) => {
       String(body.po_no || ""),
       String(body.wms_work_order_no || ""),
       Number(body.planned_box_count || 0),
-      Number(body.planned_pallet_count || 0)
+      Number(body.planned_pallet_count || 0),
+      display_no
     ).run();
 
     const lines = body.lines || [];
@@ -786,7 +816,7 @@ route("v2_outbound_order_create", async (body, env) => {
       `).bind("OBL-" + uid(), id, i + 1, String(ln.sku || ""), Number(ln.quantity || 0), String(ln.remark || "")).run();
     }
 
-    return { ok: true, id };
+    return { ok: true, id, display_no };
   });
 });
 
@@ -994,18 +1024,21 @@ route("v2_inbound_plan_create", async (body, env) => {
     }
 
     let outbound_id = null;
+    let outbound_display_no = null;
     if (body.auto_create_outbound) {
       outbound_id = "OB-" + uid();
+      const ob_date = String(body.plan_date || kstToday());
+      outbound_display_no = await nextOutboundDisplayNo(env, ob_date);
       // 口径调整：auto-create outbound 同步新字段；biz_class 固定 'bulk'，不再接 op_mode/remark
       await env.DB.prepare(`
         INSERT INTO v2_outbound_orders(id, order_date, customer, biz_class, operation_mode,
           outbound_mode, instruction, remark, status, source_inbound_plan_id, created_by, created_at, updated_at,
           destination, po_no, wms_work_order_no,
-          planned_box_count, planned_pallet_count, actual_box_count, actual_pallet_count)
-        VALUES(?,?,?,'bulk','',?,?,'','draft',?,?,?,?,?,?,?,?,?,0,0)
+          planned_box_count, planned_pallet_count, actual_box_count, actual_pallet_count, display_no)
+        VALUES(?,?,?,'bulk','',?,?,'','draft',?,?,?,?,?,?,?,?,?,0,0,?)
       `).bind(
         outbound_id,
-        String(body.plan_date || kstToday()),
+        ob_date,
         customer,
         String(body.ob_outbound_mode || ""),
         String(body.ob_instruction || ""),
@@ -1014,11 +1047,12 @@ route("v2_inbound_plan_create", async (body, env) => {
         String(body.ob_po_no || ""),
         String(body.ob_wms_work_order_no || ""),
         Number(body.ob_planned_box_count || 0),
-        Number(body.ob_planned_pallet_count || 0)
+        Number(body.ob_planned_pallet_count || 0),
+        outbound_display_no
       ).run();
     }
 
-    return { ok: true, id, display_no, outbound_id };
+    return { ok: true, id, display_no, outbound_id, outbound_display_no };
   });
 });
 
@@ -2868,6 +2902,7 @@ route("v2_bulk_op_job_start", async (body, env) => {
     if (linkedOb) {
       ret.linked_outbound = {
         id: linkedOb.id,
+        display_no: linkedOb.display_no || linkedOb.id,
         customer: linkedOb.customer || "",
         destination: linkedOb.destination || "",
         po_no: linkedOb.po_no || "",

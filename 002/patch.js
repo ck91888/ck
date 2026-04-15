@@ -27,7 +27,7 @@
     var res=await api(payload);
     if(res&&res.ok){
       var msg=L('success')+': '+(res.display_no||res.id);
-      if(res.outbound_id) msg+='\n'+L('auto_create_outbound')+': '+res.outbound_id;
+      if(res.outbound_id) msg+='\n'+L('auto_create_outbound')+': '+(res.outbound_display_no||res.outbound_id);
       alert(msg);
       document.getElementById('ibc-customer').value='';
       document.getElementById('ibc-cargo').value='';

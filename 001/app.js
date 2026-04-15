@@ -2168,6 +2168,7 @@ async function startBulkJob(btnEl) {
       if (obCard && obBody && res.linked_outbound) {
         var ob = res.linked_outbound;
         var h = '';
+        if (ob.display_no) h += '<div><b>出库单号/출고단번호:</b> ' + esc(ob.display_no) + '</div>';
         if (ob.customer) h += '<div><b>客户/고객:</b> ' + esc(ob.customer) + '</div>';
         if (ob.destination) h += '<div><b>目的地/목적지:</b> ' + esc(ob.destination) + '</div>';
         if (ob.po_no) h += '<div><b>PO号/발주번호:</b> ' + esc(ob.po_no) + '</div>';
