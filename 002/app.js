@@ -690,8 +690,8 @@ async function loadOutboundList() {
     if (o.destination) meta += ' · ' + esc(o.destination);
     if (o.wms_work_order_no) meta += ' · ' + esc(o.wms_work_order_no);
     if (o.outbound_mode) meta += ' · ' + esc(outModeLabel(o.outbound_mode));
-    if (o.planned_box_count) meta += ' · 计划' + o.planned_box_count + '箱';
-    if (o.planned_pallet_count) meta += ' · ' + o.planned_pallet_count + '托';
+    if (o.planned_box_count) meta += ' · ' + L("planned_prefix") + o.planned_box_count + L("unit_box");
+    if (o.planned_pallet_count) meta += ' · ' + o.planned_pallet_count + L("unit_pallet");
     meta += ' · ' + esc(fmtTime(o.created_at));
     html += '<div class="item-meta">' + meta + '</div>';
     html += '</div>';
@@ -716,7 +716,9 @@ function addOutboundLine() {
 
 async function submitOutbound(btnEl) {
   var customer = document.getElementById("oc-customer").value.trim();
-  if (!customer) { alert("请填写客户名"); return; }
+  if (!customer) { alert(L("customer") + "!"); return; }
+  var outmodeCheck = document.getElementById("oc-outmode").value.trim();
+  if (!outmodeCheck) { alert(L("select_outbound_mode")); return; }
   withActionLock('submitOutbound', btnEl || null, '提交中.../저장중...', async function() {
     var date = document.getElementById("oc-date").value || kstToday();
     var destination = document.getElementById("oc-destination").value.trim();
@@ -799,13 +801,13 @@ async function loadOutboundDetail() {
   html += '<div class="detail-field"><b>' + L("status") + ':</b> <span class="st st-' + esc(o.status) + '">' + esc(stLabel(o.status)) + '</span></div>';
   html += '<div class="detail-field"><b>' + L("order_date") + ':</b> ' + esc(o.order_date) + '</div>';
   html += '<div class="detail-field"><b>' + L("customer") + ':</b> ' + esc(o.customer) + '</div>';
-  if (o.destination) html += '<div class="detail-field"><b>目的地:</b> ' + esc(o.destination) + '</div>';
-  if (o.po_no) html += '<div class="detail-field"><b>PO号:</b> ' + esc(o.po_no) + '</div>';
-  if (o.wms_work_order_no) html += '<div class="detail-field"><b>WMS工单号:</b> ' + esc(o.wms_work_order_no) + '</div>';
+  if (o.destination) html += '<div class="detail-field"><b>' + L("destination") + ':</b> ' + esc(o.destination) + '</div>';
+  if (o.po_no) html += '<div class="detail-field"><b>' + L("po_no") + ':</b> ' + esc(o.po_no) + '</div>';
+  if (o.wms_work_order_no) html += '<div class="detail-field"><b>' + L("wms_work_order_no") + ':</b> ' + esc(o.wms_work_order_no) + '</div>';
   html += '<div class="detail-field"><b>' + L("outbound_mode") + ':</b> ' + esc(outModeLabel(o.outbound_mode)) + '</div>';
   if (o.instruction) html += '<div class="detail-section"><b>' + L("instruction") + ':</b><div style="margin-top:4px;white-space:pre-wrap;">' + esc(o.instruction) + '</div></div>';
-  html += '<div class="detail-field"><b>计划箱/托:</b> ' + (o.planned_box_count || 0) + '箱 / ' + (o.planned_pallet_count || 0) + '托</div>';
-  html += '<div class="detail-field"><b>实际箱/托:</b> ' + (o.actual_box_count || 0) + '箱 / ' + (o.actual_pallet_count || 0) + '托</div>';
+  html += '<div class="detail-field"><b>' + L("planned_box_pallet") + ':</b> ' + (o.planned_box_count || 0) + L("unit_box") + ' / ' + (o.planned_pallet_count || 0) + L("unit_pallet") + '</div>';
+  html += '<div class="detail-field"><b>' + L("actual_box_pallet") + ':</b> ' + (o.actual_box_count || 0) + L("unit_box") + ' / ' + (o.actual_pallet_count || 0) + L("unit_pallet") + '</div>';
   html += '<div class="detail-field"><b>' + L("submitted_by") + ':</b> ' + esc(o.created_by) + ' · ' + esc(fmtTime(o.created_at)) + '</div>';
   html += '</div>';
 
@@ -977,11 +979,13 @@ async function submitInbound(btnEl) {
     };
 
     if (autoOb) {
+      var _obMode = (document.getElementById("ibc-ob-outmode") || {}).value || "";
+      if (!_obMode) { alert(L("select_outbound_mode")); return; }
       payload.auto_create_outbound = true;
       payload.ob_destination = (document.getElementById("ibc-ob-destination") || {}).value || "";
       payload.ob_po_no = (document.getElementById("ibc-ob-po") || {}).value || "";
       payload.ob_wms_work_order_no = (document.getElementById("ibc-ob-wms-wo") || {}).value || "";
-      payload.ob_outbound_mode = (document.getElementById("ibc-ob-outmode") || {}).value || "";
+      payload.ob_outbound_mode = _obMode;
       payload.ob_instruction = (document.getElementById("ibc-ob-instruction") || {}).value || "";
       payload.ob_planned_box_count = parseInt((document.getElementById("ibc-ob-planned-box") || {}).value) || 0;
       payload.ob_planned_pallet_count = parseInt((document.getElementById("ibc-ob-planned-pallet") || {}).value) || 0;

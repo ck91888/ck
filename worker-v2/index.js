@@ -748,6 +748,9 @@ route("v2_issue_handle_finish", async (body, env) => {
 route("v2_outbound_order_create", async (body, env) => {
   if (!isAuth(body, env)) return err("unauthorized", 401);
   return withIdem(env, body, "v2_outbound_order_create", async () => {
+    const outbound_mode = String(body.outbound_mode || "").trim();
+    const VALID_MODES = ['warehouse_dispatch','customer_pickup','milk_express','milk_pallet','container_pickup'];
+    if (!outbound_mode || !VALID_MODES.includes(outbound_mode)) return err("invalid outbound_mode");
     const id = "OB-" + uid();
     const t = now();
     // 口径调整：所有出库单均联动大货操作，biz_class 固定 'bulk'；
@@ -762,7 +765,7 @@ route("v2_outbound_order_create", async (body, env) => {
       id,
       String(body.order_date || kstToday()),
       String(body.customer || ""),
-      String(body.outbound_mode || ""),
+      outbound_mode,
       String(body.instruction || ""),
       String(body.created_by || ""),
       t, t,
