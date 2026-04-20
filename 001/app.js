@@ -502,7 +502,12 @@ function goMyTask() {
     else if (jt === "pick_direct") goPage("pick_direct");
     else if (jt === "bulk_op") goPage("bulk_op");
     else if (jt === "issue_handle") goPage("issue_detail");
-    else goPage("generic_job");
+    else goPage("generic_job", {
+      flow_stage: res.job.flow_stage || "",
+      biz_class: res.job.biz_class || "",
+      job_type: jt,
+      title: JOB_TYPE_LABEL[jt] || jt
+    });
   });
 }
 
@@ -2410,16 +2415,101 @@ async function refreshBulkWorkers() {
   }
 }
 
-// ===== Generic Job =====
+// ===== Generic Job — 轻量工时页统一模板 =====
 var _genericJobCtx = {};
+var _gjStartedAt = null;
+var _gjElapsedTimer = null;
+
+// ---- 状态切换 helper ----
+function _gjSwitchState(state) {
+  var idle = document.getElementById("gjStateIdle");
+  var working = document.getElementById("gjStateWorking");
+  if (!idle || !working) return;
+  idle.style.display = state === "idle" ? "" : "none";
+  working.style.display = state === "working" ? "" : "none";
+  var errBar = document.getElementById("gjErrorBar");
+  if (errBar) { errBar.style.display = "none"; errBar.textContent = ""; }
+  var subBar = document.getElementById("gjSubmittingBar");
+  if (subBar) subBar.style.display = "none";
+}
+
+function _gjSetSubmitting(on) {
+  var subBar = document.getElementById("gjSubmittingBar");
+  if (subBar) subBar.style.display = on ? "" : "none";
+  var leaveBtn = document.getElementById("gjLeaveBtn");
+  if (leaveBtn) leaveBtn.disabled = on;
+  var finBtn = document.getElementById("gjFinishBtn");
+  if (finBtn) { finBtn.disabled = on; finBtn.textContent = on ? "提交中.../저장중..." : "结束 / 종료"; }
+}
+
+function _gjShowError(msg) {
+  var errBar = document.getElementById("gjErrorBar");
+  if (errBar) { errBar.textContent = msg; errBar.style.display = ""; }
+}
+
+function _gjStartElapsedTimer() {
+  if (_gjElapsedTimer) clearInterval(_gjElapsedTimer);
+  _gjElapsedTimer = setInterval(function() {
+    if (!_gjStartedAt) return;
+    var sec = Math.floor((Date.now() - _gjStartedAt) / 1000);
+    var h = Math.floor(sec / 3600);
+    var m = Math.floor((sec % 3600) / 60);
+    var s = sec % 60;
+    var el = document.getElementById("gjElapsed");
+    if (el) el.textContent = (h > 0 ? h + "h " : "") + m + "m " + s + "s";
+  }, 1000);
+}
+
+function _gjStopElapsedTimer() {
+  if (_gjElapsedTimer) { clearInterval(_gjElapsedTimer); _gjElapsedTimer = null; }
+}
+
+function _gjEnterWorkingState(jobDetail) {
+  _gjSwitchState("working");
+  var titleEl = document.getElementById("gjActiveTitle");
+  if (titleEl) titleEl.textContent = _genericJobCtx.title || "--";
+  _gjStartedAt = Date.now();
+  var stEl = document.getElementById("gjStartTime");
+  if (stEl) stEl.textContent = new Date().toLocaleTimeString();
+  _gjStartElapsedTimer();
+  if (jobDetail) {
+    var wcEl = document.getElementById("gjWorkerCount");
+    if (wcEl) wcEl.textContent = (jobDetail.active_worker_count || 0) + " 人/명";
+  }
+}
+
+// ---- 初始化 ----
 function initGenericJob() {
-  var title = document.getElementById("genericJobTitle");
   _genericJobCtx = _pageParams || {};
-  title.textContent = _genericJobCtx.title || "--";
+  var title = _genericJobCtx.title || "--";
+  var el = document.getElementById("genericJobTitle");
+  if (el) el.textContent = title;
+  var idleTitle = document.getElementById("gjIdleTitle");
+  if (idleTitle) idleTitle.textContent = title;
+
+  // 检查是否有活跃任务 → 恢复作业中态
+  if (_activeJobId) {
+    api({ action: "v2_ops_job_detail", job_id: _activeJobId }).then(function(res) {
+      if (res && res.ok && res.job && res.job.status !== "completed" && res.job.status !== "cancelled") {
+        _gjEnterWorkingState(res.job);
+        var wcEl = document.getElementById("gjWorkerCount");
+        if (wcEl) wcEl.textContent = (res.job.active_worker_count || 0) + " 人/명";
+        renderWorkers("gjWorkers", res.workers);
+      } else {
+        _gjSwitchState("idle");
+        if (res && res.ok && res.job && (res.job.status === "completed" || res.job.status === "cancelled")) {
+          clearActiveJob();
+        }
+      }
+    });
+  } else {
+    _gjSwitchState("idle");
+  }
   startJobPoll("generic");
 }
 
 function goGenericBack() {
+  _gjStopElapsedTimer();
   var stage = _genericJobCtx.flow_stage || "";
   if (stage === "order_op") goPage("order_op_menu");
   else if (stage === "internal") goPage("internal_menu");
@@ -2428,6 +2518,7 @@ function goGenericBack() {
   else goPage("home");
 }
 
+// ---- 开始 ----
 async function startGenericJob(btnEl) {
   withActionLock('startGenericJob', btnEl || null, '提交中.../저장중...', async function() {
     var res = await api({
@@ -2442,42 +2533,77 @@ async function startGenericJob(btnEl) {
     });
     if (res && res.ok) {
       saveActiveJob(res.job_id, res.worker_seg_id);
-      if (!res.already_joined) {
-        alert(res.is_new_job ? "已创建任务 / 작업 생성됨" : "已加入任务 / 작업 참여됨");
-      }
+      _gjEnterWorkingState(null);
       refreshGenericWorkers();
     } else {
-      alert("失败/실패: " + (res ? res.error : "unknown"));
+      alert("失败/실패: " + (res ? (res.message || res.error) : "unknown"));
     }
   });
 }
 
+// ---- 暂时离开 ----
+async function leaveGenericJob(btnEl) {
+  if (!_activeJobId) return;
+  withActionLock('leaveGenericJob', btnEl || null, '提交中.../저장중...', async function() {
+    var res = await api({
+      action: "v2_ops_job_leave",
+      job_id: _activeJobId,
+      worker_id: getWorkerId(),
+      leave_reason: "leave"
+    });
+    if (res && res.ok) {
+      _gjStopElapsedTimer();
+      clearActiveJob();
+      alert("您已退出当前作业，其他人仍可继续\n현재 작업에서 퇴장했습니다. 다른 작업자는 계속할 수 있습니다");
+      goGenericBack();
+    } else {
+      alert("失败/실패: " + (res ? (res.message || res.error) : "unknown"));
+    }
+  });
+}
+
+// ---- 结束 ----
 async function finishGenericJob(btnEl) {
   if (!_activeJobId) { alert("没有进行中的任务 / 진행 중인 작업 없음"); return; }
+  _gjSetSubmitting(true);
   withActionLock('finishGenericJob', btnEl || null, '提交中.../저장중...', async function() {
     var res = await api({
       action: "v2_ops_job_finish",
       job_id: _activeJobId,
       worker_id: getWorkerId()
     });
+    _gjSetSubmitting(false);
     if (res && res.ok) {
+      _gjStopElapsedTimer();
+      clearActiveJob();
       alert("任务已完成 / 작업 완료");
-      clearActiveJob();
-      goPage("home");
+      goGenericBack();
     } else if (res && res.error === "already_completed") {
-      alert("任务已完成，请勿重复提交\n작업이 이미 완료되었습니다. 중복 제출하지 마세요");
+      _gjStopElapsedTimer();
       clearActiveJob();
-      goPage("home");
+      alert("任务已完成，请勿重复提交\n작업이 이미 완료되었습니다");
+      goGenericBack();
+    } else if (res && res.error === "others_still_working") {
+      _gjStopElapsedTimer();
+      clearActiveJob();
+      alert("您已退出当前作业，还有 " + (res.active_worker_count || 0) + " 人继续作业\n현재 작업에서 퇴장했습니다. " + (res.active_worker_count || 0) + "명이 계속 작업 중");
+      goGenericBack();
     } else {
-      alert("失败/실패: " + (res ? res.error : "unknown"));
+      _gjShowError(res ? (res.message || res.error) : "unknown");
     }
   });
 }
 
+// ---- 刷新人员 ----
 async function refreshGenericWorkers() {
   if (!_activeJobId) return;
   var res = await api({ action: "v2_ops_job_detail", job_id: _activeJobId });
-  if (res && res.ok) renderWorkers("genericWorkers", res.workers);
+  if (res && res.ok) {
+    renderWorkers("gjWorkers", res.workers);
+    renderWorkers("gjIdleWorkers", res.workers);
+    var wcEl = document.getElementById("gjWorkerCount");
+    if (wcEl) wcEl.textContent = (res.job.active_worker_count || 0) + " 人/명";
+  }
 }
 
 // ===== Task Interrupts =====

@@ -560,24 +560,71 @@
   <div id="issueDetailBody" style="padding:0 12px;"></div>
 </div>
 
-<!-- Generic Job (skeleton for order_op, internal, import) -->
+<!-- Generic Job — 轻量工时页统一模板（4 态：待开始/作业中/提交中/拦截） -->
 <div id="page-generic_job" class="page">
   <div class="topbar">
     <button class="back-btn" onclick="goGenericBack()">← 返回/뒤로</button>
     <div class="page-title" id="genericJobTitle">--</div>
   </div>
-  <div class="card">
-    <button class="btn btn-success" onclick="startGenericJob(this)">开始 / 시작</button>
-    <button class="btn btn-danger" onclick="finishGenericJob(this)">结束 / 종료</button>
+
+  <!-- ===== STATE: 待开始 ===== -->
+  <div id="gjStateIdle">
+    <div class="card" style="border-left:4px solid #95a5a6;">
+      <div class="card-title" id="gjIdleTitle">--</div>
+      <div style="font-size:13px;color:#666;margin-bottom:8px;">这是一个工时记录任务，开始后将自动计时<br>시간 기록 작업입니다. 시작 후 자동으로 시간이 기록됩니다</div>
+    </div>
+    <div class="card">
+      <div class="card-title">当前参与人员 / 현재 참여 인원</div>
+      <div id="gjIdleWorkers" class="workers-panel"><span class="muted">--</span></div>
+    </div>
+    <div style="padding:0 12px;">
+      <button class="btn btn-success" onclick="startGenericJob(this)">开始 / 시작</button>
+    </div>
+    <div style="text-align:center;padding:20px 12px;color:#999;font-size:13px;">待开始 / 작업 대기</div>
   </div>
-  <div class="card">
-    <div class="card-title">当前参与人员 / 현재 참여 인원</div>
-    <div id="genericWorkers" class="workers-panel"><span class="muted">--</span></div>
-  </div>
-  <div class="interrupt-bar">
-    <button class="btn btn-warning btn-sm" onclick="interruptToUnload()">挂起→临时卸货 / 임시 하차</button>
-    <button class="btn btn-warning btn-sm" onclick="interruptToLoad()">挂起→临时装货 / 임시 상차</button>
-  </div>
+
+  <!-- ===== STATE: 作业中 ===== -->
+  <div id="gjStateWorking" style="display:none;">
+    <!-- 提交中提示条 -->
+    <div id="gjSubmittingBar" class="submitting-bar" style="display:none;">正在提交本次作业，请勿重复点击 / 제출 중입니다. 중복 클릭하지 마세요</div>
+
+    <!-- 当前任务卡片 -->
+    <div class="card" style="border-left:4px solid #27ae60;">
+      <div style="font-size:12px;color:#666;margin-bottom:4px;">当前任务 / 현재 작업</div>
+      <div id="gjActiveTitle" style="font-size:20px;font-weight:800;letter-spacing:1px;margin-bottom:6px;">--</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px 16px;font-size:12px;color:#555;">
+        <span><b>状态:</b> <span style="color:#27ae60;font-weight:700;">作业中 / 작업중</span></span>
+        <span><b>开始:</b> <span id="gjStartTime">--</span></span>
+        <span><b>已持续:</b> <span id="gjElapsed">--</span></span>
+        <span><b>参与人数:</b> <span id="gjWorkerCount">--</span></span>
+      </div>
+      <div style="font-size:11px;color:#999;margin-top:6px;">已进入当前作业，结束前将持续计时 / 현재 작업에 참여 중, 종료 전까지 시간이 기록됩니다</div>
+    </div>
+
+    <!-- 暂时离开 -->
+    <div style="padding:0 12px;">
+      <button class="btn btn-outline btn-sm" id="gjLeaveBtn" onclick="leaveGenericJob(this)">暂时离开 / 일시 퇴장</button>
+    </div>
+
+    <!-- 当前参与人员 -->
+    <div class="card">
+      <div class="card-title">当前参与人员 / 현재 참여 인원</div>
+      <div id="gjWorkers" class="workers-panel"><span class="muted">--</span></div>
+    </div>
+
+    <!-- 页面内错误提示区 -->
+    <div id="gjErrorBar" class="error-bar" style="display:none;"></div>
+
+    <!-- 底部结束按钮 -->
+    <div style="padding:0 12px 20px;">
+      <button class="btn btn-danger" id="gjFinishBtn" onclick="finishGenericJob(this)">结束 / 종료</button>
+    </div>
+
+    <div class="interrupt-bar">
+      <button class="btn btn-warning btn-sm" onclick="interruptToUnload()">挂起→临时卸货 / 임시 하차</button>
+      <button class="btn btn-warning btn-sm" onclick="interruptToLoad()">挂起→临시 상차</button>
+    </div>
+  </div><!-- /gjStateWorking -->
 </div>
 
 <!-- Badge Change Modal (right-top entry) -->
