@@ -889,11 +889,15 @@ route("v2_outbound_order_update_status", async (body, env) => {
       message: "不允许从 " + cur + " 变更为 " + newStatus });
   }
 
-  // 如果要取消，先检查是否有活跃 job
+  // 如果要取消，先检查是否有活跃 job（覆盖全部关联口径）
   if (newStatus === "cancelled") {
     const activeJob = await env.DB.prepare(
-      "SELECT id FROM v2_ops_jobs WHERE linked_outbound_order_id=? AND status IN ('working','awaiting_close') LIMIT 1"
-    ).bind(id).first();
+      `SELECT id FROM v2_ops_jobs
+       WHERE status IN ('working','awaiting_close','pending')
+         AND (linked_outbound_order_id=?
+           OR (related_doc_type='outbound_order' AND related_doc_id=?))
+       LIMIT 1`
+    ).bind(id, id).first();
     if (activeJob) {
       return json({ ok: false, error: "has_active_job",
         message: "当前有进行中的现场作业，不能取消" });
@@ -2986,12 +2990,21 @@ route("v2_bulk_op_job_start", async (body, env) => {
     }
 
     // ---- Phase 2: 查找或创建 job ----
-    // 尝试加入同工单号的活跃 job
+    // 系统出库单：按 linked_outbound_order_id 查活跃 job（防不同编码裂开多条）
+    // 纯手工工单号：按 related_doc_id 查
     let job = null;
-    const existing = await env.DB.prepare(
-      "SELECT * FROM v2_ops_jobs WHERE job_type='bulk_op' AND related_doc_id=? AND status IN ('pending','working','awaiting_close') AND is_temporary_interrupt=0 LIMIT 1"
-    ).bind(work_order_no).first();
-    if (existing) job = existing;
+    if (obId) {
+      const existing = await env.DB.prepare(
+        "SELECT * FROM v2_ops_jobs WHERE job_type='bulk_op' AND linked_outbound_order_id=? AND status IN ('pending','working','awaiting_close') AND is_temporary_interrupt=0 LIMIT 1"
+      ).bind(obId).first();
+      if (existing) job = existing;
+    }
+    if (!job) {
+      const existing = await env.DB.prepare(
+        "SELECT * FROM v2_ops_jobs WHERE job_type='bulk_op' AND related_doc_id=? AND status IN ('pending','working','awaiting_close') AND is_temporary_interrupt=0 LIMIT 1"
+      ).bind(work_order_no).first();
+      if (existing) job = existing;
+    }
 
     // Cross-job guard
     const targetJobId = job ? job.id : null;
@@ -3021,17 +3034,30 @@ route("v2_bulk_op_job_start", async (body, env) => {
         "UPDATE v2_ops_jobs SET active_worker_count=active_worker_count+1, updated_at=?, status='working' WHERE id=?"
       ).bind(t, job_id).run();
     } else {
-      // 历史完成拦截（覆盖纯手工工单号 + 无出库单场景）
-      const lastJob = await env.DB.prepare(
-        "SELECT status FROM v2_ops_jobs WHERE job_type='bulk_op' AND related_doc_id=? ORDER BY created_at DESC LIMIT 1"
-      ).bind(work_order_no).first();
-      if (lastJob && lastJob.status === 'completed') {
-        if (linkedOb) {
-          return { ok: false, error: "bulk_order_already_completed",
-            message: "该工单已完成，如需返工或追加操作，请在协同中心设为待再操作" };
+      // 历史完成拦截
+      // 系统出库单且 reopen_pending → 跳过拦截（允许再操作）
+      // 系统出库单其他状态 → 按 linked_outbound_order_id 查历史
+      // 纯手工工单号 → 按 related_doc_id 查历史
+      if (obStatus !== "reopen_pending") {
+        let lastJob = null;
+        if (obId) {
+          lastJob = await env.DB.prepare(
+            "SELECT status FROM v2_ops_jobs WHERE job_type='bulk_op' AND linked_outbound_order_id=? ORDER BY created_at DESC LIMIT 1"
+          ).bind(obId).first();
         }
-        return { ok: false, error: "bulk_work_order_already_completed",
-          message: "该纯工单号已完成，不能再次操作。如需返工，请创建系统出库单或使用新工单号" };
+        if (!lastJob) {
+          lastJob = await env.DB.prepare(
+            "SELECT status FROM v2_ops_jobs WHERE job_type='bulk_op' AND related_doc_id=? ORDER BY created_at DESC LIMIT 1"
+          ).bind(work_order_no).first();
+        }
+        if (lastJob && lastJob.status === 'completed') {
+          if (linkedOb) {
+            return { ok: false, error: "bulk_order_already_completed",
+              message: "该工单已完成，如需返工或追加操作，请在协同中心设为待再操作" };
+          }
+          return { ok: false, error: "bulk_work_order_already_completed",
+            message: "该纯工单号已完成，不能再次操作。如需返工，请创建系统出库单或使用新工单号" };
+        }
       }
 
       const started_from_reopen = (obStatus === "reopen_pending");
