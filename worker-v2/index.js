@@ -2083,7 +2083,12 @@ route("v2_inbound_job_finish", async (body, env) => {
     if (complete_job && !leave_only && !isReturnJob) {
       if (jobRow.related_doc_id) {
         const planCheck = await env.DB.prepare("SELECT status FROM v2_inbound_plans WHERE id=?").bind(jobRow.related_doc_id).first();
-        const inboundFinishAllowed = ['putting_away', 'unloading_putting_away'];
+        // Hard block: unload not done → cannot finish inbound
+        const unloadStillRunning = ['unloading', 'unloading_putting_away'];
+        if (planCheck && unloadStillRunning.indexOf(planCheck.status) !== -1) {
+          return { ok: false, error: "unload_not_finished", message: "卸货未完成，无法完成理货 / 하차가 아직 완료되지 않아 입고 완료 처리할 수 없습니다" };
+        }
+        const inboundFinishAllowed = ['putting_away'];
         if (planCheck && inboundFinishAllowed.indexOf(planCheck.status) === -1) {
           return { ok: false, error: "inbound_plan_status_invalid", message: "当前入库计划状态不允许完成入库（当前: " + planCheck.status + "）" };
         }

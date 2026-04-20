@@ -1190,6 +1190,7 @@ async function loadInboundDetail() {
   html += '</div></div>';
 
   // --- Plan lines ---
+  var unloadNotDone002 = (p.status === 'unloading' || p.status === 'unloading_putting_away');
   if (lines.length > 0) {
     var hasPutaway = lines.some(function(ln) { return (ln.putaway_qty || 0) > 0; });
     html += '<div class="card"><div class="card-title">' + L("plan_lines") + '</div>';
@@ -1199,7 +1200,8 @@ async function loadInboundDetail() {
     html += '</tr></thead><tbody>';
     lines.forEach(function(ln) {
       var actualQty = ln.actual_qty || 0;
-      html += '<tr><td>' + esc(unitTypeLabel(ln.unit_type)) + '</td><td>' + ln.planned_qty + '</td><td>' + actualQty + '</td>';
+      var actualDisplay = (unloadNotDone002 && actualQty === 0) ? '<span style="color:#e67e22;">卸货中</span>' : String(actualQty);
+      html += '<tr><td>' + esc(unitTypeLabel(ln.unit_type)) + '</td><td>' + ln.planned_qty + '</td><td>' + actualDisplay + '</td>';
       if (hasPutaway) {
         var pQty = ln.putaway_qty || 0;
         var diff2 = pQty - actualQty;

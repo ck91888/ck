@@ -1266,19 +1266,24 @@ async function loadInboundPlanInfo(planId) {
     infoEl.innerHTML = html;
   }
   // Build result lines form
+  var unloadNotDone = (p.status === 'unloading' || p.status === 'unloading_putting_away');
   if (linesEl) {
     if (lines.length > 0) {
       var html = '<table style="width:100%;font-size:13px;border-collapse:collapse;margin-bottom:8px;">';
       html += '<thead><tr style="background:#f5f5f5;"><th style="padding:4px 6px;text-align:left;">类型</th><th style="padding:4px 6px;">卸货实到</th><th style="padding:4px 6px;">本次入库</th></tr></thead><tbody>';
       lines.forEach(function(ln) {
         var actualQty = ln.actual_qty || 0;
+        var actualDisplay = unloadNotDone ? '<span style="color:#e67e22;font-weight:700;">卸货中/하차중</span>' : String(actualQty);
         html += '<tr>';
         html += '<td style="padding:4px 6px;">' + esc(ln.unit_type || '--') + '</td>';
-        html += '<td style="padding:4px 6px;text-align:center;">' + actualQty + '</td>';
-        html += '<td style="padding:4px 6px;"><input type="number" class="input ib-putaway-input" data-unit="' + esc(ln.unit_type || '') + '" value="' + actualQty + '" min="0" style="width:80px;text-align:center;"></td>';
+        html += '<td style="padding:4px 6px;text-align:center;">' + actualDisplay + '</td>';
+        html += '<td style="padding:4px 6px;"><input type="number" class="input ib-putaway-input" data-unit="' + esc(ln.unit_type || '') + '" value="' + (unloadNotDone ? '' : actualQty) + '" min="0" style="width:80px;text-align:center;" placeholder="' + (unloadNotDone ? '待卸货完成' : '') + '"></td>';
         html += '</tr>';
       });
       html += '</tbody></table>';
+      if (unloadNotDone) {
+        html += '<div style="font-size:12px;color:#e67e22;margin-bottom:6px;">⚠ 卸货尚未完成，实到数量待更新。卸货完成后方可完成理货。<br>⚠ 하차 미완료, 실수량 미확정. 하차 완료 후 입고 완료 가능.</div>';
+      }
       linesEl.innerHTML = html;
     } else {
       linesEl.innerHTML = '<div style="font-size:12px;color:#999;">无明细行，完成时仅记录备注</div>';
@@ -1307,6 +1312,14 @@ async function inboundLeave(btnEl) {
 
 async function finishInbound(btnEl) {
   if (!_activeJobId) { alert("没有进行中的任务 / 진행 중인 작업 없음"); return; }
+  // Front-end pre-check: block finish if unload not done
+  if (_inboundPlanData && _inboundPlanData.plan) {
+    var pStatus = _inboundPlanData.plan.status;
+    if (pStatus === 'unloading' || pStatus === 'unloading_putting_away') {
+      alert("卸货未完成，无法完成理货。请等待卸货结束后再完成。\n하차가 아직 완료되지 않아 입고 완료 처리할 수 없습니다. 하차 완료 후 다시 시도하세요.");
+      return;
+    }
+  }
   withActionLock('finishInbound', btnEl || null, '提交中.../저장중...', async function() {
     var remark = (document.getElementById("inboundRemark") || {}).value || "";
     var resultNote = (document.getElementById("inboundResultNote") || {}).value || "";
@@ -1358,6 +1371,9 @@ async function finishInbound(btnEl) {
       clearActiveJob();
       _inboundPlanData = null;
       goPage("home");
+    } else if (res && res.error === "unload_not_finished") {
+      // Unload still running — user stays on current page, no logout
+      alert("卸货未完成，无法完成理货。请等待卸货结束后再完成。\n하차가 아직 완료되지 않아 입고 완료 처리할 수 없습니다. 하차 완료 후 다시 시도하세요.");
     } else if (res && res.error === "inbound_plan_status_invalid") {
       alert("当前入库计划状态已变化，不能继续完成，请返回刷新\n입고계획 상태가 변경되었습니다. 새로고침해 주세요");
       clearActiveJob();
