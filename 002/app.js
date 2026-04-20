@@ -839,7 +839,7 @@ async function loadOutboundDetail() {
       try { result = JSON.parse(j.shared_result_json || "{}"); } catch(e) {}
       html += '<div style="border-bottom:1px solid #f0f0f0;padding:8px 0;font-size:13px;">';
       html += '<span class="st st-' + esc(j.status) + '">' + esc(stLabel(j.status)) + '</span> ';
-      html += esc(j.job_type) + ' · ' + esc(fmtTime(j.created_at));
+      html += esc(orderOpsJobTypeText(j.job_type)) + ' · ' + esc(fmtTime(j.created_at));
       if (result.box_count) html += ' · 箱:' + result.box_count;
       if (result.pallet_count) html += ' · 托:' + result.pallet_count;
       if (result.remark) html += ' · ' + esc(result.remark);
@@ -848,11 +848,21 @@ async function loadOutboundDetail() {
     html += '</div>';
   }
 
-  // Attachments
-  if (atts.length > 0) {
-    html += '<div class="card"><div class="card-title">' + L("attachments") + ' (' + atts.length + ')</div>';
+  // Attachments — grouped by category
+  var vehiclePhotos = atts.filter(function(a) { return a.attachment_category === 'vehicle_photo' || a.attachment_category === 'load_vehicle_photo'; });
+  var otherAtts = atts.filter(function(a) { return a.attachment_category !== 'vehicle_photo' && a.attachment_category !== 'load_vehicle_photo'; });
+  if (vehiclePhotos.length > 0) {
+    html += '<div class="card"><div class="card-title">' + L("vehicle_photos") + ' (' + vehiclePhotos.length + ')</div>';
     html += '<div class="att-grid">';
-    atts.forEach(function(att) {
+    vehiclePhotos.forEach(function(att) {
+      html += '<img class="att-thumb" src="' + esc(fileUrl(att.file_key)) + '" onclick="showLightbox(\'' + esc(fileUrl(att.file_key)) + '\')">';
+    });
+    html += '</div></div>';
+  }
+  if (otherAtts.length > 0) {
+    html += '<div class="card"><div class="card-title">' + L("attachments") + ' (' + otherAtts.length + ')</div>';
+    html += '<div class="att-grid">';
+    otherAtts.forEach(function(att) {
       if (att.content_type && att.content_type.startsWith("image/")) {
         html += '<img class="att-thumb" src="' + esc(fileUrl(att.file_key)) + '" onclick="showLightbox(\'' + esc(fileUrl(att.file_key)) + '\')">';
       } else {
@@ -1230,8 +1240,7 @@ async function loadInboundDetail() {
     html += '<div class="card"><div class="card-title">现场执行记录</div>';
     jobs.forEach(function(j, idx) {
       if (idx > 0) html += '<div style="border-top:1px solid #eee;margin:8px 0;"></div>';
-      var jobTypeMap = {unload:'卸货',inbound_direct:'代发入库',inbound_bulk:'大货入库',inbound_return:'退件入库',load:'装货',sort:'分拣',check:'核对',other:'其他'};
-      var jobLabel = jobTypeMap[j.job_type] || j.job_type || '--';
+      var jobLabel = orderOpsJobTypeText(j.job_type);
       var isInboundJob = (j.job_type || '').indexOf('inbound') === 0;
       var isReturnJob = (j.job_type === 'inbound_return') || j.is_return === true;
       html += '<div style="font-size:13px;line-height:1.8;">';

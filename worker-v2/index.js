@@ -853,15 +853,24 @@ route("v2_outbound_order_detail", async (body, env) => {
   const jobs = await env.DB.prepare(
     "SELECT * FROM v2_ops_jobs WHERE (related_doc_type='outbound_order' AND related_doc_id=?) OR linked_outbound_order_id=? ORDER BY created_at DESC"
   ).bind(id, id).all();
-  const atts = await env.DB.prepare(
+  const jobIds = (jobs.results || []).map(j => j.id);
+  let allAtts = [];
+  const orderAtts = await env.DB.prepare(
     "SELECT * FROM v2_attachments WHERE related_doc_type='outbound_order' AND related_doc_id=? ORDER BY created_at DESC"
   ).bind(id).all();
+  allAtts = allAtts.concat(orderAtts.results || []);
+  for (const jid of jobIds) {
+    const jAtts = await env.DB.prepare(
+      "SELECT * FROM v2_attachments WHERE related_doc_id=? ORDER BY created_at DESC"
+    ).bind(jid).all();
+    allAtts = allAtts.concat(jAtts.results || []);
+  }
   return json({
     ok: true,
     order: row,
     lines: lines.results || [],
     jobs: jobs.results || [],
-    attachments: atts.results || []
+    attachments: allAtts
   });
 });
 

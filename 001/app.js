@@ -2705,10 +2705,15 @@ async function checkAndResumeParent() {
 
 // ===== Photo Upload =====
 function uploadPhoto(docType, category) {
+  var docId = "";
+  if (docType === "outbound_order") {
+    docId = (document.getElementById("loadOrderSelect") || {}).value || "";
+  }
+  if (!docId) docId = _activeJobId || _currentIssueId || "";
   _photoUploadCtx = {
     related_doc_type: docType,
     attachment_category: category,
-    related_doc_id: _activeJobId || _currentIssueId || ""
+    related_doc_id: docId
   };
   document.getElementById("photoInput").click();
 }
