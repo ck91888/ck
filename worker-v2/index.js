@@ -3654,16 +3654,15 @@ export default {
     // Parse body
     let body = {};
     let isMultipart = false;
+    let formData = null;
     const ct = request.headers.get("content-type") || "";
 
     if (request.method === "GET") {
       body = Object.fromEntries(url.searchParams);
     } else if (ct.includes("multipart/form-data")) {
       isMultipart = true;
-      // For multipart, we pass the request to the handler directly
-      const formData = await request.formData();
+      formData = await request.formData();
       body = { action: formData.get("action") || "", k: formData.get("k") || "" };
-      // Re-create formData-capable request is tricky, so handle in route
     } else if (ct.includes("application/json")) {
       body = await request.json().catch(() => ({}));
     } else {
@@ -3673,10 +3672,9 @@ export default {
 
     const action = String(body.action || "").trim();
 
-    // Special handling for multipart upload
+    // Special handling for multipart upload — formData already parsed above, pass it directly
     if (action === "v2_attachment_upload" || isMultipart) {
-      // Re-fetch from original request
-      return await handleMultipartUpload(request, env);
+      return await handleMultipartUpload(formData, env);
     }
 
     const handler = HANDLERS[action];
@@ -3693,10 +3691,9 @@ export default {
 };
 
 // Special multipart handler
-async function handleMultipartUpload(request, env) {
+async function handleMultipartUpload(formData, env) {
   try {
     await ensureMigrated(env.DB);
-    const formData = await request.formData();
     const k = formData.get("k") || "";
     if (!isOpsAuth({ k }, env)) return err("unauthorized", 401);
 
