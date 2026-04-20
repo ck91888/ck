@@ -114,6 +114,8 @@ var I18N = {
   status_pending: { zh: "待处理", ko: "대기중" },
   status_processing: { zh: "处理中", ko: "처리중" },
   status_working: { zh: "作业中", ko: "작업중" },
+  status_ready_to_load: { zh: "待装货", ko: "상차대기" },
+  status_loading: { zh: "装货中", ko: "상차중" },
   status_responded: { zh: "已反馈", ko: "피드백완료" },
   status_completed: { zh: "已完成", ko: "완료" },
   status_closed: { zh: "已关闭", ko: "종료" },

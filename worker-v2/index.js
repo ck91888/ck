@@ -880,6 +880,8 @@ route("v2_outbound_order_update_status", async (body, env) => {
     "draft":    ["issued", "cancelled"],
     "issued":   ["cancelled"],
     "working":  ["cancelled"],
+    "ready_to_load": ["cancelled"],
+    "loading":  ["cancelled"],
     "completed": ["reopen_pending"],
     "reopen_pending": ["cancelled"],
   };
@@ -949,7 +951,7 @@ route("v2_outbound_load_start", async (body, env) => {
 
       if (order_id) {
         await env.DB.prepare(
-          "UPDATE v2_outbound_orders SET status='working', updated_at=? WHERE id=? AND status IN ('draft','issued')"
+          "UPDATE v2_outbound_orders SET status='loading', updated_at=? WHERE id=? AND status IN ('ready_to_load','loading')"
         ).bind(t, order_id).run();
       }
     }
@@ -3242,7 +3244,7 @@ route("v2_bulk_op_job_finish", async (body, env) => {
           : resultData.pallet_count;
 
         await env.DB.prepare(
-          "UPDATE v2_outbound_orders SET actual_box_count=?, actual_pallet_count=?, status='completed', updated_at=? WHERE id=?"
+          "UPDATE v2_outbound_orders SET actual_box_count=?, actual_pallet_count=?, status='ready_to_load', updated_at=? WHERE id=?"
         ).bind(newBoxCount, newPalletCount, t, linkedObId).run();
       }
     }
