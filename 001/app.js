@@ -1529,7 +1529,7 @@ async function loadOutboundOrders() {
   var opts = '<option value="">-- 选择出库单/출고단 선택 --</option>';
   if (res && res.ok && res.items) {
     res.items.forEach(function(o) {
-      if (o.status !== "ready_to_load" && o.status !== "loading") return;
+      if (o.status !== "ready_to_ship") return;
       opts += '<option value="' + esc(o.id) + '">[' + esc(o.status) + '] ' + esc(o.order_date) + ' ' + esc(o.customer) + '</option>';
     });
   }

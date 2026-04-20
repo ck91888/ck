@@ -363,7 +363,7 @@ async function loadDashboard() {
   var ibItems = ((inbounds && inbounds.items) || []).filter(function(p) { return p.source_type !== 'return_session'; });
 
   var pendingIssues = issueItems.filter(function(i) { return i.status === "pending" || i.status === "processing"; });
-  var pendingOb = obItems.filter(function(o) { return o.status === "draft" || o.status === "issued" || o.status === "working"; });
+  var pendingOb = obItems.filter(function(o) { return o.status === "pending_issue" || o.status === "issued" || o.status === "working" || o.status === "ready_to_ship"; });
   var pendingIb = ibItems.filter(function(p) { return p.status === "pending" || p.status === "unloading" || p.status === "unloading_putting_away" || p.status === "arrived_pending_putaway" || p.status === "putting_away"; });
   var fbItems = (feedbacks && feedbacks.items) || [];
   var activeFb = fbItems.filter(function(f) { return f.status === "field_working" || f.status === "unloaded_pending_info"; });
@@ -865,13 +865,13 @@ async function loadOutboundDetail() {
   // Print + Status actions
   html += '<div class="card">';
   html += '<button class="btn btn-outline btn-sm" onclick="printOutboundOrder()">' + L("print") + '</button> ';
-  if (o.status === "draft") {
+  if (o.status === "pending_issue") {
     html += '<button class="btn btn-primary" onclick="updateObStatus(\'issued\', this)">' + L("status_issued") + '</button> ';
   }
-  if (o.status !== "completed" && o.status !== "cancelled") {
+  if (o.status !== "shipped" && o.status !== "cancelled") {
     html += '<button class="btn btn-danger" onclick="updateObStatus(\'cancelled\', this)">' + L("status_cancelled") + '</button>';
   }
-  if (o.status === "completed") {
+  if (o.status === "ready_to_ship") {
     html += '<button class="btn btn-primary" onclick="updateObStatus(\'reopen_pending\', this)">' + L("set_reopen_pending") + '</button>';
   }
   if (o.status === "reopen_pending") {

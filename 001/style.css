@@ -189,10 +189,11 @@ body {
 .st-completed { background: #27ae60; }
 .st-closed { background: #7f8c8d; }
 .st-cancelled { background: #bdc3c7; color: #666; }
+.st-pending_issue { background: #95a5a6; }
 .st-draft { background: #95a5a6; }
 .st-issued { background: #e67e22; }
-.st-ready_to_load { background: #2196f3; }
-.st-loading { background: #1565c0; color: #fff; }
+.st-ready_to_ship { background: #2196f3; }
+.st-shipped { background: #1565c0; color: #fff; }
 .st-reopen_pending { background: #e91e63; }
 .st-arrived { background: #3498db; }
 .st-awaiting_close { background: #8e44ad; }

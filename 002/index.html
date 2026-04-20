@@ -140,12 +140,11 @@
       <input type="date" id="obFilterEnd">
       <select id="obFilterStatus" onchange="loadOutboundList()">
         <option value="">全部状态</option>
-        <option value="draft">草稿</option>
+        <option value="pending_issue">待下发</option>
         <option value="issued">已下发</option>
-        <option value="working">作业中</option>
-        <option value="ready_to_load">待装货</option>
-        <option value="loading">装货中</option>
-        <option value="completed">已完成</option>
+        <option value="working">操作中</option>
+        <option value="ready_to_ship">待出库</option>
+        <option value="shipped">已出库</option>
         <option value="reopen_pending">待再操作</option>
       </select>
       <button class="btn btn-outline btn-sm" onclick="loadOutboundList()">查询</button>

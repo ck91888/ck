@@ -262,7 +262,7 @@ const MIGRATIONS = [
     outbound_mode TEXT DEFAULT '',
     instruction TEXT DEFAULT '',
     remark TEXT DEFAULT '',
-    status TEXT DEFAULT 'draft',
+    status TEXT DEFAULT 'pending_issue',
     created_by TEXT DEFAULT '',
     created_at TEXT,
     updated_at TEXT
@@ -793,7 +793,7 @@ route("v2_outbound_order_create", async (body, env) => {
         outbound_mode, instruction, remark, status, created_by, created_at, updated_at,
         destination, po_no, wms_work_order_no,
         planned_box_count, planned_pallet_count, actual_box_count, actual_pallet_count, display_no)
-      VALUES(?,?,?,'bulk','',?,?,'','draft',?,?,?,?,?,?,?,?,0,0,?)
+      VALUES(?,?,?,'bulk','',?,?,'','pending_issue',?,?,?,?,?,?,?,?,0,0,?)
     `).bind(
       id,
       order_date,
@@ -877,18 +877,31 @@ route("v2_outbound_order_update_status", async (body, env) => {
 
   // 状态迁移白名单（前端只允许这些手动迁移）
   const allowed = {
-    "draft":    ["issued", "cancelled"],
-    "issued":   ["cancelled"],
-    "working":  ["cancelled"],
-    "ready_to_load": ["cancelled"],
-    "loading":  ["cancelled"],
-    "completed": ["reopen_pending"],
+    "pending_issue": ["issued", "cancelled"],
+    "issued":        ["cancelled"],
+    "working":       ["cancelled"],
+    "ready_to_ship": ["reopen_pending", "cancelled"],
+    "shipped":       [],
     "reopen_pending": ["cancelled"],
   };
   const validTargets = allowed[cur] || [];
   if (!validTargets.includes(newStatus)) {
     return json({ ok: false, error: "invalid_status_transition",
       message: "不允许从 " + cur + " 变更为 " + newStatus });
+  }
+
+  // 硬拦截：shipped 状态绝不允许 reopen（已装车出库）
+  if (newStatus === "reopen_pending") {
+    const loadedJob = await env.DB.prepare(
+      `SELECT id FROM v2_ops_jobs
+       WHERE job_type='load_outbound' AND status='completed'
+         AND (related_doc_id=? OR linked_outbound_order_id=?)
+       LIMIT 1`
+    ).bind(id, id).first();
+    if (loadedJob) {
+      return json({ ok: false, error: "outbound_already_shipped_cannot_reopen",
+        message: "该出库作业单已完成出库，不能设为待再操作 / 해당 출고작업단은 이미 출고 완료되어 재작업 대기로 변경할 수 없습니다" });
+    }
   }
 
   // 如果要取消，先检查是否有活跃 job（覆盖全部关联口径）
@@ -951,7 +964,7 @@ route("v2_outbound_load_start", async (body, env) => {
 
       if (order_id) {
         await env.DB.prepare(
-          "UPDATE v2_outbound_orders SET status='loading', updated_at=? WHERE id=? AND status IN ('ready_to_load','loading')"
+          "UPDATE v2_outbound_orders SET status='ready_to_ship', updated_at=? WHERE id=? AND status IN ('ready_to_ship')"
         ).bind(t, order_id).run();
       }
     }
@@ -1013,7 +1026,7 @@ route("v2_outbound_load_finish", async (body, env) => {
       if (job && job.related_doc_id) {
         // 口径联动：完成时回写 actual_box_count / actual_pallet_count
         await env.DB.prepare(
-          "UPDATE v2_outbound_orders SET status='completed', actual_box_count=?, actual_pallet_count=?, updated_at=? WHERE id=?"
+          "UPDATE v2_outbound_orders SET status='shipped', actual_box_count=?, actual_pallet_count=?, updated_at=? WHERE id=?"
         ).bind(box_count, pallet_count, t, job.related_doc_id).run();
       }
     } else {
@@ -1075,7 +1088,7 @@ route("v2_inbound_plan_create", async (body, env) => {
           outbound_mode, instruction, remark, status, source_inbound_plan_id, created_by, created_at, updated_at,
           destination, po_no, wms_work_order_no,
           planned_box_count, planned_pallet_count, actual_box_count, actual_pallet_count, display_no)
-        VALUES(?,?,?,'bulk','',?,?,'','draft',?,?,?,?,?,?,?,?,?,0,0,?)
+        VALUES(?,?,?,'bulk','',?,?,'','pending_issue',?,?,?,?,?,?,?,?,?,0,0,?)
       `).bind(
         outbound_id,
         ob_date,
@@ -3084,7 +3097,7 @@ route("v2_bulk_op_job_start", async (body, env) => {
     `).bind(seg_id, job_id, worker_id, worker_name, t).run();
 
     // ---- Phase 4: 出库单状态同步 ----
-    if (linkedOb && (obStatus === "draft" || obStatus === "issued" || obStatus === "reopen_pending")) {
+    if (linkedOb && (obStatus === "pending_issue" || obStatus === "issued" || obStatus === "reopen_pending")) {
       await env.DB.prepare(
         "UPDATE v2_outbound_orders SET status='working', updated_at=? WHERE id=?"
       ).bind(t, obId).run();
@@ -3244,7 +3257,7 @@ route("v2_bulk_op_job_finish", async (body, env) => {
           : resultData.pallet_count;
 
         await env.DB.prepare(
-          "UPDATE v2_outbound_orders SET actual_box_count=?, actual_pallet_count=?, status='ready_to_load', updated_at=? WHERE id=?"
+          "UPDATE v2_outbound_orders SET actual_box_count=?, actual_pallet_count=?, status='ready_to_ship', updated_at=? WHERE id=?"
         ).bind(newBoxCount, newPalletCount, t, linkedObId).run();
       }
     }
@@ -3501,7 +3514,7 @@ route("v2_admin_dirty_data_diagnose", async (body, env) => {
            j.id as job_id, j.status as job_status, j.job_type
     FROM v2_outbound_orders o
     JOIN v2_ops_jobs j ON j.linked_outbound_order_id = o.id
-    WHERE (o.status = 'completed' AND j.status IN ('working','awaiting_close','pending'))
+    WHERE (o.status = 'shipped' AND j.status IN ('working','awaiting_close','pending'))
        OR (o.status = 'working' AND j.status IN ('completed','cancelled'))
     ORDER BY o.created_at DESC LIMIT 50
   `).all();
