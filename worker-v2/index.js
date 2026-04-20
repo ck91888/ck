@@ -2971,6 +2971,15 @@ route("v2_bulk_op_job_start", async (body, env) => {
         "UPDATE v2_ops_jobs SET active_worker_count=active_worker_count+1, updated_at=?, status='working' WHERE id=?"
       ).bind(t, job_id).run();
     } else {
+      // 历史完成拦截：同工单号最近一条 bulk_op 如果已 completed，禁止新开
+      const lastJob = await env.DB.prepare(
+        "SELECT status FROM v2_ops_jobs WHERE job_type='bulk_op' AND related_doc_id=? ORDER BY created_at DESC LIMIT 1"
+      ).bind(work_order_no).first();
+      if (lastJob && lastJob.status === 'completed') {
+        return { ok: false, error: "bulk_work_order_already_completed",
+          message: "该工单已完成，如需返工或追加操作，请在协同中心设为待再操作" };
+      }
+
       job_id = "JOB-" + uid();
       is_new_job = true;
       await env.DB.prepare(`
