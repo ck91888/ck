@@ -3027,10 +3027,18 @@ route("v2_bulk_op_job_finish", async (body, env) => {
 
   return withIdem(env, body, "v2_bulk_op_job_finish", async () => {
     const t = now();
+    const leave_only = body.leave_only === true;
 
     const jobCheck = await env.DB.prepare("SELECT status FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
     if (jobCheck && jobCheck.status === 'completed') {
       return { ok: false, error: "already_completed", message: "任务已完成，请勿重复提交" };
+    }
+
+    // Leave-only: just close this worker's segments and leave
+    if (leave_only) {
+      await closeAllOpenSegs(env, job_id, worker_id, t, 'leave');
+      await recalcActiveCount(env, job_id, t);
+      return { ok: true, left: true };
     }
 
     // Pre-check: if this user is the only active worker, they MUST record output

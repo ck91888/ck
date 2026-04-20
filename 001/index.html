@@ -357,59 +357,101 @@
   </div>
 </div>
 
-<!-- Bulk Op (大货操作) -->
+<!-- Bulk Op (大货操作) — 状态驱动 UI -->
 <div id="page-bulk_op" class="page">
   <div class="topbar">
     <button class="back-btn" onclick="goPage('order_op_menu')">← 返回/뒤로</button>
     <div class="page-title">大货操作 / 대량화물 작업</div>
   </div>
-  <div class="card">
-    <div class="card-title">工单号 / 작업지시 번호</div>
-    <div style="display:flex;gap:6px;">
-      <input type="text" id="bulkOrderInput" placeholder="输入或扫码工单号 / 작업번호 입력" style="flex:1;">
+
+  <!-- ===== STATE: 待开始 ===== -->
+  <div id="bulkStateIdle">
+    <div class="card">
+      <div class="card-title">工单号 / 작업지시 번호</div>
+      <div style="display:flex;gap:6px;">
+        <input type="text" id="bulkOrderInput" placeholder="输入或扫码工单号 / 작업번호 입력" style="flex:1;">
+      </div>
+      <div style="height:6px;"></div>
+      <div id="bulkScanReader" style="width:100%;max-width:280px;margin:0 auto;"></div>
+      <button class="btn btn-outline btn-sm" id="bulkScanBtn" onclick="startBulkScan()">扫码 / 스캔</button>
     </div>
-    <div style="height:6px;"></div>
-    <div id="bulkScanReader" style="width:100%;max-width:280px;margin:0 auto;"></div>
-    <button class="btn btn-outline btn-sm" id="bulkScanBtn" onclick="startBulkScan()">扫码 / 스캔</button>
-  </div>
-  <div class="card">
-    <button class="btn btn-success" onclick="startBulkJob(this)">开始操作 / 작업 시작</button>
-    <button class="btn btn-danger" onclick="finishBulkJob(this)">完成操作 / 작업 완료</button>
-  </div>
-  <div class="card" id="bulkLinkedObCard" style="display:none;">
-    <div class="card-title">关联出库单参考 / 출고단 참고</div>
-    <div id="bulkLinkedObBody" style="font-size:13px;"></div>
-  </div>
-  <div class="card">
-    <div class="card-title">当前参与人员 / 현재 참여 인원</div>
-    <div id="bulkWorkers" class="workers-panel"><span class="muted">--</span></div>
-  </div>
-  <div class="card" id="bulkResultCard" style="display:none;">
-    <div class="card-title">操作产出 / 작업 산출</div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
-      <div><label>品数 / 품목수</label><input type="number" id="bulkPackedSku" placeholder="0"></div>
-      <div><label>打包箱数 / 포장박스수</label><input type="number" id="bulkPackedBox" placeholder="0"></div>
-      <div><label>大纸箱 / 대형박스</label><input type="number" id="bulkCartonLarge" placeholder="0"></div>
-      <div><label>小纸箱 / 소형박스</label><input type="number" id="bulkCartonSmall" placeholder="0"></div>
-      <div><label>修补箱数 / 수리박스수</label><input type="number" id="bulkRepairedBox" placeholder="0"></div>
-      <div><label>换箱数 / 교체박스수</label><input type="number" id="bulkReboxed" placeholder="0"></div>
-      <div><label>标签数 / 라벨수</label><input type="number" id="bulkLabelCount" placeholder="0"></div>
-      <div><label>操作总箱数 / 총 박스수</label><input type="number" id="bulkTotalBox" placeholder="0"></div>
-      <div><label>打托数 / 팔레트수</label><input type="number" id="bulkPalletCount" placeholder="0"></div>
-      <div><label>叉车货位数 / 지게차 위치수</label><input type="number" id="bulkForkliftLoc" placeholder="0"></div>
+    <div class="card">
+      <button class="btn btn-success" onclick="startBulkJob(this)">开始操作 / 작업 시작</button>
     </div>
-    <div style="margin-top:8px;">
-      <label><input type="checkbox" id="bulkUsedForklift"> 使用了叉车 / 지게차 사용</label>
+    <div style="text-align:center;padding:20px 12px;color:#999;font-size:13px;">待开始 / 작업 대기</div>
+  </div>
+
+  <!-- ===== STATE: 作业中 ===== -->
+  <div id="bulkStateWorking" style="display:none;">
+    <!-- 提交中提示条 -->
+    <div id="bulkSubmittingBar" style="display:none;background:#fff3cd;padding:10px 14px;text-align:center;font-size:13px;font-weight:700;color:#856404;">正在提交本次操作，请勿重复点击 / 제출 중입니다. 중복 클릭하지 마세요</div>
+
+    <!-- 当前工单卡片 -->
+    <div class="card" style="border-left:4px solid #27ae60;">
+      <div style="font-size:12px;color:#666;margin-bottom:4px;">当前工单 / 현재 작업지시</div>
+      <div id="bulkActiveOrderNo" style="font-size:22px;font-weight:800;letter-spacing:1px;margin-bottom:6px;">--</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px 16px;font-size:12px;color:#555;">
+        <span><b>状态:</b> <span style="color:#27ae60;font-weight:700;">作业中 / 작업중</span></span>
+        <span><b>开始:</b> <span id="bulkStartTime">--</span></span>
+        <span><b>已持续:</b> <span id="bulkElapsed">--</span></span>
+        <span><b>参与人数:</b> <span id="bulkWorkerCount">--</span></span>
+      </div>
+      <div style="font-size:11px;color:#999;margin-top:6px;">已锁定，需先暂时离开或完成后才能更换工单 / 잠금 상태, 퇴장 또는 완료 후 변경 가능</div>
     </div>
-    <label style="margin-top:8px;">备注 / 비고</label>
-    <textarea id="bulkRemark" rows="2" placeholder="可选备注 / 선택 비고"></textarea>
-    <label>结果说明 / 결과 설명</label>
-    <textarea id="bulkResultNote" rows="2" placeholder="可选说明 / 선택 설명"></textarea>
-  </div>
-  <div class="interrupt-bar">
-    <button class="btn btn-warning btn-sm" onclick="interruptToUnload()">挂起→临时卸货 / 임시 하차</button>
-    <button class="btn btn-warning btn-sm" onclick="interruptToLoad()">挂起→临时装货 / 임시 상차</button>
-  </div>
+
+    <!-- 暂时离开 -->
+    <div style="padding:0 12px;">
+      <button class="btn btn-outline btn-sm" id="bulkLeaveBtn" onclick="bulkLeave(this)">暂时离开 / 일시 퇴장</button>
+    </div>
+
+    <!-- 关联出库单参考 -->
+    <div class="card" id="bulkLinkedObCard" style="display:none;">
+      <div class="card-title">关联出库单参考 / 출고단 참고</div>
+      <div id="bulkLinkedObBody" style="font-size:13px;"></div>
+    </div>
+
+    <!-- 当前参与人员 -->
+    <div class="card">
+      <div class="card-title">当前参与人员 / 현재 참여 인원</div>
+      <div id="bulkWorkers" class="workers-panel"><span class="muted">--</span></div>
+    </div>
+    <!-- 操作产出 -->
+    <div class="card" id="bulkResultCard">
+      <div class="card-title">操作产出 / 작업 산출</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+        <div><label>品数 / 품목수</label><input type="number" id="bulkPackedSku" placeholder="0"></div>
+        <div><label>打包箱数 / 포장박스수</label><input type="number" id="bulkPackedBox" placeholder="0"></div>
+        <div><label>大纸箱 / 대형박스</label><input type="number" id="bulkCartonLarge" placeholder="0"></div>
+        <div><label>小纸箱 / 소형박스</label><input type="number" id="bulkCartonSmall" placeholder="0"></div>
+        <div><label>修补箱数 / 수리박스수</label><input type="number" id="bulkRepairedBox" placeholder="0"></div>
+        <div><label>换箱数 / 교체박스수</label><input type="number" id="bulkReboxed" placeholder="0"></div>
+        <div><label>标签数 / 라벨수</label><input type="number" id="bulkLabelCount" placeholder="0"></div>
+        <div><label>操作总箱数 / 총 박스수</label><input type="number" id="bulkTotalBox" placeholder="0"></div>
+        <div><label>打托数 / 팔레트수</label><input type="number" id="bulkPalletCount" placeholder="0"></div>
+        <div><label>叉车货位数 / 지게차 위치수</label><input type="number" id="bulkForkliftLoc" placeholder="0"></div>
+      </div>
+      <div style="margin-top:8px;">
+        <label><input type="checkbox" id="bulkUsedForklift"> 使用了叉车 / 지게차 사용</label>
+      </div>
+      <label style="margin-top:8px;">备注 / 비고</label>
+      <textarea id="bulkRemark" rows="2" placeholder="可选备注 / 선택 비고"></textarea>
+      <label>结果说明 / 결과 설명</label>
+      <textarea id="bulkResultNote" rows="2" placeholder="可选说明 / 선택 설명"></textarea>
+    </div>
+
+    <!-- 页面内错误提示区 -->
+    <div id="bulkErrorBar" style="display:none;margin:0 12px;padding:10px 14px;background:#fdecea;border-radius:10px;color:#c62828;font-size:13px;font-weight:700;"></div>
+
+    <!-- 底部完成按钮 -->
+    <div style="padding:0 12px 20px;">
+      <button class="btn btn-danger" id="bulkFinishBtn" onclick="finishBulkJob(this)">完成操作 / 작업 완료</button>
+    </div>
+
+    <div class="interrupt-bar">
+      <button class="btn btn-warning btn-sm" onclick="interruptToUnload()">挂起→临时卸货 / 임시 하차</button>
+      <button class="btn btn-warning btn-sm" onclick="interruptToLoad()">挂起→临时装货 / 임시 상차</button>
+    </div>
+  </div><!-- /bulkStateWorking -->
 </div>
 
 <!-- Outbound Menu -->
