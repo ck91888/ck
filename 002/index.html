@@ -224,9 +224,10 @@
       <select id="ibFilterStatus" onchange="loadInboundList()">
         <option value="">全部状态</option>
         <option value="pending">未到货</option>
-        <option value="arrived">已到货</option>
-        <option value="arrived_pending_putaway">已到库待入库</option>
-        <option value="putting_away">入库中</option>
+        <option value="unloading">卸货中</option>
+        <option value="unloading_putting_away">卸货中+理货中</option>
+        <option value="arrived_pending_putaway">已到库待理货</option>
+        <option value="putting_away">理货中</option>
         <option value="processing">处理中</option>
         <option value="completed">已完成</option>
       </select>

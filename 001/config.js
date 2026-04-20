@@ -123,6 +123,9 @@ var I18N = {
   status_arrived: { zh: "已到货", ko: "도착" },
   status_field_working: { zh: "现场卸货中", ko: "현장 하차중" },
   status_unloaded_pending_info: { zh: "已卸货·待补充", ko: "하차완료·정보보완" },
+  status_unloading_putting_away: { zh: "卸货中+理货中", ko: "하차중+입고중" },
+  status_arrived_pending_putaway: { zh: "已到库待理货", ko: "입고대기" },
+  status_putting_away: { zh: "理货中", ko: "입고중" },
   status_awaiting_close: { zh: "待收尾", ko: "마감대기" },
 
   // -- Interrupt --

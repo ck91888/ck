@@ -279,7 +279,12 @@ function feedbackTitleText(fb) {
 }
 
 function inboundStatusLabel(status) {
-  var map = {pending:'待到库',unloading:'卸货中',arrived_pending_putaway:'已到库待入库',putting_away:'入库中',completed:'已入库',cancelled:'已取消'};
+  var lang = getLang();
+  if (lang === 'ko') {
+    var map = {pending:'대기중',unloading:'하차중(입고가능)',unloading_putting_away:'하차중+입고중',arrived_pending_putaway:'입고대기',putting_away:'입고중',completed:'입고완료',cancelled:'취소됨'};
+  } else {
+    var map = {pending:'待到库',unloading:'卸货中（可提前理货）',unloading_putting_away:'卸货中+理货中',arrived_pending_putaway:'已到库待理货',putting_away:'理货中',completed:'已入库',cancelled:'已取消'};
+  }
   return map[status] || stLabel(status);
 }
 
@@ -359,7 +364,7 @@ async function loadDashboard() {
 
   var pendingIssues = issueItems.filter(function(i) { return i.status === "pending" || i.status === "processing"; });
   var pendingOb = obItems.filter(function(o) { return o.status === "draft" || o.status === "issued" || o.status === "working"; });
-  var pendingIb = ibItems.filter(function(p) { return p.status === "pending" || p.status === "unloading" || p.status === "arrived_pending_putaway" || p.status === "putting_away"; });
+  var pendingIb = ibItems.filter(function(p) { return p.status === "pending" || p.status === "unloading" || p.status === "unloading_putting_away" || p.status === "arrived_pending_putaway" || p.status === "putting_away"; });
   var fbItems = (feedbacks && feedbacks.items) || [];
   var activeFb = fbItems.filter(function(f) { return f.status === "field_working" || f.status === "unloaded_pending_info"; });
 
@@ -1293,7 +1298,7 @@ async function loadInboundDetail() {
   // --- Actions ---
   html += '<div class="card">';
   html += '<button class="btn btn-outline btn-sm" onclick="printIbQr()">' + L("print") + '</button> ';
-  if (p.status === "arrived_pending_putaway") {
+  if (p.status === "arrived_pending_putaway" || p.status === "putting_away") {
     html += '<button class="btn btn-success" onclick="markInboundCompleted(this)">文员直接完成入库 / 직접 입고 완료</button> ';
   }
   if (p.status === "pending" || p.status === "arrived_pending_putaway") {

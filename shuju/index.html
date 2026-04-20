@@ -414,12 +414,22 @@ async function loadLiveDocs() {
     tbody.innerHTML = '<tr><td colspan="8" class="muted" style="text-align:center;">当前没有进行中的单子</td></tr>';
     return;
   }
+  // Detect parallel: same doc with both unload + inbound active
+  var docFlows = {};
+  docs.forEach(function(d) {
+    var key = d.related_doc_id || d.job_id;
+    if (!docFlows[key]) docFlows[key] = [];
+    docFlows[key].push(d.flow_stage);
+  });
   var html = "";
   docs.forEach(function(d) {
+    var key = d.related_doc_id || d.job_id;
+    var flows = docFlows[key] || [];
+    var isParallel = flows.indexOf("unload") !== -1 && flows.indexOf("inbound") !== -1;
     html += "<tr>";
     html += "<td><b>" + esc(d.display_no || d.related_doc_id || d.job_id) + "</b></td>";
     html += "<td>" + esc(bizLabel(d.biz_class)) + "</td>";
-    html += "<td>" + esc(flowLabel(d.flow_stage)) + "</td>";
+    html += "<td>" + esc(flowLabel(d.flow_stage)) + (isParallel ? ' <span class="tag tag-orange" style="font-size:10px;">并行</span>' : '') + "</td>";
     html += "<td>" + esc(d.worker_names || "--") + "</td>";
     html += "<td>" + esc(fmtTime(d.created_at)) + "</td>";
     html += "<td>" + minutesSince(d.created_at) + "</td>";

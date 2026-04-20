@@ -1056,6 +1056,31 @@ route("v2_inbound_plan_create", async (body, env) => {
   });
 });
 
+// ===== Helper: check if an inbound plan is fully completed =====
+// Returns { allDone: bool, unloadDone: bool, putawayDone: bool }
+async function checkPlanFullyCompleted(env, plan_id) {
+  // 1. Check unload is done: no active unload jobs
+  const activeUnload = await env.DB.prepare(
+    "SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type='unload' AND status IN ('pending','working') LIMIT 1"
+  ).bind(plan_id).first();
+  const unloadDone = !activeUnload;
+
+  // 2. Check all lines have putaway_qty >= actual_qty (fallback to planned_qty)
+  const lines = await env.DB.prepare(
+    "SELECT planned_qty, actual_qty, putaway_qty FROM v2_inbound_plan_lines WHERE plan_id=?"
+  ).bind(plan_id).all();
+  let putawayDone = true;
+  for (const ln of (lines.results || [])) {
+    const target = (ln.actual_qty != null && ln.actual_qty > 0) ? ln.actual_qty : (ln.planned_qty || 0);
+    if (target > 0 && (ln.putaway_qty || 0) < target) {
+      putawayDone = false;
+      break;
+    }
+  }
+
+  return { allDone: unloadDone && putawayDone, unloadDone, putawayDone };
+}
+
 route("v2_inbound_plan_list", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
   const start = String(body.start_date || "").trim();
@@ -1174,9 +1199,9 @@ route("v2_inbound_plan_ops_candidates", async (body, env) => {
 
   let statusFilter;
   if (scene === 'putaway') {
-    statusFilter = "('arrived_pending_putaway','putting_away')";
+    statusFilter = "('unloading','unloading_putting_away','arrived_pending_putaway','putting_away')";
   } else if (scene === 'unload') {
-    statusFilter = "('pending','unloading')";
+    statusFilter = "('pending','unloading','unloading_putting_away')";
   } else {
     return err("scene must be putaway or unload");
   }
@@ -1235,7 +1260,7 @@ route("v2_inbound_resolve_code", async (body, env) => {
   }
 
   // Check status is putaway-able
-  const putawayStatuses = ['arrived_pending_putaway', 'putting_away'];
+  const putawayStatuses = ['unloading', 'unloading_putting_away', 'arrived_pending_putaway', 'putting_away'];
   if (putawayStatuses.indexOf(plan.status) === -1) {
     return json({ ok: true, kind: 'status_not_allowed', plan, message: "该系统入库单当前状态（" + plan.status + "）不可开始入库" });
   }
@@ -1664,7 +1689,8 @@ route("v2_unload_job_start", async (body, env) => {
     if (plan_id) {
       const plan = await env.DB.prepare("SELECT status FROM v2_inbound_plans WHERE id=?").bind(plan_id).first();
       if (!plan) return { ok: false, error: "plan not found" };
-      if (plan.status !== 'pending' && plan.status !== 'unloading') {
+      const unloadAllowed = ['pending', 'unloading', 'unloading_putting_away'];
+      if (unloadAllowed.indexOf(plan.status) === -1) {
         return { ok: false, error: "unload_not_allowed_for_status", message: "当前状态不可继续卸货 / 현재 상태에서 하차 불가", current_status: plan.status };
       }
     }
@@ -1688,7 +1714,7 @@ route("v2_unload_job_start", async (body, env) => {
     } else {
       if (plan_id) {
         const plan2 = await env.DB.prepare("SELECT status FROM v2_inbound_plans WHERE id=?").bind(plan_id).first();
-        if (plan2 && plan2.status === 'unloading') {
+        if (plan2 && (plan2.status === 'unloading' || plan2.status === 'unloading_putting_away')) {
           return { ok: false, error: "unload_status_inconsistent", message: "状态为卸货中但无活跃卸货任务，请联系管理员检查" };
         }
       }
@@ -1748,7 +1774,8 @@ route("v2_unload_job_finish", async (body, env) => {
 
     if (preJob.related_doc_type === 'inbound_plan' && preJob.related_doc_id) {
       const planCheck = await env.DB.prepare("SELECT status FROM v2_inbound_plans WHERE id=?").bind(preJob.related_doc_id).first();
-      if (planCheck && planCheck.status !== 'unloading') {
+      const unloadFinishAllowed = ['unloading', 'unloading_putting_away'];
+      if (planCheck && unloadFinishAllowed.indexOf(planCheck.status) === -1) {
         return { ok: false, error: "unload_plan_status_invalid", message: "当前卸货计划状态已变化（" + planCheck.status + "），不能继续完成" };
       }
     }
@@ -1856,9 +1883,20 @@ route("v2_unload_job_finish", async (body, env) => {
         ).bind(cargoSummary || "现场无单卸货", t, plan_id).run();
         return { ok: true, result_id, dynamic_plan: true, plan_id };
       } else {
-        await env.DB.prepare(
-          "UPDATE v2_inbound_plans SET status='arrived_pending_putaway', updated_at=? WHERE id=?"
-        ).bind(t, plan_id).run();
+        // Check if inbound (putaway) jobs are currently active for this plan
+        const activeInboundJob = await env.DB.prepare(
+          "SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type IN ('inbound_direct','inbound_bulk') AND status IN ('pending','working') LIMIT 1"
+        ).bind(plan_id).first();
+        if (activeInboundJob) {
+          // Parallel: inbound still running → putting_away
+          await env.DB.prepare(
+            "UPDATE v2_inbound_plans SET status='putting_away', updated_at=? WHERE id=?"
+          ).bind(t, plan_id).run();
+        } else {
+          await env.DB.prepare(
+            "UPDATE v2_inbound_plans SET status='arrived_pending_putaway', updated_at=? WHERE id=?"
+          ).bind(t, plan_id).run();
+        }
       }
     }
 
@@ -1914,8 +1952,9 @@ route("v2_inbound_job_start", async (body, env) => {
     if (plan_id && isStandard) {
       const plan = await env.DB.prepare("SELECT status, biz_class FROM v2_inbound_plans WHERE id=?").bind(plan_id).first();
       if (!plan) return { ok: false, error: "plan not found" };
-      if (plan.status !== 'arrived_pending_putaway' && plan.status !== 'putting_away') {
-        return { ok: false, error: "plan_status_invalid", message: "plan status must be arrived_pending_putaway, current: " + plan.status };
+      const inboundStartAllowed = ['unloading', 'unloading_putting_away', 'arrived_pending_putaway', 'putting_away'];
+      if (inboundStartAllowed.indexOf(plan.status) === -1) {
+        return { ok: false, error: "plan_status_invalid", message: "当前状态不可开始理货 / 현재 상태에서 입고 불가, current: " + plan.status };
       }
       if (plan.biz_class && biz_class && plan.biz_class !== biz_class) {
         return { ok: false, error: "biz_class_mismatch", message: "plan biz_class mismatch: plan=" + plan.biz_class + " req=" + biz_class };
@@ -1988,6 +2027,10 @@ route("v2_inbound_job_start", async (body, env) => {
         VALUES(?, 'inbound', ?, ?, 'inbound_plan', ?, 'working', ?, ?, ?, 1)
       `).bind(job_id, biz_class, job_type, plan_id, worker_id, t, t).run();
       if (isStandard) {
+        // Parallel: if unloading → unloading_putting_away; if arrived_pending_putaway → putting_away
+        await env.DB.prepare(
+          "UPDATE v2_inbound_plans SET status='unloading_putting_away', updated_at=? WHERE id=? AND status='unloading'"
+        ).bind(t, plan_id).run();
         await env.DB.prepare(
           "UPDATE v2_inbound_plans SET status='putting_away', updated_at=? WHERE id=? AND status='arrived_pending_putaway'"
         ).bind(t, plan_id).run();
@@ -2040,7 +2083,8 @@ route("v2_inbound_job_finish", async (body, env) => {
     if (complete_job && !leave_only && !isReturnJob) {
       if (jobRow.related_doc_id) {
         const planCheck = await env.DB.prepare("SELECT status FROM v2_inbound_plans WHERE id=?").bind(jobRow.related_doc_id).first();
-        if (planCheck && planCheck.status !== 'putting_away') {
+        const inboundFinishAllowed = ['putting_away', 'unloading_putting_away'];
+        if (planCheck && inboundFinishAllowed.indexOf(planCheck.status) === -1) {
           return { ok: false, error: "inbound_plan_status_invalid", message: "当前入库计划状态不允许完成入库（当前: " + planCheck.status + "）" };
         }
       }
@@ -2081,16 +2125,56 @@ route("v2_inbound_job_finish", async (body, env) => {
       ).bind(t, job_id).run();
 
       if (!isReturnJob && jobRow.related_doc_id) {
+        const pid = jobRow.related_doc_id;
+        // Accumulate putaway_qty (not overwrite) — idempotent via result_id check
         for (const rl of result_lines) {
           if (rl && rl.unit_type && Number(rl.putaway_qty || 0) > 0) {
             await env.DB.prepare(
-              "UPDATE v2_inbound_plan_lines SET putaway_qty=?, putaway_remark=? WHERE plan_id=? AND unit_type=?"
-            ).bind(Number(rl.putaway_qty || 0), String(rl.putaway_remark || ""), jobRow.related_doc_id, String(rl.unit_type)).run();
+              "UPDATE v2_inbound_plan_lines SET putaway_qty = COALESCE(putaway_qty, 0) + ?, putaway_remark=? WHERE plan_id=? AND unit_type=?"
+            ).bind(Number(rl.putaway_qty || 0), String(rl.putaway_remark || ""), pid, String(rl.unit_type)).run();
           }
         }
-        await env.DB.prepare(
-          "UPDATE v2_inbound_plans SET status='completed', updated_at=? WHERE id=?"
-        ).bind(t, jobRow.related_doc_id).run();
+
+        // Determine next plan status based on parallel state
+        const activeUnloadJob = await env.DB.prepare(
+          "SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type='unload' AND status IN ('pending','working') LIMIT 1"
+        ).bind(pid).first();
+        const otherInboundJob = await env.DB.prepare(
+          "SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type IN ('inbound_direct','inbound_bulk') AND status IN ('pending','working') AND id!=? LIMIT 1"
+        ).bind(pid, job_id).first();
+
+        if (activeUnloadJob) {
+          // Unload still running
+          if (otherInboundJob) {
+            // Other inbound workers still active → keep parallel
+            await env.DB.prepare(
+              "UPDATE v2_inbound_plans SET status='unloading_putting_away', updated_at=? WHERE id=?"
+            ).bind(t, pid).run();
+          } else {
+            // No other inbound workers → back to unloading only
+            await env.DB.prepare(
+              "UPDATE v2_inbound_plans SET status='unloading', updated_at=? WHERE id=?"
+            ).bind(t, pid).run();
+          }
+        } else {
+          // Unload done — check if all putaway is complete
+          const completion = await checkPlanFullyCompleted(env, pid);
+          if (completion.allDone) {
+            await env.DB.prepare(
+              "UPDATE v2_inbound_plans SET status='completed', updated_at=? WHERE id=?"
+            ).bind(t, pid).run();
+          } else if (otherInboundJob) {
+            // Still have other inbound workers
+            await env.DB.prepare(
+              "UPDATE v2_inbound_plans SET status='putting_away', updated_at=? WHERE id=?"
+            ).bind(t, pid).run();
+          } else {
+            // No workers, not fully done
+            await env.DB.prepare(
+              "UPDATE v2_inbound_plans SET status='arrived_pending_putaway', updated_at=? WHERE id=?"
+            ).bind(t, pid).run();
+          }
+        }
       }
       if (isReturnJob && jobRow.related_doc_id) {
         await env.DB.prepare(
@@ -2116,8 +2200,9 @@ route("v2_inbound_mark_completed", async (body, env) => {
 
     const plan = await env.DB.prepare("SELECT status FROM v2_inbound_plans WHERE id=?").bind(plan_id).first();
     if (!plan) return { ok: false, error: "plan not found" };
-    if (plan.status !== 'arrived_pending_putaway') {
-      return { ok: false, error: "status_invalid", message: "only arrived_pending_putaway can be marked completed, current: " + plan.status };
+    const markCompletedAllowed = ['arrived_pending_putaway', 'putting_away'];
+    if (markCompletedAllowed.indexOf(plan.status) === -1) {
+      return { ok: false, error: "status_invalid", message: "only arrived_pending_putaway or putting_away can be marked completed, current: " + plan.status };
     }
 
     const activeJob = await env.DB.prepare(

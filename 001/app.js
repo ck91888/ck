@@ -526,9 +526,10 @@ var JOB_TYPE_LABEL = {
 
 var STATUS_LABEL = {
   pending: "待到库/대기중",
-  unloading: "卸货中/하차중",
-  arrived_pending_putaway: "已到库待入库/입고대기",
-  putting_away: "入库中/입고중",
+  unloading: "卸货中（可��前理货）/하차중(입고가능)",
+  unloading_putting_away: "卸货中+理货中/하차중+입고중",
+  arrived_pending_putaway: "已到库待理货/입고대기",
+  putting_away: "理货中/입고중",
   processing: "处理中/처리중",
   working: "作业中/작업중",
   responded: "已反馈/피드백완료",
@@ -1338,7 +1339,17 @@ async function finishInbound(btnEl) {
       complete_job: true
     });
     if (res && res.ok) {
-      alert("入库已完成，状态已更新为\u201C已入库\u201D\n입고 완료, 상태가 \u201C입고완료\u201D로 변경됨");
+      // Check plan status to show appropriate message
+      var planAfter = null;
+      try { planAfter = await api({ action: "v2_inbound_plan_detail", plan_id: _inboundPlanData && _inboundPlanData.plan ? _inboundPlanData.plan.id : "" }); } catch(e) {}
+      var planStatus = (planAfter && planAfter.ok && planAfter.plan) ? planAfter.plan.status : "completed";
+      if (planStatus === "completed") {
+        alert("入库已完成，状态已更新为\u201C已入库\u201D\n입고 완료, 상태가 \u201C입고완료\u201D로 변경됨");
+      } else if (planStatus === "unloading" || planStatus === "unloading_putting_away") {
+        alert("本次理货已完成。卸货仍在进行中，如还有未理部分可后续继续理货。\n이번 입고 완료. 하차 진행 중이며, 미입고분은 이후 계속 가능합니다.");
+      } else {
+        alert("本次理货已完成。仍有部分货物未理完，后续可继续理货。\n이번 입고 완료. 미입고분이 있어 이후 계속 가능합니다.");
+      }
       clearActiveJob();
       _inboundPlanData = null;
       goPage("home");
