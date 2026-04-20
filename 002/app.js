@@ -865,17 +865,17 @@ async function loadOutboundDetail() {
   // Print + Status actions
   html += '<div class="card">';
   html += '<button class="btn btn-outline btn-sm" onclick="printOutboundOrder()">' + L("print") + '</button> ';
+  if (o.status === "draft") {
+    html += '<button class="btn btn-primary" onclick="updateObStatus(\'issued\', this)">' + L("status_issued") + '</button> ';
+  }
   if (o.status !== "completed" && o.status !== "cancelled") {
-    if (o.status === "draft") {
-      html += '<button class="btn btn-primary" onclick="updateObStatus(\'issued\', this)">' + L("status_issued") + '</button> ';
-    }
-    if (o.status === "issued" || o.status === "working") {
-      html += '<button class="btn btn-success" onclick="updateObStatus(\'completed\', this)">' + L("status_completed") + '</button> ';
-    }
     html += '<button class="btn btn-danger" onclick="updateObStatus(\'cancelled\', this)">' + L("status_cancelled") + '</button>';
   }
   if (o.status === "completed") {
     html += '<button class="btn btn-primary" onclick="updateObStatus(\'reopen_pending\', this)">' + L("set_reopen_pending") + '</button>';
+  }
+  if (o.status === "reopen_pending") {
+    html += '<button class="btn btn-danger" onclick="updateObStatus(\'cancelled\', this)">' + L("status_cancelled") + '</button>';
   }
   html += '</div>';
 
@@ -889,7 +889,7 @@ async function updateObStatus(status, btnEl) {
     if (res && res.ok) {
       loadOutboundDetail();
     } else {
-      alert("失败: " + (res ? res.error : "unknown"));
+      alert("失败: " + (res ? (res.message || res.error) : "unknown"));
     }
   });
 }
