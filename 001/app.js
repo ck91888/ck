@@ -2273,6 +2273,7 @@ async function startBulkJob(btnEl) {
         var ob = res.linked_outbound;
         var h = '';
         if (ob.display_no) h += '<div><b>出库单号/출고단번호:</b> ' + esc(ob.display_no) + '</div>';
+        if (ob.status === "reopen_pending") h += '<div><span class="st st-reopen_pending">' + L("status_reopen_pending") + '</span></div>';
         if (ob.customer) h += '<div><b>客户/고객:</b> ' + esc(ob.customer) + '</div>';
         if (ob.destination) h += '<div><b>目的地/목적지:</b> ' + esc(ob.destination) + '</div>';
         if (ob.po_no) h += '<div><b>PO号/발주번호:</b> ' + esc(ob.po_no) + '</div>';
@@ -2289,6 +2290,11 @@ async function startBulkJob(btnEl) {
       alert("当前已在其他大货工单作业中，请先退出或完成当前工单"
         + (otherNo ? "\n当前工单号: " + otherNo : "")
         + "\n현재 다른 대량화물 작업에 참여 중입니다. 먼저 퇴장하거나 완료한 후 다시 시도하세요");
+    } else if (res && res.error === "bulk_order_already_completed") {
+      alert("该工单已完成，如需返工或追加操作，请联系协同中心设为待再操作"
+        + "\n이미 완료된 작업입니다. 재작업/추가 작업은 협업센터에서 재작업 대기로 변경 후 진행하세요");
+    } else if (res && res.error === "bulk_order_cancelled") {
+      alert("该工单已取消，不能继续操作\n취소된 작업입니다. 계속 진행할 수 없습니다");
     } else {
       alert("失败/실패: " + (res ? res.error : "unknown"));
     }

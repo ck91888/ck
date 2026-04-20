@@ -127,6 +127,7 @@ var I18N = {
   status_arrived_pending_putaway: { zh: "已到库待理货", ko: "입고대기" },
   status_putting_away: { zh: "理货中", ko: "입고중" },
   status_awaiting_close: { zh: "待收尾", ko: "마감대기" },
+  status_reopen_pending: { zh: "待再操作", ko: "재작업 대기" },
 
   // -- Interrupt --
   interrupt_unload: { zh: "挂起并临时卸货", ko: "일시정지 후 임시 하차" },

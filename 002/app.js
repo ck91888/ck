@@ -874,6 +874,9 @@ async function loadOutboundDetail() {
     }
     html += '<button class="btn btn-danger" onclick="updateObStatus(\'cancelled\', this)">' + L("status_cancelled") + '</button>';
   }
+  if (o.status === "completed") {
+    html += '<button class="btn btn-primary" onclick="updateObStatus(\'reopen_pending\', this)">' + L("set_reopen_pending") + '</button>';
+  }
   html += '</div>';
 
   body.innerHTML = html;

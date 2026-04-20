@@ -2986,8 +2986,49 @@ route("v2_bulk_op_job_start", async (body, env) => {
       VALUES(?,?,?,?,?)
     `).bind(seg_id, job_id, worker_id, worker_name, t).run();
 
-    // 口径联动：若 work_order_no 匹配某出库单（id 或 wms_work_order_no），返回该出库单参考信息
+    // 口径联动：若 work_order_no 匹配某出库单，先校验状态再同步
     const linkedOb = await findOutboundByWorkOrder(env, work_order_no);
+
+    if (linkedOb) {
+      const obStatus = linkedOb.status || "";
+      if (obStatus === "completed") {
+        // 已完成 → 回滚刚创建的 job/segment
+        if (is_new_job) {
+          await env.DB.prepare("DELETE FROM v2_ops_jobs WHERE id=?").bind(job_id).run();
+        } else {
+          await env.DB.prepare("UPDATE v2_ops_jobs SET active_worker_count=active_worker_count-1, updated_at=? WHERE id=?").bind(t, job_id).run();
+        }
+        await env.DB.prepare("DELETE FROM v2_ops_job_workers WHERE id=?").bind(seg_id).run();
+        return { ok: false, error: "bulk_order_already_completed",
+          message: "该工单已完成，如需返工或追加操作，请在协同中心设为待再操作" };
+      }
+      if (obStatus === "cancelled") {
+        if (is_new_job) {
+          await env.DB.prepare("DELETE FROM v2_ops_jobs WHERE id=?").bind(job_id).run();
+        } else {
+          await env.DB.prepare("UPDATE v2_ops_jobs SET active_worker_count=active_worker_count-1, updated_at=? WHERE id=?").bind(t, job_id).run();
+        }
+        await env.DB.prepare("DELETE FROM v2_ops_job_workers WHERE id=?").bind(seg_id).run();
+        return { ok: false, error: "bulk_order_cancelled",
+          message: "该工单已取消，不能继续操作" };
+      }
+
+      // 状态同步：draft/issued → working, reopen_pending → working
+      const started_from_reopen = (obStatus === "reopen_pending");
+      if (obStatus === "draft" || obStatus === "issued" || obStatus === "reopen_pending") {
+        await env.DB.prepare(
+          "UPDATE v2_outbound_orders SET status='working', updated_at=? WHERE id=?"
+        ).bind(t, linkedOb.id).run();
+      }
+
+      // 在 job 上记录是否从 reopen_pending 进入（用于 finish 时判断累加）
+      if (is_new_job && started_from_reopen) {
+        await env.DB.prepare(
+          "UPDATE v2_ops_jobs SET shared_result_json=? WHERE id=?"
+        ).bind(JSON.stringify({ started_from_reopen_pending: true }), job_id).run();
+      }
+    }
+
     const ret = { ok: true, job_id, worker_seg_id: seg_id, is_new_job };
     if (linkedOb) {
       ret.linked_outbound = {
@@ -2999,18 +3040,23 @@ route("v2_bulk_op_job_start", async (body, env) => {
         wms_work_order_no: linkedOb.wms_work_order_no || "",
         planned_box_count: Number(linkedOb.planned_box_count || 0),
         planned_pallet_count: Number(linkedOb.planned_pallet_count || 0),
-        instruction: linkedOb.instruction || ""
+        instruction: linkedOb.instruction || "",
+        status: linkedOb.status || ""
       };
     }
     return ret;
   });
 });
 
-// 出库单查找 helper：优先匹配 id，其次匹配 wms_work_order_no
+// 出库单查找 helper：匹配顺序 id → display_no → wms_work_order_no
 async function findOutboundByWorkOrder(env, workOrderNo) {
   if (!workOrderNo) return null;
   let row = await env.DB.prepare(
     "SELECT * FROM v2_outbound_orders WHERE id=? LIMIT 1"
+  ).bind(workOrderNo).first();
+  if (row) return row;
+  row = await env.DB.prepare(
+    "SELECT * FROM v2_outbound_orders WHERE display_no=? ORDER BY created_at DESC LIMIT 1"
   ).bind(workOrderNo).first();
   if (row) return row;
   row = await env.DB.prepare(
@@ -3109,14 +3155,25 @@ route("v2_bulk_op_job_finish", async (body, env) => {
       "UPDATE v2_ops_job_workers SET left_at=?, leave_reason='job_completed' WHERE job_id=? AND left_at=''"
     ).bind(t, job_id).run();
 
-    // 口径联动：大货操作完成 → 回写关联出库单的 actual_box_count / actual_pallet_count
-    const finishedJob = await env.DB.prepare("SELECT related_doc_id FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
+    // 口径联动：大货操作完成 → 回写关联出库单（首次覆盖 / reopen 累加）
+    const finishedJob = await env.DB.prepare("SELECT related_doc_id, shared_result_json FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
     if (finishedJob && finishedJob.related_doc_id) {
       const linkedOb = await findOutboundByWorkOrder(env, finishedJob.related_doc_id);
       if (linkedOb) {
+        let jobMeta = {};
+        try { jobMeta = JSON.parse(finishedJob.shared_result_json || "{}"); } catch(e) {}
+        const isReopen = !!jobMeta.started_from_reopen_pending;
+
+        const newBoxCount = isReopen
+          ? Number(linkedOb.actual_box_count || 0) + resultData.total_operated_box_count
+          : resultData.total_operated_box_count;
+        const newPalletCount = isReopen
+          ? Number(linkedOb.actual_pallet_count || 0) + resultData.pallet_count
+          : resultData.pallet_count;
+
         await env.DB.prepare(
           "UPDATE v2_outbound_orders SET actual_box_count=?, actual_pallet_count=?, status='completed', updated_at=? WHERE id=?"
-        ).bind(resultData.total_operated_box_count, resultData.pallet_count, t, linkedOb.id).run();
+        ).bind(newBoxCount, newPalletCount, t, linkedOb.id).run();
       }
     }
 

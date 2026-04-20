@@ -70,6 +70,7 @@ var LANG = {
     status_draft: "草稿",
     status_issued: "已下发",
     status_working: "作业中",
+    status_reopen_pending: "待再操作",
     status_arrived: "已到货",
     status_field_working: "现场卸货中",
     status_unloaded_pending_info: "已卸货·待补充",
@@ -186,6 +187,7 @@ var LANG = {
     order_ops_leave_reason_interrupted: "被中断",
     order_ops_leave_reason_admin_cleanup: "主管清理",
     order_ops_view_detail: "详情",
+    set_reopen_pending: "设为待再操作",
   },
   ko: {
     app_title: "협업센터",
@@ -242,6 +244,7 @@ var LANG = {
     status_draft: "초안",
     status_issued: "배정됨",
     status_working: "작업중",
+    status_reopen_pending: "재작업 대기",
     status_arrived: "도착",
     status_field_working: "현장 하차중",
     status_unloaded_pending_info: "하차완료·정보보완",
@@ -350,6 +353,7 @@ var LANG = {
     order_ops_leave_reason_interrupted: "중단됨",
     order_ops_leave_reason_admin_cleanup: "관리자 정리",
     order_ops_view_detail: "상세",
+    set_reopen_pending: "재작업 대기로 변경",
   }
 };
 
