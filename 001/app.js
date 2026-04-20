@@ -2290,9 +2290,12 @@ async function startBulkJob(btnEl) {
       alert("当前已在其他大货工单作业中，请先退出或完成当前工单"
         + (otherNo ? "\n当前工单号: " + otherNo : "")
         + "\n현재 다른 대량화물 작업에 참여 중입니다. 먼저 퇴장하거나 완료한 후 다시 시도하세요");
-    } else if (res && (res.error === "bulk_order_already_completed" || res.error === "bulk_work_order_already_completed")) {
+    } else if (res && res.error === "bulk_order_already_completed") {
       alert("该工单已完成，如需返工或追加操作，请联系协同中心设为待再操作"
         + "\n이미 완료된 작업입니다. 재작업/추가 작업은 협업센터에서 재작업 대기로 변경 후 진행하세요");
+    } else if (res && res.error === "bulk_work_order_already_completed") {
+      alert("该纯工单号已完成，不能再次操作。如需返工，请创建系统出库单或使用新工单号"
+        + "\n해당 작업번호는 이미 완료되어 재사용할 수 없습니다. 재작업이 필요하면 시스템 출고단을 생성하거나 새 작업번호를 사용하세요");
     } else if (res && res.error === "bulk_order_cancelled") {
       alert("该工单已取消，不能继续操作\n취소된 작업입니다. 계속 진행할 수 없습니다");
     } else {

@@ -2976,8 +2976,13 @@ route("v2_bulk_op_job_start", async (body, env) => {
         "SELECT status FROM v2_ops_jobs WHERE job_type='bulk_op' AND related_doc_id=? ORDER BY created_at DESC LIMIT 1"
       ).bind(work_order_no).first();
       if (lastJob && lastJob.status === 'completed') {
+        const hasOutbound = await findOutboundByWorkOrder(env, work_order_no);
+        if (hasOutbound) {
+          return { ok: false, error: "bulk_order_already_completed",
+            message: "该工单已完成，如需返工或追加操作，请在协同中心设为待再操作" };
+        }
         return { ok: false, error: "bulk_work_order_already_completed",
-          message: "该工单已完成，如需返工或追加操作，请在协同中心设为待再操作" };
+          message: "该纯工单号已完成，不能再次操作。如需返工，请创建系统出库单或使用新工单号" };
       }
 
       job_id = "JOB-" + uid();
