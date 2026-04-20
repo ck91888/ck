@@ -865,9 +865,6 @@ async function loadOutboundDetail() {
   // Print + Status actions
   html += '<div class="card">';
   html += '<button class="btn btn-outline btn-sm" onclick="printOutboundOrder()">' + L("print") + '</button> ';
-  if (o.status === "pending_issue") {
-    html += '<button class="btn btn-primary" onclick="updateObStatus(\'issued\', this)">' + L("status_issued") + '</button> ';
-  }
   if (o.status !== "shipped" && o.status !== "cancelled") {
     html += '<button class="btn btn-danger" onclick="updateObStatus(\'cancelled\', this)">' + L("status_cancelled") + '</button>';
   }
@@ -990,6 +987,12 @@ function printOutboundOrder() {
     '</body></html>';
   win.document.write(html);
   win.document.close();
+
+  if (o.status === "pending_issue") {
+    api({ action: "v2_outbound_order_update_status", id: o.id, status: "issued" }).then(function(res) {
+      if (res && res.ok) loadOutboundDetail();
+    });
+  }
 }
 
 // ===== Inbound List =====
