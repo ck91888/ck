@@ -441,6 +441,18 @@ function submitBadgeModal() {
   setTimeout(hideBadgeModal, 800);
 }
 
+function hasOtherActiveJob(allowJobId) {
+  if (!_activeJobId) return false;
+  if (allowJobId && _activeJobId === allowJobId) return false;
+  return true;
+}
+
+function warnActiveJob() {
+  alert("当前已有进行中的任务，请先返回首页点击顶部任务条，结束或暂时离开后再开始新任务\n"
+    + "이미 진행 중인 작업이 있습니다. 홈에서 상단 작업 바를 눌러 현재 작업을 완료하거나 퇴장 후 새 작업을 시작하세요");
+  return false;
+}
+
 // ===== Home =====
 function initHome() {
   if (!_activeJobId) localStorage.removeItem(V2_INTERRUPT_KEY);
@@ -919,6 +931,7 @@ function stopInboundScan() {
 }
 
 async function startUnload(btnEl) {
+  if (hasOtherActiveJob()) return warnActiveJob();
   withActionLock('startUnload', btnEl || null, '提交中.../저장중...', async function() {
     var planId = document.getElementById("unloadPlanSelect").value;
     var res = await api({
@@ -953,6 +966,7 @@ async function startUnload(btnEl) {
 }
 
 async function startUnloadNoPlan(btnEl) {
+  if (hasOtherActiveJob()) return warnActiveJob();
   withActionLock('startUnloadNoPlan', btnEl || null, '提交中.../저장중...', async function() {
     var res = await api({
       action: "v2_unplanned_unload_start",
@@ -1210,6 +1224,7 @@ async function initInbound() {
 }
 
 async function startInbound(btnEl) {
+  if (hasOtherActiveJob()) return warnActiveJob();
   if (!_ibResolvedKind) {
     alert("请先识别单号 / 먼저 번호를 인식하세요");
     return;
@@ -1442,6 +1457,7 @@ function renderInboundReturnSession(job) {
 }
 
 async function startInboundReturn(btnEl) {
+  if (hasOtherActiveJob()) return warnActiveJob();
   var customer = ((document.getElementById("inboundReturnCustomer") || {}).value || "").trim();
   var startRemark = ((document.getElementById("inboundReturnStartRemark") || {}).value || "").trim();
   withActionLock('startInboundReturn', btnEl || null, '提交中.../저장중...', async function() {
@@ -1554,6 +1570,7 @@ function renderImportDeliverySession(job) {
 }
 
 async function startImportDelivery(btnEl) {
+  if (hasOtherActiveJob()) return warnActiveJob();
   withActionLock('startImportDelivery', btnEl || null, '提交中.../저장중...', async function() {
     var res = await api({
       action: "v2_import_delivery_job_start",
@@ -1755,6 +1772,7 @@ function onOutboundCandidateSelect() {
 }
 
 async function startOutboundLoad(btnEl) {
+  if (hasOtherActiveJob()) return warnActiveJob();
   withActionLock('startOutboundLoad', btnEl || null, '提交中.../저장중...', async function() {
     var orderId = _obResolvedOrderId || document.getElementById("loadOrderSelect").value || "";
     var res = await api({
@@ -2269,6 +2287,7 @@ function stopPickTripScan() {
 }
 
 async function startPickJob(btnEl) {
+  if (hasOtherActiveJob()) return warnActiveJob();
   if (_pickDocNos.length === 0) {
     alert("请先添加至少一个拣货单号\n최소 하나의 피킹번호를 추가하세요");
     return;
@@ -2297,6 +2316,7 @@ async function startPickJob(btnEl) {
 }
 
 async function joinPickTrip(jobId, btnEl) {
+  if (hasOtherActiveJob()) return warnActiveJob();
   withActionLock('joinPickTrip', btnEl || null, '加入中.../참여중...', async function() {
     var res = await api({
       action: "v2_pick_job_join",
@@ -2494,6 +2514,7 @@ function stopBulkScan() {
 }
 
 async function startBulkJob(btnEl) {
+  if (hasOtherActiveJob()) return warnActiveJob();
   var workOrderNo = (document.getElementById("bulkOrderInput") || {}).value.trim();
   if (!workOrderNo) {
     alert("请输入或扫描工单号\n작업지시 번호를 입력하거나 스캔하세요");
@@ -2781,6 +2802,7 @@ function goGenericBack() {
 
 // ---- 开始 ----
 async function startGenericJob(btnEl) {
+  if (hasOtherActiveJob()) return warnActiveJob();
   withActionLock('startGenericJob', btnEl || null, '提交中.../저장중...', async function() {
     var res = await api({
       action: "v2_ops_job_start",

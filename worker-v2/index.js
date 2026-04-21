@@ -113,6 +113,15 @@ async function findOpenSeg(env, jobId, workerId) {
   ).bind(jobId, workerId).first();
 }
 
+async function checkWorkerBusy(env, workerId, allowJobId) {
+  const seg = await env.DB.prepare(
+    "SELECT w.job_id, j.job_type, j.flow_stage FROM v2_ops_job_workers w JOIN v2_ops_jobs j ON j.id=w.job_id WHERE w.worker_id=? AND w.left_at='' AND j.status IN ('pending','working','awaiting_close') ORDER BY w.joined_at DESC LIMIT 1"
+  ).bind(workerId).first();
+  if (!seg) return null;
+  if (allowJobId && seg.job_id === allowJobId) return null;
+  return seg;
+}
+
 // 关闭某 worker 在某 job 中的所有 open segments（自愈）
 async function closeAllOpenSegs(env, jobId, workerId, t, reason) {
   const segs = await env.DB.prepare(
@@ -1000,6 +1009,9 @@ route("v2_outbound_load_start", async (body, env) => {
       if (existing) job = existing;
     }
 
+    const busy = await checkWorkerBusy(env, worker_id, job ? job.id : null);
+    if (busy) return { ok: false, error: "worker_has_active_job", active_job_id: busy.job_id, active_job_type: busy.job_type };
+
     let job_id, is_new_job = false;
     if (job) {
       job_id = job.id;
@@ -1511,6 +1523,10 @@ route("v2_unplanned_unload_start", async (body, env) => {
   if (!worker_id) return err("missing worker_id");
 
   return withIdem(env, body, "v2_unplanned_unload_start", async () => {
+    if (!parent_job_id) {
+      const busy = await checkWorkerBusy(env, worker_id, null);
+      if (busy) return { ok: false, error: "worker_has_active_job", active_job_id: busy.job_id, active_job_type: busy.job_type };
+    }
     const t = now();
     const fb_id = "FB-" + uid();
     const fb_display_no = await nextFeedbackDisplayNo(env, kstToday(), 'XCXH');
@@ -1810,6 +1826,9 @@ route("v2_unload_job_start", async (body, env) => {
       ).bind(plan_id).first();
       if (existing) job = existing;
     }
+
+    const busy = await checkWorkerBusy(env, worker_id, job ? job.id : null);
+    if (busy) return { ok: false, error: "worker_has_active_job", active_job_id: busy.job_id, active_job_type: busy.job_type };
 
     let job_id, is_new_job = false;
     if (job) {
@@ -2118,6 +2137,9 @@ route("v2_inbound_job_start", async (body, env) => {
     ).bind(plan_id, job_type).first();
     if (existing) job = existing;
 
+    const busy = await checkWorkerBusy(env, worker_id, job ? job.id : null);
+    if (busy) return { ok: false, error: "worker_has_active_job", active_job_id: busy.job_id, active_job_type: busy.job_type };
+
     let job_id, is_new_job = false;
     if (job) {
       job_id = job.id;
@@ -2316,6 +2338,9 @@ route("v2_import_delivery_job_start", async (body, env) => {
       "SELECT * FROM v2_ops_jobs WHERE job_type=? AND status IN ('pending','working') LIMIT 1"
     ).bind(job_type).first();
 
+    const busy = await checkWorkerBusy(env, worker_id, existing ? existing.id : null);
+    if (busy) return { ok: false, error: "worker_has_active_job", active_job_id: busy.job_id, active_job_type: busy.job_type };
+
     let job_id, is_new_job = false;
     if (existing) {
       job_id = existing.id;
@@ -2468,6 +2493,11 @@ route("v2_ops_job_start", async (body, env) => {
       if (existing) job = existing;
     }
 
+    if (!is_temporary_interrupt) {
+      const busy = await checkWorkerBusy(env, worker_id, job ? job.id : null);
+      if (busy) return { ok: false, error: "worker_has_active_job", active_job_id: busy.job_id, active_job_type: busy.job_type };
+    }
+
     let job_id, is_new_job = false;
     if (job) {
       job_id = job.id;
@@ -2600,12 +2630,15 @@ route("v2_ops_my_active_job", async (body, env) => {
   const worker_id = String(body.worker_id || "").trim();
   if (!worker_id) return err("missing worker_id");
 
+  // 优先取 job 仍在 working 的 segment；若有历史脏数据（多个 open seg），仍只返回 1 条最合理项
   const seg = await env.DB.prepare(
-    "SELECT * FROM v2_ops_job_workers WHERE worker_id=? AND left_at='' ORDER BY joined_at DESC LIMIT 1"
+    `SELECT w.* FROM v2_ops_job_workers w
+     JOIN v2_ops_jobs j ON j.id = w.job_id
+     WHERE w.worker_id=? AND w.left_at='' AND j.status IN ('pending','working','awaiting_close')
+     ORDER BY w.joined_at DESC LIMIT 1`
   ).bind(worker_id).first();
   if (!seg) return json({ ok: true, active: false });
 
-  // 实时校正 active_worker_count，确保首页人数与任务页一致
   const t = now();
   await recalcActiveCount(env, seg.job_id, t);
   const job = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(seg.job_id).first();
@@ -2864,6 +2897,9 @@ route("v2_pick_job_start", async (body, env) => {
   return withIdem(env, body, "v2_pick_job_start", async () => {
     const t = now();
 
+    const busy = await checkWorkerBusy(env, worker_id, null);
+    if (busy) return { ok: false, error: "worker_has_active_job", active_job_id: busy.job_id, active_job_type: busy.job_type };
+
     // Cross-trip worker exclusion: same worker cannot be in 2 active pick trips
     const workerConflict = await env.DB.prepare(
       `SELECT j.id, j.display_no FROM v2_ops_jobs j
@@ -3102,6 +3138,9 @@ route("v2_pick_job_join", async (body, env) => {
         trip_no: job.display_no || '' };
     }
 
+    const busy = await checkWorkerBusy(env, worker_id, job_id);
+    if (busy) return { ok: false, error: "worker_has_active_job", active_job_id: busy.job_id, active_job_type: busy.job_type };
+
     // Cross-trip worker exclusion: same worker cannot be in 2 active pick trips
     const workerConflict = await env.DB.prepare(
       `SELECT j.id, j.display_no FROM v2_ops_jobs j
@@ -3159,6 +3198,15 @@ route("v2_bulk_op_job_start", async (body, env) => {
       if (obStatus === "cancelled") {
         return { ok: false, error: "bulk_order_cancelled",
           message: "该工单已取消，不能继续操作" };
+      }
+    }
+
+    // ---- Phase 1.5: 跨任务类型互斥 ----
+    // bulk_op 自身的 cross-job guard 在后面，这里先做全局互斥
+    {
+      const busy = await checkWorkerBusy(env, worker_id, null);
+      if (busy && busy.job_type !== 'bulk_op') {
+        return { ok: false, error: "worker_has_active_job", active_job_id: busy.job_id, active_job_type: busy.job_type };
       }
     }
 
