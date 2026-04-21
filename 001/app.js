@@ -3007,6 +3007,7 @@ async function checkAndResumeParent() {
       saveActiveJob(saved.parent_job_id, res.worker_seg_id);
       localStorage.removeItem(V2_INTERRUPT_KEY);
       _unloadPlanData = null;
+      _pageParams = saved.parent_params || {};
       showPage(saved.parent_page || "home");
       return true;
     } else {
