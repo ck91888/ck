@@ -443,6 +443,7 @@ function submitBadgeModal() {
 
 // ===== Home =====
 function initHome() {
+  if (!_activeJobId) localStorage.removeItem(V2_INTERRUPT_KEY);
   checkMyActiveJob();
   restoreActiveJob();
 }
@@ -467,7 +468,6 @@ function clearActiveJob() {
   _activeJobId = null;
   _activeSegId = null;
   localStorage.removeItem(V2_ACTIVE_JOB_KEY);
-  localStorage.removeItem(V2_INTERRUPT_KEY);
 }
 
 async function checkMyActiveJob() {
@@ -1032,9 +1032,13 @@ async function unloadLeave(btnEl) {
       leave_only: true
     });
     if (res && res.ok) {
-      clearActiveJob();
-      _unloadPlanData = null;
-      goPage("home");
+      localStorage.removeItem('v2_unplanned_fb_id');
+      var resumed = await checkAndResumeParent();
+      if (!resumed) {
+        clearActiveJob();
+        _unloadPlanData = null;
+        goPage("home");
+      }
     } else {
       alert("失败/실패: " + (res ? res.error : "unknown"));
     }
@@ -1085,9 +1089,9 @@ async function unloadComplete(btnEl) {
       }
     } else if (res && res.error === "already_completed") {
       alert("任务已完成，请勿重复提交\n작업이 이미 완료되었습니다. 중복 제출하지 마세요");
-      clearActiveJob();
-      _unloadPlanData = null;
-      goPage("home");
+      localStorage.removeItem('v2_unplanned_fb_id');
+      var resumed2 = await checkAndResumeParent();
+      if (!resumed2) { clearActiveJob(); _unloadPlanData = null; goPage("home"); }
     } else if (res && res.error === "unload_plan_status_invalid") {
       alert("当前卸货计划状态已变化，不能继续完成，请返回刷新\n하차 계획 상태가 변경되었습니다. 새로고침해 주세요");
       clearActiveJob();
@@ -1096,9 +1100,9 @@ async function unloadComplete(btnEl) {
     } else if (res && res.error === "others_still_working") {
       var _n1 = res.active_worker_count || res.active_count || "?";
       alert("您已退出此任务，还有 " + _n1 + " 人继续作业\n현재 작업에서 퇴장했습니다. " + _n1 + "명이 계속 작업 중입니다");
-      clearActiveJob();
-      _unloadPlanData = null;
-      goPage("home");
+      localStorage.removeItem('v2_unplanned_fb_id');
+      var resumed3 = await checkAndResumeParent();
+      if (!resumed3) { clearActiveJob(); _unloadPlanData = null; goPage("home"); }
     } else if (res && res.error === "empty_result") {
       alert(res.message || "至少填写一项实际数量");
     } else {
@@ -1112,6 +1116,8 @@ function unloadGoBack() {
     if (confirm("离开将暂停当前任务 / 퇴장 시 현재 작업이 일시정지됩니다. 确认？/ 확인?")) {
       unloadLeave();
     }
+  } else if (hasInterruptContext()) {
+    checkAndResumeParent();
   } else {
     goPage("home");
   }
@@ -1798,12 +1804,18 @@ async function finishOutboundLoad(btnEl) {
     });
     if (res && res.ok) {
       alert("装货已完成 / 상차 완료");
-      clearActiveJob();
-      goPage("home");
+      var resumed = await checkAndResumeParent();
+      if (!resumed) {
+        clearActiveJob();
+        goPage("home");
+      }
     } else if (res && res.error === "already_completed") {
       alert("任务已完成，请勿重复提交\n작업이 이미 완료되었습니다. 중복 제출하지 마세요");
-      clearActiveJob();
-      goPage("home");
+      var resumed2 = await checkAndResumeParent();
+      if (!resumed2) {
+        clearActiveJob();
+        goPage("home");
+      }
     } else {
       alert("失败/실패: " + (res ? res.error : "unknown"));
     }
@@ -1812,6 +1824,18 @@ async function finishOutboundLoad(btnEl) {
 
 async function saveOutboundLoadResult(btnEl) {
   await finishOutboundLoad(btnEl);
+}
+
+function outboundLoadGoBack() {
+  if (_activeJobId) {
+    alert("装货进行中，请先完成或暂时离开 / 상차 진행 중입니다. 먼저 완료하거나 퇴장하세요");
+    return;
+  }
+  if (hasInterruptContext()) {
+    checkAndResumeParent();
+  } else {
+    goPage("outbound_menu");
+  }
 }
 
 async function refreshLoadWorkers() {
@@ -2907,12 +2931,19 @@ async function interruptToLoad() {
   });
 }
 
+function hasInterruptContext() {
+  try {
+    var saved = JSON.parse(localStorage.getItem(V2_INTERRUPT_KEY) || "null");
+    return !!(saved && saved.parent_job_id);
+  } catch(e) { return false; }
+}
+
 async function checkAndResumeParent() {
   var saved = null;
   try { saved = JSON.parse(localStorage.getItem(V2_INTERRUPT_KEY) || "null"); } catch(e) {}
   if (!saved || !saved.parent_job_id) return false;
 
-  var doResume = confirm("临时卸货已完成，是否恢复原任务？\n임시 하차가 완료되었습니다. 원래 작업으로 복귀하시겠습니까?");
+  var doResume = confirm("临时任务已结束，是否恢复原任务？\n임시 작업이 종료되었습니다. 원래 작업으로 복귀하시겠습니까?");
   if (doResume) {
     var res = await api({
       action: "v2_ops_job_resume",
@@ -2930,12 +2961,11 @@ async function checkAndResumeParent() {
       alert("恢复失败，返回首页 / 복귀 실패, 홈으로 이동");
     }
   }
-  // User declined or resume failed — clear everything
   localStorage.removeItem(V2_INTERRUPT_KEY);
   clearActiveJob();
   _unloadPlanData = null;
   goPage("home");
-  return true; // Return true because we handled navigation
+  return true;
 }
 
 // ===== Photo Upload =====
