@@ -2768,9 +2768,14 @@ function _gjEnterWorkingState(jobDetail) {
   _gjSwitchState("working");
   var titleEl = document.getElementById("gjActiveTitle");
   if (titleEl) titleEl.textContent = _genericJobCtx.title || "--";
-  _gjStartedAt = Date.now();
+  var realStart = null;
+  if (jobDetail && jobDetail.created_at) {
+    realStart = new Date(jobDetail.created_at);
+    if (isNaN(realStart.getTime())) realStart = null;
+  }
+  _gjStartedAt = realStart ? realStart.getTime() : Date.now();
   var stEl = document.getElementById("gjStartTime");
-  if (stEl) stEl.textContent = new Date().toLocaleTimeString();
+  if (stEl) stEl.textContent = new Date(_gjStartedAt).toLocaleTimeString();
   _gjStartElapsedTimer();
   if (jobDetail) {
     var wcEl = document.getElementById("gjWorkerCount");
@@ -2841,8 +2846,9 @@ async function startGenericJob(btnEl) {
     });
     if (res && res.ok) {
       saveActiveJob(res.job_id, res.worker_seg_id);
-      _gjEnterWorkingState(null);
-      refreshGenericWorkers();
+      var jobRes = await api({ action: "v2_ops_job_detail", job_id: res.job_id });
+      _gjEnterWorkingState(jobRes && jobRes.ok ? jobRes.job : null);
+      if (jobRes && jobRes.ok) renderWorkers("gjWorkers", jobRes.workers);
     } else {
       alert("失败/실패: " + (res ? (res.message || res.error) : "unknown"));
     }
