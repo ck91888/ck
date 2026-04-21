@@ -85,7 +85,7 @@ var I18N = {
   inventory: { zh: "盘点", ko: "재고조사" },
   disposal: { zh: "废弃处理", ko: "폐기 처리" },
   qc: { zh: "质检", ko: "품검" },
-  other_internal: { zh: "其他库内作业", ko: "기타 창고작업" },
+  other_internal: { zh: "仓库整理", ko: "창고 정리" },
 
   // -- Issue handling --
   issue_title: { zh: "问题点处理", ko: "이슈 처리" },

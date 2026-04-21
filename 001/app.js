@@ -526,7 +526,7 @@ var JOB_TYPE_LABEL = {
   disposal: "废弃处理/폐기 처리",
   qc: "质检/품검",
   issue_handle: "问题点处理/이슈 처리",
-  other_internal: "其他库内/기타 창고작업",
+  other_internal: "仓库整理/창고 정리",
   scan_pallet: "过机扫描/스캔",
   load_import: "装柜出货/적재 출고",
   pickup_delivery_import: "外出取/送货/외부 픽업·배송"
