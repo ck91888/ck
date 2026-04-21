@@ -2522,6 +2522,20 @@ var _genericJobCtx = {};
 var _gjStartedAt = null;
 var _gjElapsedTimer = null;
 
+function resetGenericJobState() {
+  _gjStopElapsedTimer();
+  _gjStartedAt = null;
+  _gjSwitchState("idle");
+  _gjSetSubmitting(false);
+  var wcEl = document.getElementById("gjWorkerCount");
+  if (wcEl) wcEl.textContent = "0 人/명";
+  renderWorkers("gjWorkers", []);
+  var elapsedEl = document.getElementById("gjElapsed");
+  if (elapsedEl) elapsedEl.textContent = "--";
+  var stEl = document.getElementById("gjStartTime");
+  if (stEl) stEl.textContent = "--";
+}
+
 // ---- 状态切换 helper ----
 function _gjSwitchState(state) {
   var idle = document.getElementById("gjStateIdle");
@@ -2582,6 +2596,7 @@ function _gjEnterWorkingState(jobDetail) {
 
 // ---- 初始化 ----
 function initGenericJob() {
+  resetGenericJobState();
   _genericJobCtx = _pageParams || {};
   var title = _genericJobCtx.title || "--";
   var el = document.getElementById("genericJobTitle");
@@ -2589,10 +2604,16 @@ function initGenericJob() {
   var idleTitle = document.getElementById("gjIdleTitle");
   if (idleTitle) idleTitle.textContent = title;
 
-  // 检查是否有活跃任务 → 恢复作业中态
   if (_activeJobId) {
     api({ action: "v2_ops_job_detail", job_id: _activeJobId }).then(function(res) {
       if (res && res.ok && res.job && res.job.status !== "completed" && res.job.status !== "cancelled") {
+        var jobType = res.job.job_type || "";
+        var expectedType = _genericJobCtx.job_type || "";
+        if (expectedType && jobType !== expectedType) {
+          clearActiveJob();
+          _gjSwitchState("idle");
+          return;
+        }
         _gjEnterWorkingState(res.job);
         var wcEl = document.getElementById("gjWorkerCount");
         if (wcEl) wcEl.textContent = (res.job.active_worker_count || 0) + " 人/명";
@@ -2654,7 +2675,7 @@ async function leaveGenericJob(btnEl) {
       leave_reason: "leave"
     });
     if (res && res.ok) {
-      _gjStopElapsedTimer();
+      resetGenericJobState();
       clearActiveJob();
       alert("您已退出当前作业，其他人仍可继续\n현재 작업에서 퇴장했습니다. 다른 작업자는 계속할 수 있습니다");
       goGenericBack();
@@ -2667,26 +2688,24 @@ async function leaveGenericJob(btnEl) {
 // ---- 结束 ----
 async function finishGenericJob(btnEl) {
   if (!_activeJobId) { alert("没有进行中的任务 / 진행 중인 작업 없음"); return; }
-  _gjSetSubmitting(true);
   withActionLock('finishGenericJob', btnEl || null, '提交中.../저장중...', async function() {
     var res = await api({
       action: "v2_ops_job_finish",
       job_id: _activeJobId,
       worker_id: getWorkerId()
     });
-    _gjSetSubmitting(false);
     if (res && res.ok) {
-      _gjStopElapsedTimer();
+      resetGenericJobState();
       clearActiveJob();
       alert("任务已完成 / 작업 완료");
       goGenericBack();
     } else if (res && res.error === "already_completed") {
-      _gjStopElapsedTimer();
+      resetGenericJobState();
       clearActiveJob();
       alert("任务已完成，请勿重复提交\n작업이 이미 완료되었습니다");
       goGenericBack();
     } else if (res && res.error === "others_still_working") {
-      _gjStopElapsedTimer();
+      resetGenericJobState();
       clearActiveJob();
       alert("您已退出当前作业，还有 " + (res.active_worker_count || 0) + " 人继续作业\n현재 작업에서 퇴장했습니다. " + (res.active_worker_count || 0) + "명이 계속 작업 중");
       goGenericBack();
