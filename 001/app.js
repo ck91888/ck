@@ -2530,6 +2530,7 @@ function resetGenericJobState() {
   var wcEl = document.getElementById("gjWorkerCount");
   if (wcEl) wcEl.textContent = "0 人/명";
   renderWorkers("gjWorkers", []);
+  renderWorkers("gjIdleWorkers", []);
   var elapsedEl = document.getElementById("gjElapsed");
   if (elapsedEl) elapsedEl.textContent = "--";
   var stEl = document.getElementById("gjStartTime");
