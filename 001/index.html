@@ -57,8 +57,8 @@
     </div>
     <div class="home-btn" onclick="goPage('inbound_menu')">
       <div class="icon">📦</div>
-      <div class="label">入库</div>
-      <div class="label-ko">입고</div>
+      <div class="label">理货入库</div>
+      <div class="label-ko">입고정리</div>
     </div>
     <div class="home-btn" onclick="goPage('order_op_menu')">
       <div class="icon">📋</div>
@@ -152,7 +152,7 @@
 <div id="page-inbound_menu" class="page">
   <div class="topbar">
     <button class="back-btn" onclick="goPage('home')">← 返回/뒤로</button>
-    <div class="page-title">入库 / 입고</div>
+    <div class="page-title">理货入库 / 입고정리</div>
   </div>
   <div style="padding:12px;">
     <button class="btn btn-primary" onclick="goPage('inbound',{job_type:'inbound_direct',biz_class:'direct_ship'})">代发入库 / 직배송 입고</button>
@@ -165,7 +165,7 @@
 <div id="page-inbound" class="page">
   <div class="topbar">
     <button class="back-btn" onclick="goPage('inbound_menu')">← 返回/뒤로</button>
-    <div class="page-title" id="inboundTitle">入库 / 입고</div>
+    <div class="page-title" id="inboundTitle">理货入库 / 입고정리</div>
   </div>
   <div id="inboundEntryCard" class="card">
     <!-- 统一入口：手输/扫码/候选下拉 -->

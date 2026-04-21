@@ -1168,7 +1168,7 @@ var _ibResolvedPlan = null; // plan summary object from resolve
 async function initInbound() {
   var title = document.getElementById("inboundTitle");
   var jt = _pageParams.job_type || "inbound_direct";
-  title.textContent = JOB_TYPE_LABEL[jt] || "入库/입고";
+  title.textContent = JOB_TYPE_LABEL[jt] || "理货入库/입고정리";
 
   // If already in a putaway job, show working state
   if (_activeJobId) {
