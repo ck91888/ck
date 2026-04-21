@@ -614,6 +614,8 @@ async function initUnload() {
 
   // Show entry state
   showUnloadEntry();
+  var interruptBanner = document.getElementById("unloadInterruptBanner");
+  if (interruptBanner) interruptBanner.style.display = hasInterruptContext() ? "" : "none";
 }
 
 async function showUnloadEntry() {
@@ -2900,22 +2902,21 @@ async function interruptToUnload() {
     }));
 
     var res = await api({
-      action: "v2_unplanned_unload_start",
+      action: "v2_ops_job_leave",
+      job_id: _activeJobId,
       worker_id: getWorkerId(),
-      worker_name: getWorkerName(),
-      parent_job_id: _activeJobId,
-      interrupt_type: "unload"
+      leave_reason: "interrupted"
     });
-
-    if (res && res.ok) {
-      saveActiveJob(res.job_id, res.worker_seg_id);
-      localStorage.setItem('v2_unplanned_fb_id', res.feedback_id || '');
-      _unloadPlanData = null;
-      _navStack = [];
-      goPage("unload");
-    } else {
-      alert("失败/실패: " + (res ? res.error : "unknown"));
+    if (!res || !res.ok) {
+      alert("挂起失败 / 일시정지 실패: " + (res ? res.error : "unknown"));
+      localStorage.removeItem(V2_INTERRUPT_KEY);
+      return;
     }
+
+    clearActiveJob();
+    _unloadPlanData = null;
+    _navStack = [];
+    goPage("unload");
   });
 }
 
