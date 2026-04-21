@@ -1518,6 +1518,8 @@ async function refreshInboundReturnWorkers() {
 
 // ===== Outbound Load =====
 async function initOutboundLoad() {
+  clearOutboundResolve();
+  stopOutboundScan();
   await loadOutboundOrders();
   startJobPoll("load");
 }
@@ -1536,9 +1538,106 @@ async function loadOutboundOrders() {
   sel.innerHTML = opts;
 }
 
+// ===== 出库装货：扫码/识别/清空 =====
+var _obResolvedOrderId = "";
+var _obLoadScanner = null;
+
+async function resolveOutboundCode(btnEl) {
+  var inp = document.getElementById("obLoadCodeInput");
+  var code = (inp ? inp.value : '').trim();
+  if (!code) { alert("请输入或扫描单号 / 번호를 입력하세요"); return; }
+  var resultEl = document.getElementById("obResolveResult");
+
+  if (btnEl) { btnEl.disabled = true; btnEl.textContent = '识别中...'; }
+  try {
+    var res = await api({ action: "v2_outbound_order_resolve_code", code: code });
+    if (!res || !res.ok) { alert("识别失败 / 인식 실패"); return; }
+
+    if (res.kind === 'system') {
+      var o = res.order;
+      _obResolvedOrderId = o.id;
+      document.getElementById("loadOrderSelect").value = o.id;
+      var modeMap = {warehouse_dispatch:'仓库代发',customer_pickup:'客户自提',milk_express:'牛奶速递',milk_pallet:'牛奶托盘',container_pickup:'整柜提货'};
+      if (resultEl) resultEl.innerHTML = '<div style="background:#e8f5e9;border-radius:6px;padding:8px;">' +
+        '<b>✓ </b>' + esc(o.display_no || o.id) + '<br>' +
+        esc(o.customer || '--') + ' · ' + (modeMap[o.outbound_mode] || o.outbound_mode || '--') + '<br>' +
+        '计划: ' + (o.planned_box_count || 0) + '箱 / ' + (o.planned_pallet_count || 0) + '托' +
+        '</div>';
+    } else if (res.kind === 'not_found') {
+      _obResolvedOrderId = "";
+      if (resultEl) resultEl.innerHTML = '<div style="background:#ffebee;border-radius:6px;padding:8px;color:#c62828;">✗ ' + esc(res.message) + '</div>';
+    } else if (res.kind === 'status_not_allowed') {
+      _obResolvedOrderId = "";
+      if (resultEl) resultEl.innerHTML = '<div style="background:#ffebee;border-radius:6px;padding:8px;color:#c62828;">✗ ' + esc(res.message) + '</div>';
+    }
+  } finally {
+    if (btnEl) { btnEl.disabled = false; btnEl.textContent = '识别单号 / 번호 인식'; }
+  }
+}
+
+function clearOutboundResolve() {
+  _obResolvedOrderId = "";
+  var inp = document.getElementById("obLoadCodeInput");
+  if (inp) inp.value = "";
+  var resultEl = document.getElementById("obResolveResult");
+  if (resultEl) resultEl.innerHTML = "";
+  document.getElementById("loadOrderSelect").value = "";
+}
+
+function startOutboundScan() {
+  if (_obLoadScanner) { stopOutboundScan(); return; }
+  var readerEl = document.getElementById("obLoadScanReader");
+  if (!readerEl) return;
+  readerEl.innerHTML = "";
+  var btn = document.getElementById("obScanBtn");
+  try {
+    _obLoadScanner = new Html5Qrcode("obLoadScanReader");
+    _obLoadScanner.start(
+      { facingMode: "environment" },
+      { fps: 10, qrbox: { width: 250, height: 150 } },
+      function(decoded) {
+        stopOutboundScan();
+        var code = String(decoded || "").trim();
+        if (!code) return;
+        var inp = document.getElementById("obLoadCodeInput");
+        if (inp) inp.value = code;
+        resolveOutboundCode();
+      },
+      function() {}
+    ).catch(function(e) {
+      alert("摄像头启动失败 / 카메라 시작 실패: " + e);
+      _obLoadScanner = null;
+    });
+    if (btn) btn.textContent = "取消扫码 / 스캔 취소";
+  } catch(e) {
+    alert("扫码不可用 / 스캔 불가: " + e.message);
+  }
+}
+
+function stopOutboundScan() {
+  if (_obLoadScanner) {
+    try { _obLoadScanner.stop(); } catch(e) {}
+    _obLoadScanner = null;
+    var el = document.getElementById("obLoadScanReader");
+    if (el) el.innerHTML = "";
+    var btn = document.getElementById("obScanBtn");
+    if (btn) btn.textContent = "📷 扫码";
+  }
+}
+
+function onOutboundCandidateSelect() {
+  var sel = document.getElementById("loadOrderSelect");
+  var id = sel ? sel.value : "";
+  if (!id) return;
+  _obResolvedOrderId = id;
+  var resultEl = document.getElementById("obResolveResult");
+  var opt = sel.options[sel.selectedIndex];
+  if (resultEl && opt) resultEl.innerHTML = '<div style="background:#e8f5e9;border-radius:6px;padding:8px;"><b>✓ </b>' + esc(opt.textContent) + '</div>';
+}
+
 async function startOutboundLoad(btnEl) {
   withActionLock('startOutboundLoad', btnEl || null, '提交中.../저장중...', async function() {
-    var orderId = document.getElementById("loadOrderSelect").value;
+    var orderId = _obResolvedOrderId || document.getElementById("loadOrderSelect").value || "";
     var res = await api({
       action: "v2_outbound_load_start",
       order_id: orderId,
@@ -1553,14 +1652,17 @@ async function startOutboundLoad(btnEl) {
       }
       document.getElementById("loadResultCard").style.display = "";
       document.getElementById("loadInterruptBar").style.display = "";
+      var actionCard = document.getElementById("obLoadActionCard");
+      if (actionCard) actionCard.style.display = "";
       refreshLoadWorkers();
     } else {
-      alert("失败/실패: " + (res ? res.error : "unknown"));
+      alert("失败/실패: " + (res ? (res.message || res.error) : "unknown"));
     }
   });
 }
 
 function startLoadNoOrder() {
+  _obResolvedOrderId = "";
   document.getElementById("loadOrderSelect").value = "";
   startOutboundLoad();
 }

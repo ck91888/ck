@@ -472,15 +472,29 @@
     <button class="back-btn" onclick="goPage('outbound_menu')">← 返回/뒤로</button>
     <div class="page-title">出库装货 / 출고 상차</div>
   </div>
-  <div class="card">
-    <label>关联出库作业单 / 출고작업단 선택</label>
-    <select id="loadOrderSelect"><option value="">-- 选择/선택 --</option></select>
-    <button class="btn btn-outline btn-sm mt-10" onclick="loadOutboundOrders()">刷新列表 / 새로고침</button>
+  <div id="obLoadEntryCard" class="card">
+    <label style="font-weight:700;">输入或扫描出库单号 / 출고번호 입력 또는 스캔</label>
+    <div style="display:flex;gap:6px;margin-bottom:6px;">
+      <input id="obLoadCodeInput" type="text" placeholder="CHU单号 / WMS工单号 / CHU번호 / WMS번호" style="flex:1;">
+      <button class="btn btn-outline btn-sm" onclick="startOutboundScan()" id="obScanBtn" style="white-space:nowrap;">📷 扫码</button>
+    </div>
+    <div id="obLoadScanReader" style="margin-top:4px;"></div>
+    <div style="display:flex;gap:6px;margin-bottom:8px;">
+      <button class="btn btn-outline btn-sm" onclick="resolveOutboundCode(this)" style="flex:1;">识别单号 / 번호 인식</button>
+      <button class="btn btn-outline btn-sm" onclick="clearOutboundResolve()" style="flex:1;">清空重选 / 초기화</button>
+    </div>
+    <div id="obResolveResult" style="margin-bottom:8px;font-size:13px;"></div>
+    <div style="margin-top:8px;">
+      <label style="font-size:12px;color:#888;">或从系统候选单选择 / 또는 시스템 후보 선택:</label>
+      <select id="loadOrderSelect" onchange="onOutboundCandidateSelect()"><option value="">-- 选择/선택 --</option></select>
+      <button class="btn btn-outline btn-sm mt-10" onclick="loadOutboundOrders()" style="font-size:11px;">刷新 / 새로고침</button>
+    </div>
     <div style="height:8px"></div>
     <button class="btn btn-outline btn-sm" onclick="startLoadNoOrder()">无单临时装货 / 서류없이 임시 상차</button>
-  </div>
-  <div class="card">
+    <div style="height:10px"></div>
     <button class="btn btn-success" onclick="startOutboundLoad(this)">开始装货 / 상차 시작</button>
+  </div>
+  <div class="card" style="display:none;" id="obLoadActionCard">
     <button class="btn btn-danger" onclick="finishOutboundLoad(this)">结束装货 / 상차 종료</button>
   </div>
   <div class="card">

@@ -937,6 +937,47 @@ route("v2_outbound_order_update_status", async (body, env) => {
 // =====================================================
 // OUTBOUND LOAD — Ops side
 // =====================================================
+route("v2_outbound_order_resolve_code", async (body, env) => {
+  if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  const code = String(body.code || "").trim();
+  if (!code) return err("missing code");
+
+  const cols = "id, display_no, wms_work_order_no, status, customer, outbound_mode, planned_box_count, planned_pallet_count, order_date";
+  let order = await env.DB.prepare(
+    `SELECT ${cols} FROM v2_outbound_orders WHERE display_no=? LIMIT 1`
+  ).bind(code).first();
+  if (!order) {
+    order = await env.DB.prepare(
+      `SELECT ${cols} FROM v2_outbound_orders WHERE wms_work_order_no=? AND wms_work_order_no!='' ORDER BY created_at DESC LIMIT 1`
+    ).bind(code).first();
+  }
+  if (!order) {
+    order = await env.DB.prepare(
+      `SELECT ${cols} FROM v2_outbound_orders WHERE id=? LIMIT 1`
+    ).bind(code).first();
+  }
+
+  if (!order) {
+    return json({ ok: true, kind: 'not_found', message: "未找到匹配的出库作业单 / 일치하는 출고작업단을 찾을 수 없습니다" });
+  }
+
+  const loadableStatuses = ['issued', 'working', 'ready_to_ship'];
+  if (order.status === 'shipped') {
+    return json({ ok: true, kind: 'status_not_allowed', order, message: "该出库单已出库，不能再装货 / 이미 출고 완료되어 상차할 수 없습니다" });
+  }
+  if (order.status === 'cancelled') {
+    return json({ ok: true, kind: 'status_not_allowed', order, message: "该出库单已取消 / 해당 출고단은 취소되었습니다" });
+  }
+  if (order.status === 'pending_issue') {
+    return json({ ok: true, kind: 'status_not_allowed', order, message: "该出库单尚未下发，请先打印下发 / 아직 배정되지 않았습니다. 먼저 인쇄하세요" });
+  }
+  if (loadableStatuses.indexOf(order.status) === -1) {
+    return json({ ok: true, kind: 'status_not_allowed', order, message: "当前状态（" + order.status + "）不允许装货" });
+  }
+
+  return json({ ok: true, kind: 'system', order });
+});
+
 route("v2_outbound_load_start", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
   const order_id = String(body.order_id || "").trim();
