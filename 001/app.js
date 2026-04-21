@@ -1658,8 +1658,34 @@ async function refreshImportDeliveryWorkers() {
 async function initOutboundLoad() {
   clearOutboundResolve();
   stopOutboundScan();
+
+  if (_activeJobId) {
+    var res = await api({ action: "v2_ops_job_detail", job_id: _activeJobId });
+    if (res && res.ok && res.job && res.job.job_type === 'load_outbound' && res.job.status === 'working') {
+      showOutboundLoadWorking();
+      refreshLoadWorkers();
+      startJobPoll("load");
+      return;
+    }
+  }
+
+  showOutboundLoadEntry();
   await loadOutboundOrders();
   startJobPoll("load");
+}
+
+function showOutboundLoadEntry() {
+  document.getElementById("obLoadEntryCard").style.display = "";
+  document.getElementById("obLoadActionCard").style.display = "none";
+  document.getElementById("loadResultCard").style.display = "none";
+  document.getElementById("loadInterruptBar").style.display = "none";
+}
+
+function showOutboundLoadWorking() {
+  document.getElementById("obLoadEntryCard").style.display = "none";
+  document.getElementById("obLoadActionCard").style.display = "";
+  document.getElementById("loadResultCard").style.display = "";
+  document.getElementById("loadInterruptBar").style.display = "";
 }
 
 async function loadOutboundOrders() {
@@ -1789,10 +1815,7 @@ async function startOutboundLoad(btnEl) {
       if (!res.already_joined) {
         alert(res.is_new_job ? "已创建装货任务 / 상차 작업 생성됨" : "已加入装货任务 / 상차 작업 참여됨");
       }
-      document.getElementById("loadResultCard").style.display = "";
-      document.getElementById("loadInterruptBar").style.display = "";
-      var actionCard = document.getElementById("obLoadActionCard");
-      if (actionCard) actionCard.style.display = "";
+      showOutboundLoadWorking();
       refreshLoadWorkers();
     } else {
       alert("失败/실패: " + (res ? (res.message || res.error) : "unknown"));
