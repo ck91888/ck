@@ -1681,13 +1681,18 @@ async function loadOrderOpsList() {
   if (!body) return;
   body.innerHTML = '<span class="muted">' + L("loading") + '</span>';
 
+  var searchBtn = document.getElementById("orderOpsSearchBtn");
+  var btnText = searchBtn ? searchBtn.textContent : "";
+  if (searchBtn) { searchBtn.disabled = true; searchBtn.textContent = L("loading"); }
+
   var job_type = (document.getElementById("orderOpsTypeFilter") || {}).value || "";
   var start = (document.getElementById("orderOpsStartDate") || {}).value || "";
   var end = (document.getElementById("orderOpsEndDate") || {}).value || "";
 
   var res = await api({ action: "v2_order_ops_job_list", job_type: job_type, start_date: start, end_date: end });
+  if (searchBtn) { searchBtn.disabled = false; searchBtn.textContent = btnText; }
   if (!res || !res.ok) {
-    body.innerHTML = '<span class="muted">' + L("loading") + '</span>';
+    body.innerHTML = '<span class="muted">' + L("no_data") + '</span>';
     return;
   }
 
@@ -1903,11 +1908,15 @@ async function loadOrderOpsDetail(id) {
 
 // ===== Init =====
 window.addEventListener("DOMContentLoaded", function() {
-  // Set default dates
   var today = kstToday();
   var el;
   el = document.getElementById("oc-date"); if (el) el.value = today;
   el = document.getElementById("ibc-date"); if (el) el.value = today;
+
+  var d7 = new Date(new Date().getTime() + 9*3600000 - 7*86400000);
+  var weekAgo = d7.toISOString().slice(0, 10);
+  el = document.getElementById("orderOpsStartDate"); if (el && !el.value) el.value = weekAgo;
+  el = document.getElementById("orderOpsEndDate"); if (el && !el.value) el.value = today;
 
   checkAutoLogin();
 });

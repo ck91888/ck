@@ -561,6 +561,11 @@ const MIGRATIONS = [
   // ---- 强关联：bulk_op job → 出库单主键 ----
   `ALTER TABLE v2_ops_jobs ADD COLUMN linked_outbound_order_id TEXT DEFAULT ''`,
   `CREATE INDEX IF NOT EXISTS idx_v2_ops_jobs_linked_ob ON v2_ops_jobs(linked_outbound_order_id) WHERE linked_outbound_order_id != ''`,
+
+  // ---- 按单操作列表查询优化索引 ----
+  `CREATE INDEX IF NOT EXISTS idx_v2_ops_jobs_flow_created ON v2_ops_jobs(flow_stage, created_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_ops_jobs_flow_type_created ON v2_ops_jobs(flow_stage, job_type, created_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_ops_results_job_created ON v2_ops_job_results(job_id, created_at)`,
 ];
 
 let _migrated = false;
@@ -3436,38 +3441,51 @@ route("v2_order_ops_job_list", async (body, env) => {
   sql += " ORDER BY created_at DESC LIMIT 200";
   const stmt = env.DB.prepare(sql);
   const rs = binds.length > 0 ? await stmt.bind(...binds).all() : await stmt.all();
+  const jobs = rs.results || [];
+  if (jobs.length === 0) return json({ ok: true, items: [] });
 
-  // Enrich with worker names, pick docs, result
-  const items = [];
-  for (const job of (rs.results || [])) {
-    const workers = await env.DB.prepare(
-      "SELECT worker_name, minutes_worked, left_at FROM v2_ops_job_workers WHERE job_id=? ORDER BY joined_at"
-    ).bind(job.id).all();
-    const workerRows = workers.results || [];
+  const jobIds = jobs.map(j => j.id);
+  const placeholders = jobIds.map(() => '?').join(',');
+
+  const [workersRs, pickDocsRs, resultsRs] = await Promise.all([
+    env.DB.prepare(
+      `SELECT job_id, worker_name, minutes_worked FROM v2_ops_job_workers WHERE job_id IN (${placeholders}) ORDER BY joined_at`
+    ).bind(...jobIds).all(),
+    env.DB.prepare(
+      `SELECT job_id, pick_doc_no FROM v2_ops_job_pick_docs WHERE job_id IN (${placeholders}) ORDER BY created_at`
+    ).bind(...jobIds).all(),
+    env.DB.prepare(
+      `SELECT job_id, remark, result_json, created_at FROM v2_ops_job_results WHERE job_id IN (${placeholders}) ORDER BY created_at DESC`
+    ).bind(...jobIds).all(),
+  ]);
+
+  const workersByJob = {};
+  for (const w of (workersRs.results || [])) {
+    if (!workersByJob[w.job_id]) workersByJob[w.job_id] = [];
+    workersByJob[w.job_id].push(w);
+  }
+  const pickDocsByJob = {};
+  for (const p of (pickDocsRs.results || [])) {
+    if (!pickDocsByJob[p.job_id]) pickDocsByJob[p.job_id] = [];
+    pickDocsByJob[p.job_id].push(p.pick_doc_no);
+  }
+  const latestResultByJob = {};
+  for (const r of (resultsRs.results || [])) {
+    if (!latestResultByJob[r.job_id]) latestResultByJob[r.job_id] = r;
+  }
+
+  const items = jobs.map(job => {
+    const workerRows = workersByJob[job.id] || [];
     const names = [...new Set(workerRows.map(w => w.worker_name).filter(Boolean))];
     const totalMin = workerRows.reduce((s, w) => s + (Number(w.minutes_worked) || 0), 0);
-
-    // Pick docs (if pick_direct)
-    let pickDocs = [];
-    if (job.job_type === 'pick_direct') {
-      const pds = await env.DB.prepare(
-        "SELECT pick_doc_no FROM v2_ops_job_pick_docs WHERE job_id=? ORDER BY created_at"
-      ).bind(job.id).all();
-      pickDocs = (pds.results || []).map(r => r.pick_doc_no);
-    }
-
-    // Latest result
-    const latestResult = await env.DB.prepare(
-      "SELECT remark, result_json, created_at FROM v2_ops_job_results WHERE job_id=? ORDER BY created_at DESC LIMIT 1"
-    ).bind(job.id).first();
-
+    const pickDocs = (job.job_type === 'pick_direct') ? (pickDocsByJob[job.id] || []) : [];
+    const lr = latestResultByJob[job.id];
     let resultData = null, remark = "";
-    if (latestResult) {
-      remark = latestResult.remark || "";
-      try { resultData = JSON.parse(latestResult.result_json); } catch(e) {}
+    if (lr) {
+      remark = lr.remark || "";
+      try { resultData = JSON.parse(lr.result_json); } catch(e) {}
     }
-
-    items.push({
+    return {
       ...job,
       worker_names: names,
       worker_names_text: names.join(", "),
@@ -3475,8 +3493,8 @@ route("v2_order_ops_job_list", async (body, env) => {
       pick_doc_nos: pickDocs,
       result_data: resultData,
       result_remark: remark
-    });
-  }
+    };
+  });
 
   return json({ ok: true, items });
 });
