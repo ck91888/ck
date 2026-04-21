@@ -543,6 +543,45 @@
   <div style="padding:12px;">
     <button class="btn btn-primary" onclick="goPage('generic_job',{flow_stage:'import',job_type:'scan_pallet',biz_class:'import',title:'过机扫描/스캔'})">过机扫描 / 스캔</button>
     <button class="btn btn-primary" onclick="goPage('generic_job',{flow_stage:'import',job_type:'load_import',biz_class:'import',title:'装柜出货/적재 출고'})">装柜出货 / 적재 출고</button>
+    <button class="btn btn-primary" onclick="goPage('import_delivery')">外出取/送货 / 외부 픽업·배송</button>
+  </div>
+</div>
+
+<!-- Import Delivery -->
+<div id="page-import_delivery" class="page">
+  <div class="topbar">
+    <button class="back-btn" onclick="goPage('import_menu')">← 返回/뒤로</button>
+    <div class="page-title">外出取/送货 / 외부 픽업·배송</div>
+  </div>
+  <div id="idEntryCard" class="card">
+    <div style="background:#e3f2fd;border-left:3px solid #2196f3;padding:8px 10px;margin-bottom:10px;font-size:12px;line-height:1.6;">
+      开始后自动计时，完成时填写去向和大概件数。<br>
+      시작 후 자동 시간 기록, 완료 시 목적지와 대략적인 수량을 입력하세요.
+    </div>
+    <button class="btn btn-success" onclick="startImportDelivery(this)">开始外出 / 외부 출발</button>
+  </div>
+  <div id="idWorkingCard" style="display:none;">
+    <div class="card">
+      <div class="card-title">外出中 / 외부 작업 중</div>
+      <div id="idSessionInfo" style="font-size:13px;line-height:1.8;"><span class="muted">--</span></div>
+    </div>
+    <div class="card">
+      <div class="card-title">当前参与人员 / 현재 참여 인원</div>
+      <div id="idWorkers" class="workers-panel"><span class="muted">--</span></div>
+    </div>
+    <div class="card">
+      <div class="card-title">完成记录 / 완료 기록</div>
+      <label>去哪儿 / 목적지 <span style="color:#e74c3c;">*</span></label>
+      <input id="idDestination" type="text" placeholder="例如：XX 码头 / 예: XX 부두">
+      <label style="margin-top:8px;">大概件数 / 대략 수량</label>
+      <input id="idPieceCount" type="number" placeholder="0">
+      <label style="margin-top:8px;">备注 / 비고</label>
+      <textarea id="idRemark" rows="2" placeholder="其他说明 / 기타 설명"></textarea>
+      <div style="height:10px"></div>
+      <button class="btn btn-success" onclick="finishImportDelivery(this)">完成外出 / 외부 작업 완료</button>
+      <div style="height:8px"></div>
+      <button class="btn btn-outline" onclick="leaveImportDelivery(this)">暂时离开 / 일시 퇴장</button>
+    </div>
   </div>
 </div>
 

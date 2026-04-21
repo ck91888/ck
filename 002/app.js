@@ -1861,6 +1861,21 @@ async function loadOrderOpsDetail(id) {
               html += '</div>';
             }
           }
+          if (j.job_type === 'pickup_delivery_import') {
+            var pdFields = [
+              ["目的地/목적지", rd.destination_note],
+              ["大概件数/대략 수량", rd.estimated_piece_count]
+            ];
+            var pdValid = pdFields.filter(function(f) { return f[1] !== undefined && f[1] !== "" && f[1] !== 0; });
+            if (pdValid.length > 0) {
+              html += '<div class="detail-field" style="margin-top:6px;"><b>外出记录:</b></div>';
+              html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:4px 12px;font-size:12px;margin-top:4px;">';
+              pdValid.forEach(function(f) {
+                html += '<div><span style="color:#888;">' + esc(f[0]) + ':</span> <b>' + esc(String(f[1])) + '</b></div>';
+              });
+              html += '</div>';
+            }
+          }
         } catch(e) {}
       }
       html += '</div>';

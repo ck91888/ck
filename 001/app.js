@@ -195,6 +195,7 @@ function showPage(name) {
   if (name === "generic_job") initGenericJob();
   if (name === "pick_direct") initPickDirect();
   if (name === "bulk_op") initBulkOp();
+  if (name === "import_delivery") initImportDelivery();
 }
 
 // ===== Badge Entry (replaces old login) =====
@@ -502,6 +503,7 @@ function goMyTask() {
     else if (jt === "pick_direct") goPage("pick_direct");
     else if (jt === "bulk_op") goPage("bulk_op");
     else if (jt === "issue_handle") goPage("issue_detail");
+    else if (jt === "pickup_delivery_import") goPage("import_delivery");
     else goPage("generic_job", {
       flow_stage: res.job.flow_stage || "",
       biz_class: res.job.biz_class || "",
@@ -526,7 +528,8 @@ var JOB_TYPE_LABEL = {
   issue_handle: "问题点处理/이슈 처리",
   other_internal: "其他库内/기타 창고작업",
   scan_pallet: "过机扫描/스캔",
-  load_import: "装柜出货/적재 출고"
+  load_import: "装柜出货/적재 출고",
+  pickup_delivery_import: "外出取/送货/외부 픽업·배송"
 };
 
 var STATUS_LABEL = {
@@ -1133,6 +1136,7 @@ function startJobPoll(type) {
     if (type === "generic") refreshGenericWorkers();
     if (type === "pick") refreshPickWorkers();
     if (type === "bulk") refreshBulkWorkers();
+    if (type === "import_delivery") refreshImportDeliveryWorkers();
   }, 5000);
 }
 
@@ -1514,6 +1518,115 @@ async function refreshInboundReturnWorkers() {
   if (!_activeJobId) return;
   var res = await api({ action: "v2_ops_job_detail", job_id: _activeJobId });
   if (res && res.ok) renderWorkers("inboundReturnWorkers", res.workers);
+}
+
+// ===== Import Delivery (外出取/送货) =====
+async function initImportDelivery() {
+  if (_activeJobId) {
+    var res = await api({ action: "v2_ops_job_detail", job_id: _activeJobId });
+    if (res && res.ok && res.job && res.job.job_type === 'pickup_delivery_import' && res.job.status === 'working') {
+      document.getElementById("idEntryCard").style.display = "none";
+      document.getElementById("idWorkingCard").style.display = "";
+      renderImportDeliverySession(res.job);
+      refreshImportDeliveryWorkers();
+      startJobPoll("import_delivery");
+      return;
+    }
+  }
+  document.getElementById("idEntryCard").style.display = "";
+  document.getElementById("idWorkingCard").style.display = "none";
+  var d = document.getElementById("idDestination"); if (d) d.value = '';
+  var p = document.getElementById("idPieceCount"); if (p) p.value = '';
+  var r = document.getElementById("idRemark"); if (r) r.value = '';
+}
+
+function renderImportDeliverySession(job) {
+  var el = document.getElementById("idSessionInfo");
+  if (!el) return;
+  var html = '<div><b>任务号/작업번호:</b> ' + esc(job.id) + '</div>';
+  el.innerHTML = html;
+}
+
+async function startImportDelivery(btnEl) {
+  withActionLock('startImportDelivery', btnEl || null, '提交中.../저장중...', async function() {
+    var res = await api({
+      action: "v2_import_delivery_job_start",
+      worker_id: getWorkerId(),
+      worker_name: getWorkerName()
+    });
+    if (res && res.ok) {
+      saveActiveJob(res.job_id, res.worker_seg_id);
+      alert("已开始外出 / 외부 출발 완료");
+      document.getElementById("idEntryCard").style.display = "none";
+      document.getElementById("idWorkingCard").style.display = "";
+      var jobRes = await api({ action: "v2_ops_job_detail", job_id: res.job_id });
+      if (jobRes && jobRes.ok) renderImportDeliverySession(jobRes.job);
+      refreshImportDeliveryWorkers();
+      startJobPoll("import_delivery");
+    } else {
+      alert("失败/실패: " + (res ? res.error : "unknown"));
+    }
+  });
+}
+
+async function finishImportDelivery(btnEl) {
+  if (!_activeJobId) { alert("没有进行中的任务 / 진행 중인 작업 없음"); return; }
+  var dest = ((document.getElementById("idDestination") || {}).value || "").trim();
+  if (!dest) { alert("请填写去向 / 목적지를 입력하세요"); return; }
+  var pieceCount = parseInt((document.getElementById("idPieceCount") || {}).value || "0", 10) || 0;
+  var remark = ((document.getElementById("idRemark") || {}).value || "").trim();
+  withActionLock('finishImportDelivery', btnEl || null, '提交中.../저장중...', async function() {
+    var res = await api({
+      action: "v2_import_delivery_job_finish",
+      job_id: _activeJobId,
+      worker_id: getWorkerId(),
+      complete_job: true,
+      destination_note: dest,
+      estimated_piece_count: pieceCount,
+      remark: remark
+    });
+    if (res && res.ok) {
+      alert("外出任务完成 / 외부 작업 완료");
+      clearActiveJob();
+      goPage("home");
+    } else if (res && res.error === "already_completed") {
+      alert("任务已完成，请勿重复提交\n작업이 이미 완료되었습니다");
+      clearActiveJob();
+      goPage("home");
+    } else if (res && res.error === "others_still_working") {
+      var _n = res.active_worker_count || res.active_count || "?";
+      alert("您已退出此任务，还有 " + _n + " 人继续作业\n현재 작업에서 퇴장했습니다. " + _n + "명이 계속 작업 중입니다");
+      clearActiveJob();
+      goPage("home");
+    } else {
+      alert("失败/실패: " + (res ? res.error : "unknown"));
+    }
+  });
+}
+
+async function leaveImportDelivery(btnEl) {
+  if (!_activeJobId) return;
+  if (!confirm("确认暂时离开？/ 일시 퇴장하시겠습니까?")) return;
+  withActionLock('leaveImportDelivery', btnEl || null, '提交中.../저장중...', async function() {
+    var res = await api({
+      action: "v2_import_delivery_job_finish",
+      job_id: _activeJobId,
+      worker_id: getWorkerId(),
+      leave_only: true
+    });
+    if (res && res.ok) {
+      clearActiveJob();
+      goPage("home");
+    } else {
+      alert("失败/실패: " + (res ? res.error : "unknown"));
+    }
+  });
+}
+
+async function refreshImportDeliveryWorkers() {
+  if (!_activeJobId) return;
+  var res = await api({ action: "v2_ops_job_detail", job_id: _activeJobId });
+  if (res && res.ok) renderWorkers("idWorkers", res.workers);
 }
 
 // ===== Outbound Load =====
