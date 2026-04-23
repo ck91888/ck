@@ -53,7 +53,7 @@ function setUser(u) { try { localStorage.setItem(V2_USER_KEY, u); } catch(e) {} 
 // 写操作 action 集合 — 自动注入 client_req_id 供后端幂等
 var _WRITE_ACTIONS = [
   'v2_issue_create','v2_issue_handle_start','v2_issue_handle_finish',
-  'v2_issue_close','v2_issue_cancel',
+  'v2_issue_close','v2_issue_cancel','v2_issue_rework',
   'v2_outbound_order_create','v2_outbound_order_update_status',
   'v2_outbound_load_start','v2_outbound_load_finish',
   'v2_inbound_plan_create','v2_inbound_plan_update_status','v2_inbound_plan_cancel',
@@ -362,7 +362,7 @@ async function loadDashboard() {
   var obItems = (outbounds && outbounds.items) || [];
   var ibItems = ((inbounds && inbounds.items) || []).filter(function(p) { return p.source_type !== 'return_session'; });
 
-  var pendingIssues = issueItems.filter(function(i) { return i.status === "pending" || i.status === "processing"; });
+  var pendingIssues = issueItems.filter(function(i) { return i.status === "pending" || i.status === "processing" || i.status === "responded" || i.status === "rework_required"; });
   var pendingOb = obItems.filter(function(o) { return o.status === "pending_issue" || o.status === "issued" || o.status === "working" || o.status === "ready_to_ship"; });
   var pendingIb = ibItems.filter(function(p) { return p.status === "pending" || p.status === "unloading" || p.status === "unloading_putting_away" || p.status === "arrived_pending_putaway" || p.status === "putting_away"; });
   var fbItems = (feedbacks && feedbacks.items) || [];
@@ -619,11 +619,23 @@ async function loadIssueDetail() {
     html += '</div>';
   }
 
+  // Rework note
+  if (it.rework_note) {
+    html += '<div class="card" style="border-left:3px solid #e65100;">';
+    html += '<div class="card-title" style="color:#e65100;">' + L("rework_note") + '</div>';
+    html += '<div style="white-space:pre-wrap;">' + esc(it.rework_note) + '</div>';
+    html += '</div>';
+  }
+
   // Actions
-  if (it.status !== "closed" && it.status !== "cancelled") {
+  if (it.status !== "completed" && it.status !== "closed" && it.status !== "cancelled") {
     html += '<div class="card">';
-    if (it.status === "responded" || it.status === "pending" || it.status === "processing") {
-      html += '<button class="btn btn-success" onclick="closeIssue(this)">' + L("close_issue") + '</button> ';
+    if (it.status === "responded" || it.status === "rework_required") {
+      html += '<button class="btn btn-success" onclick="completeIssue(this)">' + L("complete_issue") + '</button> ';
+      html += '<button class="btn btn-warning" onclick="reworkIssue(this)">' + L("rework_issue") + '</button> ';
+    }
+    if (it.status === "pending" || it.status === "processing") {
+      html += '<button class="btn btn-success" onclick="completeIssue(this)">' + L("complete_issue") + '</button> ';
     }
     html += '<button class="btn btn-danger" onclick="cancelIssue(this)">' + L("cancel_issue") + '</button>';
     html += '<div style="margin-top:10px;"><label>' + L("attachments") + '</label>';
@@ -636,12 +648,26 @@ async function loadIssueDetail() {
   body.innerHTML = html;
 }
 
-async function closeIssue(btnEl) {
-  if (!confirm(L("confirm") + "?")) return;
-  withActionLock('closeIssue', btnEl || null, '提交中.../저장중...', async function() {
+async function completeIssue(btnEl) {
+  if (!confirm(L("confirm_complete_issue") + "?")) return;
+  withActionLock('completeIssue', btnEl || null, '提交中.../저장중...', async function() {
     var res = await api({ action: "v2_issue_close", id: _currentIssueId });
     if (res && res.ok) {
-      alert(L("status_closed"));
+      alert(L("status_completed"));
+      loadIssueDetail();
+    } else {
+      alert("失败: " + (res ? res.error : "unknown"));
+    }
+  });
+}
+
+async function reworkIssue(btnEl) {
+  var note = prompt(L("rework_prompt"));
+  if (!note || !note.trim()) return;
+  withActionLock('reworkIssue', btnEl || null, '提交中.../저장중...', async function() {
+    var res = await api({ action: "v2_issue_rework", id: _currentIssueId, rework_note: note.trim() });
+    if (res && res.ok) {
+      alert(L("rework_sent"));
       loadIssueDetail();
     } else {
       alert("失败: " + (res ? res.error : "unknown"));

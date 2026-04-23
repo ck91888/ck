@@ -565,6 +565,16 @@ var STATUS_LABEL = {
   converted: "已转正/전환완료"
 };
 
+var ISSUE_STATUS_LABEL = {
+  pending: "待处理/대기중",
+  processing: "处理中/처리중",
+  responded: "已反馈/피드백완료",
+  rework_required: "需追加处理/추가처리필요",
+  completed: "已完成/완료",
+  closed: "已完成/완료",
+  cancelled: "已作废/취소됨"
+};
+
 var BIZ_LABEL = {
   direct_ship: "代发/직배송",
   bulk: "大货/대량화물",
@@ -1893,9 +1903,11 @@ async function loadIssueList() {
   if (!body) return;
   body.innerHTML = '<div class="card"><span class="muted">加载中.../로딩중...</span></div>';
 
-  var statusMap = { pending: "pending", processing: "processing", my: "", responded: "responded" };
+  var statusMap = { pending: "pending", processing: "processing", my: "", responded: "responded", rework: "rework_required" };
   var status = statusMap[_issueFilter] || "";
-  var res = await api({ action: "v2_issue_ops_list", status: status });
+  var bizSel = document.getElementById("issueBizFilter");
+  var bizVal = bizSel ? bizSel.value : "";
+  var res = await api({ action: "v2_issue_ops_list", status: status, biz_class: bizVal });
 
   if (!res || !res.ok) {
     body.innerHTML = '<div class="card"><span class="muted">加载失败/로딩 실패</span></div>';
@@ -1904,8 +1916,7 @@ async function loadIssueList() {
 
   var items = res.items || [];
   if (_issueFilter === "my") {
-    // Show processing + responded
-    items = items.filter(function(it) { return it.status === "processing" || it.status === "responded"; });
+    items = items.filter(function(it) { return it.status === "processing" || it.status === "responded" || it.status === "rework_required"; });
   }
 
   if (items.length === 0) {
@@ -1917,7 +1928,7 @@ async function loadIssueList() {
   items.forEach(function(it) {
     html += '<div class="list-item" onclick="openIssue(\'' + esc(it.id) + '\')">' +
       '<div class="item-title">' +
-        '<span class="st st-' + esc(it.status) + '">' + esc(STATUS_LABEL[it.status] || it.status) + '</span> ' +
+        '<span class="st st-' + esc(it.status) + '">' + esc(ISSUE_STATUS_LABEL[it.status] || it.status) + '</span> ' +
         '<span class="biz-tag biz-' + esc(it.biz_class) + '">' + esc(BIZ_LABEL[it.biz_class] || it.biz_class) + '</span> ' +
         '<span class="priority-' + esc(it.priority) + '">' + esc(PRIORITY_LABEL[it.priority] || it.priority) + '</span>' +
       '</div>' +
@@ -1963,7 +1974,7 @@ async function loadIssueDetail() {
 
   var html = '<div class="card">';
   html += '<div style="font-size:18px;font-weight:700;margin-bottom:8px;">' + esc(it.issue_summary || "(无摘要)") + '</div>';
-  html += '<div class="detail-field"><b>状态/상태:</b> <span class="st st-' + esc(it.status) + '">' + esc(STATUS_LABEL[it.status] || it.status) + '</span></div>';
+  html += '<div class="detail-field"><b>状态/상태:</b> <span class="st st-' + esc(it.status) + '">' + esc(ISSUE_STATUS_LABEL[it.status] || it.status) + '</span></div>';
   html += '<div class="detail-field"><b>业务/업무:</b> <span class="biz-tag biz-' + esc(it.biz_class) + '">' + esc(BIZ_LABEL[it.biz_class] || it.biz_class) + '</span></div>';
   html += '<div class="detail-field"><b>优先级/우선순위:</b> ' + esc(PRIORITY_LABEL[it.priority] || it.priority) + '</div>';
   html += '<div class="detail-field"><b>客户/고객:</b> ' + esc(it.customer) + '</div>';
@@ -1975,6 +1986,9 @@ async function loadIssueDetail() {
 
   if (it.latest_feedback_text) {
     html += '<div class="detail-section"><b>最新反馈/최신 피드백:</b><div style="margin-top:4px;white-space:pre-wrap;">' + esc(it.latest_feedback_text) + '</div></div>';
+  }
+  if (it.rework_note) {
+    html += '<div class="detail-section" style="border-left:3px solid #e65100;padding-left:8px;"><b>追加处理要求/추가처리 요청:</b><div style="margin-top:4px;white-space:pre-wrap;color:#e65100;">' + esc(it.rework_note) + '</div></div>';
   }
   if (it.total_minutes_worked > 0) {
     html += '<div class="detail-field"><b>累计工时/누적 작업시간:</b> ' + it.total_minutes_worked.toFixed(1) + ' 分钟/분</div>';
@@ -1995,17 +2009,18 @@ async function loadIssueDetail() {
   }
 
   // Actions
-  if (it.status === "pending" || it.status === "processing") {
+  if (it.status === "pending" || it.status === "processing" || it.status === "rework_required") {
     html += '<div class="card">';
-    if (it.status === "pending") {
+    if (it.status === "pending" || it.status === "rework_required") {
       html += '<button class="btn btn-success" onclick="handleIssueStart(this)">开始处理 / 처리 시작</button>';
     }
     if (it.status === "processing") {
-      html += '<div class="detail-section"><label>反馈内容 / 피드백 내용</label>';
-      html += '<textarea id="issueFeedback" rows="3" placeholder="输入处理结果 / 처리 결과를 입력하세요"></textarea>';
+      html += '<div class="detail-section"><label>反馈内容 / 피드백 내용 <span style="color:red;">*必填/필수</span></label>';
+      html += '<textarea id="issueFeedback" rows="3" placeholder="输入处理结果 / 처리 결과를 입력하세요 (必填/필수)"></textarea>';
       html += '<label>上传照片 / 사진 업로드</label>';
       html += '<div class="photo-upload" id="issuePhotos"><div class="photo-add" onclick="uploadPhoto(\'issue_ticket\',\'feedback_photo\')">+</div></div>';
       html += '<button class="btn btn-danger mt-10" onclick="handleIssueFinish(this)">结束处理 / 처리 종료</button>';
+      html += '<button class="btn btn-outline mt-10" onclick="handleIssueLeave(this)">暂时离开 / 일시 퇴장</button>';
       html += '</div>';
     }
     html += '</div>';
@@ -2030,6 +2045,7 @@ async function loadIssueDetail() {
 }
 
 async function handleIssueStart(btnEl) {
+  if (hasOtherActiveJob()) return warnActiveJob();
   withActionLock('handleIssueStart', btnEl || null, '提交中.../저장중...', async function() {
     var res = await api({
       action: "v2_issue_handle_start",
@@ -2049,13 +2065,13 @@ async function handleIssueStart(btnEl) {
 }
 
 async function handleIssueFinish(btnEl) {
+  var feedback = document.getElementById("issueFeedback");
+  var feedbackText = feedback ? feedback.value.trim() : "";
+  if (!feedbackText) {
+    alert("请填写处理结果后再提交 / 처리 결과를 입력한 후 제출하세요");
+    return;
+  }
   withActionLock('handleIssueFinish', btnEl || null, '提交中.../저장중...', async function() {
-    if (!_currentRunId && _activeJobId) {
-      // Try to find the run from job
-      var jobRes = await api({ action: "v2_ops_job_detail", job_id: _activeJobId });
-    }
-
-    // Find latest working run for this issue
     var detailRes = await api({ action: "v2_issue_detail", id: _currentIssueId });
     var runs = (detailRes && detailRes.handle_runs) || [];
     var workingRun = runs.find(function(r) { return r.run_status === "working"; });
@@ -2064,9 +2080,6 @@ async function handleIssueFinish(btnEl) {
       return;
     }
 
-    var feedback = document.getElementById("issueFeedback");
-    var feedbackText = feedback ? feedback.value.trim() : "";
-
     var res = await api({
       action: "v2_issue_handle_finish",
       run_id: workingRun.id,
@@ -2074,11 +2087,30 @@ async function handleIssueFinish(btnEl) {
     });
 
     if (res && res.ok) {
-      alert("处理完成 / 처리 완료\n工시/작업시간: " + res.minutes_worked.toFixed(1) + " 分钟/분");
+      alert("处理完成 / 처리 완료\n工时/작업시간: " + res.minutes_worked.toFixed(1) + " 分钟/분");
       clearActiveJob();
       loadIssueDetail();
     } else {
       alert("失败/실패: " + (res ? res.error : "unknown"));
+    }
+  });
+}
+
+async function handleIssueLeave(btnEl) {
+  if (!_activeJobId) return;
+  withActionLock('handleIssueLeave', btnEl || null, '提交中.../저장중...', async function() {
+    var res = await api({
+      action: "v2_ops_job_leave",
+      job_id: _activeJobId,
+      worker_id: getWorkerId(),
+      leave_reason: "leave"
+    });
+    if (res && res.ok) {
+      clearActiveJob();
+      alert("已暂时离开问题点处理，可稍后重新开始\n이슈 처리에서 일시 퇴장했습니다. 나중에 다시 시작할 수 있습니다");
+      loadIssueDetail();
+    } else {
+      alert("失败/실패: " + (res ? (res.message || res.error) : "unknown"));
     }
   });
 }

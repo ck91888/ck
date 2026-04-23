@@ -598,8 +598,18 @@
   <div class="tab-bar">
     <button class="active" onclick="filterIssues('pending',this)">待处理/대기중</button>
     <button onclick="filterIssues('processing',this)">处理中/처리중</button>
+    <button onclick="filterIssues('rework',this)">需追加/추가처리</button>
     <button onclick="filterIssues('my',this)">我处理的/내 처리건</button>
     <button onclick="filterIssues('responded',this)">已反馈/완료</button>
+  </div>
+  <div style="padding:8px 12px 0;">
+    <select id="issueBizFilter" onchange="loadIssueList()" style="width:100%;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:13px;">
+      <option value="">全部业务/전체 업무</option>
+      <option value="direct_ship">代发/직배송</option>
+      <option value="bulk">大货/대량화물</option>
+      <option value="return">退件/반품</option>
+      <option value="import">进口/수입</option>
+    </select>
   </div>
   <div id="issueListBody"></div>
   <div style="padding:12px;">

@@ -575,6 +575,9 @@ const MIGRATIONS = [
   `CREATE INDEX IF NOT EXISTS idx_v2_ops_jobs_flow_created ON v2_ops_jobs(flow_stage, created_at)`,
   `CREATE INDEX IF NOT EXISTS idx_v2_ops_jobs_flow_type_created ON v2_ops_jobs(flow_stage, job_type, created_at)`,
   `CREATE INDEX IF NOT EXISTS idx_v2_ops_results_job_created ON v2_ops_job_results(job_id, created_at)`,
+
+  // ---- issue rework_note 字段 ----
+  `ALTER TABLE v2_issue_tickets ADD COLUMN rework_note TEXT DEFAULT ''`,
 ];
 
 let _migrated = false;
@@ -671,8 +674,20 @@ route("v2_issue_close", async (body, env) => {
   const id = String(body.id || "").trim();
   if (!id) return err("missing id");
   await env.DB.prepare(
-    "UPDATE v2_issue_tickets SET status='closed', updated_at=? WHERE id=?"
+    "UPDATE v2_issue_tickets SET status='completed', updated_at=? WHERE id=?"
   ).bind(now(), id).run();
+  return json({ ok: true });
+});
+
+route("v2_issue_rework", async (body, env) => {
+  if (!isAuth(body, env)) return err("unauthorized", 401);
+  const id = String(body.id || "").trim();
+  const rework_note = String(body.rework_note || "").trim();
+  if (!id) return err("missing id");
+  if (!rework_note) return err("missing rework_note");
+  await env.DB.prepare(
+    "UPDATE v2_issue_tickets SET status='rework_required', rework_note=?, updated_at=? WHERE id=?"
+  ).bind(rework_note, now(), id).run();
   return json({ ok: true });
 });
 
@@ -692,9 +707,11 @@ route("v2_issue_cancel", async (body, env) => {
 route("v2_issue_ops_list", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
   const status = String(body.status || "").trim();
+  const biz_class = String(body.biz_class || "").trim();
   let sql = "SELECT * FROM v2_issue_tickets WHERE 1=1";
   const binds = [];
   if (status) { sql += " AND status=?"; binds.push(status); }
+  if (biz_class) { sql += " AND biz_class=?"; binds.push(biz_class); }
   sql += " ORDER BY CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END, created_at DESC LIMIT 200";
   const stmt = env.DB.prepare(sql);
   const rs = binds.length > 0 ? await stmt.bind(...binds).all() : await stmt.all();
@@ -709,9 +726,12 @@ route("v2_issue_handle_start", async (body, env) => {
   if (!issue_id || !handler_id) return err("missing issue_id or handler_id");
 
   return withIdem(env, body, "v2_issue_handle_start", async () => {
+    const busy = await checkWorkerBusy(env, handler_id);
+    if (busy) return { ok: false, error: "worker_busy", busy_job_type: busy.job_type };
+
     const issue = await env.DB.prepare("SELECT * FROM v2_issue_tickets WHERE id=?").bind(issue_id).first();
     if (!issue) return { ok: false, error: "issue not found" };
-    if (issue.status === "closed" || issue.status === "cancelled") return { ok: false, error: "issue already " + issue.status };
+    if (issue.status === "closed" || issue.status === "cancelled" || issue.status === "completed") return { ok: false, error: "issue already " + issue.status };
 
     const t = now();
     const job_id = "JOB-" + uid();
@@ -747,6 +767,7 @@ route("v2_issue_handle_finish", async (body, env) => {
   const run_id = String(body.run_id || "").trim();
   const feedback_text = String(body.feedback_text || "").trim();
   if (!run_id) return err("missing run_id");
+  if (!feedback_text) return err("missing feedback_text");
 
   const run = await env.DB.prepare("SELECT * FROM v2_issue_handle_runs WHERE id=?").bind(run_id).first();
   if (!run) return err("run not found", 404);

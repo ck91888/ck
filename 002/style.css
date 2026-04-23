@@ -153,6 +153,7 @@ body {
 .st-ready_to_ship { background: #2196f3; }
 .st-shipped { background: #1565c0; color: #fff; }
 .st-reopen_pending { background: #e91e63; }
+.st-rework_required { background: #e65100; color: #fff; }
 .st-arrived { background: #3498db; }
 .st-field_working { background: #e74c3c; }
 .st-unloaded_pending_info { background: #ff9800; }
@@ -207,6 +208,7 @@ select { cursor: pointer; }
 .btn-primary { background: #1565c0; color: #fff; }
 .btn-success { background: #27ae60; color: #fff; }
 .btn-danger { background: #e74c3c; color: #fff; }
+.btn-warning { background: #f39c12; color: #fff; }
 .btn-outline { background: #fff; color: #333; border: 1px solid #ddd; }
 .btn-sm { padding: 6px 14px; font-size: 12px; }
 .btn-full { display: block; width: 100%; text-align: center; }

@@ -195,6 +195,7 @@ body {
 .st-ready_to_ship { background: #2196f3; }
 .st-shipped { background: #1565c0; color: #fff; }
 .st-reopen_pending { background: #e91e63; }
+.st-rework_required { background: #e65100; color: #fff; }
 .st-arrived { background: #3498db; }
 .st-awaiting_close { background: #8e44ad; }
 .st-field_working { background: #e74c3c; }
