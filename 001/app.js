@@ -603,14 +603,8 @@ var BIZ_LABEL = {
   import: "进口/수입"
 };
 
-// PRIORITY_LABEL: 业务规则改为 FIFO（按发布时间先后处理），UI 不再展示优先级标签。
-// 仅保留以兼容旧数据 priority 字段（v2_issue_tickets.priority），如未来需要恢复展示直接引用即可。
-var PRIORITY_LABEL = {
-  urgent: "🔴 紧急/긴급",
-  high: "🟠 高/높음",
-  normal: "普通/보통",
-  low: "低/낮음"
-};
+// PRIORITY_LABEL 已下线：业务规则改为 FIFO（按发布时间先后处理），UI 不再展示优先级。
+// 数据库 v2_issue_tickets.priority 字段保留，后端 v2_issue_create 默认 'normal'，向后兼容旧数据。
 
 // ===== Unload =====
 var UNIT_TYPES = [

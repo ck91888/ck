@@ -1130,12 +1130,25 @@ async function loadInboundList() {
     body.innerHTML = '<div class="card muted">' + L("no_data") + '</div>';
     return;
   }
+  // plan_date 倒序，同日按 created_at 倒序（最新计划在上）
+  items.sort(function(a, b) {
+    var da = String(a.plan_date || ''), db = String(b.plan_date || '');
+    if (da !== db) return db.localeCompare(da);
+    return String(b.created_at || '').localeCompare(String(a.created_at || ''));
+  });
 
   var html = '<div class="card">';
   items.forEach(function(p) {
+    var dynTag = '';
+    if (p.source_type === 'from_feedback') {
+      dynTag = '<span style="background:#8e24aa;color:#fff;font-size:10px;padding:1px 4px;border-radius:2px;margin-right:4px;">反馈转正</span>';
+    } else if (p.source_type === 'field_dynamic') {
+      dynTag = '<span style="background:#ff9800;color:#fff;font-size:10px;padding:1px 4px;border-radius:2px;margin-right:4px;">动态</span>';
+    }
     html += '<div class="list-item" onclick="openInboundDetail(\'' + esc(p.id) + '\')">';
     html += '<div class="item-title">';
     html += '<span class="st st-' + esc(p.status) + '">' + esc(inboundStatusLabel(p.status)) + '</span> ';
+    html += dynTag;
     html += '<span class="biz-tag biz-' + esc(p.biz_class) + '">' + esc(bizLabel(p.biz_class)) + '</span> ';
     html += esc(p.display_no || p.id) + ' · ' + esc(p.customer || "--") + ' · ' + esc(p.cargo_summary || "");
     html += '</div>';
@@ -1183,7 +1196,10 @@ function toggleIbcAutoOb() {
 
 async function submitInbound(btnEl) {
   var customer = document.getElementById("ibc-customer").value.trim();
-  if (!customer) { alert(L("customer") + " " + L("required") + "!"); return; }
+  if (!customer) { alert("请填写客户 / 고객을 입력하세요"); return; }
+  // 严格校验：必须至少有一行 planned_qty>0 的明细
+  var linesPre = getIbcLines();
+  if (linesPre.length === 0) { alert("请至少填写一行货物明细 / 화물 명세를 1건 이상 입력하세요"); return; }
   withActionLock('submitInbound', btnEl || null, '提交中.../저장중...', async function() {
     var date = document.getElementById("ibc-date").value || kstToday();
     var biz = document.getElementById("ibc-biz").value;
@@ -1191,8 +1207,12 @@ async function submitInbound(btnEl) {
     var arrival = document.getElementById("ibc-arrival").value.trim();
     var purpose = document.getElementById("ibc-purpose").value.trim();
     var remark = document.getElementById("ibc-remark").value.trim();
-    var lines = getIbcLines();
+    var lines = linesPre;
     var autoOb = document.getElementById("ibc-auto-ob").checked;
+    // 货物摘要为空时，自动用明细生成
+    if (!cargo) {
+      cargo = lines.map(function(ln) { return unitTypeLabel(ln.unit_type) + ' ' + ln.planned_qty; }).join(' / ');
+    }
 
     var payload = {
       action: "v2_inbound_plan_create",
@@ -1223,7 +1243,7 @@ async function submitInbound(btnEl) {
     var res = await api(payload);
 
     if (res && res.ok) {
-      var msg = L("success") + ": " + res.id;
+      var msg = "已创建 / 생성됨: " + (res.display_no || res.id);
       if (res.outbound_id) msg += "\n" + L("auto_create_outbound") + ": " + (res.outbound_display_no || res.outbound_id);
       alert(msg);
       document.getElementById("ibc-customer").value = "";
@@ -1234,11 +1254,18 @@ async function submitInbound(btnEl) {
       document.getElementById("ibcLinesBody").innerHTML = "";
       document.getElementById("ibc-auto-ob").checked = false;
       document.getElementById("ibcAutoObFields").style.display = "none";
+      ensureFirstIbcLine();
       goTab("inbound");
     } else {
-      alert(L("error") + ": " + (res ? res.error : "unknown"));
+      alert("失败 / 실패: " + (res ? res.error : "unknown"));
     }
   });
+}
+
+// 确保入库创建表单始终存在至少一行明细
+function ensureFirstIbcLine() {
+  var tbody = document.getElementById("ibcLinesBody");
+  if (tbody && !tbody.children.length && typeof addIbcLine === "function") addIbcLine();
 }
 
 // ===== Inbound Detail =====
@@ -1275,6 +1302,9 @@ async function loadInboundDetail() {
   var lines = res.lines || [];
   var jobs = res.jobs || [];
   var atts = res.attachments || [];
+  // 缓存 plan 给 printIbQr / 二维码 A4 单据使用
+  window._currentInboundPlanCache = p;
+  window._currentInboundPretty = p.display_no || p.id;
 
   // --- Basic info: two-column grid ---
   var isDynamic = (p.source_type === 'field_dynamic');
@@ -1467,13 +1497,73 @@ function buildInboundQrHtml(text, cellSize) {
   return qr.createSvgTag({ cellSize: cellSize || 4, margin: 0, scalable: true });
 }
 
+// 入库计划单 A4 打印：左上抬头 + 右上小二维码 + 双列信息 + 明细表 + 签字行
 function printIbQr() {
-  var qrEl = document.getElementById("ibDetailQr");
-  if (!qrEl) return;
-  var win = window.open("", "_blank");
-  win.document.write('<html><head><title>' + _currentInboundId + '</title></head><body style="text-align:center;padding:40px;">' +
-    '<h2>' + esc(_currentInboundId) + '</h2>' + qrEl.innerHTML +
-    '<script>window.print();<\/script></body></html>');
+  var displayNo = window._currentInboundPretty || _currentInboundId || '';
+  var planId = _currentInboundId || '';
+  var plan = window._currentInboundPlanCache || {};
+
+  var qrHtml = '';
+  try { qrHtml = buildInboundQrHtml(displayNo || planId, 3); }
+  catch (e) { qrHtml = '<div style="color:red;font-size:10px;">QR error</div>'; }
+
+  var detailBody = document.getElementById('inboundDetailBody');
+  var tables = detailBody ? detailBody.querySelectorAll('table.line-table') : [];
+  var linesHtml = tables.length ? tables[0].outerHTML : '';
+
+  var bizMap = { direct_ship: '直发/직배송', bulk: '大货/대량', return_op: '退件/반품', inventory_op: '库内/창고' };
+  var bizText = bizMap[plan.biz_class] || plan.biz_class || '';
+
+  var win = window.open('', '_blank');
+  var html = '<!doctype html><html><head><meta charset="utf-8"/><title>' + esc(displayNo) + '</title>' +
+    '<style>' +
+    'body{font-family:"Microsoft YaHei","Helvetica Neue",Arial,sans-serif;margin:20px 30px;color:#000;}' +
+    '.print-header{display:flex;justify-content:space-between;align-items:flex-start;border-bottom:3px solid #000;padding-bottom:10px;margin-bottom:14px;}' +
+    '.print-title{font-size:22px;font-weight:900;}' +
+    '.print-sub{font-size:13px;color:#333;margin-top:4px;}' +
+    '.qr-box{text-align:center;flex-shrink:0;margin-left:20px;}' +
+    '.qr-box svg{width:100px;height:100px;}' +
+    '.qr-label{font-size:10px;color:#666;margin-top:2px;line-height:1.3;}' +
+    '.info-grid{display:grid;grid-template-columns:1fr 1fr;gap:4px 24px;font-size:13px;margin-bottom:14px;}' +
+    '.info-grid .label{font-weight:700;}' +
+    'table{width:100%;border-collapse:collapse;font-size:12px;margin-bottom:14px;}' +
+    'th,td{border:1px solid #333;padding:5px 6px;text-align:left;}' +
+    'th{background:#eee;font-weight:700;}' +
+    '.sig-row{display:flex;gap:40px;margin-top:30px;font-size:13px;}' +
+    '.sig-item{flex:1;}' +
+    '.sig-line{border-bottom:1px solid #333;height:30px;margin-top:4px;}' +
+    '.footer{margin-top:16px;font-size:11px;color:#888;text-align:center;border-top:1px dashed #ccc;padding-top:6px;}' +
+    '@media print{@page{size:A4;margin:15mm 20mm;} body{margin:0;}}' +
+    '</style></head><body>' +
+    '<div class="print-header">' +
+      '<div>' +
+        '<div class="print-title">入库计划单</div>' +
+        '<div class="print-sub">CK 仓储</div>' +
+      '</div>' +
+      '<div class="qr-box">' + qrHtml + '<div class="qr-label">' + esc(displayNo) + '</div></div>' +
+    '</div>' +
+    '<div class="info-grid">' +
+      '<div><span class="label">入库单号：</span>' + esc(displayNo) + '</div>' +
+      '<div><span class="label">货物摘要：</span>' + esc(plan.cargo_summary || '') + '</div>' +
+      '<div><span class="label">计划日期：</span>' + esc(plan.plan_date || '') + '</div>' +
+      '<div><span class="label">预计到达：</span>' + esc(plan.expected_arrival || '--') + '</div>' +
+      '<div><span class="label">客户：</span>' + esc(plan.customer || '') + '</div>' +
+      '<div><span class="label">提出人：</span>' + esc(plan.created_by || '') + '</div>' +
+      '<div><span class="label">业务分类：</span>' + esc(bizText) + '</div>' +
+      (plan.remark ? '<div><span class="label">备注：</span>' + esc(plan.remark) + '</div>' : '') +
+      (plan.purpose ? '<div style="grid-column:1/-1;"><span class="label">入库目的：</span>' + esc(plan.purpose) + '</div>' : '') +
+    '</div>' +
+    linesHtml +
+    '<div class="sig-row">' +
+      '<div class="sig-item"><span class="label">制单人：</span>' + esc(plan.created_by || '') + '<div class="sig-line"></div></div>' +
+      '<div class="sig-item"><span class="label">仓库确认：</span><div class="sig-line"></div></div>' +
+      '<div class="sig-item"><span class="label">客户签收：</span><div class="sig-line"></div></div>' +
+      '<div class="sig-item"><span class="label">日期：</span><div class="sig-line"></div></div>' +
+    '</div>' +
+    '<div class="footer">Printed from CK Warehouse V2</div>' +
+    '<script>window.onload=function(){window.print();}<\/script>' +
+    '</body></html>';
+  win.document.write(html);
   win.document.close();
 }
 
@@ -2458,6 +2548,11 @@ window.addEventListener("DOMContentLoaded", function() {
   var weekAgo = d7.toISOString().slice(0, 10);
   el = document.getElementById("orderOpsStartDate"); if (el && !el.value) el.value = weekAgo;
   el = document.getElementById("orderOpsEndDate"); if (el && !el.value) el.value = today;
+
+  // 入库创建表单：进入时确保至少一行明细，点击"+ 入库计划"后再补一行
+  ensureFirstIbcLine();
+  var btnNI = document.getElementById("btnNewInbound");
+  if (btnNI) btnNI.addEventListener("click", function() { setTimeout(ensureFirstIbcLine, 30); });
 
   checkAutoLogin();
 });

@@ -38,7 +38,6 @@ var LANG = {
     customer: "客户",
     biz_class: "业务分类",
     status: "状态",
-    // priority: "优先级",  // UI 已下线
     submitted_by: "提出人",
     created_at: "创建时间",
     updated_at: "更新时间",
@@ -94,11 +93,7 @@ var LANG = {
     biz_bulk: "大货",
     biz_return: "退件",
     biz_import: "进口",
-    // Priority — UI 已下线，仅保留 i18n 兜底旧数据展示（FIFO 排序后无标签）
-    // priority_urgent: "紧急",
-    // priority_high: "高",
-    // priority_normal: "普通",
-    // priority_low: "低",
+    // Priority i18n 已删除：UI 改为 FIFO 模式，不再展示优先级
     // Inbound
     cargo_summary: "货物摘要",
     expected_arrival: "预计到达",
@@ -233,7 +228,6 @@ var LANG = {
     customer: "고객",
     biz_class: "업무 분류",
     status: "상태",
-    // priority: "우선순위",  // UI 已下线
     submitted_by: "제출자",
     created_at: "생성 시간",
     updated_at: "업데이트 시간",
@@ -286,11 +280,7 @@ var LANG = {
     biz_bulk: "대량화물",
     biz_return: "반품",
     biz_import: "수입",
-    // priority_* — UI 已下线
-    // priority_urgent: "긴급",
-    // priority_high: "높음",
-    // priority_normal: "보통",
-    // priority_low: "낮음",
+    // priority_* 已删除（FIFO 모드）
     cargo_summary: "화물 요약",
     expected_arrival: "예상 도착",
     purpose: "용도",

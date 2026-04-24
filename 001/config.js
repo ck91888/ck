@@ -97,10 +97,7 @@ var I18N = {
   issue_start_handle: { zh: "开始处理", ko: "처리 시작" },
   issue_finish_handle: { zh: "结束处理", ko: "처리 종료" },
   issue_feedback: { zh: "反馈内容", ko: "피드백 내용" },
-  priority_urgent: { zh: "紧急", ko: "긴급" },
-  priority_high: { zh: "高", ko: "높음" },
-  priority_normal: { zh: "普通", ko: "보통" },
-  priority_low: { zh: "低", ko: "낮음" },
+  // priority_* — UI 已下线（FIFO 模式），i18n 文案删除；后端字段与默认值仍兼容
 
   // -- Import --
   import_title: { zh: "进口专区", ko: "수입 전용" },
