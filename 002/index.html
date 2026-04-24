@@ -396,8 +396,11 @@
         <textarea id="vc-remark" rows="2"></textarea>
       </div>
       <div class="form-group">
-        <label>上传 Excel / CSV 文件 <span style="color:#c62828;">*</span></label>
-        <input type="file" id="vc-file" accept=".xlsx,.xls,.csv" onchange="onVerifyFilePick(this)">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;">
+          <label style="margin:0;">上传 Excel / CSV 文件 <span style="color:#c62828;">*</span></label>
+          <button type="button" class="btn btn-outline" style="padding:4px 10px;font-size:12px;" onclick="downloadVerifyTemplate()">下载模板 / 템플릿 다운로드</button>
+        </div>
+        <input type="file" id="vc-file" accept=".xlsx,.xls,.csv" onchange="onVerifyFilePick(this)" style="margin-top:6px;">
         <div class="muted" style="font-size:12px;margin-top:4px;">
           表头必须包含 3 列：<b>条码</b>、<b>计划箱数</b>、<b>客户名</b>（支持别名：barcode/出库条码；箱数/planned_box_count；客户/customer_name）
         </div>
@@ -460,7 +463,7 @@
 <script src="config.js"></script>
 <script src="../shared/qrcode.min.js"></script>
 <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
-<script src="app.js?v=20260424a"></script>
+<script src="app.js?v=20260424b"></script>
 <script src="patch.js?v=20260415b"></script>
 </body>
 </html>

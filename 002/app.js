@@ -2117,6 +2117,30 @@ async function loadVerifyDetail() {
   body.innerHTML = html;
 }
 
+// ===== Excel 模板下载 =====
+function downloadVerifyTemplate() {
+  if (typeof XLSX === 'undefined') {
+    alert("Excel 库未加载，请检查网络后刷新页面\nExcel 라이브러리 미로딩, 페이지 새로고침");
+    return;
+  }
+  var data = [
+    ["条码", "计划箱数", "客户名"],
+    ["BC-001", 3, "A客户"],
+    ["BC-002", 1, "A客户"],
+    ["BC-003", 5, "B客户"]
+  ];
+  var ws = XLSX.utils.aoa_to_sheet(data);
+  ws['!cols'] = [{ wch: 20 }, { wch: 12 }, { wch: 20 }];
+  var wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "核对批次模板");
+  var fname = "核对批次模板_verify_batch_template.xlsx";
+  try {
+    XLSX.writeFile(wb, fname);
+  } catch (e) {
+    alert("模板生成失败：" + (e && e.message || e));
+  }
+}
+
 // ===== Excel 文件解析 + 预览 =====
 var _vcParsedRows = null; // [{ barcode, planned_box_count, customer_name, row_no }]
 
