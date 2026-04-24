@@ -129,11 +129,11 @@ function doLogin() {
   errEl.textContent = "验证中... / 확인중...";
   errEl.style.color = "#666";
   setKey(k);
-  // 用需要 auth 的接口验证 key 有效性（v2_issue_list 需要 ADMINKEY/VIEWKEY）
+  // 轻量鉴权：只验 ADMINKEY/VIEWKEY，不查任何业务表
   fetch(V2_API, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action: "v2_issue_list", status: "pending", k: k })
+    body: JSON.stringify({ action: "v2_auth_check", k: k })
   }).then(function(res) {
     if (!res.ok && res.status === 404) {
       // Worker 不存在或未部署
@@ -202,11 +202,11 @@ function promptUserName() {
 
 function checkAutoLogin() {
   if (getKey()) {
-    // 有 key，先快速验证还是否有效
+    // 轻量探测，避免开页就触发业务 SQL
     fetch(V2_API, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: "v2_issue_list", status: "pending", k: getKey() })
+      body: JSON.stringify({ action: "v2_auth_check", k: getKey() })
     }).then(function(res) { return res.json(); })
       .then(function(data) {
         if (data && data.ok) {
@@ -387,24 +387,19 @@ async function loadDashboard() {
   if (!grid) return;
   grid.innerHTML = '<div class="dash-card"><span class="muted">' + L("loading") + '</span></div>';
 
-  // Parallel fetch
-  var [issues, outbounds, inbounds, upcoming, feedbacks] = await Promise.all([
-    api({ action: "v2_issue_list", status: "" }),
-    api({ action: "v2_outbound_order_list", start_date: "", end_date: "" }),
-    api({ action: "v2_inbound_plan_list", start_date: "", end_date: "" }),
-    api({ action: "v2_inbound_plan_list_upcoming" }),
-    api({ action: "v2_feedback_list", feedback_type: "", status: "" })
-  ]);
+  // 单次聚合：替代原先 5 个 list 接口 Promise.all
+  var summary = await api({ action: "v2_dashboard_summary" });
+  if (!summary || !summary.ok) {
+    grid.innerHTML = '<div class="dash-card"><span class="muted">' + L("error") + '</span></div>';
+    return;
+  }
 
-  var issueItems = (issues && issues.items) || [];
-  var obItems = (outbounds && outbounds.items) || [];
-  var ibItems = ((inbounds && inbounds.items) || []).filter(function(p) { return p.source_type !== 'return_session'; });
-
-  var pendingIssues = issueItems.filter(function(i) { return i.status === "pending" || i.status === "processing" || i.status === "responded" || i.status === "rework_required"; });
-  var pendingOb = obItems.filter(function(o) { return o.status === "pending_issue" || o.status === "issued" || o.status === "working" || o.status === "ready_to_ship"; });
-  var pendingIb = ibItems.filter(function(p) { return p.status === "pending" || p.status === "unloading" || p.status === "unloading_putting_away" || p.status === "arrived_pending_putaway" || p.status === "putting_away"; });
-  var fbItems = (feedbacks && feedbacks.items) || [];
-  var activeFb = fbItems.filter(function(f) { return f.status === "field_working" || f.status === "unloaded_pending_info"; });
+  // 后端已按"待处理"状态过滤，前端不再二次 filter
+  var pendingIssues = (summary.issues && summary.issues.items) || [];
+  var pendingOb = (summary.outbounds && summary.outbounds.items) || [];
+  var pendingIb = (summary.inbounds && summary.inbounds.items) || [];
+  var activeFb = (summary.feedbacks && summary.feedbacks.items) || [];
+  var upcoming = summary.upcoming || { items: [], dates: [] };
 
   var html = '';
 
@@ -470,8 +465,8 @@ async function loadDashboard() {
   html += '</div>';
 
   // Upcoming inbound card (next 3 working days)
-  var upcomingItems = ((upcoming && upcoming.items) || []).filter(function(p) { return p.source_type !== 'return_session'; });
-  var upcomingDates = (upcoming && upcoming.dates) || [];
+  var upcomingItems = (upcoming.items || []).filter(function(p) { return p.source_type !== 'return_session'; });
+  var upcomingDates = upcoming.dates || [];
   html += '<div class="dash-card" onclick="goTab(\'inbound\')">';
   html += '<div class="d-title">📅 ' + L("upcoming_inbound") + '</div>';
   if (upcomingItems.length > 0) {

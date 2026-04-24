@@ -63,6 +63,16 @@ function isOpsAuth(body, env) {
   return isAuth(body, env) || isOpsKey(body, env);
 }
 
+// 列表分页参数：默认 limit=50，最大 200；offset 默认 0
+function pageParams(body) {
+  let limit = parseInt(body && body.limit, 10);
+  if (!Number.isFinite(limit) || limit <= 0) limit = 50;
+  if (limit > 200) limit = 200;
+  let offset = parseInt(body && body.offset, 10);
+  if (!Number.isFinite(offset) || offset < 0) offset = 0;
+  return { limit, offset };
+}
+
 // ===== Idempotency helper =====
 // 用法：
 //   route("v2_xxx_create", async (body, env) => {
@@ -637,11 +647,41 @@ const MIGRATIONS = [
   `ALTER TABLE v2_outbound_orders ADD COLUMN accounted INTEGER DEFAULT 0`,
   `ALTER TABLE v2_outbound_orders ADD COLUMN accounted_by TEXT DEFAULT ''`,
   `ALTER TABLE v2_outbound_orders ADD COLUMN accounted_at TEXT DEFAULT ''`,
+
+  // ---- 性能索引（v2.20260424f）：列表接口高频过滤路径 ----
+  `CREATE INDEX IF NOT EXISTS idx_v2_issue_status_biz_created ON v2_issue_tickets(status, biz_class, created_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_outbound_status_date_created ON v2_outbound_orders(status, order_date, created_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_feedback_status_created ON v2_field_feedbacks(status, created_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_inbound_status_date_created ON v2_inbound_plans(status, plan_date, created_at)`,
 ];
+
+// 每次发布迁移变化时手动 +1（patch 段），冷启动只比对一次字符串即可跳过整段 MIGRATIONS
+const CURRENT_SCHEMA_VERSION = 'v2.20260424f';
 
 let _migrated = false;
 async function ensureMigrated(db) {
   if (_migrated) return;
+  // 1. 先确保 v2_schema_meta 存在（轻量幂等 DDL）
+  try {
+    await db.prepare(`CREATE TABLE IF NOT EXISTS v2_schema_meta (
+      key TEXT PRIMARY KEY,
+      value TEXT,
+      updated_at TEXT
+    )`).run();
+  } catch (e) { /* 容忍并发 */ }
+
+  // 2. 比对版本号，命中即跳过整段 MIGRATIONS
+  try {
+    const row = await db.prepare(
+      "SELECT value FROM v2_schema_meta WHERE key='schema_version'"
+    ).first();
+    if (row && row.value === CURRENT_SCHEMA_VERSION) {
+      _migrated = true;
+      return;
+    }
+  } catch (e) { /* 表刚建好/读失败一律走完整迁移 */ }
+
+  // 3. 版本不匹配（首次部署 / 升级），跑全量迁移
   for (const sql of MIGRATIONS) {
     try {
       await db.prepare(sql).run();
@@ -650,6 +690,14 @@ async function ensureMigrated(db) {
       if (!sql.trim().toUpperCase().startsWith("ALTER")) throw e;
     }
   }
+
+  // 4. 写入当前版本号
+  try {
+    await db.prepare(
+      "INSERT OR REPLACE INTO v2_schema_meta(key, value, updated_at) VALUES('schema_version', ?, ?)"
+    ).bind(CURRENT_SCHEMA_VERSION, now()).run();
+  } catch (e) { /* 写入失败不影响功能 */ }
+
   _migrated = true;
 }
 
@@ -662,6 +710,79 @@ function route(action, fn) { HANDLERS[action] = fn; }
 // =====================================================
 route("v2_health_check", async (body, env) => {
   return json({ ok: true, version: "2.0.0", time: now() });
+});
+
+// 轻量鉴权探测：登录 / 自动登录用，避免触发业务 SQL
+route("v2_auth_check", async (body, env) => {
+  if (!isAuth(body, env)) return err("unauthorized", 401);
+  return json({ ok: true });
+});
+
+// 协同中心首页聚合：一次拉齐 5 张卡片所需数据，替代前端 5 次并发
+route("v2_dashboard_summary", async (body, env) => {
+  if (!isAuth(body, env)) return err("unauthorized", 401);
+
+  // 未来 3 个工作日（跳过周日，与 v2_inbound_plan_list_upcoming 保持一致）
+  const today = kstToday();
+  const dates = [];
+  const kstMs = Date.now() + 9 * 3600 * 1000;
+  let d = new Date(kstMs);
+  d.setUTCHours(0, 0, 0, 0);
+  while (dates.length < 3) {
+    d.setUTCDate(d.getUTCDate() + 1);
+    if (d.getUTCDay() !== 0) {
+      const ds = d.toISOString().slice(0, 10);
+      if (ds !== today && dates.indexOf(ds) === -1) dates.push(ds);
+    }
+  }
+  const first = dates[0];
+  const last = dates[dates.length - 1];
+
+  // 5 个聚合查询并发：每张卡只取 50 条以内，前端再 slice(3) 展示
+  const [issuesRs, outboundsRs, inboundsRs, feedbacksRs, upcomingRs] = await Promise.all([
+    env.DB.prepare(
+      `SELECT id, status, biz_class, customer, issue_description, issue_summary, priority, created_at
+         FROM v2_issue_tickets
+        WHERE status IN ('pending','processing','responded','rework_required')
+        ORDER BY created_at DESC LIMIT 50`
+    ).all(),
+    env.DB.prepare(
+      `SELECT id, display_no, status, customer, order_date, created_at
+         FROM v2_outbound_orders
+        WHERE status IN ('pending_issue','issued','working','ready_to_ship')
+        ORDER BY order_date DESC, created_at DESC LIMIT 50`
+    ).all(),
+    env.DB.prepare(
+      `SELECT id, display_no, status, biz_class, customer, cargo_summary, plan_date, source_type, created_at
+         FROM v2_inbound_plans
+        WHERE status IN ('pending','unloading','unloading_putting_away','arrived_pending_putaway','putting_away')
+          AND source_type != 'return_session'
+        ORDER BY plan_date DESC, created_at DESC LIMIT 50`
+    ).all(),
+    env.DB.prepare(
+      `SELECT id, display_no, status, feedback_type, customer, plate_no, title, created_at
+         FROM v2_field_feedbacks
+        WHERE status IN ('field_working','unloaded_pending_info')
+        ORDER BY created_at DESC LIMIT 50`
+    ).all(),
+    env.DB.prepare(
+      `SELECT id, display_no, status, biz_class, customer, cargo_summary, plan_date, source_type
+         FROM v2_inbound_plans
+        WHERE plan_date>=? AND plan_date<=?
+          AND status NOT IN ('completed','cancelled')
+          AND source_type != 'return_session'
+        ORDER BY plan_date ASC, created_at ASC`
+    ).bind(first, last).all()
+  ]);
+
+  return json({
+    ok: true,
+    issues:    { items: issuesRs.results || [] },
+    outbounds: { items: outboundsRs.results || [] },
+    inbounds:  { items: inboundsRs.results || [] },
+    feedbacks: { items: feedbacksRs.results || [] },
+    upcoming:  { items: upcomingRs.results || [], dates }
+  });
 });
 
 // =====================================================
@@ -698,15 +819,17 @@ route("v2_issue_list", async (body, env) => {
   const status = String(body.status || "").trim();
   const biz_class = String(body.biz_class || "").trim();
   const sort = String(body.sort || "").trim();
+  const { limit, offset } = pageParams(body);
   let sql = "SELECT * FROM v2_issue_tickets WHERE 1=1";
   const binds = [];
   if (status) { sql += " AND status=?"; binds.push(status); }
   if (biz_class) { sql += " AND biz_class=?"; binds.push(biz_class); }
   // 默认 newest_first（002 客服侧看最新）；oldest_first 给需要 FIFO 的视角
-  sql += sort === "oldest_first" ? " ORDER BY created_at ASC LIMIT 200" : " ORDER BY created_at DESC LIMIT 200";
-  const stmt = env.DB.prepare(sql);
-  const rs = binds.length > 0 ? await stmt.bind(...binds).all() : await stmt.all();
-  return json({ ok: true, items: rs.results || [] });
+  sql += sort === "oldest_first" ? " ORDER BY created_at ASC" : " ORDER BY created_at DESC";
+  sql += " LIMIT ? OFFSET ?";
+  binds.push(limit, offset);
+  const rs = await env.DB.prepare(sql).bind(...binds).all();
+  return json({ ok: true, items: rs.results || [], limit, offset });
 });
 
 route("v2_issue_detail", async (body, env) => {
@@ -928,15 +1051,16 @@ route("v2_outbound_order_list", async (body, env) => {
   const start = String(body.start_date || "").trim();
   const end = String(body.end_date || "").trim();
   const status = String(body.status || "").trim();
+  const { limit, offset } = pageParams(body);
   let sql = "SELECT * FROM v2_outbound_orders WHERE 1=1";
   const binds = [];
   if (start) { sql += " AND order_date>=?"; binds.push(start); }
   if (end) { sql += " AND order_date<=?"; binds.push(end); }
   if (status) { sql += " AND status=?"; binds.push(status); }
-  sql += " ORDER BY order_date DESC, created_at DESC LIMIT 200";
-  const stmt = env.DB.prepare(sql);
-  const rs = binds.length > 0 ? await stmt.bind(...binds).all() : await stmt.all();
-  return json({ ok: true, items: rs.results || [] });
+  sql += " ORDER BY order_date DESC, created_at DESC LIMIT ? OFFSET ?";
+  binds.push(limit, offset);
+  const rs = await env.DB.prepare(sql).bind(...binds).all();
+  return json({ ok: true, items: rs.results || [], limit, offset });
 });
 
 route("v2_outbound_order_detail", async (body, env) => {
@@ -1314,16 +1438,17 @@ route("v2_inbound_plan_list", async (body, env) => {
   const start = String(body.start_date || "").trim();
   const end = String(body.end_date || "").trim();
   const status = String(body.status || "").trim();
+  const { limit, offset } = pageParams(body);
   // 排除退件入库会话：return_session 不属于正式入库计划口径
   let sql = "SELECT * FROM v2_inbound_plans WHERE source_type != 'return_session'";
   const binds = [];
   if (start) { sql += " AND plan_date>=?"; binds.push(start); }
   if (end) { sql += " AND plan_date<=?"; binds.push(end); }
   if (status) { sql += " AND status=?"; binds.push(status); }
-  sql += " ORDER BY plan_date DESC, created_at DESC LIMIT 200";
-  const stmt = env.DB.prepare(sql);
-  const rs = binds.length > 0 ? await stmt.bind(...binds).all() : await stmt.all();
-  return json({ ok: true, items: rs.results || [] });
+  sql += " ORDER BY plan_date DESC, created_at DESC LIMIT ? OFFSET ?";
+  binds.push(limit, offset);
+  const rs = await env.DB.prepare(sql).bind(...binds).all();
+  return json({ ok: true, items: rs.results || [], limit, offset });
 });
 
 route("v2_inbound_plan_detail", async (body, env) => {
@@ -2899,14 +3024,15 @@ route("v2_feedback_list", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
   const feedback_type = String(body.feedback_type || "").trim();
   const status = String(body.status || "").trim();
+  const { limit, offset } = pageParams(body);
   let sql = "SELECT * FROM v2_field_feedbacks WHERE 1=1";
   const binds = [];
   if (feedback_type) { sql += " AND feedback_type=?"; binds.push(feedback_type); }
   if (status) { sql += " AND status=?"; binds.push(status); }
-  sql += " ORDER BY created_at DESC LIMIT 200";
-  const stmt = env.DB.prepare(sql);
-  const rs = binds.length > 0 ? await stmt.bind(...binds).all() : await stmt.all();
-  return json({ ok: true, items: rs.results || [] });
+  sql += " ORDER BY created_at DESC LIMIT ? OFFSET ?";
+  binds.push(limit, offset);
+  const rs = await env.DB.prepare(sql).bind(...binds).all();
+  return json({ ok: true, items: rs.results || [], limit, offset });
 });
 
 route("v2_feedback_detail", async (body, env) => {
@@ -4081,18 +4207,19 @@ route("v2_verify_batch_list", async (body, env) => {
   const start_date = String(body.start_date || "").trim();
   const end_date = String(body.end_date || "").trim();
 
+  const { limit, offset } = pageParams(body);
   let sql = "SELECT * FROM v2_verify_batches WHERE 1=1";
   const binds = [];
   if (status) { sql += " AND status=?"; binds.push(status); }
   if (customer_name) { sql += " AND customer_name LIKE ?"; binds.push('%' + customer_name + '%'); }
   if (start_date) { sql += " AND created_at >= ?"; binds.push(start_date); }
   if (end_date) { sql += " AND created_at <= ?"; binds.push(end_date + 'T23:59:59Z'); }
-  sql += " ORDER BY created_at DESC LIMIT 200";
+  sql += " ORDER BY created_at DESC LIMIT ? OFFSET ?";
+  binds.push(limit, offset);
 
-  const stmt = env.DB.prepare(sql);
-  const rs = binds.length > 0 ? await stmt.bind(...binds).all() : await stmt.all();
+  const rs = await env.DB.prepare(sql).bind(...binds).all();
   const batches = rs.results || [];
-  if (batches.length === 0) return json({ ok: true, items: [] });
+  if (batches.length === 0) return json({ ok: true, items: [], limit, offset });
 
   // 批量聚合 scan_logs：ok 数 / 异常数
   const ids = batches.map(b => b.id);
@@ -4114,7 +4241,7 @@ route("v2_verify_batch_list", async (body, env) => {
       abnormal_count: Number(s.abnormal_count || 0)
     };
   });
-  return json({ ok: true, items });
+  return json({ ok: true, items, limit, offset });
 });
 
 // 3) 批次详情（按"条码对应计划箱数"出每行状态 + 聚合异常）
