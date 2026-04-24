@@ -1903,20 +1903,41 @@ async function loadIssueList() {
   if (!body) return;
   body.innerHTML = '<div class="card"><span class="muted">加载中.../로딩중...</span></div>';
 
-  var statusMap = { pending: "pending", processing: "processing", my: "", responded: "responded", rework: "rework_required" };
-  var status = statusMap[_issueFilter] || "";
+  var statusMap = { pending: "pending", processing: "processing", my: "", responded: "responded" };
   var bizSel = document.getElementById("issueBizFilter");
   var bizVal = bizSel ? bizSel.value : "";
-  var res = await api({ action: "v2_issue_ops_list", status: status, biz_class: bizVal });
 
-  if (!res || !res.ok) {
-    body.innerHTML = '<div class="card"><span class="muted">加载失败/로딩 실패</span></div>';
-    return;
-  }
-
-  var items = res.items || [];
-  if (_issueFilter === "my") {
-    items = items.filter(function(it) { return it.status === "processing" || it.status === "responded" || it.status === "rework_required"; });
+  var items = [];
+  if (_issueFilter === "pending") {
+    // 现场视角下 rework_required 本质也是待再次处理，并入"待处理"列表（状态标签仍区分）
+    var pair = await Promise.all([
+      api({ action: "v2_issue_ops_list", status: "pending", biz_class: bizVal }),
+      api({ action: "v2_issue_ops_list", status: "rework_required", biz_class: bizVal })
+    ]);
+    var r1 = pair[0], r2 = pair[1];
+    if (!r1 || !r1.ok || !r2 || !r2.ok) {
+      body.innerHTML = '<div class="card"><span class="muted">加载失败/로딩 실패</span></div>';
+      return;
+    }
+    items = (r1.items || []).concat(r2.items || []);
+    var prio = { urgent: 0, high: 1, normal: 2 };
+    items.sort(function(a, b) {
+      var pa = prio[a.priority] != null ? prio[a.priority] : 3;
+      var pb = prio[b.priority] != null ? prio[b.priority] : 3;
+      if (pa !== pb) return pa - pb;
+      return (b.created_at || 0) - (a.created_at || 0);
+    });
+  } else {
+    var status = statusMap[_issueFilter] || "";
+    var res = await api({ action: "v2_issue_ops_list", status: status, biz_class: bizVal });
+    if (!res || !res.ok) {
+      body.innerHTML = '<div class="card"><span class="muted">加载失败/로딩 실패</span></div>';
+      return;
+    }
+    items = res.items || [];
+    if (_issueFilter === "my") {
+      items = items.filter(function(it) { return it.status === "processing" || it.status === "responded" || it.status === "rework_required"; });
+    }
   }
 
   if (items.length === 0) {
