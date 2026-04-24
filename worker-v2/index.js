@@ -670,20 +670,21 @@ route("v2_health_check", async (body, env) => {
 route("v2_issue_create", async (body, env) => {
   if (!isAuth(body, env)) return err("unauthorized", 401);
   return withIdem(env, body, "v2_issue_create", async () => {
+    const desc = String(body.issue_description || "").trim();
+    if (!desc) return { ok: false, error: "issue_description is required" };
     const id = "ISS-" + uid();
     const t = now();
+    // issue_type / issue_summary 字段保留（schema DEFAULT ''），不再写入；前端不再传
     await env.DB.prepare(`
-      INSERT INTO v2_issue_tickets(id, biz_class, customer, related_doc_no, issue_type,
-        issue_summary, issue_description, priority, submitted_by, status, created_at, updated_at)
-      VALUES(?,?,?,?,?,?,?,?,?,'pending',?,?)
+      INSERT INTO v2_issue_tickets(id, biz_class, customer, related_doc_no,
+        issue_description, priority, submitted_by, status, created_at, updated_at)
+      VALUES(?,?,?,?,?,?,?,'pending',?,?)
     `).bind(
       id,
       String(body.biz_class || ""),
       String(body.customer || ""),
       String(body.related_doc_no || ""),
-      String(body.issue_type || ""),
-      String(body.issue_summary || ""),
-      String(body.issue_description || ""),
+      desc,
       String(body.priority || "normal"),
       String(body.submitted_by || ""),
       t, t

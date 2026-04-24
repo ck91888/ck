@@ -102,20 +102,12 @@
         <input id="ic-customer" type="text" placeholder="客户名称">
       </div>
       <div class="form-group">
-        <label>关联单号</label>
-        <input id="ic-docno" type="text" placeholder="可选">
+        <label>关联单号 / 관련번호</label>
+        <input id="ic-docno" type="text" placeholder="可选 / 선택">
       </div>
       <div class="form-group">
-        <label>问题类型</label>
-        <input id="ic-type" type="text" placeholder="如：破损、缺件、标签错误...">
-      </div>
-      <div class="form-group">
-        <label>问题摘要</label>
-        <input id="ic-summary" type="text" placeholder="简短描述">
-      </div>
-      <div class="form-group">
-        <label>问题描述</label>
-        <textarea id="ic-desc" rows="4" placeholder="详细描述"></textarea>
+        <label>问题描述 / 문제 설명 <span style="color:#d32f2f;">*</span></label>
+        <textarea id="ic-desc" rows="5" required placeholder="请直接描述问题（如：单号xxx少3箱 / 标签错误 / 客户反馈未发出）&#10;문제를 직접 입력하세요 (예: 주문번호 xxx 3박스 부족 / 라벨 오류 / 고객 미출고 문의)"></textarea>
       </div>
       <div class="form-group">
         <label>优先级</label>

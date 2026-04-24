@@ -1920,6 +1920,14 @@ async function refreshLoadWorkers() {
 }
 
 // ===== Issue List =====
+// 取问题描述前 30 字（兼容旧记录的 issue_summary）
+function _issueTitleText(it) {
+  var d = (it && (it.issue_description || it.issue_summary)) || "";
+  d = String(d).trim().replace(/\s+/g, ' ');
+  if (d.length > 30) d = d.substring(0, 30) + "…";
+  return d || "(无描述)";
+}
+
 async function loadIssueList() {
   var body = document.getElementById("issueListBody");
   if (!body) return;
@@ -1975,10 +1983,9 @@ async function loadIssueList() {
         '<span class="biz-tag biz-' + esc(it.biz_class) + '">' + esc(BIZ_LABEL[it.biz_class] || it.biz_class) + '</span> ' +
         '<span class="priority-' + esc(it.priority) + '">' + esc(PRIORITY_LABEL[it.priority] || it.priority) + '</span>' +
       '</div>' +
-      '<div style="font-size:14px;font-weight:600;margin-top:4px;">' + esc(it.issue_summary || "(无摘要)") + '</div>' +
+      '<div style="font-size:14px;font-weight:600;margin-top:4px;">' + esc(_issueTitleText(it)) + '</div>' +
       '<div class="item-meta">' +
         esc(it.customer || "") + (it.related_doc_no ? " · " + esc(it.related_doc_no) : "") +
-        ' · ' + esc(it.issue_type || "") +
         ' · ' + esc(fmtTime(it.created_at)) +
       '</div>' +
     '</div>';
@@ -2016,13 +2023,12 @@ async function loadIssueDetail() {
   var atts = res.attachments || [];
 
   var html = '<div class="card">';
-  html += '<div style="font-size:18px;font-weight:700;margin-bottom:8px;">' + esc(it.issue_summary || "(无摘要)") + '</div>';
+  html += '<div style="font-size:18px;font-weight:700;margin-bottom:8px;">' + esc(_issueTitleText(it)) + '</div>';
   html += '<div class="detail-field"><b>状态/상태:</b> <span class="st st-' + esc(it.status) + '">' + esc(ISSUE_STATUS_LABEL[it.status] || it.status) + '</span></div>';
   html += '<div class="detail-field"><b>业务/업무:</b> <span class="biz-tag biz-' + esc(it.biz_class) + '">' + esc(BIZ_LABEL[it.biz_class] || it.biz_class) + '</span></div>';
   html += '<div class="detail-field"><b>优先级/우선순위:</b> ' + esc(PRIORITY_LABEL[it.priority] || it.priority) + '</div>';
   html += '<div class="detail-field"><b>客户/고객:</b> ' + esc(it.customer) + '</div>';
   html += '<div class="detail-field"><b>关联单号/관련번호:</b> ' + esc(it.related_doc_no) + '</div>';
-  html += '<div class="detail-field"><b>类型/유형:</b> ' + esc(it.issue_type) + '</div>';
   html += '<div class="detail-field"><b>提出人/제출자:</b> ' + esc(it.submitted_by) + '</div>';
   html += '<div class="detail-field"><b>提出时间/제출시간:</b> ' + esc(fmtTime(it.created_at)) + '</div>';
   html += '<div class="detail-section"><b>问题描述/문제 설명:</b><div style="margin-top:4px;white-space:pre-wrap;">' + esc(it.issue_description) + '</div></div>';

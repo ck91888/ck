@@ -412,7 +412,7 @@ async function loadDashboard() {
     pendingIssues.slice(0, 3).forEach(function(i) {
       html += '<div style="font-size:12px;padding:2px 0;">' +
         '<span class="st st-' + esc(i.status) + '">' + esc(stLabel(i.status)) + '</span> ' +
-        esc(i.issue_summary || i.customer || "--") + '</div>';
+        esc(issueTitleText(i) || i.customer || "--") + '</div>';
     });
   } else {
     html += '<div class="d-empty">' + L("no_data") + '</div>';
@@ -526,10 +526,10 @@ async function loadIssueList() {
     if (it.priority === "urgent" || it.priority === "high") {
       html += '<span class="priority-' + esc(it.priority) + '">' + esc(priLabel(it.priority)) + '</span> ';
     }
-    html += esc(it.issue_summary || "(无摘要)");
+    html += esc(issueTitleText(it));
     html += '</div>';
     html += '<div class="item-meta">';
-    html += esc(it.customer || "") + ' · ' + esc(it.issue_type || "") + ' · ' + esc(it.submitted_by || "") + ' · ' + esc(fmtTime(it.created_at));
+    html += esc(it.customer || "") + ' · ' + esc(it.submitted_by || "") + ' · ' + esc(fmtTime(it.created_at));
     if (it.total_minutes_worked > 0) html += ' · ' + it.total_minutes_worked.toFixed(1) + L("minutes");
     html += '</div>';
     html += '</div>';
@@ -540,14 +540,14 @@ async function loadIssueList() {
 
 // ===== Issue Create =====
 async function submitIssue(btnEl) {
-  var summary = document.getElementById("ic-summary").value.trim();
-  if (!summary) { alert("请填写问题摘要"); return; }
+  var desc = document.getElementById("ic-desc").value.trim();
+  if (!desc) { alert("请填写问题描述 / 문제 설명을 입력하세요"); return; }
+  var customer = document.getElementById("ic-customer").value.trim();
+  if (!customer) { alert("请填写客户 / 고객을 입력하세요"); return; }
+
   withActionLock('submitIssue', btnEl || null, '提交中.../저장중...', async function() {
     var biz = document.getElementById("ic-biz").value;
-    var customer = document.getElementById("ic-customer").value.trim();
     var docno = document.getElementById("ic-docno").value.trim();
-    var itype = document.getElementById("ic-type").value.trim();
-    var desc = document.getElementById("ic-desc").value.trim();
     var priority = document.getElementById("ic-priority").value;
 
     var res = await api({
@@ -555,8 +555,6 @@ async function submitIssue(btnEl) {
       biz_class: biz,
       customer: customer,
       related_doc_no: docno,
-      issue_type: itype,
-      issue_summary: summary,
       issue_description: desc,
       priority: priority,
       submitted_by: getUser()
@@ -566,14 +564,20 @@ async function submitIssue(btnEl) {
       alert("已创建: " + res.id);
       document.getElementById("ic-customer").value = "";
       document.getElementById("ic-docno").value = "";
-      document.getElementById("ic-type").value = "";
-      document.getElementById("ic-summary").value = "";
       document.getElementById("ic-desc").value = "";
       goTab("issue");
     } else {
       alert("失败: " + (res ? res.error : "unknown"));
     }
   });
+}
+
+// 取问题描述前 30 字作为标题（兼容旧记录的 issue_summary）
+function issueTitleText(it) {
+  var d = (it && (it.issue_description || it.issue_summary)) || "";
+  d = String(d).trim().replace(/\s+/g, ' ');
+  if (d.length > 30) d = d.substring(0, 30) + "…";
+  return d || "(无描述)";
 }
 
 // ===== Issue Detail =====
@@ -599,13 +603,12 @@ async function loadIssueDetail() {
   var atts = res.attachments || [];
 
   var html = '<div class="card">';
-  html += '<div style="font-size:18px;font-weight:700;margin-bottom:8px;">' + esc(it.issue_summary) + '</div>';
+  html += '<div style="font-size:18px;font-weight:700;margin-bottom:8px;">' + esc(issueTitleText(it)) + '</div>';
   html += '<div class="detail-field"><b>' + L("status") + ':</b> <span class="st st-' + esc(it.status) + '">' + esc(stLabel(it.status)) + '</span></div>';
   html += '<div class="detail-field"><b>' + L("biz_class") + ':</b> <span class="biz-tag biz-' + esc(it.biz_class) + '">' + esc(bizLabel(it.biz_class)) + '</span></div>';
   html += '<div class="detail-field"><b>' + L("priority") + ':</b> <span class="priority-' + esc(it.priority) + '">' + esc(priLabel(it.priority)) + '</span></div>';
   html += '<div class="detail-field"><b>' + L("customer") + ':</b> ' + esc(it.customer) + '</div>';
   html += '<div class="detail-field"><b>' + L("related_doc_no") + ':</b> ' + esc(it.related_doc_no) + '</div>';
-  html += '<div class="detail-field"><b>' + L("issue_type") + ':</b> ' + esc(it.issue_type) + '</div>';
   html += '<div class="detail-field"><b>' + L("submitted_by") + ':</b> ' + esc(it.submitted_by) + '</div>';
   html += '<div class="detail-field"><b>' + L("created_at") + ':</b> ' + esc(fmtTime(it.created_at)) + '</div>';
   html += '<div class="detail-section"><b>' + L("issue_description") + ':</b>';
