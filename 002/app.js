@@ -523,9 +523,6 @@ async function loadIssueList() {
     html += '<div class="item-title">';
     html += '<span class="st st-' + esc(it.status) + '">' + esc(stLabel(it.status)) + '</span> ';
     html += '<span class="biz-tag biz-' + esc(it.biz_class) + '">' + esc(bizLabel(it.biz_class)) + '</span> ';
-    if (it.priority === "urgent" || it.priority === "high") {
-      html += '<span class="priority-' + esc(it.priority) + '">' + esc(priLabel(it.priority)) + '</span> ';
-    }
     html += esc(issueTitleText(it));
     html += '</div>';
     html += '<div class="item-meta">';
@@ -548,7 +545,6 @@ async function submitIssue(btnEl) {
   withActionLock('submitIssue', btnEl || null, '提交中.../저장중...', async function() {
     var biz = document.getElementById("ic-biz").value;
     var docno = document.getElementById("ic-docno").value.trim();
-    var priority = document.getElementById("ic-priority").value;
 
     var res = await api({
       action: "v2_issue_create",
@@ -556,7 +552,7 @@ async function submitIssue(btnEl) {
       customer: customer,
       related_doc_no: docno,
       issue_description: desc,
-      priority: priority,
+      priority: "normal", // 优先级字段已下线，固定 normal 兼容后端
       submitted_by: getUser()
     });
 
@@ -606,7 +602,6 @@ async function loadIssueDetail() {
   html += '<div style="font-size:18px;font-weight:700;margin-bottom:8px;">' + esc(issueTitleText(it)) + '</div>';
   html += '<div class="detail-field"><b>' + L("status") + ':</b> <span class="st st-' + esc(it.status) + '">' + esc(stLabel(it.status)) + '</span></div>';
   html += '<div class="detail-field"><b>' + L("biz_class") + ':</b> <span class="biz-tag biz-' + esc(it.biz_class) + '">' + esc(bizLabel(it.biz_class)) + '</span></div>';
-  html += '<div class="detail-field"><b>' + L("priority") + ':</b> <span class="priority-' + esc(it.priority) + '">' + esc(priLabel(it.priority)) + '</span></div>';
   html += '<div class="detail-field"><b>' + L("customer") + ':</b> ' + esc(it.customer) + '</div>';
   html += '<div class="detail-field"><b>' + L("related_doc_no") + ':</b> ' + esc(it.related_doc_no) + '</div>';
   html += '<div class="detail-field"><b>' + L("submitted_by") + ':</b> ' + esc(it.submitted_by) + '</div>';

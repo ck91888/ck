@@ -1941,25 +1941,20 @@ async function loadIssueList() {
   if (_issueFilter === "pending") {
     // 现场视角下 rework_required 本质也是待再次处理，并入"待处理"列表（状态标签仍区分）
     var pair = await Promise.all([
-      api({ action: "v2_issue_ops_list", status: "pending", biz_class: bizVal }),
-      api({ action: "v2_issue_ops_list", status: "rework_required", biz_class: bizVal })
+      api({ action: "v2_issue_ops_list", status: "pending", biz_class: bizVal, sort: "oldest_first" }),
+      api({ action: "v2_issue_ops_list", status: "rework_required", biz_class: bizVal, sort: "oldest_first" })
     ]);
     var r1 = pair[0], r2 = pair[1];
     if (!r1 || !r1.ok || !r2 || !r2.ok) {
       body.innerHTML = '<div class="card"><span class="muted">加载失败/로딩 실패</span></div>';
       return;
     }
+    // FIFO：最早发布的最先处理；priority 字段已废弃，不参与排序
     items = (r1.items || []).concat(r2.items || []);
-    var prio = { urgent: 0, high: 1, normal: 2 };
-    items.sort(function(a, b) {
-      var pa = prio[a.priority] != null ? prio[a.priority] : 3;
-      var pb = prio[b.priority] != null ? prio[b.priority] : 3;
-      if (pa !== pb) return pa - pb;
-      return (b.created_at || 0) - (a.created_at || 0);
-    });
+    items.sort(function(a, b) { return (a.created_at || 0) - (b.created_at || 0); });
   } else {
     var status = statusMap[_issueFilter] || "";
-    var res = await api({ action: "v2_issue_ops_list", status: status, biz_class: bizVal });
+    var res = await api({ action: "v2_issue_ops_list", status: status, biz_class: bizVal, sort: "oldest_first" });
     if (!res || !res.ok) {
       body.innerHTML = '<div class="card"><span class="muted">加载失败/로딩 실패</span></div>';
       return;
@@ -1980,8 +1975,7 @@ async function loadIssueList() {
     html += '<div class="list-item" onclick="openIssue(\'' + esc(it.id) + '\')">' +
       '<div class="item-title">' +
         '<span class="st st-' + esc(it.status) + '">' + esc(ISSUE_STATUS_LABEL[it.status] || it.status) + '</span> ' +
-        '<span class="biz-tag biz-' + esc(it.biz_class) + '">' + esc(BIZ_LABEL[it.biz_class] || it.biz_class) + '</span> ' +
-        '<span class="priority-' + esc(it.priority) + '">' + esc(PRIORITY_LABEL[it.priority] || it.priority) + '</span>' +
+        '<span class="biz-tag biz-' + esc(it.biz_class) + '">' + esc(BIZ_LABEL[it.biz_class] || it.biz_class) + '</span>' +
       '</div>' +
       '<div style="font-size:14px;font-weight:600;margin-top:4px;">' + esc(_issueTitleText(it)) + '</div>' +
       '<div class="item-meta">' +
@@ -2026,7 +2020,6 @@ async function loadIssueDetail() {
   html += '<div style="font-size:18px;font-weight:700;margin-bottom:8px;">' + esc(_issueTitleText(it)) + '</div>';
   html += '<div class="detail-field"><b>状态/상태:</b> <span class="st st-' + esc(it.status) + '">' + esc(ISSUE_STATUS_LABEL[it.status] || it.status) + '</span></div>';
   html += '<div class="detail-field"><b>业务/업무:</b> <span class="biz-tag biz-' + esc(it.biz_class) + '">' + esc(BIZ_LABEL[it.biz_class] || it.biz_class) + '</span></div>';
-  html += '<div class="detail-field"><b>优先级/우선순위:</b> ' + esc(PRIORITY_LABEL[it.priority] || it.priority) + '</div>';
   html += '<div class="detail-field"><b>客户/고객:</b> ' + esc(it.customer) + '</div>';
   html += '<div class="detail-field"><b>关联单号/관련번호:</b> ' + esc(it.related_doc_no) + '</div>';
   html += '<div class="detail-field"><b>提出人/제출자:</b> ' + esc(it.submitted_by) + '</div>';

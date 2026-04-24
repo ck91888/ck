@@ -697,11 +697,13 @@ route("v2_issue_list", async (body, env) => {
   if (!isAuth(body, env)) return err("unauthorized", 401);
   const status = String(body.status || "").trim();
   const biz_class = String(body.biz_class || "").trim();
+  const sort = String(body.sort || "").trim();
   let sql = "SELECT * FROM v2_issue_tickets WHERE 1=1";
   const binds = [];
   if (status) { sql += " AND status=?"; binds.push(status); }
   if (biz_class) { sql += " AND biz_class=?"; binds.push(biz_class); }
-  sql += " ORDER BY created_at DESC LIMIT 200";
+  // 默认 newest_first（002 客服侧看最新）；oldest_first 给需要 FIFO 的视角
+  sql += sort === "oldest_first" ? " ORDER BY created_at ASC LIMIT 200" : " ORDER BY created_at DESC LIMIT 200";
   const stmt = env.DB.prepare(sql);
   const rs = binds.length > 0 ? await stmt.bind(...binds).all() : await stmt.all();
   return json({ ok: true, items: rs.results || [] });
@@ -768,11 +770,13 @@ route("v2_issue_ops_list", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
   const status = String(body.status || "").trim();
   const biz_class = String(body.biz_class || "").trim();
+  const sort = String(body.sort || "").trim();
   let sql = "SELECT * FROM v2_issue_tickets WHERE 1=1";
   const binds = [];
   if (status) { sql += " AND status=?"; binds.push(status); }
   if (biz_class) { sql += " AND biz_class=?"; binds.push(biz_class); }
-  sql += " ORDER BY CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END, created_at DESC LIMIT 200";
+  // 现场默认 oldest_first（FIFO，最早等待最先看到）；显式 newest_first 才反过来
+  sql += sort === "newest_first" ? " ORDER BY created_at DESC LIMIT 200" : " ORDER BY created_at ASC LIMIT 200";
   const stmt = env.DB.prepare(sql);
   const rs = binds.length > 0 ? await stmt.bind(...binds).all() : await stmt.all();
   return json({ ok: true, items: rs.results || [] });
