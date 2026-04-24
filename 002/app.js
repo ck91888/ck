@@ -390,7 +390,13 @@ async function loadDashboard() {
   // 单次聚合：替代原先 5 个 list 接口 Promise.all
   var summary = await api({ action: "v2_dashboard_summary" });
   if (!summary || !summary.ok) {
-    grid.innerHTML = '<div class="dash-card"><span class="muted">' + L("error") + '</span></div>';
+    var errMsg = (summary && (summary.error || summary.message)) || "网络异常 / 네트워크 오류";
+    console.error("[dashboard_summary]", summary);
+    grid.innerHTML =
+      '<div class="dash-card"><div style="color:#e74c3c;font-weight:700;">今日看板加载失败 / 대시보드 로딩 실패</div>' +
+      '<div style="font-size:12px;color:#666;margin-top:6px;">原因: ' + esc(String(errMsg)) + '</div>' +
+      '<button class="btn btn-outline btn-sm" style="margin-top:8px;" onclick="loadDashboard()">重试 / 재시도</button>' +
+      '</div>';
     return;
   }
 
