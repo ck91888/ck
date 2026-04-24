@@ -313,9 +313,8 @@ function outModeLabel(mode) {
   return L("outmode_" + mode) || mode;
 }
 
-function priLabel(pri) {
-  return L("priority_" + pri) || pri;
-}
+// priLabel: UI 不再展示优先级；保留函数定义只为兼容外部潜在引用，返回原值
+function priLabel(pri) { return pri; }
 
 function fmtTime(isoStr) {
   if (!isoStr) return "--";
@@ -340,9 +339,8 @@ function goTab(tab, btn) {
     tabs.forEach(function(b) { if (b.getAttribute("data-tab") === tab) b.classList.add("active"); });
   }
 
-  // Show corresponding view
+  // Show corresponding view（goView 内部会自动 updateActionsBarByView）
   goView(tab);
-  updateActionsBar(tab);
 
   // Load data
   if (tab === "home") loadDashboard();
@@ -354,18 +352,19 @@ function goTab(tab, btn) {
   if (tab === "check") loadVerifyList();
 }
 
-// 按 tab 动态显示"+新建"按钮，防止误操作
-function updateActionsBar(tab) {
+// 按当前 view 动态显示"+新建"按钮（详情/创建/feedback/home/order_ops 全部隐藏）
+function updateActionsBarByView(view) {
   var map = {
     issue:    'btnNewIssue',
     outbound: 'btnNewOutbound',
     inbound:  'btnNewInbound',
     check:    'btnNewCheck'
-    // home / feedback / order_ops → 不显示任何新增按钮
+    // 其余 view（home / feedback / order_ops / *_create / *_detail）→ 全部隐藏
   };
+  var target = map[view] || null;
   ['btnNewIssue','btnNewOutbound','btnNewInbound','btnNewCheck'].forEach(function(id) {
     var el = document.getElementById(id);
-    if (el) el.style.display = (map[tab] === id) ? '' : 'none';
+    if (el) el.style.display = (id === target) ? '' : 'none';
   });
 }
 
@@ -375,6 +374,7 @@ function goView(name) {
   views.forEach(function(v) { v.style.display = "none"; });
   var el = document.getElementById("view-" + name);
   if (el) el.style.display = "";
+  updateActionsBarByView(name);
 }
 
 // ===== Dashboard =====

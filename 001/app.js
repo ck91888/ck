@@ -566,7 +566,7 @@ var JOB_TYPE_LABEL = {
 
 var STATUS_LABEL = {
   pending: "待到库/대기중",
-  unloading: "卸货中（可��前理货）/하차중(입고가능)",
+  unloading: "卸货中（可提前理货）/하차중(입고가능)",
   unloading_putting_away: "卸货中+理货中/하차중+입고중",
   arrived_pending_putaway: "已到库待理货/입고대기",
   putting_away: "理货中/입고중",
@@ -603,6 +603,8 @@ var BIZ_LABEL = {
   import: "进口/수입"
 };
 
+// PRIORITY_LABEL: 业务规则改为 FIFO（按发布时间先后处理），UI 不再展示优先级标签。
+// 仅保留以兼容旧数据 priority 字段（v2_issue_tickets.priority），如未来需要恢复展示直接引用即可。
 var PRIORITY_LABEL = {
   urgent: "🔴 紧急/긴급",
   high: "🟠 高/높음",
