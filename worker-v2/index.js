@@ -578,6 +578,53 @@ const MIGRATIONS = [
 
   // ---- issue rework_note 字段 ----
   `ALTER TABLE v2_issue_tickets ADD COLUMN rework_note TEXT DEFAULT ''`,
+
+  // ---- 核对中心：扫码核对批次（客服上传，不含托盘号） ----
+  `CREATE TABLE IF NOT EXISTS v2_verify_batches (
+    id TEXT PRIMARY KEY,
+    batch_no TEXT DEFAULT '',
+    customer_name TEXT DEFAULT '',
+    planned_qty INTEGER DEFAULT 0,
+    status TEXT DEFAULT 'pending',
+    remark TEXT DEFAULT '',
+    created_by TEXT DEFAULT '',
+    created_at TEXT,
+    updated_at TEXT,
+    completed_at TEXT DEFAULT '',
+    completed_by TEXT DEFAULT '',
+    cancelled_at TEXT DEFAULT '',
+    cancelled_by TEXT DEFAULT ''
+  )`,
+
+  // ---- 核对中心：批次内计划条码（不含托盘号） ----
+  `CREATE TABLE IF NOT EXISTS v2_verify_batch_items (
+    id TEXT PRIMARY KEY,
+    batch_id TEXT DEFAULT '',
+    barcode TEXT DEFAULT '',
+    planned_qty INTEGER DEFAULT 1,
+    created_at TEXT
+  )`,
+
+  // ---- 核对中心：现场扫码流水（托盘号仅出现在扫码记录） ----
+  `CREATE TABLE IF NOT EXISTS v2_verify_scan_logs (
+    id TEXT PRIMARY KEY,
+    batch_id TEXT DEFAULT '',
+    job_id TEXT DEFAULT '',
+    worker_id TEXT DEFAULT '',
+    worker_name TEXT DEFAULT '',
+    pallet_no TEXT DEFAULT '',
+    barcode TEXT DEFAULT '',
+    scan_result TEXT DEFAULT '',
+    message TEXT DEFAULT '',
+    scanned_at TEXT
+  )`,
+
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_verify_batch_no ON v2_verify_batches(batch_no) WHERE batch_no != ''`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_verify_batches_status ON v2_verify_batches(status, created_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_verify_batch_items_batch ON v2_verify_batch_items(batch_id, barcode)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_verify_scan_logs_batch_barcode ON v2_verify_scan_logs(batch_id, barcode)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_verify_scan_logs_batch_pallet ON v2_verify_scan_logs(batch_id, pallet_no)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_verify_scan_logs_job ON v2_verify_scan_logs(job_id)`,
 ];
 
 let _migrated = false;
@@ -3870,6 +3917,423 @@ route("v2_correction_request_list", async (body, env) => {
   const stmt = env.DB.prepare(sql);
   const rs = binds.length > 0 ? await stmt.bind(...binds).all() : await stmt.all();
   return json({ ok: true, items: rs.results || [] });
+});
+
+// =====================================================
+// VERIFY CENTER — 扫码核对（客服上传批次 + 现场扫码核对）
+// =====================================================
+
+// 1) 创建核对批次（仅客服/协同中心调用）
+route("v2_verify_batch_create", async (body, env) => {
+  if (!isAuth(body, env)) return err("unauthorized", 401);
+  const customer_name = String(body.customer_name || "").trim();
+  const planned_qty = Math.max(0, parseInt(body.planned_qty, 10) || 0);
+  const remark = String(body.remark || "").trim();
+  const created_by = String(body.created_by || "").trim();
+  let batch_no = String(body.batch_no || "").trim();
+  const rawItems = Array.isArray(body.items) ? body.items : [];
+  if (!customer_name) return err("missing customer_name");
+
+  // 清洗 items：去空行 + 去重（保留顺序）
+  const seen = {};
+  const items = [];
+  rawItems.forEach(it => {
+    const bc = String(typeof it === 'string' ? it : (it && it.barcode) || "").trim();
+    if (!bc) return;
+    if (seen[bc]) return;
+    seen[bc] = true;
+    items.push(bc);
+  });
+
+  return withIdem(env, body, "v2_verify_batch_create", async () => {
+    const t = now();
+    const id = "VB-" + uid();
+    // batch_no 可自动生成：VBT-YYYYMMDD-XXXX
+    if (!batch_no) {
+      const dateStr = kstToday().replace(/-/g, '');
+      batch_no = 'VBT-' + dateStr + '-' + Date.now().toString(36).slice(-4).toUpperCase();
+    }
+    // 唯一性检查（客户已手填的场景）
+    const dup = await env.DB.prepare("SELECT id FROM v2_verify_batches WHERE batch_no=?").bind(batch_no).first();
+    if (dup) return { ok: false, error: "batch_no_duplicate", message: "批次号已存在 / 배치번호 중복" };
+
+    await env.DB.prepare(`
+      INSERT INTO v2_verify_batches(id, batch_no, customer_name, planned_qty, status,
+        remark, created_by, created_at, updated_at)
+      VALUES(?,?,?,?,'pending',?,?,?,?)
+    `).bind(id, batch_no, customer_name, planned_qty, remark, created_by, t, t).run();
+
+    for (const bc of items) {
+      const item_id = "VBI-" + uid();
+      await env.DB.prepare(`
+        INSERT INTO v2_verify_batch_items(id, batch_id, barcode, planned_qty, created_at)
+        VALUES(?,?,?,1,?)
+      `).bind(item_id, id, bc, t).run();
+    }
+
+    return { ok: true, id, batch_no, item_count: items.length };
+  });
+});
+
+// 2) 批次列表（带扫描汇总）
+route("v2_verify_batch_list", async (body, env) => {
+  if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  const status = String(body.status || "").trim();
+  const customer_name = String(body.customer_name || "").trim();
+  const start_date = String(body.start_date || "").trim();
+  const end_date = String(body.end_date || "").trim();
+
+  let sql = "SELECT * FROM v2_verify_batches WHERE 1=1";
+  const binds = [];
+  if (status) { sql += " AND status=?"; binds.push(status); }
+  if (customer_name) { sql += " AND customer_name LIKE ?"; binds.push('%' + customer_name + '%'); }
+  if (start_date) { sql += " AND created_at >= ?"; binds.push(start_date); }
+  if (end_date) { sql += " AND created_at <= ?"; binds.push(end_date + 'T23:59:59Z'); }
+  sql += " ORDER BY created_at DESC LIMIT 200";
+
+  const stmt = env.DB.prepare(sql);
+  const rs = binds.length > 0 ? await stmt.bind(...binds).all() : await stmt.all();
+  const batches = rs.results || [];
+  if (batches.length === 0) return json({ ok: true, items: [] });
+
+  // 批量聚合 scan_logs：ok 数 / 异常数
+  const ids = batches.map(b => b.id);
+  const placeholders = ids.map(() => '?').join(',');
+  const statRs = await env.DB.prepare(
+    `SELECT batch_id,
+            SUM(CASE WHEN scan_result='ok' THEN 1 ELSE 0 END) AS ok_count,
+            SUM(CASE WHEN scan_result IN ('not_found','duplicate','overflow') THEN 1 ELSE 0 END) AS abnormal_count
+     FROM v2_verify_scan_logs WHERE batch_id IN (${placeholders}) GROUP BY batch_id`
+  ).bind(...ids).all();
+  const statMap = {};
+  (statRs.results || []).forEach(r => { statMap[r.batch_id] = r; });
+
+  const items = batches.map(b => {
+    const s = statMap[b.id] || {};
+    return {
+      ...b,
+      scanned_ok_count: Number(s.ok_count || 0),
+      abnormal_count: Number(s.abnormal_count || 0)
+    };
+  });
+  return json({ ok: true, items });
+});
+
+// 3) 批次详情（batch + items + scan_logs + 汇总 + 按托盘汇总）
+route("v2_verify_batch_detail", async (body, env) => {
+  if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  const id = String(body.id || "").trim();
+  if (!id) return err("missing id");
+
+  const batch = await env.DB.prepare("SELECT * FROM v2_verify_batches WHERE id=?").bind(id).first();
+  if (!batch) return err("not found", 404);
+
+  const itemsRs = await env.DB.prepare(
+    "SELECT * FROM v2_verify_batch_items WHERE batch_id=? ORDER BY created_at"
+  ).bind(id).all();
+  const logsRs = await env.DB.prepare(
+    "SELECT * FROM v2_verify_scan_logs WHERE batch_id=? ORDER BY scanned_at DESC LIMIT 500"
+  ).bind(id).all();
+
+  const items = itemsRs.results || [];
+  const logs = logsRs.results || [];
+
+  // 汇总
+  let scanned_ok_count = 0, duplicate_count = 0, not_found_count = 0, overflow_count = 0;
+  const palletMap = {};
+  logs.forEach(l => {
+    if (l.scan_result === 'ok') scanned_ok_count++;
+    else if (l.scan_result === 'duplicate') duplicate_count++;
+    else if (l.scan_result === 'not_found') not_found_count++;
+    else if (l.scan_result === 'overflow') overflow_count++;
+    const p = l.pallet_no || '(未填/미기입)';
+    if (!palletMap[p]) palletMap[p] = { pallet_no: p, scanned_ok_count: 0, abnormal_count: 0 };
+    if (l.scan_result === 'ok') palletMap[p].scanned_ok_count++;
+    else palletMap[p].abnormal_count++;
+  });
+  const pallet_summary = Object.values(palletMap).sort((a, b) =>
+    (b.scanned_ok_count + b.abnormal_count) - (a.scanned_ok_count + a.abnormal_count)
+  );
+
+  return json({
+    ok: true,
+    batch,
+    items,
+    scan_logs: logs,
+    summary: {
+      planned_qty: batch.planned_qty || 0,
+      scanned_ok_count,
+      duplicate_count,
+      not_found_count,
+      overflow_count,
+      abnormal_count: duplicate_count + not_found_count + overflow_count,
+      diff: (batch.planned_qty || 0) - scanned_ok_count
+    },
+    pallet_summary
+  });
+});
+
+// 4) 批次状态变更（completed / cancelled）
+route("v2_verify_batch_update_status", async (body, env) => {
+  if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  const id = String(body.id || "").trim();
+  const target = String(body.status || "").trim();
+  const actor = String(body.actor || body.worker_id || body.created_by || "").trim();
+  if (!id || !target) return err("missing id or status");
+  const allowed = ['pending', 'verifying', 'completed', 'cancelled'];
+  if (allowed.indexOf(target) === -1) return err("bad status");
+
+  return withIdem(env, body, "v2_verify_batch_update_status", async () => {
+    const row = await env.DB.prepare("SELECT * FROM v2_verify_batches WHERE id=?").bind(id).first();
+    if (!row) return { ok: false, error: "batch not found" };
+    if (row.status === 'completed' && target !== 'completed') return { ok: false, error: "already_completed" };
+    if (row.status === 'cancelled' && target !== 'cancelled') return { ok: false, error: "already_cancelled" };
+
+    const t = now();
+    let sql = "UPDATE v2_verify_batches SET status=?, updated_at=?";
+    const binds = [target, t];
+    if (target === 'completed') { sql += ", completed_at=?, completed_by=?"; binds.push(t, actor); }
+    if (target === 'cancelled') { sql += ", cancelled_at=?, cancelled_by=?"; binds.push(t, actor); }
+    sql += " WHERE id=?";
+    binds.push(id);
+    await env.DB.prepare(sql).bind(...binds).run();
+    return { ok: true, id, status: target };
+  });
+});
+
+// 5) 扫码提交：现场逐条扫，每扫一次必写入 scan_logs（含托盘号）
+route("v2_verify_scan_submit", async (body, env) => {
+  if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  const batch_id = String(body.batch_id || "").trim();
+  const job_id = String(body.job_id || "").trim();
+  const worker_id = String(body.worker_id || "").trim();
+  const worker_name = String(body.worker_name || "").trim();
+  const pallet_no = String(body.pallet_no || "").trim();
+  const barcode = String(body.barcode || "").trim();
+  if (!batch_id || !barcode) return err("missing batch_id or barcode");
+  if (!pallet_no) return err("missing pallet_no");
+  if (!job_id) return err("missing job_id");
+
+  return withIdem(env, body, "v2_verify_scan_submit", async () => {
+    // 校验批次状态
+    const batch = await env.DB.prepare("SELECT * FROM v2_verify_batches WHERE id=?").bind(batch_id).first();
+    if (!batch) return { ok: false, error: "batch_not_found" };
+    if (batch.status === 'completed' || batch.status === 'cancelled') {
+      return { ok: false, error: "batch_closed", message: "批次已 " + batch.status };
+    }
+    // 校验 job 状态
+    const job = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
+    if (!job) return { ok: false, error: "job_not_found" };
+    if (job.job_type !== 'verify_scan') return { ok: false, error: "job_type_mismatch" };
+    if (job.status !== 'working') return { ok: false, error: "job_not_working", message: "任务不在作业中" };
+
+    // 匹配 batch_items
+    const item = await env.DB.prepare(
+      "SELECT * FROM v2_verify_batch_items WHERE batch_id=? AND barcode=? LIMIT 1"
+    ).bind(batch_id, barcode).first();
+
+    let scan_result, message = '';
+    if (!item) {
+      scan_result = 'not_found';
+      message = '条码不在本批次 / 배치에 없는 바코드';
+    } else {
+      const okRs = await env.DB.prepare(
+        "SELECT COUNT(*) AS c FROM v2_verify_scan_logs WHERE batch_id=? AND barcode=? AND scan_result='ok'"
+      ).bind(batch_id, barcode).first();
+      const okCount = okRs ? Number(okRs.c || 0) : 0;
+      const planned = Math.max(1, Number(item.planned_qty || 1));
+      if (okCount === 0) {
+        scan_result = 'ok';
+      } else if (okCount < planned) {
+        scan_result = 'ok';
+      } else if (okCount === planned && planned === 1) {
+        scan_result = 'duplicate';
+        message = '此条码已扫过 / 이미 스캔된 바코드';
+      } else {
+        scan_result = 'overflow';
+        message = '超过计划数 / 계획 수량 초과';
+      }
+    }
+
+    const t = now();
+    const log_id = "VSL-" + uid();
+    await env.DB.prepare(`
+      INSERT INTO v2_verify_scan_logs(id, batch_id, job_id, worker_id, worker_name,
+        pallet_no, barcode, scan_result, message, scanned_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?)
+    `).bind(log_id, batch_id, job_id, worker_id, worker_name,
+        pallet_no, barcode, scan_result, message, t).run();
+
+    // 实时汇总
+    const sumRs = await env.DB.prepare(
+      `SELECT
+        SUM(CASE WHEN scan_result='ok' THEN 1 ELSE 0 END) AS ok_count,
+        SUM(CASE WHEN scan_result='duplicate' THEN 1 ELSE 0 END) AS dup_count,
+        SUM(CASE WHEN scan_result='not_found' THEN 1 ELSE 0 END) AS nf_count,
+        SUM(CASE WHEN scan_result='overflow' THEN 1 ELSE 0 END) AS of_count
+       FROM v2_verify_scan_logs WHERE batch_id=?`
+    ).bind(batch_id).first();
+    const summary = {
+      planned_qty: batch.planned_qty || 0,
+      scanned_ok_count: Number((sumRs && sumRs.ok_count) || 0),
+      duplicate_count: Number((sumRs && sumRs.dup_count) || 0),
+      not_found_count: Number((sumRs && sumRs.nf_count) || 0),
+      overflow_count: Number((sumRs && sumRs.of_count) || 0)
+    };
+    summary.abnormal_count = summary.duplicate_count + summary.not_found_count + summary.overflow_count;
+    summary.diff = summary.planned_qty - summary.scanned_ok_count;
+
+    return {
+      ok: true,
+      scan_result,
+      message,
+      log_id,
+      summary
+    };
+  });
+});
+
+// 6) 开始扫码核对（专用包装：更新批次状态 + 创建/加入 verify_scan job）
+route("v2_verify_job_start", async (body, env) => {
+  if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  const batch_id = String(body.batch_id || "").trim();
+  const worker_id = String(body.worker_id || "").trim();
+  const worker_name = String(body.worker_name || "").trim();
+  if (!batch_id) return err("missing batch_id");
+  if (!worker_id) return err("missing worker_id");
+
+  return withIdem(env, body, "v2_verify_job_start", async () => {
+    const batch = await env.DB.prepare("SELECT * FROM v2_verify_batches WHERE id=?").bind(batch_id).first();
+    if (!batch) return { ok: false, error: "batch_not_found" };
+    if (batch.status === 'completed' || batch.status === 'cancelled') {
+      return { ok: false, error: "batch_closed", message: "批次已 " + batch.status };
+    }
+
+    const t = now();
+
+    // 多任务互斥（允许已在同 job 的本人重入）
+    let existing = await env.DB.prepare(
+      "SELECT * FROM v2_ops_jobs WHERE related_doc_type='verify_batch' AND related_doc_id=? AND job_type='verify_scan' AND status IN ('pending','working','awaiting_close') LIMIT 1"
+    ).bind(batch_id).first();
+
+    const busy = await checkWorkerBusy(env, worker_id, existing ? existing.id : null);
+    if (busy) return { ok: false, error: "worker_has_active_job", active_job_id: busy.job_id, active_job_type: busy.job_type };
+
+    let job_id, is_new_job = false;
+    if (existing) {
+      job_id = existing.id;
+      const dup = await findOpenSeg(env, job_id, worker_id);
+      if (!dup) {
+        await env.DB.prepare(
+          "UPDATE v2_ops_jobs SET active_worker_count=active_worker_count+1, status='working', updated_at=? WHERE id=?"
+        ).bind(t, job_id).run();
+        const seg_id = "WS-" + uid();
+        await env.DB.prepare(`
+          INSERT INTO v2_ops_job_workers(id, job_id, worker_id, worker_name, joined_at)
+          VALUES(?,?,?,?,?)
+        `).bind(seg_id, job_id, worker_id, worker_name, t).run();
+        // 更新批次状态（pending -> verifying）
+        if (batch.status === 'pending') {
+          await env.DB.prepare("UPDATE v2_verify_batches SET status='verifying', updated_at=? WHERE id=?").bind(t, batch_id).run();
+        }
+        return { ok: true, job_id, worker_seg_id: seg_id, is_new_job: false, batch_id };
+      }
+      // 已在同 job，直接返回
+      return { ok: true, job_id, worker_seg_id: dup.id, is_new_job: false, already_joined: true, batch_id };
+    }
+
+    job_id = "JOB-" + uid();
+    is_new_job = true;
+    await env.DB.prepare(`
+      INSERT INTO v2_ops_jobs(id, flow_stage, biz_class, job_type, related_doc_type, related_doc_id,
+        status, created_by, created_at, updated_at, active_worker_count)
+      VALUES(?, 'order_op', '', 'verify_scan', 'verify_batch', ?, 'working', ?, ?, ?, 1)
+    `).bind(job_id, batch_id, worker_id, t, t).run();
+
+    const seg_id = "WS-" + uid();
+    await env.DB.prepare(`
+      INSERT INTO v2_ops_job_workers(id, job_id, worker_id, worker_name, joined_at)
+      VALUES(?,?,?,?,?)
+    `).bind(seg_id, job_id, worker_id, worker_name, t).run();
+
+    if (batch.status === 'pending') {
+      await env.DB.prepare("UPDATE v2_verify_batches SET status='verifying', updated_at=? WHERE id=?").bind(t, batch_id).run();
+    }
+
+    return { ok: true, job_id, worker_seg_id: seg_id, is_new_job, batch_id };
+  });
+});
+
+// 7) 完成扫码核对：结束 segment（+可选关 job + 可选关批次）
+route("v2_verify_job_finish", async (body, env) => {
+  if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  const job_id = String(body.job_id || "").trim();
+  const worker_id = String(body.worker_id || "").trim();
+  const complete_job = body.complete_job !== false; // 默认 true
+  const complete_batch = !!body.complete_batch;     // 默认 false
+  if (!job_id) return err("missing job_id");
+
+  return withIdem(env, body, "v2_verify_job_finish", async () => {
+    const t = now();
+    const job = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
+    if (!job) return { ok: false, error: "job_not_found" };
+    if (job.job_type !== 'verify_scan') return { ok: false, error: "job_type_mismatch" };
+    if (job.status === 'completed') return { ok: false, error: "already_completed" };
+
+    // 关闭本人 segment
+    await closeAllOpenSegs(env, job_id, worker_id, t, 'finished');
+
+    if (complete_job) {
+      // 关闭所有 open segments
+      await env.DB.prepare(
+        "UPDATE v2_ops_job_workers SET left_at=?, leave_reason='job_completed' WHERE job_id=? AND left_at=''"
+      ).bind(t, job_id).run();
+
+      // 写入结果摘要
+      const batch_id = job.related_doc_id || '';
+      const sumRs = await env.DB.prepare(
+        `SELECT
+          SUM(CASE WHEN scan_result='ok' THEN 1 ELSE 0 END) AS ok_count,
+          SUM(CASE WHEN scan_result='duplicate' THEN 1 ELSE 0 END) AS dup_count,
+          SUM(CASE WHEN scan_result='not_found' THEN 1 ELSE 0 END) AS nf_count,
+          SUM(CASE WHEN scan_result='overflow' THEN 1 ELSE 0 END) AS of_count
+         FROM v2_verify_scan_logs WHERE batch_id=?`
+      ).bind(batch_id).first();
+      const batch = await env.DB.prepare("SELECT planned_qty FROM v2_verify_batches WHERE id=?").bind(batch_id).first();
+      const summary = {
+        batch_id,
+        planned_qty: (batch && batch.planned_qty) || 0,
+        scanned_ok_count: Number((sumRs && sumRs.ok_count) || 0),
+        duplicate_count: Number((sumRs && sumRs.dup_count) || 0),
+        not_found_count: Number((sumRs && sumRs.nf_count) || 0),
+        overflow_count: Number((sumRs && sumRs.of_count) || 0)
+      };
+      const result_id = "RES-" + uid();
+      await env.DB.prepare(`
+        INSERT INTO v2_ops_job_results(id, job_id, box_count, pallet_count, remark, result_json, created_by, created_at)
+        VALUES(?,?,?,?,?,?,?,?)
+      `).bind(result_id, job_id, summary.scanned_ok_count, 0,
+          String(body.remark || ""), JSON.stringify(summary), worker_id, t).run();
+
+      await env.DB.prepare(
+        "UPDATE v2_ops_jobs SET status='completed', active_worker_count=0, updated_at=? WHERE id=?"
+      ).bind(t, job_id).run();
+
+      if (complete_batch && batch_id) {
+        await env.DB.prepare(
+          "UPDATE v2_verify_batches SET status='completed', completed_at=?, completed_by=?, updated_at=? WHERE id=?"
+        ).bind(t, worker_id, t, batch_id).run();
+      }
+    } else {
+      // 仅本人退出，若无剩余 open seg 则 awaiting_close
+      const realCount = await recalcActiveCount(env, job_id, t);
+      if (realCount <= 0 && job.status === 'working') {
+        await env.DB.prepare("UPDATE v2_ops_jobs SET status='awaiting_close', updated_at=? WHERE id=?").bind(t, job_id).run();
+      }
+    }
+
+    return { ok: true, job_id, completed: complete_job, batch_completed: complete_job && complete_batch };
+  });
 });
 
 // =====================================================

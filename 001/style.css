@@ -202,6 +202,7 @@ body {
 .st-unloaded_pending_info { background: #ff9800; }
 .st-converted { background: #8e24aa; }
 .st-unloading { background: #e67e22; }
+.st-verifying { background: #6a1b9a; }
 .st-arrived_pending_putaway { background: #2196f3; }
 .st-putting_away { background: #9c27b0; }
 
@@ -422,3 +423,27 @@ label {
   font-size: 13px;
   font-weight: 700;
 }
+
+/* ===== 扫码核对结果反馈 ===== */
+.scan-feedback { display: block; }
+.scan-feedback.result-ok { background: #e8f5e9; color: #2e7d32; }
+.scan-feedback.result-warn { background: #fff3e0; color: #e65100; }
+.scan-feedback.result-err { background: #fdecea; color: #c62828; }
+
+.scan-log-row {
+  border-bottom: 1px solid #f0f0f0;
+  padding: 6px 0;
+  font-size: 13px;
+}
+.scan-log-row:last-child { border-bottom: none; }
+.scan-log-row .tag {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  margin-right: 6px;
+}
+.scan-log-row .tag.ok { background: #e8f5e9; color: #2e7d32; }
+.scan-log-row .tag.warn { background: #fff3e0; color: #e65100; }
+.scan-log-row .tag.err { background: #fdecea; color: #c62828; }

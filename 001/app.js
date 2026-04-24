@@ -122,7 +122,9 @@ var _WRITE_ACTIONS = [
   'v2_ops_job_start','v2_ops_job_leave','v2_ops_job_finish','v2_ops_job_resume',
   'v2_pick_job_start','v2_pick_job_join','v2_pick_job_add_docs','v2_pick_job_finish',
   'v2_bulk_op_job_start','v2_bulk_op_job_finish',
-  'v2_correction_request_create','v2_admin_dirty_data_cleanup'
+  'v2_correction_request_create','v2_admin_dirty_data_cleanup',
+  'v2_verify_batch_create','v2_verify_batch_update_status',
+  'v2_verify_job_start','v2_verify_job_finish','v2_verify_scan_submit'
 ];
 function _genReqId(action) {
   return action + '_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
@@ -196,6 +198,7 @@ function showPage(name) {
   if (name === "pick_direct") initPickDirect();
   if (name === "bulk_op") initBulkOp();
   if (name === "import_delivery") initImportDelivery();
+  if (name === "verify_scan") initVerifyScan();
 }
 
 // ===== Badge Entry (replaces old login) =====
@@ -225,6 +228,7 @@ function resumeActiveOrHome() {
       else if (jt === "pick_direct") showPage("pick_direct");
       else if (jt === "bulk_op") showPage("bulk_op");
       else if (jt === "issue_handle") { _currentIssueId = res.job.related_doc_id || null; showPage("issue_detail"); }
+      else if (jt === "verify_scan") { _vsBatchId = res.job.related_doc_id || ""; showPage("verify_scan"); }
       else { _pageParams = { flow_stage: res.job.flow_stage || "", biz_class: res.job.biz_class || "", job_type: jt, title: JOB_TYPE_LABEL[jt] || jt }; showPage("generic_job"); }
     } else {
       showPage("home");
@@ -516,6 +520,7 @@ function goMyTask() {
     else if (jt === "bulk_op") goPage("bulk_op");
     else if (jt === "issue_handle") goPage("issue_detail");
     else if (jt === "pickup_delivery_import") goPage("import_delivery");
+    else if (jt === "verify_scan") { _vsBatchId = res.job.related_doc_id || ""; goPage("verify_scan"); }
     else goPage("generic_job", {
       flow_stage: res.job.flow_stage || "",
       biz_class: res.job.biz_class || "",
@@ -541,7 +546,8 @@ var JOB_TYPE_LABEL = {
   other_internal: "仓库整理/창고 정리",
   scan_pallet: "过机扫描/스캔",
   load_import: "装柜出货/적재 출고",
-  pickup_delivery_import: "外出取/送货/외부 픽업·배송"
+  pickup_delivery_import: "外出取/送货/외부 픽업·배송",
+  verify_scan: "扫码核对/스캔 검수"
 };
 
 var STATUS_LABEL = {
@@ -562,7 +568,8 @@ var STATUS_LABEL = {
   awaiting_close: "待收尾/마감대기",
   field_working: "现场卸货中/현장하차중",
   unloaded_pending_info: "待补充信息/정보보완대기",
-  converted: "已转正/전환완료"
+  converted: "已转正/전환완료",
+  verifying: "核对中/검수중"
 };
 
 var ISSUE_STATUS_LABEL = {
@@ -1169,6 +1176,7 @@ function startJobPoll(type) {
     if (type === "pick") refreshPickWorkers();
     if (type === "bulk") refreshBulkWorkers();
     if (type === "import_delivery") refreshImportDeliveryWorkers();
+    if (type === "verify_scan") refreshVerifyScanWorkers();
   }, 5000);
 }
 
@@ -3126,6 +3134,295 @@ function fmtTime(isoStr) {
     var min = d.getMinutes();
     return m + "-" + day + " " + (h < 10 ? "0" : "") + h + ":" + (min < 10 ? "0" : "") + min;
   } catch(e) { return isoStr; }
+}
+
+// =====================================================
+// Verify Scan — 扫码核对
+// =====================================================
+var _vsBatchId = "";        // 当前进入作业的 batch_id
+var _vsBatchList = [];      // entry 态缓存
+var _vsLastPallet = "";     // 上一次填写的托盘号
+var _vsSubmitInflight = false;
+
+function initVerifyScan() {
+  var entry = document.getElementById("vsEntryCard");
+  var working = document.getElementById("vsWorkingCard");
+  var logCard = document.getElementById("vsScanLogCard");
+  var workersCard = document.getElementById("vsWorkersCard");
+  var actionCard = document.getElementById("vsActionCard");
+
+  // 已在本人 verify_scan 任务中 — 直接回 working 态
+  if (_activeJobId) {
+    api({ action: "v2_ops_job_detail", job_id: _activeJobId }).then(function(res) {
+      if (res && res.ok && res.job && res.job.job_type === "verify_scan" && res.job.status === "working") {
+        _vsBatchId = res.job.related_doc_id || "";
+        entry.style.display = "none";
+        working.style.display = "";
+        logCard.style.display = "";
+        workersCard.style.display = "";
+        actionCard.style.display = "";
+        renderWorkers("vsWorkers", res.workers);
+        refreshVerifyScanSummary();
+        refreshVerifyScanLogs();
+        startJobPoll("verify_scan");
+        setTimeout(function() {
+          var p = document.getElementById("vsPalletInput");
+          if (p && _vsLastPallet) p.value = _vsLastPallet;
+        }, 50);
+        return;
+      }
+      enterVsEntryState();
+    });
+    return;
+  }
+  enterVsEntryState();
+}
+
+function enterVsEntryState() {
+  document.getElementById("vsEntryCard").style.display = "";
+  document.getElementById("vsWorkingCard").style.display = "none";
+  document.getElementById("vsScanLogCard").style.display = "none";
+  document.getElementById("vsWorkersCard").style.display = "none";
+  document.getElementById("vsActionCard").style.display = "none";
+  loadVsBatches();
+}
+
+function verifyScanGoBack() {
+  if (_activeJobId) {
+    // 提示：有活跃任务不直接返回，而是走首页顶部任务条恢复
+    goPage("home");
+    return;
+  }
+  goPage("outbound_menu");
+}
+
+async function loadVsBatches() {
+  var sel = document.getElementById("vsBatchSelect");
+  if (!sel) return;
+  sel.innerHTML = '<option value="">加载中.../로딩중...</option>';
+  // pending + verifying 都能被接续
+  var pair = await Promise.all([
+    api({ action: "v2_verify_batch_list", status: "pending" }),
+    api({ action: "v2_verify_batch_list", status: "verifying" })
+  ]);
+  var items = [];
+  if (pair[0] && pair[0].ok) items = items.concat(pair[0].items || []);
+  if (pair[1] && pair[1].ok) items = items.concat(pair[1].items || []);
+  _vsBatchList = items;
+  sel.innerHTML = '<option value="">-- 选择批次/배치 선택 --</option>';
+  items.forEach(function(b) {
+    var opt = document.createElement("option");
+    opt.value = b.id;
+    opt.textContent = b.batch_no + " · " + (b.customer_name || "--") + " · 计划/계획 " + (b.planned_qty || 0);
+    sel.appendChild(opt);
+  });
+  onVsBatchChange();
+}
+
+function onVsBatchChange() {
+  var sel = document.getElementById("vsBatchSelect");
+  var info = document.getElementById("vsBatchInfo");
+  if (!sel || !info) return;
+  var id = sel.value;
+  if (!id) { info.textContent = "--"; return; }
+  var b = null;
+  for (var i = 0; i < _vsBatchList.length; i++) if (_vsBatchList[i].id === id) { b = _vsBatchList[i]; break; }
+  if (!b) { info.textContent = "--"; return; }
+  info.innerHTML = '客户/고객: <b>' + esc(b.customer_name || "--") + '</b> · 状态/상태: <b>' + esc(b.status) +
+    '</b> · 计划/계획: <b>' + (b.planned_qty || 0) + '</b> · 已扫/완료: <b>' + (b.scanned_ok_count || 0) +
+    '</b> · 异常/이상: <b>' + (b.abnormal_count || 0) + '</b>';
+}
+
+function startVerifyScan(btnEl) {
+  if (hasOtherActiveJob()) return warnActiveJob();
+  var sel = document.getElementById("vsBatchSelect");
+  var batch_id = sel ? sel.value : "";
+  if (!batch_id) { alert("请先选择批次 / 배치를 선택하세요"); return; }
+  withActionLock('startVerifyScan', btnEl || null, '开始中.../시작중...', async function() {
+    var res = await api({
+      action: "v2_verify_job_start",
+      batch_id: batch_id,
+      worker_id: getWorkerId(),
+      worker_name: getWorkerName()
+    });
+    if (!res || !res.ok) {
+      if (res && res.error === "worker_has_active_job") {
+        alert("已有进行中的任务，请先结束 / 이미 진행 중인 작업이 있습니다");
+        return;
+      }
+      alert((res && (res.message || res.error)) || "开始失败 / 시작 실패");
+      return;
+    }
+    saveActiveJob(res.job_id, res.worker_seg_id);
+    _vsBatchId = batch_id;
+    // 进入 working 态
+    document.getElementById("vsEntryCard").style.display = "none";
+    document.getElementById("vsWorkingCard").style.display = "";
+    document.getElementById("vsScanLogCard").style.display = "";
+    document.getElementById("vsWorkersCard").style.display = "";
+    document.getElementById("vsActionCard").style.display = "";
+    await refreshVerifyScanSummary();
+    await refreshVerifyScanLogs();
+    await refreshVerifyScanWorkers();
+    startJobPoll("verify_scan");
+    setTimeout(function() {
+      var p = document.getElementById("vsPalletInput");
+      if (p) p.focus();
+    }, 80);
+  });
+}
+
+async function refreshVerifyScanSummary() {
+  if (!_vsBatchId) return;
+  var res = await api({ action: "v2_verify_batch_detail", id: _vsBatchId });
+  if (!res || !res.ok) return;
+  applyVsSummary(res.batch, res.summary);
+}
+
+function applyVsSummary(batch, sum) {
+  var head = document.getElementById("vsBatchHeader");
+  if (head && batch) {
+    head.innerHTML = '<b>' + esc(batch.batch_no || "--") + '</b> · ' + esc(batch.customer_name || "--") +
+      ' · <span class="st st-' + esc(batch.status) + '">' + esc(batch.status) + '</span>';
+  }
+  var plan = document.getElementById("vsPlanQty");
+  var ok = document.getElementById("vsOkQty");
+  var ab = document.getElementById("vsAbQty");
+  var diff = document.getElementById("vsDiffQty");
+  if (plan) plan.textContent = (sum && sum.planned_qty) || 0;
+  if (ok) ok.textContent = (sum && sum.scanned_ok_count) || 0;
+  if (ab) ab.textContent = (sum && sum.abnormal_count) || 0;
+  if (diff) {
+    var d = (sum && typeof sum.diff === 'number') ? sum.diff : ((sum && sum.planned_qty) || 0) - ((sum && sum.scanned_ok_count) || 0);
+    diff.textContent = d;
+  }
+}
+
+async function refreshVerifyScanLogs() {
+  if (!_vsBatchId) return;
+  var res = await api({ action: "v2_verify_batch_detail", id: _vsBatchId });
+  if (!res || !res.ok) return;
+  renderVsLogs(res.scan_logs || []);
+}
+
+function renderVsLogs(logs) {
+  var body = document.getElementById("vsScanLogBody");
+  if (!body) return;
+  if (!logs.length) {
+    body.innerHTML = '<span class="muted">暂无扫码记录 / 스캔 기록 없음</span>';
+    return;
+  }
+  var recent = logs.slice(0, 20);
+  var html = "";
+  recent.forEach(function(l) {
+    var cls = l.scan_result === 'ok' ? 'ok' :
+              (l.scan_result === 'not_found' ? 'err' : 'warn');
+    html += '<div class="scan-log-row">' +
+      '<span class="tag ' + cls + '">' + esc(l.scan_result) + '</span>' +
+      '<b>' + esc(l.barcode) + '</b> · P/팔: ' + esc(l.pallet_no || '--') +
+      ' · ' + esc(l.worker_name || l.worker_id || '--') + ' · ' + esc(fmtTime(l.scanned_at)) +
+      (l.message ? ' · ' + esc(l.message) : '') +
+    '</div>';
+  });
+  body.innerHTML = html;
+}
+
+async function refreshVerifyScanWorkers() {
+  if (!_activeJobId) return;
+  var res = await api({ action: "v2_ops_job_detail", job_id: _activeJobId });
+  if (res && res.ok) renderWorkers("vsWorkers", res.workers);
+}
+
+function onVsBarcodeKey(ev) {
+  if (ev && (ev.key === "Enter" || ev.keyCode === 13)) {
+    ev.preventDefault();
+    submitVsBarcode();
+  }
+}
+
+async function submitVsBarcode() {
+  if (_vsSubmitInflight) return;
+  if (!_activeJobId || !_vsBatchId) return;
+  var pEl = document.getElementById("vsPalletInput");
+  var bEl = document.getElementById("vsBarcodeInput");
+  var pallet_no = (pEl && pEl.value || "").trim();
+  var barcode = (bEl && bEl.value || "").trim();
+  if (!pallet_no) { showVsResult("warn", "请先填写托盘号 / 팔레트 번호를 입력하세요"); if (pEl) pEl.focus(); return; }
+  if (!barcode) return;
+  _vsSubmitInflight = true;
+  try {
+    var res = await api({
+      action: "v2_verify_scan_submit",
+      batch_id: _vsBatchId,
+      job_id: _activeJobId,
+      worker_id: getWorkerId(),
+      worker_name: getWorkerName(),
+      pallet_no: pallet_no,
+      barcode: barcode
+    });
+    _vsLastPallet = pallet_no;
+    if (!res || !res.ok) {
+      showVsResult("err", (res && (res.message || res.error)) || "提交失败 / 제출 실패");
+    } else {
+      var r = res.scan_result;
+      var cls = r === 'ok' ? 'ok' : (r === 'not_found' ? 'err' : 'warn');
+      var msg = '[' + r + '] ' + barcode + (res.message ? ' — ' + res.message : '');
+      showVsResult(cls, msg);
+      applyVsSummary(null, res.summary);
+      refreshVerifyScanLogs();
+    }
+  } finally {
+    _vsSubmitInflight = false;
+    if (bEl) { bEl.value = ""; bEl.focus(); }
+  }
+}
+
+function showVsResult(kind, text) {
+  var el = document.getElementById("vsLastResult");
+  if (!el) return;
+  el.className = "scan-feedback result-" + kind;
+  el.style.display = "";
+  el.textContent = text;
+}
+
+function leaveVerifyScan(btnEl) {
+  if (!_activeJobId) { goPage("home"); return; }
+  withActionLock('leaveVerifyScan', btnEl || null, '提交中.../저장중...', async function() {
+    var res = await api({
+      action: "v2_verify_job_finish",
+      job_id: _activeJobId,
+      worker_id: getWorkerId(),
+      complete_job: false
+    });
+    if (!res || !res.ok) {
+      alert((res && (res.message || res.error)) || "暂离失败 / 퇴장 실패");
+      return;
+    }
+    clearActiveJob();
+    goPage("home");
+  });
+}
+
+function finishVerifyScan(btnEl) {
+  if (!_activeJobId) { goPage("home"); return; }
+  var doCloseBatch = confirm("是否同时将该核对批次标记为【已完成】？\n배치를 '완료'로 표시하시겠습니까？\n\n[确定/확인] = 结束任务+关闭批次\n[取消/취소] = 只结束任务，批次仍开放");
+  withActionLock('finishVerifyScan', btnEl || null, '提交中.../저장중...', async function() {
+    var res = await api({
+      action: "v2_verify_job_finish",
+      job_id: _activeJobId,
+      worker_id: getWorkerId(),
+      complete_job: true,
+      complete_batch: !!doCloseBatch
+    });
+    if (!res || !res.ok) {
+      alert((res && (res.message || res.error)) || "完成失败 / 완료 실패");
+      return;
+    }
+    clearActiveJob();
+    _vsBatchId = "";
+    _vsLastPallet = "";
+    goPage("home");
+  });
 }
 
 // ===== Init =====

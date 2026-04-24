@@ -467,6 +467,61 @@
   <div style="padding:12px;">
     <button class="btn btn-primary" onclick="goPage('generic_job',{flow_stage:'outbound',job_type:'pack_direct',title:'代发打包/직배송 포장'})">代发打包 / 직배송 포장</button>
     <button class="btn btn-primary" onclick="goPage('outbound_load')">出库装货 / 출고 상차</button>
+    <button class="btn btn-primary" onclick="goPage('verify_scan')">扫码核对 / 스캔 검수</button>
+  </div>
+</div>
+
+<!-- Verify Scan -->
+<div id="page-verify_scan" class="page">
+  <div class="topbar">
+    <button class="back-btn" onclick="verifyScanGoBack()">← 返回/뒤로</button>
+    <div class="page-title">扫码核对 / 스캔 검수</div>
+  </div>
+
+  <!-- Entry card -->
+  <div id="vsEntryCard" class="card">
+    <label>选择核对批次 / 검수 배치 선택</label>
+    <select id="vsBatchSelect" onchange="onVsBatchChange()">
+      <option value="">-- 选择/선택 --</option>
+    </select>
+    <button class="btn btn-outline btn-sm mt-10" onclick="loadVsBatches()">刷新 / 새로고침</button>
+    <div id="vsBatchInfo" class="muted mt-10">--</div>
+    <div style="height:10px"></div>
+    <button class="btn btn-success" onclick="startVerifyScan(this)">开始核对 / 검수 시작</button>
+  </div>
+
+  <!-- Working card -->
+  <div id="vsWorkingCard" class="card" style="display:none;">
+    <div class="card-title">当前批次 / 현재 배치</div>
+    <div id="vsBatchHeader" style="font-size:13px;margin-bottom:8px;">--</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;font-size:13px;margin-bottom:8px;">
+      <span>计划/계획: <b id="vsPlanQty">--</b></span>
+      <span>正确/정상: <b id="vsOkQty" style="color:#27ae60;">0</b></span>
+      <span>异常/이상: <b id="vsAbQty" style="color:#e67e22;">0</b></span>
+      <span>差异/차이: <b id="vsDiffQty" style="color:#c62828;">--</b></span>
+    </div>
+    <label>当前托盘号 / 팔레트 번호 <span style="color:#c62828;">*必填/필수</span></label>
+    <input type="text" id="vsPalletInput" placeholder="扫描或输入托盘号 / 팔레트 스캔 또는 입력" autocomplete="off">
+    <label class="mt-10">扫描出库条码 / 출고 바코드 스캔</label>
+    <input type="text" id="vsBarcodeInput" placeholder="扫描枪直接扫条码 / 스캐너로 바코드 스캔" autocomplete="off" onkeydown="onVsBarcodeKey(event)">
+    <div class="muted" style="font-size:12px;margin-top:4px;">提示：扫描枪回车自动提交；换托盘时修改上方托盘号 / Tip: 스캐너 Enter 자동제출, 팔레트 변경시 위 번호 수정</div>
+    <div id="vsLastResult" style="display:none;margin-top:10px;padding:10px;border-radius:8px;font-size:13px;font-weight:700;"></div>
+  </div>
+
+  <div id="vsScanLogCard" class="card" style="display:none;">
+    <div class="card-title">最近扫码 / 최근 스캔</div>
+    <div id="vsScanLogBody"></div>
+  </div>
+
+  <div id="vsWorkersCard" class="card" style="display:none;">
+    <div class="card-title">当前参与人员 / 현재 참여 인원</div>
+    <div id="vsWorkers" class="workers-panel"><span class="muted">--</span></div>
+  </div>
+
+  <div id="vsActionCard" class="card" style="display:none;">
+    <button class="btn btn-outline" onclick="leaveVerifyScan(this)">暂时离开 / 일시 퇴장</button>
+    <div style="height:8px"></div>
+    <button class="btn btn-danger" onclick="finishVerifyScan(this)">完成核对 / 검수 종료</button>
   </div>
 </div>
 

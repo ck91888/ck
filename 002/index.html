@@ -365,9 +365,60 @@
     <div id="feedbackDetailBody"></div>
   </div>
 
-  <!-- Check (skeleton) -->
+  <!-- Check center: 扫码核对批次管理 -->
   <div id="view-check" class="view" style="display:none;">
-    <div class="card"><span class="muted">核对中心模块 — 下一轮完善</span></div>
+    <div class="filter-bar">
+      <select id="checkFilterStatus" onchange="loadVerifyList()">
+        <option value="">全部状态</option>
+        <option value="pending">待核对</option>
+        <option value="verifying">核对中</option>
+        <option value="completed">已完成</option>
+        <option value="cancelled">已作废</option>
+      </select>
+      <input type="text" id="checkFilterCustomer" placeholder="客户名（模糊）">
+      <button class="btn btn-outline btn-sm" onclick="loadVerifyList()">刷新</button>
+      <button class="btn btn-primary btn-sm" onclick="goView('check_create')">+ 新建批次</button>
+    </div>
+    <div id="checkListBody"><span class="muted">加载中...</span></div>
+  </div>
+
+  <!-- Check create -->
+  <div id="view-check_create" class="view" style="display:none;">
+    <button class="nav-back" onclick="goTab('check')">← 返回</button>
+    <div class="card">
+      <div class="card-title">新建核对批次</div>
+      <div class="form-group">
+        <label>客户名 / 고객사 <span style="color:#c62828;">*</span></label>
+        <input type="text" id="vc-customer" placeholder="如：某某电商">
+      </div>
+      <div class="form-group">
+        <label>批次号 / 배치번호 <span class="muted">(留空自动生成 VBT-YYYYMMDD-XXXX)</span></label>
+        <input type="text" id="vc-batch_no" placeholder="可手填；留空系统自动生成">
+      </div>
+      <div class="form-group">
+        <label>计划箱数 / 계획 박스수</label>
+        <input type="number" id="vc-planned_qty" min="0" value="0">
+      </div>
+      <div class="form-group">
+        <label>出库条码 / 출고 바코드 <span class="muted">(一行一个；自动去空行与重复)</span></label>
+        <textarea id="vc-items" rows="10" placeholder="BC-001&#10;BC-002&#10;BC-003"></textarea>
+      </div>
+      <div class="form-group">
+        <label>备注 / 비고</label>
+        <textarea id="vc-remark" rows="2"></textarea>
+      </div>
+      <div class="muted" style="font-size:12px;margin-bottom:8px;">
+        注意：托盘号不由客服维护，由现场核对时扫码自动记录。<br>
+        Pallet number is recorded by field workers during scanning, not by customer service.
+      </div>
+      <button class="btn btn-primary" onclick="submitVerifyBatch(this)">创建批次</button>
+    </div>
+  </div>
+
+  <!-- Check detail -->
+  <div id="view-check_detail" class="view" style="display:none;">
+    <button class="nav-back" onclick="goTab('check')">← 返回列表</button>
+    <div id="checkDetailBody"><span class="muted">加载中...</span></div>
   </div>
 
   <!-- Order Ops (按单操作) -->

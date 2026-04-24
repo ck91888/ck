@@ -66,7 +66,8 @@ var _WRITE_ACTIONS = [
   'v2_ops_job_start','v2_ops_job_leave','v2_ops_job_finish','v2_ops_job_resume',
   'v2_pick_job_start','v2_pick_job_join','v2_pick_job_add_docs','v2_pick_job_finish',
   'v2_bulk_op_job_start','v2_bulk_op_job_finish',
-  'v2_correction_request_create','v2_admin_dirty_data_cleanup'
+  'v2_correction_request_create','v2_admin_dirty_data_cleanup',
+  'v2_verify_batch_create','v2_verify_batch_update_status'
 ];
 function _genReqId(action) {
   return action + '_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
@@ -333,6 +334,7 @@ function goTab(tab, btn) {
   if (tab === "inbound") loadInboundList();
   if (tab === "feedback") loadFeedbackList();
   if (tab === "order_ops") loadOrderOpsList();
+  if (tab === "check") loadVerifyList();
 }
 
 function goView(name) {
@@ -1930,6 +1932,196 @@ async function loadOrderOpsDetail(id) {
       }
     }
   }
+}
+
+// =====================================================
+// Verify Center — 核对中心
+// =====================================================
+var _currentVerifyBatchId = null;
+
+async function loadVerifyList() {
+  var body = document.getElementById("checkListBody");
+  if (!body) return;
+  body.innerHTML = '<span class="muted">加载中...</span>';
+  var status = (document.getElementById("checkFilterStatus") || {}).value || "";
+  var customer = (document.getElementById("checkFilterCustomer") || {}).value || "";
+  var res = await api({ action: "v2_verify_batch_list", status: status, customer_name: customer });
+  if (!res || !res.ok) { body.innerHTML = '<span class="muted">加载失败</span>'; return; }
+  var items = res.items || [];
+  if (items.length === 0) {
+    body.innerHTML = '<div class="card"><span class="muted">暂无批次</span></div>';
+    return;
+  }
+  var html = '<div class="card"><div class="card-title">核对批次 <span class="count">共 ' + items.length + ' 条</span></div>';
+  items.forEach(function(b) {
+    var diff = (b.planned_qty || 0) - (b.scanned_ok_count || 0);
+    html += '<div class="list-item" onclick="openVerifyBatch(\'' + esc(b.id) + '\')">' +
+      '<div class="item-title">' +
+        '<span class="st st-' + esc(b.status) + '">' + esc(verifyStatusLabel(b.status)) + '</span> ' +
+        esc(b.batch_no || '--') + ' · ' + esc(b.customer_name || '--') +
+      '</div>' +
+      '<div class="item-meta">' +
+        '计划/계획 ' + (b.planned_qty || 0) +
+        ' · 正确/정상 ' + (b.scanned_ok_count || 0) +
+        ' · 异常/이상 ' + (b.abnormal_count || 0) +
+        ' · 差异/차이 ' + diff +
+        ' · ' + esc(b.created_at || '').slice(0, 16).replace('T', ' ') +
+      '</div>' +
+    '</div>';
+  });
+  html += '</div>';
+  body.innerHTML = html;
+}
+
+function verifyStatusLabel(s) {
+  return ({
+    pending: "待核对/대기",
+    verifying: "核对中/검수중",
+    completed: "已完成/완료",
+    cancelled: "已作废/취소"
+  })[s] || s;
+}
+
+function openVerifyBatch(id) {
+  _currentVerifyBatchId = id;
+  goView("check_detail");
+  loadVerifyDetail();
+}
+
+async function loadVerifyDetail() {
+  var body = document.getElementById("checkDetailBody");
+  if (!body || !_currentVerifyBatchId) return;
+  body.innerHTML = '<span class="muted">加载中...</span>';
+  var res = await api({ action: "v2_verify_batch_detail", id: _currentVerifyBatchId });
+  if (!res || !res.ok) { body.innerHTML = '<span class="muted">加载失败</span>'; return; }
+  var b = res.batch;
+  var s = res.summary || {};
+  var items = res.items || [];
+  var logs = res.scan_logs || [];
+  var pallets = res.pallet_summary || [];
+
+  var canClose = (b.status === 'pending' || b.status === 'verifying');
+  var html = '';
+
+  // 批次头
+  html += '<div class="card">';
+  html += '<div class="card-title">' + esc(b.batch_no) + ' · ' + esc(b.customer_name) +
+    ' <span class="st st-' + esc(b.status) + '">' + esc(verifyStatusLabel(b.status)) + '</span></div>';
+  html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;font-size:13px;">' +
+    '<div>计划/계획: <b>' + (s.planned_qty || 0) + '</b></div>' +
+    '<div>正确/정상: <b style="color:#2e7d32;">' + (s.scanned_ok_count || 0) + '</b></div>' +
+    '<div>重复/중복: <b style="color:#e65100;">' + (s.duplicate_count || 0) + '</b></div>' +
+    '<div>未匹配/미일치: <b style="color:#c62828;">' + (s.not_found_count || 0) + '</b></div>' +
+    '<div>超量/초과: <b style="color:#e65100;">' + (s.overflow_count || 0) + '</b></div>' +
+    '<div>差异/차이: <b style="color:#c62828;">' + (s.diff || 0) + '</b></div>' +
+  '</div>';
+  if (b.remark) html += '<div style="margin-top:8px;font-size:13px;"><b>备注:</b> ' + esc(b.remark) + '</div>';
+  html += '<div style="margin-top:10px;">';
+  if (canClose) {
+    html += '<button class="btn btn-primary btn-sm" onclick="updateVerifyBatch(\'' + esc(b.id) + '\',\'completed\',this)">标记已完成</button> ';
+    html += '<button class="btn btn-outline btn-sm" onclick="updateVerifyBatch(\'' + esc(b.id) + '\',\'cancelled\',this)">作废批次</button>';
+  } else {
+    html += '<span class="muted">批次已关闭，不可变更</span>';
+  }
+  html += '</div></div>';
+
+  // 条码清单
+  html += '<div class="card"><div class="card-title">计划条码 <span class="count">' + items.length + ' 条</span></div>';
+  if (!items.length) html += '<span class="muted">无条码</span>';
+  else {
+    html += '<div style="max-height:240px;overflow:auto;">';
+    items.forEach(function(it) {
+      html += '<div style="padding:4px 0;border-bottom:1px solid #f0f0f0;font-size:13px;font-family:monospace;">' +
+        esc(it.barcode) + '</div>';
+    });
+    html += '</div>';
+  }
+  html += '</div>';
+
+  // 按托盘汇总
+  html += '<div class="card"><div class="card-title">按托盘汇总 <span class="count">' + pallets.length + ' 托</span></div>';
+  if (!pallets.length) html += '<span class="muted">尚无现场扫码</span>';
+  else {
+    pallets.forEach(function(p) {
+      html += '<div class="list-item">' +
+        '<div class="item-title">' + esc(p.pallet_no) + '</div>' +
+        '<div class="item-meta">正确 ' + p.scanned_ok_count + ' · 异常 ' + p.abnormal_count + '</div>' +
+      '</div>';
+    });
+  }
+  html += '</div>';
+
+  // 扫码流水
+  html += '<div class="card"><div class="card-title">扫码流水 <span class="count">最近 ' + Math.min(100, logs.length) + ' 条</span></div>';
+  if (!logs.length) html += '<span class="muted">暂无扫码记录</span>';
+  else {
+    html += '<div style="max-height:360px;overflow:auto;">';
+    logs.slice(0, 100).forEach(function(l) {
+      var tagCls = l.scan_result === 'ok' ? 'st-completed' :
+                   (l.scan_result === 'not_found' ? 'st-cancelled' : 'st-issued');
+      html += '<div style="padding:6px 0;border-bottom:1px solid #f0f0f0;font-size:13px;">' +
+        '<span class="st ' + tagCls + '">' + esc(l.scan_result) + '</span> ' +
+        '<b>' + esc(l.barcode) + '</b> · 托盘 ' + esc(l.pallet_no || '--') +
+        ' · ' + esc(l.worker_name || l.worker_id || '--') +
+        ' · ' + esc((l.scanned_at || '').slice(0, 16).replace('T', ' ')) +
+        (l.message ? '<div class="muted" style="margin-left:8px;">' + esc(l.message) + '</div>' : '') +
+      '</div>';
+    });
+    html += '</div>';
+  }
+  html += '</div>';
+
+  body.innerHTML = html;
+}
+
+function submitVerifyBatch(btnEl) {
+  var customer = (document.getElementById("vc-customer") || {}).value.trim();
+  var batch_no = (document.getElementById("vc-batch_no") || {}).value.trim();
+  var planned_qty = parseInt((document.getElementById("vc-planned_qty") || {}).value || "0", 10);
+  var remark = (document.getElementById("vc-remark") || {}).value.trim();
+  var itemsRaw = (document.getElementById("vc-items") || {}).value || "";
+  if (!customer) { alert("请填写客户名"); return; }
+  var items = itemsRaw.split(/\r?\n/).map(function(s) { return s.trim(); }).filter(function(s) { return !!s; });
+  withActionLock('submitVerifyBatch', btnEl || null, '创建中...', async function() {
+    var res = await api({
+      action: "v2_verify_batch_create",
+      customer_name: customer,
+      batch_no: batch_no,
+      planned_qty: planned_qty,
+      items: items,
+      remark: remark,
+      created_by: getUser() || "cs"
+    });
+    if (!res || !res.ok) {
+      alert((res && (res.message || res.error)) || "创建失败");
+      return;
+    }
+    alert("批次已创建：" + res.batch_no + "（共 " + res.item_count + " 条条码）");
+    // 重置表单
+    ["vc-customer","vc-batch_no","vc-items","vc-remark"].forEach(function(id) {
+      var el = document.getElementById(id); if (el) el.value = "";
+    });
+    var q = document.getElementById("vc-planned_qty"); if (q) q.value = "0";
+    goTab("check");
+  });
+}
+
+function updateVerifyBatch(id, target, btnEl) {
+  var label = target === 'completed' ? '标记为已完成' : '作废此批次';
+  if (!confirm(label + "？")) return;
+  withActionLock('updateVerifyBatch_' + id, btnEl || null, '提交中...', async function() {
+    var res = await api({
+      action: "v2_verify_batch_update_status",
+      id: id,
+      status: target,
+      actor: getUser() || "cs"
+    });
+    if (!res || !res.ok) {
+      alert((res && (res.message || res.error)) || "操作失败");
+      return;
+    }
+    loadVerifyDetail();
+  });
 }
 
 // ===== Init =====
