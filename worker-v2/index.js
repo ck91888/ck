@@ -719,6 +719,8 @@ route("v2_auth_check", async (body, env) => {
 });
 
 // 协同中心首页聚合：一次拉齐 5 张卡片所需数据，替代前端 5 次并发
+// 每组返回 { count, items(<=3) }；upcoming 额外含 dates。
+// 用 SELECT * 兜底，避免后续表新增列时这里 SELECT 列名不一致而 500。
 route("v2_dashboard_summary", async (body, env) => {
   if (!isAuth(body, env)) return err("unauthorized", 401);
 
@@ -738,50 +740,79 @@ route("v2_dashboard_summary", async (body, env) => {
   const first = dates[0];
   const last = dates[dates.length - 1];
 
-  // 5 个聚合查询并发：每张卡只取 50 条以内，前端再 slice(3) 展示
-  const [issuesRs, outboundsRs, inboundsRs, feedbacksRs, upcomingRs] = await Promise.all([
+  // 每个类别：count(*) + items(<=3) 两个查询并发
+  const [
+    issuesCntRs, issuesItemsRs,
+    obCntRs, obItemsRs,
+    ibCntRs, ibItemsRs,
+    fbCntRs, fbItemsRs,
+    upcomingRs
+  ] = await Promise.all([
+    // ---- issues：FIFO 排序，最早的最先看到 ----
     env.DB.prepare(
-      `SELECT id, status, biz_class, customer, issue_description, issue_summary, priority, created_at
-         FROM v2_issue_tickets
+      `SELECT COUNT(*) AS c FROM v2_issue_tickets
+        WHERE status IN ('pending','processing','responded','rework_required')`
+    ).first(),
+    env.DB.prepare(
+      `SELECT * FROM v2_issue_tickets
         WHERE status IN ('pending','processing','responded','rework_required')
-        ORDER BY created_at DESC LIMIT 50`
+        ORDER BY created_at ASC LIMIT 3`
     ).all(),
+
+    // ---- outbounds：按 order_date / created_at 顺序 ----
     env.DB.prepare(
-      `SELECT id, display_no, status, customer, order_date, created_at
-         FROM v2_outbound_orders
+      `SELECT COUNT(*) AS c FROM v2_outbound_orders
+        WHERE status IN ('pending_issue','issued','working','ready_to_ship')`
+    ).first(),
+    env.DB.prepare(
+      `SELECT * FROM v2_outbound_orders
         WHERE status IN ('pending_issue','issued','working','ready_to_ship')
-        ORDER BY order_date DESC, created_at DESC LIMIT 50`
+        ORDER BY order_date ASC, created_at ASC LIMIT 3`
     ).all(),
+
+    // ---- inbounds（待执行入库）----
     env.DB.prepare(
-      `SELECT id, display_no, status, biz_class, customer, cargo_summary, plan_date, source_type, created_at
-         FROM v2_inbound_plans
-        WHERE status IN ('pending','unloading','unloading_putting_away','arrived_pending_putaway','putting_away')
-          AND source_type != 'return_session'
-        ORDER BY plan_date DESC, created_at DESC LIMIT 50`
+      `SELECT COUNT(*) AS c FROM v2_inbound_plans
+        WHERE source_type != 'return_session'
+          AND status IN ('pending','unloading','unloading_putting_away','arrived_pending_putaway','putting_away')`
+    ).first(),
+    env.DB.prepare(
+      `SELECT * FROM v2_inbound_plans
+        WHERE source_type != 'return_session'
+          AND status IN ('pending','unloading','unloading_putting_away','arrived_pending_putaway','putting_away')
+        ORDER BY plan_date ASC, created_at ASC LIMIT 3`
     ).all(),
+
+    // ---- feedbacks（现场反馈进行中）----
     env.DB.prepare(
-      `SELECT id, display_no, status, feedback_type, customer, plate_no, title, created_at
-         FROM v2_field_feedbacks
+      `SELECT COUNT(*) AS c FROM v2_field_feedbacks
+        WHERE status IN ('field_working','unloaded_pending_info')`
+    ).first(),
+    env.DB.prepare(
+      `SELECT * FROM v2_field_feedbacks
         WHERE status IN ('field_working','unloaded_pending_info')
-        ORDER BY created_at DESC LIMIT 50`
+        ORDER BY created_at ASC LIMIT 3`
     ).all(),
+
+    // ---- upcoming（未来 3 工作日入库计划，按日期分组）----
     env.DB.prepare(
-      `SELECT id, display_no, status, biz_class, customer, cargo_summary, plan_date, source_type
-         FROM v2_inbound_plans
+      `SELECT * FROM v2_inbound_plans
         WHERE plan_date>=? AND plan_date<=?
-          AND status NOT IN ('completed','cancelled')
           AND source_type != 'return_session'
+          AND status NOT IN ('completed','cancelled')
         ORDER BY plan_date ASC, created_at ASC`
     ).bind(first, last).all()
   ]);
 
+  const upcomingItems = upcomingRs.results || [];
+
   return json({
     ok: true,
-    issues:    { items: issuesRs.results || [] },
-    outbounds: { items: outboundsRs.results || [] },
-    inbounds:  { items: inboundsRs.results || [] },
-    feedbacks: { items: feedbacksRs.results || [] },
-    upcoming:  { items: upcomingRs.results || [], dates }
+    issues:    { count: Number((issuesCntRs && issuesCntRs.c) || 0), items: issuesItemsRs.results || [] },
+    outbounds: { count: Number((obCntRs && obCntRs.c) || 0),         items: obItemsRs.results || [] },
+    inbounds:  { count: Number((ibCntRs && ibCntRs.c) || 0),         items: ibItemsRs.results || [] },
+    feedbacks: { count: Number((fbCntRs && fbCntRs.c) || 0),         items: fbItemsRs.results || [] },
+    upcoming:  { count: upcomingItems.length, items: upcomingItems, dates }
   });
 });
 
