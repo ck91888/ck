@@ -67,7 +67,7 @@ var _WRITE_ACTIONS = [
   'v2_pick_job_start','v2_pick_job_join','v2_pick_job_add_docs','v2_pick_job_finish',
   'v2_bulk_op_job_start','v2_bulk_op_job_finish',
   'v2_correction_request_create','v2_admin_dirty_data_cleanup',
-  'v2_verify_batch_create','v2_verify_batch_update_status'
+  'v2_verify_batch_upload','v2_verify_batch_update_status'
 ];
 function _genReqId(action) {
   return action + '_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
@@ -2007,13 +2007,15 @@ async function loadVerifyDetail() {
   html += '<div class="card">';
   html += '<div class="card-title">' + esc(b.batch_no) + ' · ' + esc(b.customer_name) +
     ' <span class="st st-' + esc(b.status) + '">' + esc(verifyStatusLabel(b.status)) + '</span></div>';
-  html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;font-size:13px;">' +
-    '<div>计划/계획: <b>' + (s.planned_qty || 0) + '</b></div>' +
-    '<div>正确/정상: <b style="color:#2e7d32;">' + (s.scanned_ok_count || 0) + '</b></div>' +
-    '<div>重复/중복: <b style="color:#e65100;">' + (s.duplicate_count || 0) + '</b></div>' +
-    '<div>未匹配/미일치: <b style="color:#c62828;">' + (s.not_found_count || 0) + '</b></div>' +
-    '<div>超量/초과: <b style="color:#e65100;">' + (s.overflow_count || 0) + '</b></div>' +
+  html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;font-size:13px;">' +
+    '<div>计划/계획: <b>' + (s.planned_total_box_count || 0) + ' 箱</b></div>' +
+    '<div>已扫/스캔: <b style="color:#2e7d32;">' + (s.scanned_ok_total_count || 0) + '</b></div>' +
     '<div>差异/차이: <b style="color:#c62828;">' + (s.diff || 0) + '</b></div>' +
+    '<div>完成条码/완료: <b style="color:#2e7d32;">' + (s.ok_count || 0) + '</b></div>' +
+    '<div>少扫条码/부족: <b style="color:#e67e22;">' + (s.shortage_count || 0) + '</b></div>' +
+    '<div>超扫条码/초과: <b style="color:#e65100;">' + (s.overflow_count || 0) + '</b></div>' +
+    '<div>未扫条码/미스캔: <b>' + (s.not_scanned_count || 0) + '</b></div>' +
+    '<div>非本批次扫码/미일치: <b style="color:#c62828;">' + (s.not_found_count || 0) + '</b></div>' +
   '</div>';
   if (b.remark) html += '<div style="margin-top:8px;font-size:13px;"><b>备注:</b> ' + esc(b.remark) + '</div>';
   html += '<div style="margin-top:10px;">';
@@ -2025,16 +2027,33 @@ async function loadVerifyDetail() {
   }
   html += '</div></div>';
 
-  // 条码清单
-  html += '<div class="card"><div class="card-title">计划条码 <span class="count">' + items.length + ' 条</span></div>';
+  // 按条码核对表格
+  html += '<div class="card"><div class="card-title">按条码核对 <span class="count">' + items.length + ' 条</span></div>';
   if (!items.length) html += '<span class="muted">无条码</span>';
   else {
-    html += '<div style="max-height:240px;overflow:auto;">';
+    html += '<div style="max-height:360px;overflow:auto;">';
+    html += '<table class="verify-item-table" style="width:100%;border-collapse:collapse;font-size:13px;">' +
+      '<thead><tr style="background:#fafafa;">' +
+        '<th style="text-align:left;padding:6px;">条码</th>' +
+        '<th style="text-align:left;padding:6px;">客户名</th>' +
+        '<th style="text-align:right;padding:6px;">计划箱数</th>' +
+        '<th style="text-align:right;padding:6px;">已扫箱数</th>' +
+        '<th style="text-align:right;padding:6px;">差异</th>' +
+        '<th style="text-align:left;padding:6px;">状态</th>' +
+      '</tr></thead><tbody>';
     items.forEach(function(it) {
-      html += '<div style="padding:4px 0;border-bottom:1px solid #f0f0f0;font-size:13px;font-family:monospace;">' +
-        esc(it.barcode) + '</div>';
+      var stCls = ({ ok: 'st-completed', shortage: 'st-issued', overflow: 'st-rework_required', not_scanned: 'st-pending' })[it.status] || '';
+      var stLabel = ({ ok: '完成/완료', shortage: '少扫/부족', overflow: '超扫/초과', not_scanned: '未扫/미스캔' })[it.status] || it.status;
+      html += '<tr style="border-top:1px solid #f0f0f0;">' +
+        '<td style="padding:6px;font-family:monospace;">' + esc(it.barcode) + '</td>' +
+        '<td style="padding:6px;">' + esc(it.customer_name || '--') + '</td>' +
+        '<td style="padding:6px;text-align:right;">' + (it.planned_box_count || 0) + '</td>' +
+        '<td style="padding:6px;text-align:right;">' + (it.scanned_ok_count || 0) + '</td>' +
+        '<td style="padding:6px;text-align:right;' + (it.diff_count !== 0 ? 'color:#c62828;font-weight:700;' : '') + '">' + (it.diff_count || 0) + '</td>' +
+        '<td style="padding:6px;"><span class="st ' + stCls + '">' + esc(stLabel) + '</span></td>' +
+      '</tr>';
     });
-    html += '</div>';
+    html += '</tbody></table></div>';
   }
   html += '</div>';
 
@@ -2051,17 +2070,20 @@ async function loadVerifyDetail() {
   }
   html += '</div>';
 
-  // 扫码流水
-  html += '<div class="card"><div class="card-title">扫码流水 <span class="count">最近 ' + Math.min(100, logs.length) + ' 条</span></div>';
-  if (!logs.length) html += '<span class="muted">暂无扫码记录</span>';
+  // 异常记录（只展示非 ok 的扫码流水）
+  var abnormalLogs = logs.filter(function(l) { return l.scan_result !== 'ok'; });
+  html += '<div class="card"><div class="card-title">异常记录 <span class="count">' + abnormalLogs.length + ' 条</span></div>';
+  if (!abnormalLogs.length) html += '<span class="muted">暂无异常</span>';
   else {
-    html += '<div style="max-height:360px;overflow:auto;">';
-    logs.slice(0, 100).forEach(function(l) {
-      var tagCls = l.scan_result === 'ok' ? 'st-completed' :
-                   (l.scan_result === 'not_found' ? 'st-cancelled' : 'st-issued');
+    html += '<div style="max-height:260px;overflow:auto;">';
+    abnormalLogs.forEach(function(l) {
+      var tagCls = l.scan_result === 'not_found' ? 'st-cancelled' : 'st-rework_required';
+      var typeLabel = ({ not_found: '不在本批次', overflow: '超扫', duplicate: '重复(legacy)' })[l.scan_result] || l.scan_result;
       html += '<div style="padding:6px 0;border-bottom:1px solid #f0f0f0;font-size:13px;">' +
-        '<span class="st ' + tagCls + '">' + esc(l.scan_result) + '</span> ' +
-        '<b>' + esc(l.barcode) + '</b> · 托盘 ' + esc(l.pallet_no || '--') +
+        '<span class="st ' + tagCls + '">' + esc(typeLabel) + '</span> ' +
+        '<b>' + esc(l.barcode) + '</b>' +
+        (l.customer_name ? ' · 客户 ' + esc(l.customer_name) : '') +
+        ' · 托盘 ' + esc(l.pallet_no || '--') +
         ' · ' + esc(l.worker_name || l.worker_id || '--') +
         ' · ' + esc((l.scanned_at || '').slice(0, 16).replace('T', ' ')) +
         (l.message ? '<div class="muted" style="margin-left:8px;">' + esc(l.message) + '</div>' : '') +
@@ -2071,37 +2093,209 @@ async function loadVerifyDetail() {
   }
   html += '</div>';
 
+  // 完整扫码流水
+  html += '<div class="card"><div class="card-title">扫码流水 <span class="count">最近 ' + Math.min(100, logs.length) + ' 条</span></div>';
+  if (!logs.length) html += '<span class="muted">暂无扫码记录</span>';
+  else {
+    html += '<div style="max-height:300px;overflow:auto;">';
+    logs.slice(0, 100).forEach(function(l) {
+      var tagCls = l.scan_result === 'ok' ? 'st-completed' :
+                   (l.scan_result === 'not_found' ? 'st-cancelled' : 'st-issued');
+      html += '<div style="padding:6px 0;border-bottom:1px solid #f0f0f0;font-size:13px;">' +
+        '<span class="st ' + tagCls + '">' + esc(l.scan_result) + '</span> ' +
+        '<b>' + esc(l.barcode) + '</b>' +
+        (l.customer_name ? ' · ' + esc(l.customer_name) : '') +
+        ' · 托盘 ' + esc(l.pallet_no || '--') +
+        ' · ' + esc(l.worker_name || l.worker_id || '--') +
+        ' · ' + esc((l.scanned_at || '').slice(0, 16).replace('T', ' ')) +
+      '</div>';
+    });
+    html += '</div>';
+  }
+  html += '</div>';
+
   body.innerHTML = html;
 }
 
+// ===== Excel 文件解析 + 预览 =====
+var _vcParsedRows = null; // [{ barcode, planned_box_count, customer_name, row_no }]
+
+var _VC_HEADER_ALIASES = {
+  barcode: ["条码", "出库条码", "barcode", "bar code"],
+  planned_box_count: ["计划箱数", "箱数", "planned_box_count", "box count", "box_count"],
+  customer_name: ["客户名", "客户", "customer_name", "customer", "고객사", "고객명"]
+};
+
+function _vcFindHeaderIdx(header, aliases) {
+  var norm = header.map(function(h) { return String(h || "").trim().toLowerCase(); });
+  for (var i = 0; i < aliases.length; i++) {
+    var a = aliases[i].toLowerCase();
+    var idx = norm.indexOf(a);
+    if (idx >= 0) return idx;
+  }
+  return -1;
+}
+
+function onVerifyFilePick(input) {
+  var submitBtn = document.getElementById("vc-submit-btn");
+  if (submitBtn) submitBtn.disabled = true;
+  _vcParsedRows = null;
+  var file = input && input.files && input.files[0];
+  var previewBox = document.getElementById("vc-preview");
+  var sumEl = document.getElementById("vc-preview-summary");
+  var errEl = document.getElementById("vc-preview-errors");
+  var tblEl = document.getElementById("vc-preview-table");
+  if (errEl) { errEl.style.display = "none"; errEl.innerHTML = ""; }
+  if (!file) { if (previewBox) previewBox.style.display = "none"; return; }
+  if (typeof XLSX === 'undefined') {
+    alert("Excel 解析库未加载（SheetJS CDN 未就绪），请检查网络后刷新");
+    return;
+  }
+
+  var reader = new FileReader();
+  reader.onload = function(e) {
+    try {
+      var data = new Uint8Array(e.target.result);
+      var wb = XLSX.read(data, { type: 'array' });
+      var sheet = wb.Sheets[wb.SheetNames[0]];
+      if (!sheet) throw new Error("文件无工作表");
+      var rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "", blankrows: false });
+      if (!rows.length) throw new Error("文件为空");
+      var header = rows[0].map(String);
+      var bcIdx = _vcFindHeaderIdx(header, _VC_HEADER_ALIASES.barcode);
+      var bxIdx = _vcFindHeaderIdx(header, _VC_HEADER_ALIASES.planned_box_count);
+      var cuIdx = _vcFindHeaderIdx(header, _VC_HEADER_ALIASES.customer_name);
+      if (bcIdx < 0 || bxIdx < 0 || cuIdx < 0) {
+        var miss = [];
+        if (bcIdx < 0) miss.push("条码");
+        if (bxIdx < 0) miss.push("计划箱数");
+        if (cuIdx < 0) miss.push("客户名");
+        throw new Error("表头缺少：" + miss.join("、"));
+      }
+
+      var parsed = [];
+      var errors = [];
+      for (var i = 1; i < rows.length; i++) {
+        var r = rows[i];
+        if (!r) continue;
+        var bc = String(r[bcIdx] || "").trim();
+        var bxRaw = r[bxIdx];
+        var cu = String(r[cuIdx] || "").trim();
+        if (!bc && !cu && !bxRaw) continue; // 空行
+        var bxN = typeof bxRaw === 'number' ? bxRaw : parseInt(String(bxRaw || "").trim(), 10);
+        var rowNo = i + 1; // Excel 行号（含表头）
+        if (!bc) errors.push({ row: rowNo, msg: "条码为空" });
+        if (!cu) errors.push({ row: rowNo, msg: "客户名为空" });
+        if (!Number.isFinite(bxN) || bxN <= 0 || !Number.isInteger(bxN)) errors.push({ row: rowNo, msg: "计划箱数非正整数: " + bxRaw });
+        parsed.push({ barcode: bc, planned_box_count: bxN, customer_name: cu, row_no: rowNo });
+      }
+
+      // 合并预检 + 客户冲突检查
+      var merged = {};
+      var mergeErrors = [];
+      parsed.forEach(function(p) {
+        if (!p.barcode || !p.customer_name || !(p.planned_box_count > 0)) return;
+        if (!merged[p.barcode]) merged[p.barcode] = { barcode: p.barcode, planned_box_count: p.planned_box_count, customer_name: p.customer_name, rows: [p.row_no] };
+        else {
+          var prev = merged[p.barcode];
+          if (prev.customer_name !== p.customer_name) {
+            mergeErrors.push({ row: p.row_no, msg: "条码 " + p.barcode + " 在第 " + prev.rows.join(",") + " 行属于 " + prev.customer_name + "，第 " + p.row_no + " 行却写 " + p.customer_name + "（可能串单）" });
+          } else {
+            prev.planned_box_count += p.planned_box_count;
+            prev.rows.push(p.row_no);
+          }
+        }
+      });
+      var mergedList = Object.keys(merged).map(function(k) { return merged[k]; });
+
+      var distinctCu = {};
+      var totalBox = 0;
+      mergedList.forEach(function(m) { distinctCu[m.customer_name] = true; totalBox += m.planned_box_count; });
+
+      // 渲染预览
+      sumEl.innerHTML =
+        '总行数/줄수: <b>' + parsed.length + '</b> · ' +
+        '去重后条码/바코드: <b>' + mergedList.length + '</b> · ' +
+        '计划总箱数/계획 박스: <b>' + totalBox + '</b> · ' +
+        '客户数/고객수: <b>' + Object.keys(distinctCu).length + '</b>';
+
+      var allErrors = errors.concat(mergeErrors);
+      if (allErrors.length) {
+        var errHtml = '<b>发现 ' + allErrors.length + ' 条问题：</b><br>';
+        allErrors.slice(0, 30).forEach(function(e) { errHtml += '第 ' + e.row + ' 行: ' + esc(e.msg) + '<br>'; });
+        if (allErrors.length > 30) errHtml += '...（仅展示前 30 条）';
+        errEl.innerHTML = errHtml;
+        errEl.style.display = "";
+      }
+
+      // 预览表格
+      var preview = mergedList.slice(0, 10);
+      var tblHtml = '<table style="width:100%;border-collapse:collapse;font-size:13px;">' +
+        '<thead><tr style="background:#fafafa;">' +
+          '<th style="text-align:left;padding:4px;">条码</th>' +
+          '<th style="text-align:left;padding:4px;">客户名</th>' +
+          '<th style="text-align:right;padding:4px;">计划箱数</th>' +
+        '</tr></thead><tbody>';
+      preview.forEach(function(m) {
+        tblHtml += '<tr style="border-top:1px solid #f0f0f0;">' +
+          '<td style="padding:4px;font-family:monospace;">' + esc(m.barcode) + '</td>' +
+          '<td style="padding:4px;">' + esc(m.customer_name) + '</td>' +
+          '<td style="padding:4px;text-align:right;">' + m.planned_box_count + '</td>' +
+        '</tr>';
+      });
+      tblHtml += '</tbody></table>';
+      if (mergedList.length > 10) tblHtml += '<div class="muted" style="padding:4px;font-size:12px;">...以下省略 ' + (mergedList.length - 10) + ' 行</div>';
+      tblEl.innerHTML = tblHtml;
+
+      previewBox.style.display = "";
+      if (!allErrors.length && mergedList.length > 0) {
+        _vcParsedRows = parsed; // 原始行（后端会重新合并校验）
+        if (submitBtn) submitBtn.disabled = false;
+      }
+    } catch (ex) {
+      errEl.innerHTML = '<b>解析失败：</b>' + esc(ex.message || String(ex));
+      errEl.style.display = "";
+      previewBox.style.display = "";
+      sumEl.innerHTML = '';
+      tblEl.innerHTML = '';
+    }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
 function submitVerifyBatch(btnEl) {
-  var customer = (document.getElementById("vc-customer") || {}).value.trim();
+  if (!_vcParsedRows || _vcParsedRows.length === 0) {
+    alert("请先上传并通过预览的 Excel 文件");
+    return;
+  }
   var batch_no = (document.getElementById("vc-batch_no") || {}).value.trim();
-  var planned_qty = parseInt((document.getElementById("vc-planned_qty") || {}).value || "0", 10);
   var remark = (document.getElementById("vc-remark") || {}).value.trim();
-  var itemsRaw = (document.getElementById("vc-items") || {}).value || "";
-  if (!customer) { alert("请填写客户名"); return; }
-  var items = itemsRaw.split(/\r?\n/).map(function(s) { return s.trim(); }).filter(function(s) { return !!s; });
   withActionLock('submitVerifyBatch', btnEl || null, '创建中...', async function() {
     var res = await api({
-      action: "v2_verify_batch_create",
-      customer_name: customer,
+      action: "v2_verify_batch_upload",
       batch_no: batch_no,
-      planned_qty: planned_qty,
-      items: items,
       remark: remark,
+      rows: _vcParsedRows,
       created_by: getUser() || "cs"
     });
     if (!res || !res.ok) {
-      alert((res && (res.message || res.error)) || "创建失败");
+      if (res && res.error === 'row_errors' && Array.isArray(res.errors)) {
+        var msg = "后端校验未通过：\n";
+        res.errors.slice(0, 10).forEach(function(e) { msg += "第 " + e.row + " 行: " + e.msg + "\n"; });
+        alert(msg);
+      } else {
+        alert((res && (res.message || res.error)) || "创建失败");
+      }
       return;
     }
-    alert("批次已创建：" + res.batch_no + "（共 " + res.item_count + " 条条码）");
-    // 重置表单
-    ["vc-customer","vc-batch_no","vc-items","vc-remark"].forEach(function(id) {
+    alert("批次已创建：" + res.batch_no + "\n去重后条码 " + res.item_count + " 条 · 计划总箱数 " + res.planned_total_box_count + " 箱 · 客户 " + res.distinct_customer_count + " 个");
+    // 重置
+    ["vc-batch_no","vc-remark"].forEach(function(id) {
       var el = document.getElementById(id); if (el) el.value = "";
     });
-    var q = document.getElementById("vc-planned_qty"); if (q) q.value = "0";
+    var f = document.getElementById("vc-file"); if (f) f.value = "";
+    _vcParsedRows = null;
+    var pv = document.getElementById("vc-preview"); if (pv) pv.style.display = "none";
     goTab("check");
   });
 }

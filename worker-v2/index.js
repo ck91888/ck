@@ -625,6 +625,10 @@ const MIGRATIONS = [
   `CREATE INDEX IF NOT EXISTS idx_v2_verify_scan_logs_batch_barcode ON v2_verify_scan_logs(batch_id, barcode)`,
   `CREATE INDEX IF NOT EXISTS idx_v2_verify_scan_logs_batch_pallet ON v2_verify_scan_logs(batch_id, pallet_no)`,
   `CREATE INDEX IF NOT EXISTS idx_v2_verify_scan_logs_job ON v2_verify_scan_logs(job_id)`,
+
+  // ---- 核对口径修正：按"条码对应的计划箱数"核对，客户名落到条码级 ----
+  `ALTER TABLE v2_verify_batch_items ADD COLUMN planned_box_count INTEGER DEFAULT 1`,
+  `ALTER TABLE v2_verify_batch_items ADD COLUMN customer_name TEXT DEFAULT ''`,
 ];
 
 let _migrated = false;
@@ -3923,55 +3927,90 @@ route("v2_correction_request_list", async (body, env) => {
 // VERIFY CENTER — 扫码核对（客服上传批次 + 现场扫码核对）
 // =====================================================
 
-// 1) 创建核对批次（仅客服/协同中心调用）
-route("v2_verify_batch_create", async (body, env) => {
+// 1) 上传核对批次（客服上传 Excel → 前端解析后 POST rows）
+// 请求体：{ batch_no?, remark?, rows: [{ barcode, planned_box_count, customer_name, row_no? }] }
+// 规则：
+// - barcode/客户名必填；planned_box_count 必须是正整数
+// - 同一 barcode 出现多次：合并箱数；客户名不同则报错（可能串单）
+// - 批次 planned_qty = SUM(items.planned_box_count)
+route("v2_verify_batch_upload", async (body, env) => {
   if (!isAuth(body, env)) return err("unauthorized", 401);
-  const customer_name = String(body.customer_name || "").trim();
-  const planned_qty = Math.max(0, parseInt(body.planned_qty, 10) || 0);
   const remark = String(body.remark || "").trim();
   const created_by = String(body.created_by || "").trim();
   let batch_no = String(body.batch_no || "").trim();
-  const rawItems = Array.isArray(body.items) ? body.items : [];
-  if (!customer_name) return err("missing customer_name");
+  const rawRows = Array.isArray(body.rows) ? body.rows : [];
+  if (rawRows.length === 0) return err("empty_rows");
 
-  // 清洗 items：去空行 + 去重（保留顺序）
-  const seen = {};
-  const items = [];
-  rawItems.forEach(it => {
-    const bc = String(typeof it === 'string' ? it : (it && it.barcode) || "").trim();
-    if (!bc) return;
-    if (seen[bc]) return;
-    seen[bc] = true;
-    items.push(bc);
+  // ---- 清洗+合并 ----
+  const errors = [];
+  const merged = {}; // barcode -> { barcode, planned_box_count, customer_name, row_nos:[] }
+  rawRows.forEach((r, idx) => {
+    const row_no = Number(r && r.row_no) || (idx + 2); // 默认从表格第 2 行起（表头 1）
+    const bc = String((r && r.barcode) || "").trim();
+    const cn = String((r && r.customer_name) || "").trim();
+    const bcRaw = r && r.planned_box_count;
+    const bc_n = typeof bcRaw === 'number' ? bcRaw : parseInt(String(bcRaw || "").trim(), 10);
+    if (!bc && !cn && !bc_n) return; // 整行空 → 跳过
+    if (!bc) { errors.push({ row: row_no, msg: "条码为空 / 바코드 비어있음" }); return; }
+    if (!cn) { errors.push({ row: row_no, msg: "客户名为空 / 고객사 비어있음" }); return; }
+    if (!Number.isFinite(bc_n) || bc_n <= 0 || !Number.isInteger(bc_n)) {
+      errors.push({ row: row_no, msg: "计划箱数必须是正整数 / 계획 박스수는 양의 정수" }); return;
+    }
+    if (!merged[bc]) {
+      merged[bc] = { barcode: bc, planned_box_count: bc_n, customer_name: cn, row_nos: [row_no] };
+    } else {
+      const prev = merged[bc];
+      if (prev.customer_name !== cn) {
+        errors.push({ row: row_no, msg: "条码 " + bc + " 在第 " + prev.row_nos.join(",") + " 行属于客户 " + prev.customer_name + "，此行却写 " + cn + "（可能串单）" });
+        return;
+      }
+      prev.planned_box_count += bc_n;
+      prev.row_nos.push(row_no);
+    }
   });
+  if (errors.length > 0) return json({ ok: false, error: "row_errors", errors });
+  const items = Object.values(merged);
+  if (items.length === 0) return err("no_valid_rows");
 
-  return withIdem(env, body, "v2_verify_batch_create", async () => {
+  return withIdem(env, body, "v2_verify_batch_upload", async () => {
     const t = now();
     const id = "VB-" + uid();
-    // batch_no 可自动生成：VBT-YYYYMMDD-XXXX
     if (!batch_no) {
       const dateStr = kstToday().replace(/-/g, '');
       batch_no = 'VBT-' + dateStr + '-' + Date.now().toString(36).slice(-4).toUpperCase();
     }
-    // 唯一性检查（客户已手填的场景）
     const dup = await env.DB.prepare("SELECT id FROM v2_verify_batches WHERE batch_no=?").bind(batch_no).first();
     if (dup) return { ok: false, error: "batch_no_duplicate", message: "批次号已存在 / 배치번호 중복" };
+
+    const planned_qty = items.reduce((s, it) => s + (it.planned_box_count || 0), 0);
+    // batch 级 customer_name：单客户直写；多客户存"(多客户/다고객)"
+    const distinctCu = {};
+    items.forEach(it => { distinctCu[it.customer_name] = true; });
+    const distinctCuList = Object.keys(distinctCu);
+    const batchCustomerName = distinctCuList.length === 1 ? distinctCuList[0] : ("(多客户/다고객 " + distinctCuList.length + ")");
 
     await env.DB.prepare(`
       INSERT INTO v2_verify_batches(id, batch_no, customer_name, planned_qty, status,
         remark, created_by, created_at, updated_at)
       VALUES(?,?,?,?,'pending',?,?,?,?)
-    `).bind(id, batch_no, customer_name, planned_qty, remark, created_by, t, t).run();
+    `).bind(id, batch_no, batchCustomerName, planned_qty, remark, created_by, t, t).run();
 
-    for (const bc of items) {
+    for (const it of items) {
       const item_id = "VBI-" + uid();
       await env.DB.prepare(`
-        INSERT INTO v2_verify_batch_items(id, batch_id, barcode, planned_qty, created_at)
-        VALUES(?,?,?,1,?)
-      `).bind(item_id, id, bc, t).run();
+        INSERT INTO v2_verify_batch_items(id, batch_id, barcode, planned_qty, planned_box_count, customer_name, created_at)
+        VALUES(?,?,?,?,?,?,?)
+      `).bind(item_id, id, it.barcode, it.planned_box_count, it.planned_box_count, it.customer_name, t).run();
     }
 
-    return { ok: true, id, batch_no, item_count: items.length };
+    return {
+      ok: true,
+      id,
+      batch_no,
+      item_count: items.length,
+      planned_total_box_count: planned_qty,
+      distinct_customer_count: distinctCuList.length
+    };
   });
 });
 
@@ -4002,7 +4041,7 @@ route("v2_verify_batch_list", async (body, env) => {
   const statRs = await env.DB.prepare(
     `SELECT batch_id,
             SUM(CASE WHEN scan_result='ok' THEN 1 ELSE 0 END) AS ok_count,
-            SUM(CASE WHEN scan_result IN ('not_found','duplicate','overflow') THEN 1 ELSE 0 END) AS abnormal_count
+            SUM(CASE WHEN scan_result IN ('not_found','overflow') THEN 1 ELSE 0 END) AS abnormal_count
      FROM v2_verify_scan_logs WHERE batch_id IN (${placeholders}) GROUP BY batch_id`
   ).bind(...ids).all();
   const statMap = {};
@@ -4019,7 +4058,7 @@ route("v2_verify_batch_list", async (body, env) => {
   return json({ ok: true, items });
 });
 
-// 3) 批次详情（batch + items + scan_logs + 汇总 + 按托盘汇总）
+// 3) 批次详情（按"条码对应计划箱数"出每行状态 + 聚合异常）
 route("v2_verify_batch_detail", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
   const id = String(body.id || "").trim();
@@ -4034,40 +4073,84 @@ route("v2_verify_batch_detail", async (body, env) => {
   const logsRs = await env.DB.prepare(
     "SELECT * FROM v2_verify_scan_logs WHERE batch_id=? ORDER BY scanned_at DESC LIMIT 500"
   ).bind(id).all();
+  // 每个 barcode 已扫 ok 次数
+  const okByBcRs = await env.DB.prepare(
+    "SELECT barcode, COUNT(*) AS c FROM v2_verify_scan_logs WHERE batch_id=? AND scan_result='ok' GROUP BY barcode"
+  ).bind(id).all();
 
-  const items = itemsRs.results || [];
+  const itemsRaw = itemsRs.results || [];
   const logs = logsRs.results || [];
+  const okByBc = {};
+  (okByBcRs.results || []).forEach(r => { okByBc[r.barcode] = Number(r.c || 0); });
 
-  // 汇总
-  let scanned_ok_count = 0, duplicate_count = 0, not_found_count = 0, overflow_count = 0;
+  // 每个 item 的状态
+  let planned_total_box_count = 0, scanned_ok_total_count = 0;
+  let shortage_count = 0, overflow_count_items = 0, ok_items = 0, not_scanned_count = 0;
+  const items = itemsRaw.map(it => {
+    const planned = Number(it.planned_box_count || it.planned_qty || 1);
+    const ok = Number(okByBc[it.barcode] || 0);
+    planned_total_box_count += planned;
+    scanned_ok_total_count += ok;
+    let st;
+    if (ok === 0) { st = 'not_scanned'; not_scanned_count++; }
+    else if (ok < planned) { st = 'shortage'; shortage_count++; }
+    else if (ok === planned) { st = 'ok'; ok_items++; }
+    else { st = 'overflow'; overflow_count_items++; }
+    return {
+      id: it.id,
+      barcode: it.barcode,
+      customer_name: it.customer_name || '',
+      planned_box_count: planned,
+      scanned_ok_count: ok,
+      diff_count: ok - planned,
+      status: st
+    };
+  });
+
+  // scan_logs 统计 + 为每条 log 挂 customer_name（如果 item 匹配到）
+  const itemMap = {};
+  itemsRaw.forEach(it => { itemMap[it.barcode] = it; });
+  let log_ok = 0, log_overflow = 0, log_not_found = 0, log_duplicate = 0;
   const palletMap = {};
-  logs.forEach(l => {
-    if (l.scan_result === 'ok') scanned_ok_count++;
-    else if (l.scan_result === 'duplicate') duplicate_count++;
-    else if (l.scan_result === 'not_found') not_found_count++;
-    else if (l.scan_result === 'overflow') overflow_count++;
+  const enrichedLogs = logs.map(l => {
+    if (l.scan_result === 'ok') log_ok++;
+    else if (l.scan_result === 'overflow') log_overflow++;
+    else if (l.scan_result === 'not_found') log_not_found++;
+    else if (l.scan_result === 'duplicate') log_duplicate++;
     const p = l.pallet_no || '(未填/미기입)';
     if (!palletMap[p]) palletMap[p] = { pallet_no: p, scanned_ok_count: 0, abnormal_count: 0 };
     if (l.scan_result === 'ok') palletMap[p].scanned_ok_count++;
     else palletMap[p].abnormal_count++;
+    const matched = itemMap[l.barcode];
+    return { ...l, customer_name: matched ? (matched.customer_name || '') : '' };
   });
   const pallet_summary = Object.values(palletMap).sort((a, b) =>
     (b.scanned_ok_count + b.abnormal_count) - (a.scanned_ok_count + a.abnormal_count)
   );
 
+  const abnormal_count = shortage_count + overflow_count_items + log_not_found;
+
   return json({
     ok: true,
     batch,
     items,
-    scan_logs: logs,
+    scan_logs: enrichedLogs,
     summary: {
-      planned_qty: batch.planned_qty || 0,
-      scanned_ok_count,
-      duplicate_count,
-      not_found_count,
-      overflow_count,
-      abnormal_count: duplicate_count + not_found_count + overflow_count,
-      diff: (batch.planned_qty || 0) - scanned_ok_count
+      planned_total_box_count,
+      scanned_ok_total_count,
+      // 条码级异常条数
+      ok_count: ok_items,
+      shortage_count,
+      overflow_count: overflow_count_items,
+      not_scanned_count,
+      // 扫码流水级统计
+      log_ok_count: log_ok,
+      log_overflow_count: log_overflow,
+      log_not_found_count: log_not_found,
+      log_duplicate_count: log_duplicate,
+      not_found_count: log_not_found,
+      abnormal_count,
+      diff: planned_total_box_count - scanned_ok_total_count
     },
     pallet_summary
   });
@@ -4132,26 +4215,26 @@ route("v2_verify_scan_submit", async (body, env) => {
       "SELECT * FROM v2_verify_batch_items WHERE batch_id=? AND barcode=? LIMIT 1"
     ).bind(batch_id, barcode).first();
 
+    // 以条码对应的 planned_box_count 为准；只在超过计划箱数时才判为 overflow
     let scan_result, message = '';
+    let customer_name = '';
+    let planned_box_count = 0;
+    let barcode_ok_before = 0;
     if (!item) {
       scan_result = 'not_found';
       message = '条码不在本批次 / 배치에 없는 바코드';
     } else {
+      customer_name = item.customer_name || '';
+      planned_box_count = Math.max(1, Number(item.planned_box_count || item.planned_qty || 1));
       const okRs = await env.DB.prepare(
         "SELECT COUNT(*) AS c FROM v2_verify_scan_logs WHERE batch_id=? AND barcode=? AND scan_result='ok'"
       ).bind(batch_id, barcode).first();
-      const okCount = okRs ? Number(okRs.c || 0) : 0;
-      const planned = Math.max(1, Number(item.planned_qty || 1));
-      if (okCount === 0) {
+      barcode_ok_before = okRs ? Number(okRs.c || 0) : 0;
+      if (barcode_ok_before < planned_box_count) {
         scan_result = 'ok';
-      } else if (okCount < planned) {
-        scan_result = 'ok';
-      } else if (okCount === planned && planned === 1) {
-        scan_result = 'duplicate';
-        message = '此条码已扫过 / 이미 스캔된 바코드';
       } else {
         scan_result = 'overflow';
-        message = '超过计划数 / 계획 수량 초과';
+        message = '超出计划箱数 / 계획 박스수 초과';
       }
     }
 
@@ -4164,30 +4247,39 @@ route("v2_verify_scan_submit", async (body, env) => {
     `).bind(log_id, batch_id, job_id, worker_id, worker_name,
         pallet_no, barcode, scan_result, message, t).run();
 
-    // 实时汇总
+    // 条码级实时：当前扫码后的 ok 次数 / 差异
+    const barcode_ok_now = scan_result === 'ok' ? (barcode_ok_before + 1) : barcode_ok_before;
+    const diff_count = barcode_ok_now - planned_box_count;
+
+    // 批次级汇总
     const sumRs = await env.DB.prepare(
       `SELECT
         SUM(CASE WHEN scan_result='ok' THEN 1 ELSE 0 END) AS ok_count,
-        SUM(CASE WHEN scan_result='duplicate' THEN 1 ELSE 0 END) AS dup_count,
         SUM(CASE WHEN scan_result='not_found' THEN 1 ELSE 0 END) AS nf_count,
         SUM(CASE WHEN scan_result='overflow' THEN 1 ELSE 0 END) AS of_count
        FROM v2_verify_scan_logs WHERE batch_id=?`
     ).bind(batch_id).first();
     const summary = {
-      planned_qty: batch.planned_qty || 0,
-      scanned_ok_count: Number((sumRs && sumRs.ok_count) || 0),
-      duplicate_count: Number((sumRs && sumRs.dup_count) || 0),
+      planned_total_box_count: batch.planned_qty || 0,
+      scanned_ok_total_count: Number((sumRs && sumRs.ok_count) || 0),
       not_found_count: Number((sumRs && sumRs.nf_count) || 0),
       overflow_count: Number((sumRs && sumRs.of_count) || 0)
     };
-    summary.abnormal_count = summary.duplicate_count + summary.not_found_count + summary.overflow_count;
-    summary.diff = summary.planned_qty - summary.scanned_ok_count;
+    summary.abnormal_count = summary.not_found_count + summary.overflow_count;
+    summary.diff = summary.planned_total_box_count - summary.scanned_ok_total_count;
 
     return {
       ok: true,
       scan_result,
       message,
       log_id,
+      barcode_info: {
+        barcode,
+        customer_name,
+        planned_box_count,
+        scanned_ok_count: barcode_ok_now,
+        diff_count
+      },
       summary
     };
   });

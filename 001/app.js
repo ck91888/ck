@@ -123,7 +123,7 @@ var _WRITE_ACTIONS = [
   'v2_pick_job_start','v2_pick_job_join','v2_pick_job_add_docs','v2_pick_job_finish',
   'v2_bulk_op_job_start','v2_bulk_op_job_finish',
   'v2_correction_request_create','v2_admin_dirty_data_cleanup',
-  'v2_verify_batch_create','v2_verify_batch_update_status',
+  'v2_verify_batch_upload','v2_verify_batch_update_status',
   'v2_verify_job_start','v2_verify_job_finish','v2_verify_scan_submit'
 ];
 function _genReqId(action) {
@@ -3289,11 +3289,14 @@ function applyVsSummary(batch, sum) {
   var ok = document.getElementById("vsOkQty");
   var ab = document.getElementById("vsAbQty");
   var diff = document.getElementById("vsDiffQty");
-  if (plan) plan.textContent = (sum && sum.planned_qty) || 0;
-  if (ok) ok.textContent = (sum && sum.scanned_ok_count) || 0;
-  if (ab) ab.textContent = (sum && sum.abnormal_count) || 0;
+  var planVal = (sum && (sum.planned_total_box_count != null ? sum.planned_total_box_count : sum.planned_qty)) || 0;
+  var okVal = (sum && (sum.scanned_ok_total_count != null ? sum.scanned_ok_total_count : sum.scanned_ok_count)) || 0;
+  var abVal = (sum && sum.abnormal_count) || 0;
+  if (plan) plan.textContent = planVal;
+  if (ok) ok.textContent = okVal;
+  if (ab) ab.textContent = abVal;
   if (diff) {
-    var d = (sum && typeof sum.diff === 'number') ? sum.diff : ((sum && sum.planned_qty) || 0) - ((sum && sum.scanned_ok_count) || 0);
+    var d = (sum && typeof sum.diff === 'number') ? sum.diff : (planVal - okVal);
     diff.textContent = d;
   }
 }
@@ -3366,7 +3369,18 @@ async function submitVsBarcode() {
     } else {
       var r = res.scan_result;
       var cls = r === 'ok' ? 'ok' : (r === 'not_found' ? 'err' : 'warn');
-      var msg = '[' + r + '] ' + barcode + (res.message ? ' — ' + res.message : '');
+      var info = res.barcode_info || {};
+      var msg;
+      if (r === 'not_found') {
+        msg = '[not_found] ' + barcode + '｜不在本批次 / 배치에 없음';
+      } else {
+        var cu = info.customer_name || '--';
+        var okN = (info.scanned_ok_count != null) ? info.scanned_ok_count : '?';
+        var planN = (info.planned_box_count != null) ? info.planned_box_count : '?';
+        var tag = r === 'ok' ? 'OK' : (r === 'overflow' ? '超扫/초과' : r);
+        msg = '[' + tag + '] ' + barcode + '｜' + cu + '｜已扫 ' + okN + '/' + planN;
+        if (r === 'overflow') msg += '（已超出计划）';
+      }
       showVsResult(cls, msg);
       applyVsSummary(null, res.summary);
       refreshVerifyScanLogs();
@@ -3403,8 +3417,29 @@ function leaveVerifyScan(btnEl) {
   });
 }
 
-function finishVerifyScan(btnEl) {
+async function finishVerifyScan(btnEl) {
   if (!_activeJobId) { goPage("home"); return; }
+  if (_vsBatchId) {
+    try {
+      var detail = await api({ action: "v2_verify_batch_detail", id: _vsBatchId });
+      if (detail && detail.ok && detail.summary) {
+        var s = detail.summary;
+        var shortage = s.shortage_count || 0;
+        var overflow = s.overflow_count || 0;
+        var notScanned = s.not_scanned_count || 0;
+        var notFound = s.not_found_count || 0;
+        if (shortage + overflow + notScanned + notFound > 0) {
+          var txt = "当前核对仍有差异 / 현재 차이 있음:\n" +
+            "少扫 / 부족: " + shortage + "\n" +
+            "超扫 / 초과: " + overflow + "\n" +
+            "未扫 / 미스캔: " + notScanned + "\n" +
+            "非本批次 / 미일치: " + notFound + "\n\n" +
+            "是否仍然完成核对？/ 그래도 완료하시겠습니까？";
+          if (!confirm(txt)) return;
+        }
+      }
+    } catch (e) { /* 忽略网络异常，仍允许用户完成 */ }
+  }
   var doCloseBatch = confirm("是否同时将该核对批次标记为【已完成】？\n배치를 '완료'로 표시하시겠습니까？\n\n[确定/확인] = 结束任务+关闭批次\n[取消/취소] = 只结束任务，批次仍开放");
   withActionLock('finishVerifyScan', btnEl || null, '提交中.../저장중...', async function() {
     var res = await api({
