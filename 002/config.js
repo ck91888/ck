@@ -3,7 +3,8 @@
  * Shared config for collaboration center (/ck/002/)
  */
 
-var V2_API = "https://ck-v2-api.ck91888.workers.dev";
+// workers.dev 在国内访问不稳定，生产环境统一使用自定义域名 api.ck91888.cn
+var V2_API = "https://api.ck91888.cn";
 var V2_KEY_STORAGE = "ck_v2_collab_k";
 var V2_LANG_KEY = "ck_v2_lang";
 var V2_USER_KEY = "ck_v2_collab_user";

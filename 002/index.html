@@ -48,9 +48,10 @@
 
   <!-- Actions -->
   <div class="actions-bar" id="actionsBar">
-    <button onclick="goView('issue_create')" id="btnNewIssue">+ 新建问题点</button>
-    <button onclick="goView('outbound_create')" id="btnNewOutbound">+ 出库作业单</button>
-    <button onclick="goView('inbound_create')" id="btnNewInbound">+ 入库计划</button>
+    <button onclick="goView('issue_create')" id="btnNewIssue" style="display:none;">+ 新建问题点</button>
+    <button onclick="goView('outbound_create')" id="btnNewOutbound" style="display:none;">+ 出库作业单</button>
+    <button onclick="goView('inbound_create')" id="btnNewInbound" style="display:none;">+ 入库计划</button>
+    <button onclick="goView('check_create')" id="btnNewCheck" style="display:none;">+ 新建核对批次</button>
   </div>
 
   <!-- Dashboard -->
@@ -463,7 +464,7 @@
 <script src="config.js"></script>
 <script src="../shared/qrcode.min.js"></script>
 <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
-<script src="app.js?v=20260424b"></script>
+<script src="app.js?v=20260424c"></script>
 <script src="patch.js?v=20260415b"></script>
 </body>
 </html>

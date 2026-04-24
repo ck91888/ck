@@ -629,6 +629,14 @@ const MIGRATIONS = [
   // ---- 核对口径修正：按"条码对应的计划箱数"核对，客户名落到条码级 ----
   `ALTER TABLE v2_verify_batch_items ADD COLUMN planned_box_count INTEGER DEFAULT 1`,
   `ALTER TABLE v2_verify_batch_items ADD COLUMN customer_name TEXT DEFAULT ''`,
+
+  // ---- 记账标记：入库计划 / 出库作业单 ----
+  `ALTER TABLE v2_inbound_plans ADD COLUMN accounted INTEGER DEFAULT 0`,
+  `ALTER TABLE v2_inbound_plans ADD COLUMN accounted_by TEXT DEFAULT ''`,
+  `ALTER TABLE v2_inbound_plans ADD COLUMN accounted_at TEXT DEFAULT ''`,
+  `ALTER TABLE v2_outbound_orders ADD COLUMN accounted INTEGER DEFAULT 0`,
+  `ALTER TABLE v2_outbound_orders ADD COLUMN accounted_by TEXT DEFAULT ''`,
+  `ALTER TABLE v2_outbound_orders ADD COLUMN accounted_at TEXT DEFAULT ''`,
 ];
 
 let _migrated = false;
@@ -1018,6 +1026,29 @@ route("v2_outbound_order_update_status", async (body, env) => {
     "UPDATE v2_outbound_orders SET status=?, updated_at=? WHERE id=?"
   ).bind(newStatus, now(), id).run();
   return json({ ok: true });
+});
+
+// ===== 出库作业单：记账标记 =====
+route("v2_outbound_order_mark_accounted", async (body, env) => {
+  if (!isAuth(body, env)) return err("unauthorized", 401);
+  const id = String(body.id || "").trim();
+  const operator = String(body.operator_name || "").trim();
+  const accounted = Number(body.accounted) === 1 ? 1 : 0;
+  if (!id) return err("missing id");
+  if (accounted === 1 && !operator) return err("missing operator_name");
+  const order = await env.DB.prepare("SELECT id FROM v2_outbound_orders WHERE id=?").bind(id).first();
+  if (!order) return err("not found", 404);
+  const t = now();
+  if (accounted === 1) {
+    await env.DB.prepare(
+      "UPDATE v2_outbound_orders SET accounted=1, accounted_by=?, accounted_at=?, updated_at=? WHERE id=?"
+    ).bind(operator, t, t, id).run();
+  } else {
+    await env.DB.prepare(
+      "UPDATE v2_outbound_orders SET accounted=0, accounted_by='', accounted_at='', updated_at=? WHERE id=?"
+    ).bind(t, id).run();
+  }
+  return json({ ok: true, accounted, accounted_by: accounted ? operator : '', accounted_at: accounted ? t : '' });
 });
 
 // =====================================================
@@ -1495,6 +1526,29 @@ route("v2_inbound_plan_update_status", async (body, env) => {
     "UPDATE v2_inbound_plans SET status=?, updated_at=? WHERE id=?"
   ).bind(status, now(), id).run();
   return json({ ok: true });
+});
+
+// ===== 入库计划：记账标记 =====
+route("v2_inbound_plan_mark_accounted", async (body, env) => {
+  if (!isAuth(body, env)) return err("unauthorized", 401);
+  const id = String(body.id || "").trim();
+  const operator = String(body.operator_name || "").trim();
+  const accounted = Number(body.accounted) === 1 ? 1 : 0;
+  if (!id) return err("missing id");
+  if (accounted === 1 && !operator) return err("missing operator_name");
+  const plan = await env.DB.prepare("SELECT id FROM v2_inbound_plans WHERE id=?").bind(id).first();
+  if (!plan) return err("plan not found", 404);
+  const t = now();
+  if (accounted === 1) {
+    await env.DB.prepare(
+      "UPDATE v2_inbound_plans SET accounted=1, accounted_by=?, accounted_at=?, updated_at=? WHERE id=?"
+    ).bind(operator, t, t, id).run();
+  } else {
+    await env.DB.prepare(
+      "UPDATE v2_inbound_plans SET accounted=0, accounted_by='', accounted_at='', updated_at=? WHERE id=?"
+    ).bind(t, id).run();
+  }
+  return json({ ok: true, accounted, accounted_by: accounted ? operator : '', accounted_at: accounted ? t : '' });
 });
 
 // ===== 入库计划专用取消接口 =====

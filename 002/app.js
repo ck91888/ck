@@ -67,7 +67,8 @@ var _WRITE_ACTIONS = [
   'v2_pick_job_start','v2_pick_job_join','v2_pick_job_add_docs','v2_pick_job_finish',
   'v2_bulk_op_job_start','v2_bulk_op_job_finish',
   'v2_correction_request_create','v2_admin_dirty_data_cleanup',
-  'v2_verify_batch_upload','v2_verify_batch_update_status'
+  'v2_verify_batch_upload','v2_verify_batch_update_status',
+  'v2_inbound_plan_mark_accounted','v2_outbound_order_mark_accounted'
 ];
 function _genReqId(action) {
   return action + '_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
@@ -85,7 +86,13 @@ async function api(params) {
     });
     return await res.json();
   } catch(e) {
-    return { ok: false, error: "network: " + e };
+    // TypeError: Failed to fetch / NetworkError — 不是业务错误，是网络/域名问题
+    return {
+      ok: false,
+      error: "network_error",
+      network_error: true,
+      message: "接口连接失败（网络或域名问题），不是业务提交失败\n네트워크 오류 (서버 응답 없음)\n" + (e && e.message || e)
+    };
   }
 }
 
@@ -96,7 +103,12 @@ async function uploadFile(formData) {
     var res = await fetch(V2_API, { method: "POST", body: formData });
     return await res.json();
   } catch(e) {
-    return { ok: false, error: "upload failed: " + e };
+    return {
+      ok: false,
+      error: "network_error",
+      network_error: true,
+      message: "文件上传失败（网络或域名问题）\n파일 업로드 실패 (네트워크 오류)\n" + (e && e.message || e)
+    };
   }
 }
 
@@ -208,9 +220,13 @@ function checkAutoLogin() {
             errEl.textContent = "访问码已失效，请重新输入 / 액세스 코드가 만료되었습니다";
           }
         }
-      }).catch(function() {
-        // 网络异常，仍然尝试进入（离线容忍）
-        showMain();
+      }).catch(function(e) {
+        // 网络/域名异常：不要进入主页，否则用户会误以为系统正常但所有提交都失败
+        var errEl = document.getElementById("loginErr");
+        if (errEl) {
+          errEl.style.color = "#e74c3c";
+          errEl.textContent = "后端接口连接失败，请检查网络或接口域名\n백엔드 연결 실패, 네트워크/도메인 확인\n(" + (e && e.message || e) + ")";
+        }
       });
   }
 }
@@ -326,6 +342,7 @@ function goTab(tab, btn) {
 
   // Show corresponding view
   goView(tab);
+  updateActionsBar(tab);
 
   // Load data
   if (tab === "home") loadDashboard();
@@ -335,6 +352,21 @@ function goTab(tab, btn) {
   if (tab === "feedback") loadFeedbackList();
   if (tab === "order_ops") loadOrderOpsList();
   if (tab === "check") loadVerifyList();
+}
+
+// 按 tab 动态显示"+新建"按钮，防止误操作
+function updateActionsBar(tab) {
+  var map = {
+    issue:    'btnNewIssue',
+    outbound: 'btnNewOutbound',
+    inbound:  'btnNewInbound',
+    check:    'btnNewCheck'
+    // home / feedback / order_ops → 不显示任何新增按钮
+  };
+  ['btnNewIssue','btnNewOutbound','btnNewInbound','btnNewCheck'].forEach(function(id) {
+    var el = document.getElementById(id);
+    if (el) el.style.display = (map[tab] === id) ? '' : 'none';
+  });
 }
 
 function goView(name) {
@@ -900,6 +932,15 @@ async function loadOutboundDetail() {
     html += '</div></div>';
   }
 
+  // 记账标记
+  html += renderAccountedCard({
+    accounted: Number(o.accounted || 0),
+    accounted_by: o.accounted_by || '',
+    accounted_at: o.accounted_at || '',
+    onMark: "markOutboundAccounted(1, this)",
+    onUnmark: "markOutboundAccounted(0, this)"
+  });
+
   // Print + Status actions
   html += '<div class="card">';
   html += '<button class="btn btn-outline btn-sm" onclick="printOutboundOrder()">' + L("print") + '</button> ';
@@ -915,6 +956,43 @@ async function loadOutboundDetail() {
   html += '</div>';
 
   body.innerHTML = html;
+}
+
+// 统一记账卡片渲染（入库/出库共用）
+function renderAccountedCard(opts) {
+  var a = opts.accounted === 1;
+  var html = '<div class="card">';
+  html += '<div class="card-title">记账标记 / 기장 표시</div>';
+  if (a) {
+    html += '<div style="color:#2e7d32;font-weight:700;">● 已记账 / 기장 완료</div>';
+    html += '<div class="muted" style="font-size:13px;margin-top:4px;">操作人: ' + esc(opts.accounted_by || '--') + ' · ' + esc(fmtTime(opts.accounted_at)) + '</div>';
+    html += '<div style="margin-top:8px;"><button class="btn btn-outline btn-sm" onclick="' + opts.onUnmark + '">取消记账 / 기장 취소</button></div>';
+  } else {
+    html += '<div style="color:#e67e22;font-weight:700;">● 未记账 / 미기장</div>';
+    html += '<div style="margin-top:8px;"><button class="btn btn-primary btn-sm" onclick="' + opts.onMark + '">标记已记账 / 기장 완료 표시</button></div>';
+  }
+  html += '</div>';
+  return html;
+}
+
+async function markOutboundAccounted(accounted, btnEl) {
+  var op = getUser();
+  if (accounted === 1 && !op) { alert("请先在右上角设置你的显示名"); return; }
+  var msg = accounted === 1 ? "确认标记为【已记账】？" : "确认取消记账？";
+  if (!confirm(msg)) return;
+  withActionLock('markOutboundAccounted', btnEl || null, '提交中...', async function() {
+    var res = await api({
+      action: "v2_outbound_order_mark_accounted",
+      id: _currentOutboundId,
+      accounted: accounted,
+      operator_name: op
+    });
+    if (!res || !res.ok) {
+      alert("失败: " + (res ? (res.message || res.error) : "unknown"));
+      return;
+    }
+    loadOutboundDetail();
+  });
 }
 
 async function updateObStatus(status, btnEl) {
@@ -1340,6 +1418,15 @@ async function loadInboundDetail() {
     html += '</div>';
   }
 
+  // 记账标记
+  html += renderAccountedCard({
+    accounted: Number(p.accounted || 0),
+    accounted_by: p.accounted_by || '',
+    accounted_at: p.accounted_at || '',
+    onMark: "markInboundAccounted(1, this)",
+    onUnmark: "markInboundAccounted(0, this)"
+  });
+
   // --- Actions ---
   html += '<div class="card">';
   html += '<button class="btn btn-outline btn-sm" onclick="printIbQr()">' + L("print") + '</button> ';
@@ -1352,6 +1439,26 @@ async function loadInboundDetail() {
   html += '</div>';
 
   body.innerHTML = html;
+}
+
+async function markInboundAccounted(accounted, btnEl) {
+  var op = getUser();
+  if (accounted === 1 && !op) { alert("请先在右上角设置你的显示名"); return; }
+  var msg = accounted === 1 ? "确认标记为【已记账】？" : "确认取消记账？";
+  if (!confirm(msg)) return;
+  withActionLock('markInboundAccounted', btnEl || null, '提交中...', async function() {
+    var res = await api({
+      action: "v2_inbound_plan_mark_accounted",
+      id: _currentInboundId,
+      accounted: accounted,
+      operator_name: op
+    });
+    if (!res || !res.ok) {
+      alert("失败: " + (res ? (res.message || res.error) : "unknown"));
+      return;
+    }
+    loadInboundDetail();
+  });
 }
 
 // QR helper using qrcode-generator (loaded as ../shared/qrcode.min.js)

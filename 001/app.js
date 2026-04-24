@@ -139,7 +139,14 @@ function api(params) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(params)
   }).then(function(res) { return res.json(); })
-    .catch(function(e) { return { ok: false, error: "network: " + e }; });
+    .catch(function(e) {
+      return {
+        ok: false,
+        error: "network_error",
+        network_error: true,
+        message: "接口连接失败（网络或域名问题），不是业务提交失败\n네트워크/도메인 오류\n" + (e && e.message || e)
+      };
+    });
 }
 
 function uploadFile(formData) {
@@ -147,7 +154,14 @@ function uploadFile(formData) {
   formData.append("action", "v2_attachment_upload");
   return fetch(V2_API, { method: "POST", body: formData })
     .then(function(res) { return res.json(); })
-    .catch(function(e) { return { ok: false, error: "upload failed: " + e }; });
+    .catch(function(e) {
+      return {
+        ok: false,
+        error: "network_error",
+        network_error: true,
+        message: "文件上传失败（网络或域名问题）\n파일 업로드 실패\n" + (e && e.message || e)
+      };
+    });
 }
 
 function fileUrl(fileKey) {

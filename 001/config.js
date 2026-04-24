@@ -3,7 +3,8 @@
  * Shared config for field execution system (/ck/001/)
  */
 
-var V2_API = "https://ck-v2-api.ck91888.workers.dev";
+// workers.dev 在国内访问不稳定，生产环境统一使用自定义域名 api.ck91888.cn
+var V2_API = "https://api.ck91888.cn";
 
 // ===== OPS 专用访问码（第一轮轻量访问控制，非安全密钥）=====
 // 部署时替换为实际值，并在 Cloudflare Workers 设置对应 OPSKEY secret
