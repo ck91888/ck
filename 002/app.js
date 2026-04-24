@@ -242,7 +242,8 @@ function toggleLang() {
   if (_currentTab === "outbound") loadOutboundList();
   if (_currentTab === "inbound") loadInboundList();
   if (_currentTab === "order_ops") loadOrderOpsList();
-  if (_currentTab === "order_ops_detail" && _currentOrderOpsJobId) loadOrderOpsDetail(_currentOrderOpsJobId);
+  // order_ops_detail 是 view 而非 tab，必须用 _currentView 判断
+  if (_currentView === "order_ops_detail" && _currentOrderOpsJobId) loadOrderOpsDetail(_currentOrderOpsJobId);
 }
 
 function applyLang() {
@@ -257,10 +258,13 @@ function applyLang() {
   document.getElementById("btnNewIssue").textContent = L("new_issue");
   document.getElementById("btnNewOutbound").textContent = L("new_outbound");
   document.getElementById("btnNewInbound").textContent = L("new_inbound");
+  var btnNC = document.getElementById("btnNewCheck");
+  if (btnNC) btnNC.textContent = L("new_check");
 
   // Tabs
   var tabMap = { home: "tab_home", issue: "tab_issue", outbound: "tab_outbound",
-    inbound: "tab_inbound", feedback: "tab_feedback", check: "tab_check" };
+    inbound: "tab_inbound", feedback: "tab_feedback", check: "tab_check",
+    order_ops: "tab_order_ops" };
   var tabs = document.querySelectorAll("#mainTabs button");
   tabs.forEach(function(btn) {
     var key = btn.getAttribute("data-tab");
