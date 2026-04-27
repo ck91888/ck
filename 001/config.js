@@ -76,6 +76,7 @@ var I18N = {
   // -- Outbound --
   outbound_title: { zh: "出库作业", ko: "출고 작업" },
   pack_direct: { zh: "代发打包", ko: "직배송 포장" },
+  change_order: { zh: "换单操作", ko: "송장 교체" },
   load_outbound: { zh: "出库装货", ko: "출고 상차" },
   box_count: { zh: "箱数", ko: "박스 수" },
   pallet_count: { zh: "托数", ko: "팔레트 수" },

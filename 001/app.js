@@ -552,6 +552,7 @@ var JOB_TYPE_LABEL = {
   pick_direct: "代发拣货/직배송 피킹",
   bulk_op: "大货操作/대량화물 작업",
   pack_direct: "代发打包/직배송 포장",
+  change_order: "换单操作/송장 교체",
   load_outbound: "出库装货/출고 상차",
   inventory: "盘点/재고조사",
   disposal: "废弃处理/폐기 처리",
