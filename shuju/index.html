@@ -125,7 +125,7 @@
         <input type="text" id="ordersFilterWorker" placeholder="员工姓名（模糊）">
         <input type="text" id="ordersFilterDoc" placeholder="单号 / display_no">
         <button class="btn-primary" onclick="loadOrders(this)">查询</button>
-        <button class="btn-secondary" onclick="exportOrders()">导出 CSV</button>
+        <button class="btn-secondary" onclick="exportOrders(this)">导出明细 CSV</button>
         <span class="muted" id="ordersTotal" style="margin-left:auto;font-size:12px;"></span>
       </div>
       <div style="overflow-x:auto;">
@@ -134,15 +134,15 @@
             <tr>
               <th>日期</th><th>单号</th><th>业务阶段</th><th>任务类型</th>
               <th>业务分类</th><th>状态</th><th>参与人数</th><th>总工时</th>
-              <th>开始时间</th><th>结束时间</th><th>操作</th>
+              <th>开始时间</th><th>结束时间</th><th>作业结果</th><th>操作</th>
             </tr>
           </thead>
           <tbody id="ordersBody">
-            <tr><td colspan="11" class="muted" style="text-align:center;">请点击「查询」</td></tr>
+            <tr><td colspan="12" class="muted" style="text-align:center;">请点击「查询」</td></tr>
           </tbody>
         </table>
       </div>
-      <div class="section-hint">默认按 created_at 倒序，单次返回最多 200 条；如需更多请缩小日期范围或细化筛选。</div>
+      <div class="section-hint">默认按 created_at 倒序，列表最多 200 条；导出走独立接口，最多 10000 条带完整作业结果与拣货明细。</div>
     </div>
   </div>
 
@@ -360,6 +360,6 @@
 
 <script src="../shared/xlsx.full.min.js"></script>
 <script src="config.js?v=20260427a"></script>
-<script src="app.js?v=20260427a"></script>
+<script src="app.js?v=20260427b"></script>
 </body>
 </html>

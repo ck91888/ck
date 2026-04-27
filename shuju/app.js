@@ -41,15 +41,22 @@ function minutesSince(isoStr) {
   if (isNaN(t)) return "--";
   return Math.round((Date.now() - t) / 60000);
 }
+function round1(n) {
+  n = Number(n);
+  if (!isFinite(n)) return 0;
+  return Math.round(n * 10) / 10;
+}
 function fmtMinutes(m) {
-  m = Number(m) || 0;
+  m = round1(m);
   if (m < 60) return m + " 分";
-  var h = Math.floor(m / 60), r = m % 60;
-  return h + " 小时 " + (r > 0 ? r + " 分" : "");
+  var h = Math.floor(m / 60);
+  var r = round1(m - h * 60);
+  if (r <= 0) return h + " 小时";
+  return h + " 小时 " + r + " 分";
 }
 function fmtNumber(n) {
   n = Number(n) || 0;
-  return (Math.round(n * 10) / 10).toLocaleString();
+  return round1(n).toLocaleString();
 }
 function defaultDateRangeToday() {
   var d = new Date(Date.now() + 9 * 3600 * 1000);
@@ -175,7 +182,8 @@ function initFilterSelects() {
 
 function setDefaultDateInputs() {
   var today = defaultDateRangeToday();
-  ['whFilterStart', 'whFilterEnd', 'mgmtFilterStart', 'mgmtFilterEnd'].forEach(function(id) {
+  ['ordersFilterStart', 'ordersFilterEnd', 'whFilterStart', 'whFilterEnd',
+   'mgmtFilterStart', 'mgmtFilterEnd'].forEach(function(id) {
     var el = document.getElementById(id);
     if (el && !el.value) el.value = today;
   });
@@ -327,24 +335,30 @@ function ordersFilterParams() {
 
 async function loadOrders(btn) {
   var tbody = document.getElementById("ordersBody");
-  tbody.innerHTML = '<tr><td colspan="11" class="muted" style="text-align:center;">加载中...</td></tr>';
+  tbody.innerHTML = '<tr><td colspan="12" class="muted" style="text-align:center;">加载中...</td></tr>';
   setBtnLoading(btn, true);
   var params = ordersFilterParams();
   params.action = "v2_dashboard_order_list";
   var res = await api(params);
   setBtnLoading(btn, false, "查询");
   if (!res || !res.ok) {
-    tbody.innerHTML = '<tr><td colspan="11" class="muted" style="text-align:center;">加载失败: ' + esc(res && (res.message || res.error)) + '</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="12" class="muted" style="text-align:center;">加载失败: ' + esc(res && (res.message || res.error)) + '</td></tr>';
     return;
   }
   _ordersItems = res.items || [];
   document.getElementById("ordersTotal").textContent = (res.total || 0) + ' 条 (显示前 ' + _ordersItems.length + ')';
   if (_ordersItems.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="11" class="muted" style="text-align:center;">暂无数据</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="12" class="muted" style="text-align:center;">暂无数据</td></tr>';
     return;
   }
   var html = '';
   _ordersItems.forEach(function(j) {
+    var resultSummary = '';
+    var bx = Number(j.box_count_sum) || 0, pl = Number(j.pallet_count_sum) || 0;
+    if (bx) resultSummary += '箱 ' + bx;
+    if (pl) resultSummary += (resultSummary ? ' / ' : '') + '板 ' + pl;
+    if (j.result_remarks_short) resultSummary += (resultSummary ? ' / ' : '') + '备注 ' + j.result_remarks_short;
+    if (!resultSummary) resultSummary = '<span class="muted">--</span>';
     html += '<tr>';
     html += '<td>' + esc((j.created_at || '').slice(0, 10)) + '</td>';
     html += '<td><b>' + esc(j.display_no || j.related_doc_id || j.id) + '</b></td>';
@@ -356,30 +370,67 @@ async function loadOrders(btn) {
     html += '<td>' + fmtMinutes(j.total_minutes) + '</td>';
     html += '<td>' + esc(fmtTime(j.started_at)) + '</td>';
     html += '<td>' + esc(fmtTime(j.ended_at)) + '</td>';
+    html += '<td>' + (resultSummary.indexOf('<span') === 0 ? resultSummary : esc(resultSummary)) + '</td>';
     html += '<td><button class="row-action" onclick="openOrderDetail(\'' + esc(j.id) + '\')">详情</button></td>';
     html += '</tr>';
   });
   tbody.innerHTML = html;
 }
 
-function exportOrders() {
-  if (_ordersItems.length === 0) { alert("无数据"); return; }
-  var rows = _ordersItems.map(function(j) {
+async function exportOrders(btn) {
+  setBtnLoading(btn, true);
+  var params = ordersFilterParams();
+  params.action = "v2_dashboard_order_export";
+  params.limit = 10000;
+  delete params.offset;
+  var res = await api(params);
+  setBtnLoading(btn, false, "导出明细 CSV");
+  if (!res || !res.ok) { alert("导出失败: " + (res ? (res.message || res.error) : "unknown")); return; }
+  var rows = res.rows || [];
+  if (rows.length === 0) { alert("无数据可导出"); return; }
+  var csvRows = rows.map(function(r) {
     return {
-      日期: (j.created_at || '').slice(0, 10),
-      单号: j.display_no || j.related_doc_id || j.id,
-      业务阶段: flowLabel(j.flow_stage),
-      任务类型: jobTypeLabel(j.job_type),
-      业务分类: bizLabel(j.biz_class),
-      状态: statusLabel(j.status),
-      参与人数: j.worker_count || 0,
-      总分钟: j.total_minutes || 0,
-      开始时间: fmtTime(j.started_at),
-      结束时间: fmtTime(j.ended_at),
-      job_id: j.id
+      日期: r['日期'] || '',
+      单号: r['单号'] || '',
+      客户: r.customer || '',
+      业务阶段: flowLabel(r.flow_stage),
+      任务类型: jobTypeLabel(r.job_type),
+      业务分类: bizLabel(r.biz_class),
+      状态: statusLabel(r.status),
+      是否记账: r.accounted === '' ? '' : (r.accounted ? '已记账' : '未记账'),
+      记账人: r.accounted_by || '',
+      记账时间: r.accounted_at || '',
+      参与人数: r.worker_count || 0,
+      参与人员: r.worker_names || '',
+      总分钟: r.total_minutes || 0,
+      总小时: r.total_hours || 0,
+      开始时间: r.started_at || '',
+      结束时间: r.ended_at || '',
+      箱数合计: r.box_count_sum || 0,
+      板数合计: r.pallet_count_sum || 0,
+      作业备注: r.result_remarks || '',
+      差异说明: r.diff_notes || '',
+      作业结果明细: r.result_lines_json_all || '',
+      result_json: r.result_json_all || '',
+      拣货单号: r.pick_doc_nos || '',
+      拣货人员明细: r.pick_worker_summary || '',
+      出库单号: r.outbound_display_no || '',
+      入库单号: r.inbound_display_no || '',
+      WMS工单号: r.wms_work_order_no || '',
+      目的地: r.destination || '',
+      PO号: r.po_no || '',
+      计划箱数: r.planned_box_count || 0,
+      计划板数: r.planned_pallet_count || 0,
+      实际箱数: r.actual_box_count || 0,
+      实际板数: r.actual_pallet_count || 0,
+      job_id: r.job_id
     };
   });
-  exportCsv("orders_" + defaultDateRangeToday() + ".csv", rows);
+  var startD = (params.start_date || '').replace(/-/g, '');
+  var endD = (params.end_date || '').replace(/-/g, '');
+  var fname = 'orders_export_' + (startD || 'all') + '_' + (endD || 'all') + '.csv';
+  exportCsv(fname, csvRows);
+  if (res.truncated) alert('已达单次导出上限 10000 行，部分数据可能被截断。请缩小日期或筛选范围。');
 }
 
 async function openOrderDetail(jobId) {
@@ -512,12 +563,13 @@ async function loadWorkhours(btn) {
 
   // 顶部统计卡
   var cards = [
-    { label: '总工时', value: fmtMinutes(s.total_minutes || 0), sub: s.total_hours + ' 小时' },
+    { label: '总工时', value: fmtMinutes(s.total_minutes || 0), sub: round1(s.total_hours) + ' 小时' },
     { label: '参与人数', value: s.worker_count || 0 },
     { label: '任务数', value: s.job_count || 0 },
     { label: '人均工时', value: fmtMinutes(s.avg_minutes_per_worker || 0) },
     { label: '最长单段', value: fmtMinutes(s.max_segment_minutes || 0) },
-    { label: '异常段', value: s.anomaly_count || 0, sub: '> 240分 或 ≤0分' }
+    { label: '异常段', value: s.anomaly_count || 0, sub: '≥12小时 / ≤0分 / 跨天未结束' },
+    { label: '长工时提醒', value: s.long_segment_count || 0, sub: '≥240分 但未达异常' }
   ];
   var ch = '';
   cards.forEach(function(c) {
@@ -534,11 +586,11 @@ async function loadWorkhours(btn) {
   if (bw.length === 0) tb1 = '<tr><td colspan="5" class="muted" style="text-align:center;">暂无数据</td></tr>';
   else bw.forEach(function(w) {
     tb1 += '<tr><td><b>' + esc(w.worker_name) + '</b></td>';
-    tb1 += '<td>' + (w.total_minutes || 0) + '</td>';
-    tb1 += '<td>' + (w.total_hours || 0) + '</td>';
+    tb1 += '<td>' + round1(w.total_minutes) + '</td>';
+    tb1 += '<td>' + round1(w.total_hours) + '</td>';
     tb1 += '<td>' + (w.job_count || 0) + '</td>';
-    tb1 += '<td>' + (w.avg_minutes_per_job || 0) + '</td>';
-    tb1 += '<td>' + (w.max_segment_minutes || 0) + '</td></tr>';
+    tb1 += '<td>' + round1(w.avg_minutes_per_job) + '</td>';
+    tb1 += '<td>' + round1(w.max_segment_minutes) + '</td></tr>';
   });
   document.getElementById("whByWorkerBody").innerHTML = tb1;
 
@@ -548,10 +600,10 @@ async function loadWorkhours(btn) {
   if (bj.length === 0) tb2 = '<tr><td colspan="5" class="muted" style="text-align:center;">暂无数据</td></tr>';
   else bj.forEach(function(j) {
     tb2 += '<tr><td><b>' + esc(jobTypeLabel(j.job_type)) + '</b></td>';
-    tb2 += '<td>' + (j.total_minutes || 0) + '</td>';
+    tb2 += '<td>' + round1(j.total_minutes) + '</td>';
     tb2 += '<td>' + (j.worker_count || 0) + '</td>';
     tb2 += '<td>' + (j.job_count || 0) + '</td>';
-    tb2 += '<td>' + (j.avg_minutes_per_worker || 0) + '</td></tr>';
+    tb2 += '<td>' + round1(j.avg_minutes_per_worker) + '</td></tr>';
   });
   document.getElementById("whByJobTypeBody").innerHTML = tb2;
 
@@ -560,7 +612,10 @@ async function loadWorkhours(btn) {
   var tb3 = '';
   if (segs.length === 0) tb3 = '<tr><td colspan="8" class="muted" style="text-align:center;">暂无数据</td></tr>';
   else segs.slice(0, 200).forEach(function(s) {
-    var anomalyTag = s.anomaly ? ' <span class="tag tag-red" style="font-size:10px;">异常</span>' : '';
+    var anomalyTag = s.anomaly
+      ? ' <span class="tag tag-red" style="font-size:10px;" title="' + esc(s.anomaly_reason || '') + '">异常</span>'
+      : '';
+    var longTag = s.long_segment ? ' <span class="tag tag-orange" style="font-size:10px;">长工时</span>' : '';
     var activeTag = s.active ? ' <span class="tag tag-green" style="font-size:10px;">在岗</span>' : '';
     tb3 += '<tr><td>' + esc(s.worker_name) + '</td>';
     tb3 += '<td>' + esc((s.joined_at || '').slice(0, 10)) + '</td>';
@@ -568,7 +623,7 @@ async function loadWorkhours(btn) {
     tb3 += '<td>' + esc(s.display_no || s.job_id) + '</td>';
     tb3 += '<td>' + esc(fmtTime(s.joined_at)) + '</td>';
     tb3 += '<td>' + esc(fmtTime(s.left_at)) + '</td>';
-    tb3 += '<td>' + (s.minutes || 0) + activeTag + anomalyTag + '</td>';
+    tb3 += '<td>' + round1(s.minutes || 0) + activeTag + longTag + anomalyTag + '</td>';
     tb3 += '<td>' + statusTag(s.status) + '</td></tr>';
   });
   document.getElementById("whSegmentsBody").innerHTML = tb3;
@@ -586,8 +641,9 @@ function exportWorkhoursSegments() {
       员工: s.worker_name, 日期: (s.joined_at || '').slice(0, 10),
       任务类型: jobTypeLabel(s.job_type), 任务号: s.display_no || s.job_id,
       开始: fmtTime(s.joined_at), 结束: fmtTime(s.left_at),
-      分钟: s.minutes, 状态: statusLabel(s.status),
-      在岗: s.active, 异常: s.anomaly ? 1 : 0
+      分钟: round1(s.minutes), 状态: statusLabel(s.status),
+      在岗: s.active, 异常: s.anomaly ? 1 : 0, 异常原因: s.anomaly_reason || '',
+      长工时: s.long_segment ? 1 : 0
     };
   });
   exportCsv("workhour_segments_" + defaultDateRangeToday() + ".csv", rows);
