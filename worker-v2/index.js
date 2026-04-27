@@ -4248,6 +4248,9 @@ route("v2_order_ops_job_list", async (body, env) => {
   const end = String(body.end_date || "").trim();
   const job_type = String(body.job_type || "").trim();
 
+  // TODO(分页): 当前硬编码 LIMIT 200，与其他 v2_*_list 不同。
+  //   后续如需"加载更多"，改用 pageParams(body) + LIMIT ? OFFSET ?，
+  //   并调整下方 jobIds 关联查询为按页内 ids 关联。
   let sql = "SELECT * FROM v2_ops_jobs WHERE flow_stage='order_op'";
   const binds = [];
   if (job_type) { sql += " AND job_type=?"; binds.push(job_type); }

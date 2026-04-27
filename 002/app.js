@@ -391,6 +391,13 @@ function goView(name) {
   updateActionsBarByView(name);
 }
 
+// TODO(分页 — list 接口能力盘点 2026-04-27):
+//   v2_issue_list / v2_outbound_order_list / v2_inbound_plan_list /
+//   v2_feedback_list / v2_verify_batch_list ✓ 已支持 limit/offset。
+//   v2_order_ops_job_list ✗ 当前硬编码 LIMIT 200，需先改后端再前端分页。
+//   后续做"加载更多"时：维护 _xxxOffset 累加，列表底部按钮调
+//   loadXxxList({append:true}) 即可，无需改后端（除 order_ops 外）。
+
 // ===== Dashboard =====
 async function loadDashboard() {
   var grid = document.getElementById("dashGrid");
