@@ -686,10 +686,12 @@ const MIGRATIONS = [
   `CREATE INDEX IF NOT EXISTS idx_v2_pwd_pick_doc ON v2_pick_worker_docs(pick_doc_no)`,
   `CREATE INDEX IF NOT EXISTS idx_v2_pwd_job_doc ON v2_pick_worker_docs(job_id, pick_doc_no)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_pwd_seg_doc ON v2_pick_worker_docs(segment_id, pick_doc_no)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_inbound_accounted_date ON v2_inbound_plans(accounted, plan_date, created_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_outbound_accounted_date ON v2_outbound_orders(accounted, order_date, created_at)`,
 ];
 
 // 每次发布迁移变化时手动 +1（patch 段），冷启动只比对一次字符串即可跳过整段 MIGRATIONS
-const CURRENT_SCHEMA_VERSION = 'v2.20260427c';
+const CURRENT_SCHEMA_VERSION = 'v2.20260427d';
 
 let _migrated = false;
 async function ensureMigrated(db) {
@@ -1115,12 +1117,15 @@ route("v2_outbound_order_list", async (body, env) => {
   const start = String(body.start_date || "").trim();
   const end = String(body.end_date || "").trim();
   const status = String(body.status || "").trim();
+  const accounted = String(body.accounted == null ? "" : body.accounted).trim();
   const { limit, offset } = pageParams(body);
   let sql = "SELECT * FROM v2_outbound_orders WHERE 1=1";
   const binds = [];
   if (start) { sql += " AND order_date>=?"; binds.push(start); }
   if (end) { sql += " AND order_date<=?"; binds.push(end); }
   if (status) { sql += " AND status=?"; binds.push(status); }
+  if (accounted === "1") { sql += " AND accounted=1"; }
+  else if (accounted === "0") { sql += " AND (accounted IS NULL OR accounted=0)"; }
   sql += " ORDER BY order_date DESC, created_at DESC LIMIT ? OFFSET ?";
   binds.push(limit, offset);
   const rs = await env.DB.prepare(sql).bind(...binds).all();
@@ -1502,6 +1507,7 @@ route("v2_inbound_plan_list", async (body, env) => {
   const start = String(body.start_date || "").trim();
   const end = String(body.end_date || "").trim();
   const status = String(body.status || "").trim();
+  const accounted = String(body.accounted == null ? "" : body.accounted).trim();
   const { limit, offset } = pageParams(body);
   // 排除退件入库会话：return_session 不属于正式入库计划口径
   let sql = "SELECT * FROM v2_inbound_plans WHERE source_type != 'return_session'";
@@ -1509,6 +1515,8 @@ route("v2_inbound_plan_list", async (body, env) => {
   if (start) { sql += " AND plan_date>=?"; binds.push(start); }
   if (end) { sql += " AND plan_date<=?"; binds.push(end); }
   if (status) { sql += " AND status=?"; binds.push(status); }
+  if (accounted === "1") { sql += " AND accounted=1"; }
+  else if (accounted === "0") { sql += " AND (accounted IS NULL OR accounted=0)"; }
   sql += " ORDER BY plan_date DESC, created_at DESC LIMIT ? OFFSET ?";
   binds.push(limit, offset);
   const rs = await env.DB.prepare(sql).bind(...binds).all();

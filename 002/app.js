@@ -320,6 +320,15 @@ function outModeLabel(mode) {
 // priLabel: UI 不再展示优先级；保留函数定义只为兼容外部潜在引用，返回原值
 function priLabel(pri) { return pri; }
 
+// 列表外层是否记帐 tag（入库计划/出库作业单共用）
+function accountTag(o) {
+  if (!o) return '';
+  if (Number(o.accounted) === 1) {
+    return '<span class="account-tag accounted">' + esc(L("accounted_yes")) + '</span> ';
+  }
+  return '<span class="account-tag unaccounted">' + esc(L("accounted_no")) + '</span> ';
+}
+
 function fmtTime(isoStr) {
   if (!isoStr) return "--";
   try {
@@ -734,8 +743,10 @@ async function loadOutboundList() {
   var start = document.getElementById("obFilterStart").value;
   var end = document.getElementById("obFilterEnd").value;
   var status = document.getElementById("obFilterStatus").value;
+  var accountedSel = document.getElementById("outboundFilterAccounted");
+  var accounted = accountedSel ? accountedSel.value : "";
 
-  var res = await api({ action: "v2_outbound_order_list", start_date: start, end_date: end, status: status });
+  var res = await api({ action: "v2_outbound_order_list", start_date: start, end_date: end, status: status, accounted: accounted });
   if (!res || !res.ok) {
     body.innerHTML = '<div class="card muted">加载失败</div>';
     return;
@@ -752,6 +763,7 @@ async function loadOutboundList() {
     html += '<div class="list-item" onclick="openOutboundDetail(\'' + esc(o.id) + '\')">';
     html += '<div class="item-title">';
     html += '<span class="st st-' + esc(o.status) + '">' + esc(stLabel(o.status)) + '</span> ';
+    html += accountTag(o);
     html += esc(o.display_no || o.id) + ' · ' + esc(o.customer || "--");
     html += '</div>';
     var meta = esc(o.order_date || "");
@@ -761,6 +773,9 @@ async function loadOutboundList() {
     if (o.planned_box_count) meta += ' · ' + L("planned_prefix") + o.planned_box_count + L("unit_box");
     if (o.planned_pallet_count) meta += ' · ' + o.planned_pallet_count + L("unit_pallet");
     meta += ' · ' + esc(fmtTime(o.created_at));
+    if (o.accounted == 1 && (o.accounted_by || o.accounted_at)) {
+      meta += ' · ' + L("accounted_by_short") + ': ' + esc(o.accounted_by || "") + (o.accounted_at ? ' ' + esc(fmtTime(o.accounted_at)) : '');
+    }
     html += '<div class="item-meta">' + meta + '</div>';
     html += '</div>';
   });
@@ -1123,8 +1138,10 @@ async function loadInboundList() {
   var start = document.getElementById("ibFilterStart").value;
   var end = document.getElementById("ibFilterEnd").value;
   var status = document.getElementById("ibFilterStatus").value;
+  var accountedSel = document.getElementById("inboundFilterAccounted");
+  var accounted = accountedSel ? accountedSel.value : "";
 
-  var res = await api({ action: "v2_inbound_plan_list", start_date: start, end_date: end, status: status });
+  var res = await api({ action: "v2_inbound_plan_list", start_date: start, end_date: end, status: status, accounted: accounted });
   if (!res || !res.ok) {
     body.innerHTML = '<div class="card muted">加载失败</div>';
     return;
@@ -1153,11 +1170,16 @@ async function loadInboundList() {
     html += '<div class="list-item" onclick="openInboundDetail(\'' + esc(p.id) + '\')">';
     html += '<div class="item-title">';
     html += '<span class="st st-' + esc(p.status) + '">' + esc(inboundStatusLabel(p.status)) + '</span> ';
+    html += accountTag(p);
     html += dynTag;
     html += '<span class="biz-tag biz-' + esc(p.biz_class) + '">' + esc(bizLabel(p.biz_class)) + '</span> ';
     html += esc(p.display_no || p.id) + ' · ' + esc(p.customer || "--") + ' · ' + esc(p.cargo_summary || "");
     html += '</div>';
-    html += '<div class="item-meta">' + esc(p.plan_date || "") + ' · ' + esc(p.expected_arrival || "") + ' · ' + esc(fmtTime(p.created_at)) + '</div>';
+    var ibMeta = esc(p.plan_date || "") + ' · ' + esc(p.expected_arrival || "") + ' · ' + esc(fmtTime(p.created_at));
+    if (p.accounted == 1 && (p.accounted_by || p.accounted_at)) {
+      ibMeta += ' · ' + L("accounted_by_short") + ': ' + esc(p.accounted_by || "") + (p.accounted_at ? ' ' + esc(fmtTime(p.accounted_at)) : '');
+    }
+    html += '<div class="item-meta">' + ibMeta + '</div>';
     html += '</div>';
   });
   html += '</div>';

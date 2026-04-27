@@ -216,6 +216,12 @@ var LANG = {
     order_ops_leave_reason_admin_cleanup: "主管清理",
     order_ops_view_detail: "详情",
     set_reopen_pending: "设为待再操作",
+    // 是否记帐
+    account_filter: "是否记帐",
+    account_all: "全部记帐状态",
+    accounted_yes: "已记帐",
+    accounted_no: "未记帐",
+    accounted_by_short: "记帐",
   },
   ko: {
     app_title: "협업센터",
@@ -410,6 +416,12 @@ var LANG = {
     order_ops_leave_reason_admin_cleanup: "관리자 정리",
     order_ops_view_detail: "상세",
     set_reopen_pending: "재작업 대기로 변경",
+    // 是否记帐
+    account_filter: "기장 여부",
+    account_all: "전체 기장상태",
+    accounted_yes: "기장완료",
+    accounted_no: "미기장",
+    accounted_by_short: "기장",
   }
 };
 
