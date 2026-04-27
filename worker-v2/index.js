@@ -945,10 +945,31 @@ const MIGRATIONS = [
   `CREATE INDEX IF NOT EXISTS idx_v2_wms_rows_worker_date ON v2_wms_import_rows(worker_name, work_date)`,
   `CREATE INDEX IF NOT EXISTS idx_v2_wms_rows_doc ON v2_wms_import_rows(doc_no)`,
   `CREATE INDEX IF NOT EXISTS idx_v2_wms_batches_created ON v2_wms_import_batches(created_at)`,
+
+  // ---- v2.20260428a：入库计划业务类型多选 ----
+  `ALTER TABLE v2_inbound_plans ADD COLUMN biz_classes_json TEXT DEFAULT '[]'`,
+  `CREATE TABLE IF NOT EXISTS v2_inbound_plan_biz_tasks (
+    id TEXT PRIMARY KEY,
+    plan_id TEXT DEFAULT '',
+    biz_class TEXT DEFAULT '',
+    job_type TEXT DEFAULT '',
+    status TEXT DEFAULT 'pending',
+    job_id TEXT DEFAULT '',
+    started_at TEXT DEFAULT '',
+    completed_at TEXT DEFAULT '',
+    completed_by TEXT DEFAULT '',
+    worker_names TEXT DEFAULT '',
+    total_minutes REAL DEFAULT 0,
+    created_at TEXT,
+    updated_at TEXT
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_inbound_biz_task_unique ON v2_inbound_plan_biz_tasks(plan_id, biz_class)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_inbound_biz_task_plan ON v2_inbound_plan_biz_tasks(plan_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_inbound_biz_task_biz_status ON v2_inbound_plan_biz_tasks(biz_class, status)`,
 ];
 
 // 每次发布迁移变化时手动 +1（patch 段），冷启动只比对一次字符串即可跳过整段 MIGRATIONS
-const CURRENT_SCHEMA_VERSION = 'v2.20260427g';
+const CURRENT_SCHEMA_VERSION = 'v2.20260428a';
 
 let _migrated = false;
 async function ensureMigrated(db) {
@@ -1062,16 +1083,16 @@ route("v2_dashboard_summary", async (body, env) => {
         ORDER BY order_date ASC, created_at ASC LIMIT 3`
     ).all(),
 
-    // ---- inbounds（待执行入库）----
+    // ---- inbounds（待执行入库 / 多业务计划部分完成也算"待执行"）----
     env.DB.prepare(
       `SELECT COUNT(*) AS c FROM v2_inbound_plans
         WHERE source_type != 'return_session'
-          AND status IN ('pending','unloading','unloading_putting_away','arrived_pending_putaway','putting_away')`
+          AND status IN ('pending','unloading','unloading_putting_away','arrived_pending_putaway','putting_away','partially_completed')`
     ).first(),
     env.DB.prepare(
       `SELECT * FROM v2_inbound_plans
         WHERE source_type != 'return_session'
-          AND status IN ('pending','unloading','unloading_putting_away','arrived_pending_putaway','putting_away')
+          AND status IN ('pending','unloading','unloading_putting_away','arrived_pending_putaway','putting_away','partially_completed')
         ORDER BY plan_date ASC, created_at ASC LIMIT 3`
     ).all(),
 
@@ -1669,28 +1690,44 @@ route("v2_outbound_load_finish", async (body, env) => {
 // =====================================================
 route("v2_inbound_plan_create", async (body, env) => {
   if (!isAuth(body, env)) return err("unauthorized", 401);
+  // 业务类型多选：必须至少 1 项合法 (direct_ship/bulk/return)
+  const bizNorm = normalizeInboundBizClasses(body);
+  if (bizNorm.list.length === 0) {
+    return err("biz_classes 至少选择一个业务类型（代发/大货/退件）/ 업무 유형을 1개 이상 선택하세요");
+  }
   return withIdem(env, body, "v2_inbound_plan_create", async () => {
     const id = "IB-" + uid();
     const t = now();
     const plan_date = String(body.plan_date || kstToday());
     const customer = String(body.customer || "");
-    const biz_class = String(body.biz_class || "");
+    const biz_class = bizNorm.primary; // 兼容旧字段，存第一个
+    const biz_classes_json = JSON.stringify(bizNorm.list);
     const created_by = String(body.created_by || "");
     const display_no = await nextDisplayNo(env, plan_date);
 
     await env.DB.prepare(`
-      INSERT INTO v2_inbound_plans(id, plan_date, customer, biz_class, cargo_summary,
+      INSERT INTO v2_inbound_plans(id, plan_date, customer, biz_class, biz_classes_json, cargo_summary,
         expected_arrival, purpose, remark, status, created_by, created_at, updated_at, display_no)
-      VALUES(?,?,?,?,?,?,?,?,'pending',?,?,?,?)
+      VALUES(?,?,?,?,?,?,?,?,?,'pending',?,?,?,?)
     `).bind(
       id, plan_date,
-      customer, biz_class,
+      customer, biz_class, biz_classes_json,
       String(body.cargo_summary || ""),
       String(body.expected_arrival || ""),
       String(body.purpose || ""),
       String(body.remark || ""),
       created_by, t, t, display_no
     ).run();
+
+    // 为每个业务类型创建一条 biz_task（pending）
+    for (const biz of bizNorm.list) {
+      const taskId = "IBT-" + uid();
+      await env.DB.prepare(`
+        INSERT OR IGNORE INTO v2_inbound_plan_biz_tasks
+          (id, plan_id, biz_class, job_type, status, created_at, updated_at)
+        VALUES(?,?,?,?, 'pending', ?, ?)
+      `).bind(taskId, id, biz, mapInboundBizToJobType(biz), t, t).run();
+    }
 
     const lines = body.lines || [];
     for (let i = 0; i < lines.length; i++) {
@@ -1759,12 +1796,242 @@ async function checkPlanFullyCompleted(env, plan_id) {
   return { allDone: unloadDone && putawayDone, unloadDone, putawayDone };
 }
 
+// ===================================================================
+// 入库计划「业务类型多选 + 多类型完成判定」helpers
+// 一张计划可同时含 direct_ship/bulk/return 多个业务，每个业务一条 task。
+// 整张计划只有所有 task 都 completed 才能视为完成；部分完成进入 partially_completed。
+// ===================================================================
+
+const INBOUND_BIZ_VALID = ['direct_ship', 'bulk', 'return'];
+const INBOUND_BIZ_TO_JOB_TYPE = {
+  direct_ship: 'inbound_direct',
+  bulk: 'inbound_bulk',
+  return: 'inbound_return'
+};
+const INBOUND_JOB_TYPE_TO_BIZ = {
+  inbound_direct: 'direct_ship',
+  inbound_bulk: 'bulk',
+  inbound_return: 'return'
+};
+function mapInboundBizToJobType(biz) { return INBOUND_BIZ_TO_JOB_TYPE[biz] || ''; }
+function mapInboundJobTypeToBiz(jt) { return INBOUND_JOB_TYPE_TO_BIZ[jt] || ''; }
+
+// 从请求体中规整出 biz_classes 数组：优先 body.biz_classes，回退 body.biz_class
+// 返回 { list, primary }，list 仅含合法 enum 且去重，primary 为第一个值
+function normalizeInboundBizClasses(body) {
+  let raw = body && body.biz_classes;
+  let arr = [];
+  if (Array.isArray(raw)) arr = raw.slice();
+  else if (typeof raw === 'string' && raw) arr = raw.split(',');
+  if (arr.length === 0 && body && body.biz_class) arr = [String(body.biz_class)];
+  const seen = {};
+  const list = [];
+  for (let i = 0; i < arr.length; i++) {
+    const v = String(arr[i] || '').trim();
+    if (!v) continue;
+    if (INBOUND_BIZ_VALID.indexOf(v) === -1) continue;
+    if (seen[v]) continue;
+    seen[v] = 1;
+    list.push(v);
+  }
+  return { list, primary: list[0] || '' };
+}
+
+// 解析 plan 行的 biz_classes（兼容老数据）
+function extractPlanBizClasses(plan) {
+  if (!plan) return [];
+  let arr = [];
+  try {
+    const raw = plan.biz_classes_json;
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) arr = parsed.filter(Boolean).map(String);
+    }
+  } catch (e) { /* ignore */ }
+  if (arr.length === 0 && plan.biz_class) {
+    const v = String(plan.biz_class);
+    if (INBOUND_BIZ_VALID.indexOf(v) !== -1) arr = [v];
+  }
+  // 去重 + 仅保留合法值
+  const seen = {};
+  const out = [];
+  for (let i = 0; i < arr.length; i++) {
+    const v = arr[i];
+    if (INBOUND_BIZ_VALID.indexOf(v) === -1) continue;
+    if (seen[v]) continue;
+    seen[v] = 1;
+    out.push(v);
+  }
+  return out;
+}
+
+// 懒加载创建 biz_tasks：plan 第一次被读到 / 操作时确保 task 行齐全
+// 旧已 completed 的计划：自动把 task 标 completed，避免显示"未完成"
+async function ensureInboundPlanBizTasks(env, plan) {
+  if (!plan || !plan.id) return [];
+  // return_session 不是协同中心口径，不生成 biz_task
+  if (plan.source_type === 'return_session') return [];
+  const list = extractPlanBizClasses(plan);
+  if (list.length === 0) return [];
+  const existing = await env.DB.prepare(
+    "SELECT biz_class FROM v2_inbound_plan_biz_tasks WHERE plan_id=?"
+  ).bind(plan.id).all();
+  const has = {};
+  for (const r of (existing.results || [])) has[r.biz_class] = 1;
+  const missing = list.filter(b => !has[b]);
+  if (missing.length === 0) return list;
+  const t = now();
+  const planCompleted = (plan.status === 'completed');
+  for (const biz of missing) {
+    const id = "IBT-" + uid();
+    const jt = mapInboundBizToJobType(biz);
+    if (planCompleted) {
+      await env.DB.prepare(`
+        INSERT OR IGNORE INTO v2_inbound_plan_biz_tasks
+          (id, plan_id, biz_class, job_type, status, completed_at, completed_by, created_at, updated_at)
+        VALUES(?,?,?,?, 'completed', ?, ?, ?, ?)
+      `).bind(id, plan.id, biz, jt,
+              plan.manual_completed_at || plan.updated_at || t,
+              plan.manual_completed_by || '(legacy)',
+              t, t).run();
+    } else {
+      await env.DB.prepare(`
+        INSERT OR IGNORE INTO v2_inbound_plan_biz_tasks
+          (id, plan_id, biz_class, job_type, status, created_at, updated_at)
+        VALUES(?,?,?,?, 'pending', ?, ?)
+      `).bind(id, plan.id, biz, jt, t, t).run();
+    }
+  }
+  return list;
+}
+
+// 拉取 plan 的所有 biz_task（建议先 ensure）
+async function listInboundPlanBizTasks(env, plan_id) {
+  const rs = await env.DB.prepare(
+    "SELECT * FROM v2_inbound_plan_biz_tasks WHERE plan_id=? ORDER BY biz_class"
+  ).bind(plan_id).all();
+  return rs.results || [];
+}
+
+// 把某个业务类型的 task 标完成（idempotent — 已 completed 不重复写）
+async function markInboundBizTaskCompleted(env, plan_id, biz_class, payload) {
+  if (!plan_id || !biz_class) return;
+  const t = now();
+  const row = await env.DB.prepare(
+    "SELECT id, status FROM v2_inbound_plan_biz_tasks WHERE plan_id=? AND biz_class=?"
+  ).bind(plan_id, biz_class).first();
+  if (!row) {
+    // 计划当时没生成 task（极端兼容）：直接补一条 completed
+    await env.DB.prepare(`
+      INSERT OR IGNORE INTO v2_inbound_plan_biz_tasks
+        (id, plan_id, biz_class, job_type, status, job_id, started_at, completed_at, completed_by, worker_names, total_minutes, created_at, updated_at)
+      VALUES(?,?,?,?, 'completed', ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+      "IBT-" + uid(), plan_id, biz_class, mapInboundBizToJobType(biz_class),
+      String((payload && payload.job_id) || ''),
+      String((payload && payload.started_at) || t),
+      t, String((payload && payload.completed_by) || ''),
+      String((payload && payload.worker_names) || ''),
+      Number((payload && payload.total_minutes) || 0),
+      t, t
+    ).run();
+    return;
+  }
+  if (row.status === 'completed') return;
+  await env.DB.prepare(`
+    UPDATE v2_inbound_plan_biz_tasks
+       SET status='completed', job_id=?, started_at=COALESCE(NULLIF(started_at,''), ?),
+           completed_at=?, completed_by=?, worker_names=?, total_minutes=?, updated_at=?
+     WHERE id=?
+  `).bind(
+    String((payload && payload.job_id) || ''),
+    String((payload && payload.started_at) || t),
+    t,
+    String((payload && payload.completed_by) || ''),
+    String((payload && payload.worker_names) || ''),
+    Number((payload && payload.total_minutes) || 0),
+    t,
+    row.id
+  ).run();
+}
+
+// 重新计算计划总状态：综合 (a) 卸货是否还在 (b) biz_task 完成度 (c) 已有的 putaway 口径
+// 仅在 (1) 业务 task 模型存在 且 (2) 卸货已结束 的情况下，由 task 模型决定 completed/partially_completed
+// 卸货中或无 biz_task 的老数据，沿用旧的 status 推进规则（由调用方传入 fallbackStatus）
+async function recalcInboundPlanCompletion(env, plan_id, t, opts) {
+  const ts = t || now();
+  const plan = await env.DB.prepare(
+    "SELECT id, status, source_type FROM v2_inbound_plans WHERE id=?"
+  ).bind(plan_id).first();
+  if (!plan) return null;
+  if (plan.status === 'cancelled') return plan.status;
+  if (plan.source_type === 'return_session') return plan.status;
+
+  const activeUnload = await env.DB.prepare(
+    "SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type='unload' AND status IN ('pending','working') LIMIT 1"
+  ).bind(plan_id).first();
+  const otherInbound = await env.DB.prepare(
+    "SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type IN ('inbound_direct','inbound_bulk','inbound_return') AND status IN ('pending','working') LIMIT 1"
+  ).bind(plan_id).first();
+
+  // 卸货还在 → 不进入完成态。若仍有理货并行 → unloading_putting_away；否则 unloading
+  if (activeUnload) {
+    const next = otherInbound ? 'unloading_putting_away' : 'unloading';
+    if (plan.status !== next) {
+      await env.DB.prepare(
+        "UPDATE v2_inbound_plans SET status=?, updated_at=? WHERE id=?"
+      ).bind(next, ts, plan_id).run();
+    }
+    return next;
+  }
+
+  const tasks = await listInboundPlanBizTasks(env, plan_id);
+  if (tasks.length > 0) {
+    const completedCnt = tasks.filter(x => x.status === 'completed').length;
+    const allCompleted = (completedCnt === tasks.length);
+    const someCompleted = (completedCnt > 0);
+    let next;
+    if (allCompleted) {
+      // 所有 biz 已完成 → 整单 completed
+      next = 'completed';
+    } else if (someCompleted) {
+      // 至少一个完成、还有未完成 → 部分入库完成
+      next = 'partially_completed';
+    } else if (otherInbound) {
+      next = 'putting_away';
+    } else {
+      next = 'arrived_pending_putaway';
+    }
+    if (plan.status !== next) {
+      await env.DB.prepare(
+        "UPDATE v2_inbound_plans SET status=?, updated_at=? WHERE id=?"
+      ).bind(next, ts, plan_id).run();
+    }
+    return next;
+  }
+
+  // 老数据无 biz_task：沿用 putaway_qty 口径
+  const completion = await checkPlanFullyCompleted(env, plan_id);
+  let next;
+  if (completion.allDone) next = 'completed';
+  else if (otherInbound) next = 'putting_away';
+  else next = 'arrived_pending_putaway';
+  if (plan.status !== next) {
+    await env.DB.prepare(
+      "UPDATE v2_inbound_plans SET status=?, updated_at=? WHERE id=?"
+    ).bind(next, ts, plan_id).run();
+  }
+  return next;
+}
+
 route("v2_inbound_plan_list", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
   const start = String(body.start_date || "").trim();
   const end = String(body.end_date || "").trim();
   const status = String(body.status || "").trim();
   const accounted = String(body.accounted == null ? "" : body.accounted).trim();
+  // 执行系统过滤：required_biz_class 限定该业务类型仍未完成的计划（in: direct_ship/bulk/return）
+  const required_biz_class = String(body.required_biz_class || "").trim();
   const { limit, offset } = pageParams(body);
   // 排除退件入库会话：return_session 不属于正式入库计划口径
   let sql = "SELECT * FROM v2_inbound_plans WHERE source_type != 'return_session'";
@@ -1777,7 +2044,31 @@ route("v2_inbound_plan_list", async (body, env) => {
   sql += " ORDER BY plan_date DESC, created_at DESC LIMIT ? OFFSET ?";
   binds.push(limit, offset);
   const rs = await env.DB.prepare(sql).bind(...binds).all();
-  return json({ ok: true, items: rs.results || [], limit, offset });
+  const rows = rs.results || [];
+
+  // 注入 biz_classes / biz_task_summary / completed_biz_classes / pending_biz_classes / missing_biz_classes
+  const items = [];
+  for (const p of rows) {
+    await ensureInboundPlanBizTasks(env, p);
+    const tasks = await listInboundPlanBizTasks(env, p.id);
+    const biz_classes = extractPlanBizClasses(p);
+    const completed = tasks.filter(x => x.status === 'completed').map(x => x.biz_class);
+    const pending = tasks.filter(x => x.status !== 'completed').map(x => x.biz_class);
+    if (required_biz_class) {
+      // 只返回包含该 biz 且 该 biz task 仍未完成 的计划
+      if (biz_classes.indexOf(required_biz_class) === -1) continue;
+      if (pending.indexOf(required_biz_class) === -1) continue;
+    }
+    items.push({
+      ...p,
+      biz_classes,
+      biz_task_summary: tasks.map(x => ({ biz_class: x.biz_class, status: x.status })),
+      completed_biz_classes: completed,
+      pending_biz_classes: pending,
+      missing_biz_classes: pending // 与 pending 同义；前端醒目提示用
+    });
+  }
+  return json({ ok: true, items, limit, offset });
 });
 
 route("v2_inbound_plan_detail", async (body, env) => {
@@ -1788,6 +2079,9 @@ route("v2_inbound_plan_detail", async (body, env) => {
   if (!row) return err("not found", 404);
   // 退件入库会话不属于正式入库计划口径，协同中心不应打开
   if (row.source_type === 'return_session') return err("not found", 404);
+  await ensureInboundPlanBizTasks(env, row);
+  const biz_tasks = await listInboundPlanBizTasks(env, id);
+  const biz_classes = extractPlanBizClasses(row);
   const planLines = await env.DB.prepare(
     "SELECT * FROM v2_inbound_plan_lines WHERE plan_id=? ORDER BY line_no"
   ).bind(id).all();
@@ -1844,9 +2138,18 @@ route("v2_inbound_plan_detail", async (body, env) => {
     });
   }
 
+  // biz_tasks 增补 missing_biz_classes（前端"未完成入库类型"用）
+  const completed_biz_classes = biz_tasks.filter(x => x.status === 'completed').map(x => x.biz_class);
+  const pending_biz_classes = biz_tasks.filter(x => x.status !== 'completed').map(x => x.biz_class);
+
   return json({
     ok: true,
-    plan: row,
+    plan: { ...row, biz_classes },
+    biz_tasks,
+    biz_classes,
+    completed_biz_classes,
+    pending_biz_classes,
+    missing_biz_classes: pending_biz_classes,
     lines: planLines.results || [],
     jobs: enrichedJobs,
     attachments: atts.results || []
@@ -1860,53 +2163,85 @@ route("v2_inbound_plan_find_by_code", async (body, env) => {
   if (!code) return err("missing code");
   // Prefer display_no, fallback to id
   let row = await env.DB.prepare(
-    "SELECT id, display_no, status, customer, cargo_summary, biz_class FROM v2_inbound_plans WHERE display_no=? AND status!='cancelled'"
+    "SELECT id, display_no, status, customer, cargo_summary, biz_class, biz_classes_json, source_type, manual_completed_at, manual_completed_by, updated_at FROM v2_inbound_plans WHERE display_no=? AND status!='cancelled'"
   ).bind(code).first();
   if (!row) {
     row = await env.DB.prepare(
-      "SELECT id, display_no, status, customer, cargo_summary, biz_class FROM v2_inbound_plans WHERE id=? AND status!='cancelled'"
+      "SELECT id, display_no, status, customer, cargo_summary, biz_class, biz_classes_json, source_type, manual_completed_at, manual_completed_by, updated_at FROM v2_inbound_plans WHERE id=? AND status!='cancelled'"
     ).bind(code).first();
   }
   if (!row) return err("not found", 404);
-  return json({ ok: true, plan: row });
+  await ensureInboundPlanBizTasks(env, row);
+  const tasks = await listInboundPlanBizTasks(env, row.id);
+  const biz_classes = extractPlanBizClasses(row);
+  return json({
+    ok: true,
+    plan: { ...row, biz_classes },
+    biz_classes,
+    biz_task_summary: tasks.map(x => ({ biz_class: x.biz_class, status: x.status })),
+    pending_biz_classes: tasks.filter(x => x.status !== 'completed').map(x => x.biz_class),
+    completed_biz_classes: tasks.filter(x => x.status === 'completed').map(x => x.biz_class)
+  });
 });
 
 // ===== Ops candidates: filtered list for putaway/unload scene =====
 route("v2_inbound_plan_ops_candidates", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
   const scene = String(body.scene || "").trim();
+  // biz_class 旧字段保留兼容；优先用 required_biz_class（新口径，按 biz_classes_json + 未完成 biz_task 过滤）
   const biz_class = String(body.biz_class || "").trim();
+  const required_biz_class = String(body.required_biz_class || biz_class).trim();
   const keyword = String(body.keyword || "").trim();
   const limit = Math.min(Number(body.limit) || 100, 200);
 
   let statusFilter;
   if (scene === 'putaway') {
-    statusFilter = "('unloading','unloading_putting_away','arrived_pending_putaway','putting_away')";
+    // partially_completed 也属于"还能继续入库"的状态
+    statusFilter = "('unloading','unloading_putting_away','arrived_pending_putaway','putting_away','partially_completed')";
   } else if (scene === 'unload') {
     statusFilter = "('pending','unloading','unloading_putting_away')";
   } else {
     return err("scene must be putaway or unload");
   }
 
-  let sql = `SELECT id, display_no, external_inbound_no, customer, cargo_summary, status, biz_class, plan_date
-    FROM v2_inbound_plans WHERE status IN ${statusFilter}`;
+  let sql = `SELECT id, display_no, external_inbound_no, customer, cargo_summary, status, biz_class, biz_classes_json, plan_date, source_type, manual_completed_at, manual_completed_by, updated_at
+    FROM v2_inbound_plans WHERE status IN ${statusFilter} AND source_type != 'return_session'`;
   const binds = [];
-
-  if (biz_class) {
-    sql += " AND biz_class=?";
-    binds.push(biz_class);
-  }
   if (keyword) {
     sql += " AND (display_no LIKE ? OR external_inbound_no LIKE ? OR customer LIKE ?)";
     const kw = "%" + keyword + "%";
     binds.push(kw, kw, kw);
   }
   sql += " ORDER BY created_at DESC LIMIT ?";
-  binds.push(limit);
+  binds.push(limit * 3); // 多取一些用于过滤后再截断
 
   const stmt = env.DB.prepare(sql);
   const rs = binds.length > 0 ? await stmt.bind(...binds).all() : await stmt.all();
-  return json({ ok: true, items: rs.results || [] });
+  const rows = rs.results || [];
+
+  // 按 biz_classes_json 与 biz_task 过滤，仅返回该 biz 仍未完成的计划
+  const items = [];
+  for (const p of rows) {
+    if (required_biz_class) {
+      await ensureInboundPlanBizTasks(env, p);
+      const biz_classes = extractPlanBizClasses(p);
+      if (biz_classes.indexOf(required_biz_class) === -1) {
+        // 老数据兼容：如果 plan.biz_class 命中但不在 list（例如 import），跳过
+        if (p.biz_class !== required_biz_class) continue;
+      }
+      const tasks = await listInboundPlanBizTasks(env, p.id);
+      const pending = tasks.filter(x => x.status !== 'completed').map(x => x.biz_class);
+      // 如果存在 task：要求 required_biz_class 仍 pending
+      // 如果无 task（极旧老数据）：放行（沿用旧 biz_class= 比对）
+      if (tasks.length > 0 && pending.indexOf(required_biz_class) === -1) continue;
+    }
+    items.push({
+      ...p,
+      biz_classes: extractPlanBizClasses(p)
+    });
+    if (items.length >= limit) break;
+  }
+  return json({ ok: true, items });
 });
 
 // ===== Resolve inbound code: identify system plan vs external no =====
@@ -1917,18 +2252,13 @@ route("v2_inbound_resolve_code", async (body, env) => {
   if (!code) return err("missing code");
 
   // Try to find system plan by display_no, external_inbound_no, or id
-  let plan = await env.DB.prepare(
-    "SELECT id, display_no, external_inbound_no, status, customer, cargo_summary, biz_class, plan_date FROM v2_inbound_plans WHERE display_no=? AND status!='cancelled'"
-  ).bind(code).first();
+  const SEL = "SELECT id, display_no, external_inbound_no, status, customer, cargo_summary, biz_class, biz_classes_json, plan_date, source_type, manual_completed_at, manual_completed_by, updated_at FROM v2_inbound_plans";
+  let plan = await env.DB.prepare(SEL + " WHERE display_no=? AND status!='cancelled'").bind(code).first();
   if (!plan) {
-    plan = await env.DB.prepare(
-      "SELECT id, display_no, external_inbound_no, status, customer, cargo_summary, biz_class, plan_date FROM v2_inbound_plans WHERE external_inbound_no=? AND status!='cancelled' ORDER BY created_at DESC LIMIT 1"
-    ).bind(code).first();
+    plan = await env.DB.prepare(SEL + " WHERE external_inbound_no=? AND status!='cancelled' ORDER BY created_at DESC LIMIT 1").bind(code).first();
   }
   if (!plan) {
-    plan = await env.DB.prepare(
-      "SELECT id, display_no, external_inbound_no, status, customer, cargo_summary, biz_class, plan_date FROM v2_inbound_plans WHERE id=? AND status!='cancelled'"
-    ).bind(code).first();
+    plan = await env.DB.prepare(SEL + " WHERE id=? AND status!='cancelled'").bind(code).first();
   }
 
   if (!plan) {
@@ -1936,18 +2266,41 @@ route("v2_inbound_resolve_code", async (body, env) => {
     return json({ ok: true, kind: 'external', code });
   }
 
+  await ensureInboundPlanBizTasks(env, plan);
+  const biz_classes = extractPlanBizClasses(plan);
+  const tasks = await listInboundPlanBizTasks(env, plan.id);
+  const pending = tasks.filter(x => x.status !== 'completed').map(x => x.biz_class);
+  const completed = tasks.filter(x => x.status === 'completed').map(x => x.biz_class);
+  const planEnriched = { ...plan, biz_classes };
+
   // Found system plan — check biz_class match
-  if (biz_class && plan.biz_class && plan.biz_class !== biz_class) {
-    return json({ ok: true, kind: 'biz_mismatch', plan, message: "该入库单不属于当前业务（" + plan.biz_class + "），不能在此页面开始入库" });
+  if (biz_class) {
+    const inList = biz_classes.indexOf(biz_class) !== -1;
+    const legacyMatch = (plan.biz_class === biz_class);
+    if (!inList && !legacyMatch) {
+      const have = biz_classes.length ? biz_classes.join('/') : (plan.biz_class || '');
+      return json({ ok: true, kind: 'biz_mismatch', plan: planEnriched, message: "该入库单不属于当前业务（" + have + "），不能在此页面开始入库" });
+    }
+    // 该 biz 已完成 → 不允许重复操作
+    if (tasks.length > 0 && completed.indexOf(biz_class) !== -1) {
+      return json({ ok: true, kind: 'biz_already_completed', plan: planEnriched, message: "该入库单的此业务类型已完成入库" });
+    }
   }
 
-  // Check status is putaway-able
-  const putawayStatuses = ['unloading', 'unloading_putting_away', 'arrived_pending_putaway', 'putting_away'];
+  // Check status is putaway-able（partially_completed 也允许继续，因为还有未完成的 biz）
+  const putawayStatuses = ['unloading', 'unloading_putting_away', 'arrived_pending_putaway', 'putting_away', 'partially_completed'];
   if (putawayStatuses.indexOf(plan.status) === -1) {
-    return json({ ok: true, kind: 'status_not_allowed', plan, message: "该系统入库单当前状态（" + plan.status + "）不可开始入库" });
+    return json({ ok: true, kind: 'status_not_allowed', plan: planEnriched, message: "该系统入库单当前状态（" + plan.status + "）不可开始入库" });
   }
 
-  return json({ ok: true, kind: 'system', plan });
+  return json({
+    ok: true,
+    kind: 'system',
+    plan: planEnriched,
+    biz_classes,
+    pending_biz_classes: pending,
+    completed_biz_classes: completed
+  });
 });
 
 // Upcoming inbound plans (next 3 working days, skip Sundays)
@@ -1981,6 +2334,8 @@ route("v2_inbound_plan_update_status", async (body, env) => {
   if (!id || !status) return err("missing id or status");
   // 禁止通过此接口设置 cancelled，必须走专用取消接口
   if (status === 'cancelled') return err("请使用 v2_inbound_plan_cancel 取消入库计划");
+  // 禁止通过此接口直接设 completed —— 必须走 v2_inbound_mark_completed（含 biz_task 校验）
+  if (status === 'completed') return err("请使用 v2_inbound_mark_completed 完成入库计划（需所有业务类型已完成）");
   await env.DB.prepare(
     "UPDATE v2_inbound_plans SET status=?, updated_at=? WHERE id=?"
   ).bind(status, now(), id).run();
@@ -2064,17 +2419,20 @@ route("v2_inbound_dynamic_finalize", async (body, env) => {
 
     const t = now();
     const customer = String(body.customer || plan.customer || "").trim();
-    const biz_class = String(body.biz_class || plan.biz_class || "").trim();
+    // 兼容多业务类型：优先 biz_classes，回退 biz_class
+    const bizNorm = normalizeInboundBizClasses({ biz_classes: body.biz_classes, biz_class: body.biz_class || plan.biz_class });
+    const biz_class = bizNorm.primary || String(body.biz_class || plan.biz_class || "").trim();
+    const biz_classes_json = bizNorm.list.length > 0 ? JSON.stringify(bizNorm.list) : (plan.biz_classes_json || '[]');
     const cargo_summary = String(body.cargo_summary || plan.cargo_summary || "").trim();
     const expected_arrival = String(body.expected_arrival || plan.expected_arrival || "").trim();
     const purpose = String(body.purpose || plan.purpose || "").trim();
     const remark = String(body.remark || plan.remark || "").trim();
 
     await env.DB.prepare(`
-      UPDATE v2_inbound_plans SET customer=?, biz_class=?, cargo_summary=?,
+      UPDATE v2_inbound_plans SET customer=?, biz_class=?, biz_classes_json=?, cargo_summary=?,
         expected_arrival=?, purpose=?, remark=?, status='completed',
         needs_info_update=0, updated_at=? WHERE id=?
-    `).bind(customer, biz_class, cargo_summary, expected_arrival, purpose, remark, t, id).run();
+    `).bind(customer, biz_class, biz_classes_json, cargo_summary, expected_arrival, purpose, remark, t, id).run();
 
     const newLines = body.lines || [];
     if (newLines.length > 0) {
@@ -2085,6 +2443,15 @@ route("v2_inbound_dynamic_finalize", async (body, env) => {
           "INSERT INTO v2_inbound_plan_lines(id, plan_id, line_no, unit_type, planned_qty, actual_qty, remark) VALUES(?,?,?,?,?,?,?)"
         ).bind("IPL-" + uid(), id, i + 1, String(ln.unit_type || ""), Number(ln.planned_qty || 0), Number(ln.actual_qty || 0), String(ln.remark || "")).run();
       }
+    }
+
+    // 同步 biz_task：写完毕（与 status='completed' 对齐）
+    const updatedPlan = await env.DB.prepare("SELECT * FROM v2_inbound_plans WHERE id=?").bind(id).first();
+    await ensureInboundPlanBizTasks(env, updatedPlan);
+    for (const biz of extractPlanBizClasses(updatedPlan)) {
+      await markInboundBizTaskCompleted(env, id, biz, {
+        completed_by: '(legacy_dynamic_finalize)'
+      });
     }
 
     return { ok: true, id, display_no: plan.display_no };
@@ -2311,7 +2678,10 @@ route("v2_feedback_finalize_to_inbound", async (body, env) => {
     const plan_id = "IB-" + uid();
     const display_no = await nextDisplayNo(env, plan_date);
 
-    const biz_class = String(body.biz_class || "").trim();
+    // 业务类型：兼容多选（biz_classes 数组）+ 老单值 biz_class
+    const bizNorm = normalizeInboundBizClasses({ biz_classes: body.biz_classes, biz_class: body.biz_class });
+    const biz_class = bizNorm.primary || String(body.biz_class || "").trim();
+    const biz_classes_json = bizNorm.list.length > 0 ? JSON.stringify(bizNorm.list) : '[]';
     const cargo_summary = String(body.cargo_summary || "").trim();
     const expected_arrival = String(body.expected_arrival || "").trim();
     const purpose = String(body.purpose || "").trim();
@@ -2319,12 +2689,21 @@ route("v2_feedback_finalize_to_inbound", async (body, env) => {
     const created_by = String(body.created_by || "").trim();
 
     await env.DB.prepare(`
-      INSERT INTO v2_inbound_plans(id, plan_date, customer, biz_class, cargo_summary,
+      INSERT INTO v2_inbound_plans(id, plan_date, customer, biz_class, biz_classes_json, cargo_summary,
         expected_arrival, purpose, remark, status, source_feedback_id, created_by, created_at, updated_at, display_no, source_type)
-      VALUES(?,?,?,?,?,?,?,?,'arrived_pending_putaway',?,?,?,?,?,'from_feedback')
-    `).bind(plan_id, plan_date, customer, biz_class, cargo_summary,
+      VALUES(?,?,?,?,?,?,?,?,?,'arrived_pending_putaway',?,?,?,?,?,'from_feedback')
+    `).bind(plan_id, plan_date, customer, biz_class, biz_classes_json, cargo_summary,
         expected_arrival, purpose, remark,
         feedback_id, created_by, t, t, display_no).run();
+
+    // 初始化 biz_tasks（pending）
+    for (const biz of bizNorm.list) {
+      await env.DB.prepare(`
+        INSERT OR IGNORE INTO v2_inbound_plan_biz_tasks
+          (id, plan_id, biz_class, job_type, status, created_at, updated_at)
+        VALUES(?,?,?,?, 'pending', ?, ?)
+      `).bind("IBT-" + uid(), plan_id, biz, mapInboundBizToJobType(biz), t, t).run();
+    }
 
     let lines = body.lines || [];
     if (lines.length === 0) {
@@ -2362,9 +2741,9 @@ route("v2_unload_dynamic_start", async (body, env) => {
     const display_no = await nextDisplayNo(env, plan_date);
 
     await env.DB.prepare(`
-      INSERT INTO v2_inbound_plans(id, plan_date, customer, biz_class, cargo_summary,
+      INSERT INTO v2_inbound_plans(id, plan_date, customer, biz_class, biz_classes_json, cargo_summary,
         expected_arrival, purpose, remark, status, created_by, created_at, updated_at, display_no, source_type, needs_info_update)
-      VALUES(?,?,'待补充','','现场无单卸货','','','','field_working',?,?,?,?,'field_dynamic',1)
+      VALUES(?,?,'待补充','','[]','现场无单卸货','','','','field_working',?,?,?,?,'field_dynamic',1)
     `).bind(plan_id, plan_date, worker_name || worker_id, t, t, display_no).run();
 
     const job_id = "JOB-" + uid();
@@ -2662,14 +3041,27 @@ route("v2_inbound_job_start", async (body, env) => {
 
     // ===== Path A: start from existing system inbound plan (standard only) =====
     if (plan_id && isStandard) {
-      const plan = await env.DB.prepare("SELECT status, biz_class FROM v2_inbound_plans WHERE id=?").bind(plan_id).first();
+      const plan = await env.DB.prepare("SELECT * FROM v2_inbound_plans WHERE id=?").bind(plan_id).first();
       if (!plan) return { ok: false, error: "plan not found" };
-      const inboundStartAllowed = ['unloading', 'unloading_putting_away', 'arrived_pending_putaway', 'putting_away'];
+      const inboundStartAllowed = ['unloading', 'unloading_putting_away', 'arrived_pending_putaway', 'putting_away', 'partially_completed'];
       if (inboundStartAllowed.indexOf(plan.status) === -1) {
         return { ok: false, error: "plan_status_invalid", message: "当前状态不可开始理货 / 현재 상태에서 입고 불가, current: " + plan.status };
       }
-      if (plan.biz_class && biz_class && plan.biz_class !== biz_class) {
-        return { ok: false, error: "biz_class_mismatch", message: "plan biz_class mismatch: plan=" + plan.biz_class + " req=" + biz_class };
+      // 业务类型校验：当前 biz 必须在计划的 biz_classes_json 内（或老数据 biz_class 单值匹配）
+      const biz_classes = extractPlanBizClasses(plan);
+      const inList = biz_classes.indexOf(biz_class) !== -1;
+      const legacyMatch = (plan.biz_class === biz_class);
+      if (!inList && !legacyMatch) {
+        const have = biz_classes.length ? biz_classes.join('/') : (plan.biz_class || '');
+        return { ok: false, error: "biz_class_mismatch", message: "plan biz_classes mismatch: plan=" + have + " req=" + biz_class };
+      }
+      // 该 biz 是否已完成 → 拒绝
+      await ensureInboundPlanBizTasks(env, plan);
+      const taskRow = await env.DB.prepare(
+        "SELECT status FROM v2_inbound_plan_biz_tasks WHERE plan_id=? AND biz_class=?"
+      ).bind(plan_id, biz_class).first();
+      if (taskRow && taskRow.status === 'completed') {
+        return { ok: false, error: "biz_task_already_completed", message: "该入库计划的此业务类型已完成入库" };
       }
     }
     // ===== Path B: start from external WMS inbound number (standard only) =====
@@ -2681,15 +3073,38 @@ route("v2_inbound_job_start", async (body, env) => {
       ).bind(external_inbound_no).first();
       if (dupPlan) {
         plan_id = dupPlan.id;
+        // 复用计划：补 biz_task（若该 biz 缺）
+        const planRow = await env.DB.prepare("SELECT * FROM v2_inbound_plans WHERE id=?").bind(plan_id).first();
+        if (planRow) {
+          await ensureInboundPlanBizTasks(env, planRow);
+          const tt = await env.DB.prepare(
+            "SELECT status FROM v2_inbound_plan_biz_tasks WHERE plan_id=? AND biz_class=?"
+          ).bind(plan_id, biz_class).first();
+          if (!tt) {
+            await env.DB.prepare(`
+              INSERT OR IGNORE INTO v2_inbound_plan_biz_tasks
+                (id, plan_id, biz_class, job_type, status, created_at, updated_at)
+              VALUES(?,?,?,?, 'pending', ?, ?)
+            `).bind("IBT-" + uid(), plan_id, biz_class, mapInboundBizToJobType(biz_class), t, t).run();
+          } else if (tt.status === 'completed') {
+            return { ok: false, error: "biz_task_already_completed", message: "该入库单的此业务类型已完成入库" };
+          }
+        }
       } else {
         plan_id = "IB-" + uid();
         const display_no = await nextDisplayNo(env, today);
+        const biz_classes_json = JSON.stringify([biz_class]);
         await env.DB.prepare(`
-          INSERT INTO v2_inbound_plans(id, plan_date, customer, biz_class, cargo_summary,
+          INSERT INTO v2_inbound_plans(id, plan_date, customer, biz_class, biz_classes_json, cargo_summary,
             expected_arrival, purpose, remark, status, created_by, created_at, updated_at,
             display_no, source_type, external_inbound_no)
-          VALUES(?,?,?,?,'外部WMS入库单','','',?, 'putting_away',?,?,?,?,'external_inbound',?)
-        `).bind(plan_id, today, customer_name, biz_class, start_remark, worker_id, t, t, display_no, external_inbound_no).run();
+          VALUES(?,?,?,?,?,'外部WMS入库单','','',?, 'putting_away',?,?,?,?,'external_inbound',?)
+        `).bind(plan_id, today, customer_name, biz_class, biz_classes_json, start_remark, worker_id, t, t, display_no, external_inbound_no).run();
+        await env.DB.prepare(`
+          INSERT OR IGNORE INTO v2_inbound_plan_biz_tasks
+            (id, plan_id, biz_class, job_type, status, created_at, updated_at)
+          VALUES(?,?,?,?, 'pending', ?, ?)
+        `).bind("IBT-" + uid(), plan_id, biz_class, job_type, t, t).run();
       }
     }
     // ===== Path C: return inbound lightweight session =====
@@ -2697,12 +3112,19 @@ route("v2_inbound_job_start", async (body, env) => {
       if (!plan_id) {
         plan_id = "IB-" + uid();
         const display_no = await nextDisplayNo(env, today);
+        const biz_classes_json = JSON.stringify(['return']);
         await env.DB.prepare(`
-          INSERT INTO v2_inbound_plans(id, plan_date, customer, biz_class, cargo_summary,
+          INSERT INTO v2_inbound_plans(id, plan_date, customer, biz_class, biz_classes_json, cargo_summary,
             expected_arrival, purpose, remark, status, created_by, created_at, updated_at,
             display_no, source_type)
-          VALUES(?,?,?,'return','退件入库会话','','',?, 'putting_away',?,?,?,?,'return_session')
-        `).bind(plan_id, today, customer_name || '未指定', start_remark, worker_id, t, t, display_no).run();
+          VALUES(?,?,?,'return',?,'退件入库会话','','',?, 'putting_away',?,?,?,?,'return_session')
+        `).bind(plan_id, today, customer_name || '未指定', biz_classes_json, start_remark, worker_id, t, t, display_no).run();
+        // return_session 不在协同中心列表口径，不强制 biz_task；但补一条便于完成时统一收口
+        await env.DB.prepare(`
+          INSERT OR IGNORE INTO v2_inbound_plan_biz_tasks
+            (id, plan_id, biz_class, job_type, status, created_at, updated_at)
+          VALUES(?,?,?,?, 'pending', ?, ?)
+        `).bind("IBT-" + uid(), plan_id, 'return', 'inbound_return', t, t).run();
       } else {
         const rp = await env.DB.prepare(
           "SELECT status, source_type, biz_class FROM v2_inbound_plans WHERE id=?"
@@ -2803,7 +3225,8 @@ route("v2_inbound_job_finish", async (body, env) => {
         if (planCheck && unloadStillRunning.indexOf(planCheck.status) !== -1) {
           return { ok: false, error: "unload_not_finished", message: "卸货未完成，无法完成理货 / 하차가 아직 완료되지 않아 입고 완료 처리할 수 없습니다" };
         }
-        const inboundFinishAllowed = ['putting_away'];
+        // partially_completed 也允许：还有别的 biz 未完成，但本 biz 自己可以完成
+        const inboundFinishAllowed = ['putting_away', 'partially_completed'];
         if (planCheck && inboundFinishAllowed.indexOf(planCheck.status) === -1) {
           return { ok: false, error: "inbound_plan_status_invalid", message: "当前入库计划状态不允许完成入库（当前: " + planCheck.status + "）" };
         }
@@ -2855,51 +3278,40 @@ route("v2_inbound_job_finish", async (body, env) => {
           }
         }
 
-        // Determine next plan status based on parallel state
-        const activeUnloadJob = await env.DB.prepare(
-          "SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type='unload' AND status IN ('pending','working') LIMIT 1"
-        ).bind(pid).first();
-        const otherInboundJob = await env.DB.prepare(
-          "SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type IN ('inbound_direct','inbound_bulk') AND status IN ('pending','working') AND id!=? LIMIT 1"
-        ).bind(pid, job_id).first();
-
-        if (activeUnloadJob) {
-          // Unload still running
-          if (otherInboundJob) {
-            // Other inbound workers still active → keep parallel
-            await env.DB.prepare(
-              "UPDATE v2_inbound_plans SET status='unloading_putting_away', updated_at=? WHERE id=?"
-            ).bind(t, pid).run();
-          } else {
-            // No other inbound workers → back to unloading only
-            await env.DB.prepare(
-              "UPDATE v2_inbound_plans SET status='unloading', updated_at=? WHERE id=?"
-            ).bind(t, pid).run();
-          }
-        } else {
-          // Unload done — check if all putaway is complete
-          const completion = await checkPlanFullyCompleted(env, pid);
-          if (completion.allDone) {
-            await env.DB.prepare(
-              "UPDATE v2_inbound_plans SET status='completed', updated_at=? WHERE id=?"
-            ).bind(t, pid).run();
-          } else if (otherInboundJob) {
-            // Still have other inbound workers
-            await env.DB.prepare(
-              "UPDATE v2_inbound_plans SET status='putting_away', updated_at=? WHERE id=?"
-            ).bind(t, pid).run();
-          } else {
-            // No workers, not fully done
-            await env.DB.prepare(
-              "UPDATE v2_inbound_plans SET status='arrived_pending_putaway', updated_at=? WHERE id=?"
-            ).bind(t, pid).run();
-          }
+        // 标记该业务类型的 biz_task 完成
+        const biz_for_task = mapInboundJobTypeToBiz(jobRow.job_type) || jobRow.biz_class || '';
+        if (biz_for_task) {
+          // 汇总参与人员 + 总分钟，写入 biz_task
+          const wkRs = await env.DB.prepare(
+            "SELECT worker_name, minutes_worked, joined_at FROM v2_ops_job_workers WHERE job_id=? ORDER BY joined_at"
+          ).bind(job_id).all();
+          const wkRows = wkRs.results || [];
+          const names = [...new Set(wkRows.map(w => w.worker_name).filter(Boolean))].join('、');
+          const total_min = Math.round(wkRows.reduce((s, w) => s + (Number(w.minutes_worked) || 0), 0));
+          const startedAt = wkRows.reduce((m, w) => (!m || (w.joined_at && w.joined_at < m)) ? w.joined_at : m, '');
+          await markInboundBizTaskCompleted(env, pid, biz_for_task, {
+            job_id,
+            started_at: startedAt || jobRow.created_at || t,
+            completed_by: worker_id,
+            worker_names: names,
+            total_minutes: total_min
+          });
         }
+
+        // 重新计算计划总状态
+        await recalcInboundPlanCompletion(env, pid, t);
       }
       if (isReturnJob && jobRow.related_doc_id) {
+        // return_session：保留原有"完成即整单 completed"语义
         await env.DB.prepare(
           "UPDATE v2_inbound_plans SET status='completed', updated_at=? WHERE id=? AND source_type='return_session'"
         ).bind(t, jobRow.related_doc_id).run();
+        // 同步 biz_task（若存在）
+        await markInboundBizTaskCompleted(env, jobRow.related_doc_id, 'return', {
+          job_id,
+          started_at: jobRow.created_at || t,
+          completed_by: worker_id
+        });
       }
       return { ok: true, result_id };
     }
@@ -3024,11 +3436,11 @@ route("v2_inbound_mark_completed", async (body, env) => {
     const operator = String(body.operator_name || "").trim();
     const remark = String(body.remark || "").trim();
 
-    const plan = await env.DB.prepare("SELECT status FROM v2_inbound_plans WHERE id=?").bind(plan_id).first();
+    const plan = await env.DB.prepare("SELECT * FROM v2_inbound_plans WHERE id=?").bind(plan_id).first();
     if (!plan) return { ok: false, error: "plan not found" };
-    const markCompletedAllowed = ['arrived_pending_putaway', 'putting_away'];
+    const markCompletedAllowed = ['arrived_pending_putaway', 'putting_away', 'partially_completed'];
     if (markCompletedAllowed.indexOf(plan.status) === -1) {
-      return { ok: false, error: "status_invalid", message: "only arrived_pending_putaway or putting_away can be marked completed, current: " + plan.status };
+      return { ok: false, error: "status_invalid", message: "only arrived_pending_putaway/putting_away/partially_completed can be marked completed, current: " + plan.status };
     }
 
     const activeJob = await env.DB.prepare(
@@ -3036,6 +3448,23 @@ route("v2_inbound_mark_completed", async (body, env) => {
     ).bind(plan_id).first();
     if (activeJob) {
       return { ok: false, error: "inbound_job_still_active", message: "当前仍有进行中的入库任务，不能直接完结" };
+    }
+
+    // 多业务类型限制：仍有未完成的 biz_task → 拒绝
+    await ensureInboundPlanBizTasks(env, plan);
+    const tasks = await listInboundPlanBizTasks(env, plan_id);
+    const pending = tasks.filter(x => x.status !== 'completed').map(x => x.biz_class);
+    if (pending.length > 0) {
+      const biz_label_zh = { direct_ship: '代发入库', bulk: '大货入库', return: '退件入库' };
+      const biz_label_ko = { direct_ship: '직배송 입고', bulk: '대량화물 입고', return: '반품 입고' };
+      const zhList = pending.map(b => biz_label_zh[b] || b).join('、');
+      const koList = pending.map(b => biz_label_ko[b] || b).join(', ');
+      return {
+        ok: false,
+        error: "biz_tasks_pending",
+        pending_biz_classes: pending,
+        message: "该入库计划还有未完成的入库类型：" + zhList + "。请现场完成对应入库操作后再完成整单。\n해당 입고 계획에 미완료 입고 유형이 있습니다: " + koList + ". 현장에서 해당 작업을 완료한 후 전체 입고 완료 처리하세요."
+      };
     }
 
     const t = now();
@@ -3404,22 +3833,33 @@ route("v2_feedback_convert_to_inbound", async (body, env) => {
   const id = "IB-" + uid();
   const plan_date = kstToday();
   const customer = String(body.customer || "");
-  const biz_class = String(body.biz_class || "");
+  const bizNorm = normalizeInboundBizClasses({ biz_classes: body.biz_classes, biz_class: body.biz_class });
+  const biz_class = bizNorm.primary || String(body.biz_class || "");
+  const biz_classes_json = bizNorm.list.length > 0 ? JSON.stringify(bizNorm.list) : '[]';
   const created_by = String(body.created_by || "");
   const display_no = await nextDisplayNo(env, plan_date);
 
   await env.DB.prepare(`
-    INSERT INTO v2_inbound_plans(id, plan_date, customer, biz_class, cargo_summary,
+    INSERT INTO v2_inbound_plans(id, plan_date, customer, biz_class, biz_classes_json, cargo_summary,
       expected_arrival, purpose, remark, status, source_feedback_id, created_by, created_at, updated_at, display_no)
-    VALUES(?,?,?,?,?,?,?,?,'pending',?,?,?,?,?)
+    VALUES(?,?,?,?,?,?,?,?,?,'pending',?,?,?,?,?)
   `).bind(
-    id, plan_date, customer, biz_class,
+    id, plan_date, customer, biz_class, biz_classes_json,
     String(body.cargo_summary || fb.title || ""),
     String(body.expected_arrival || ""),
     String(body.purpose || ""),
     String(body.remark || fb.content || ""),
     feedback_id, created_by, t, t, display_no
   ).run();
+
+  // 初始化 biz_tasks（pending）
+  for (const biz of bizNorm.list) {
+    await env.DB.prepare(`
+      INSERT OR IGNORE INTO v2_inbound_plan_biz_tasks
+        (id, plan_id, biz_class, job_type, status, created_at, updated_at)
+      VALUES(?,?,?,?, 'pending', ?, ?)
+    `).bind("IBT-" + uid(), id, biz, mapInboundBizToJobType(biz), t, t).run();
+  }
 
   // Insert lines if provided
   const lines = body.lines || [];
@@ -5540,7 +5980,9 @@ route("v2_dashboard_order_export", async (body, env) => {
   if (jobs.length === 0) return json({ ok: true, rows: [], total: 0 });
 
   const jobIds = jobs.map(j => j.id);
-  const inboundIds = [...new Set(jobs.filter(j => j.related_doc_type === 'inbound' && j.related_doc_id).map(j => j.related_doc_id))];
+  // 兼容历史 related_doc_type 写法：实际写入是 'inbound_plan'，旧导出按 'inbound' 过滤导致永远空
+  const isInboundLink = (t) => (t === 'inbound_plan' || t === 'inbound');
+  const inboundIds = [...new Set(jobs.filter(j => isInboundLink(j.related_doc_type) && j.related_doc_id).map(j => j.related_doc_id))];
   const outboundIds = [...new Set(jobs.flatMap(j => {
     const ids = [];
     if (j.related_doc_type === 'outbound' && j.related_doc_id) ids.push(j.related_doc_id);
@@ -5563,7 +6005,7 @@ route("v2_dashboard_order_export", async (body, env) => {
        FROM v2_pick_worker_docs WHERE job_id IN (PLACEHOLDER) ORDER BY started_at ASC`,
       pickJobIds),
     batchSelectInGlobal(env,
-      `SELECT id, customer, display_no, external_inbound_no, accounted, accounted_by, accounted_at
+      `SELECT id, customer, display_no, external_inbound_no, biz_class, biz_classes_json, accounted, accounted_by, accounted_at
        FROM v2_inbound_plans WHERE id IN (PLACEHOLDER)`,
       inboundIds),
     batchSelectInGlobal(env,
@@ -5581,6 +6023,13 @@ route("v2_dashboard_order_export", async (body, env) => {
   const inboundById = {}, outboundById = {};
   inboundAll.forEach(d => { inboundById[d.id] = d; });
   outboundAll.forEach(d => { outboundById[d.id] = d; });
+
+  // 入库计划业务类型 / 完成 / 未完成（多业务类型 V1.2）
+  const inboundBizTasksAll = inboundIds.length > 0 ? await batchSelectInGlobal(env,
+    `SELECT plan_id, biz_class, status FROM v2_inbound_plan_biz_tasks WHERE plan_id IN (PLACEHOLDER)`,
+    inboundIds) : [];
+  const inboundBizTasksByPlan = {};
+  inboundBizTasksAll.forEach(t => { (inboundBizTasksByPlan[t.plan_id] = inboundBizTasksByPlan[t.plan_id] || []).push(t); });
 
   const out = jobs.map(j => {
     const ws = workersByJob[j.id] || [];
@@ -5616,16 +6065,37 @@ route("v2_dashboard_order_export", async (body, env) => {
 
     // 业务关联
     let related = null;
-    if (j.related_doc_type === 'inbound') related = inboundById[j.related_doc_id] || null;
+    if (isInboundLink(j.related_doc_type)) related = inboundById[j.related_doc_id] || null;
     else if (j.related_doc_type === 'outbound') related = outboundById[j.related_doc_id] || null;
     const linked_ob = j.linked_outbound_order_id ? outboundById[j.linked_outbound_order_id] : null;
     const customer = (related && related.customer) || (linked_ob && linked_ob.customer) || '';
     const accounted = (related && related.accounted) ?? (linked_ob && linked_ob.accounted) ?? '';
     const accounted_by = (related && related.accounted_by) || (linked_ob && linked_ob.accounted_by) || '';
     const accounted_at_iso = (related && related.accounted_at) || (linked_ob && linked_ob.accounted_at) || '';
-    const inbound_display_no = (j.related_doc_type === 'inbound' && related) ? (related.display_no || related.external_inbound_no || '') : '';
+    const inbound_display_no = (isInboundLink(j.related_doc_type) && related) ? (related.display_no || related.external_inbound_no || '') : '';
     const outbound_display_no = (j.related_doc_type === 'outbound' && related) ? (related.display_no || '') : (linked_ob ? linked_ob.display_no || '' : '');
+
+    // 入库计划业务类型 / 完成 / 未完成
+    let inbound_biz_classes = '', inbound_completed_biz = '', inbound_pending_biz = '';
+    if (isInboundLink(j.related_doc_type) && related) {
+      let bizArr = [];
+      try {
+        const raw = related.biz_classes_json;
+        if (raw) { const parsedArr = JSON.parse(raw); if (Array.isArray(parsedArr)) bizArr = parsedArr.filter(Boolean).map(String); }
+      } catch (e) { /* ignore */ }
+      if (bizArr.length === 0 && related.biz_class) bizArr = [String(related.biz_class)];
+      const bizMapZh = { direct_ship: '代发', bulk: '大货', return: '退件', import: '进口' };
+      inbound_biz_classes = bizArr.map(b => bizMapZh[b] || b).join('+');
+      const tasks = inboundBizTasksByPlan[related.id] || [];
+      if (tasks.length > 0) {
+        const doneArr = tasks.filter(t => t.status === 'completed').map(t => bizMapZh[t.biz_class] || t.biz_class);
+        const pendArr = tasks.filter(t => t.status !== 'completed').map(t => bizMapZh[t.biz_class] || t.biz_class);
+        inbound_completed_biz = doneArr.join('+');
+        inbound_pending_biz = pendArr.join('+');
+      }
+    }
     const ob_for_fields = (j.related_doc_type === 'outbound' && related) ? related : linked_ob;
+    // ob_for_fields 仅可用于 outbound 路径，避免 isInboundLink 时把 inbound_plan 当 outbound 取字段
     const wms_work_order_no = (ob_for_fields && ob_for_fields.wms_work_order_no) || '';
     const destination = (ob_for_fields && ob_for_fields.destination) || '';
     const po_no = (ob_for_fields && ob_for_fields.po_no) || '';
@@ -5682,6 +6152,10 @@ route("v2_dashboard_order_export", async (body, env) => {
       outbound_display_no, inbound_display_no,
       wms_work_order_no, destination, po_no,
       planned_box_count, planned_pallet_count, actual_box_count, actual_pallet_count,
+      // 入库计划业务类型 / 完成 / 未完成（多业务类型 V1.2）
+      inbound_biz_classes,
+      inbound_completed_biz,
+      inbound_pending_biz,
       // 代发拣货
       pick_doc_nos, pick_worker_summary
     };

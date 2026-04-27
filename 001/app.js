@@ -913,7 +913,8 @@ async function loadInboundCandidates() {
   var sel = document.getElementById("inboundPlanSelect");
   if (!sel) return;
   var bc = _resolveBizClass();
-  var res = await api({ action: "v2_inbound_plan_ops_candidates", scene: "putaway", biz_class: bc });
+  // 用 required_biz_class 让后端按 biz_task 未完成口径过滤；biz_class 同时传以兼容旧后端
+  var res = await api({ action: "v2_inbound_plan_ops_candidates", scene: "putaway", biz_class: bc, required_biz_class: bc });
   var opts = '<option value="">-- 选择系统候选单 / 시스템 후보 선택 --</option>';
   if (res && res.ok && res.items) {
     res.items.forEach(function(p) {
@@ -988,6 +989,10 @@ async function resolveInboundCode(btnEl) {
     } else if (res.kind === 'biz_mismatch') {
       _ibResolvedKind = '';
       if (resultEl) resultEl.innerHTML = '<div style="background:#ffebee;border-radius:6px;padding:8px;color:#c62828;">✗ ' + esc(res.message) + '</div>';
+      if (extFields) extFields.style.display = 'none';
+    } else if (res.kind === 'biz_already_completed') {
+      _ibResolvedKind = '';
+      if (resultEl) resultEl.innerHTML = '<div style="background:#fff3e0;border-radius:6px;padding:8px;color:#e65100;">✓ 该入库单的此业务类型已完成入库 / 이 입고단의 해당 업무 유형은 이미 입고 완료됨<br><span style="font-size:12px;">' + esc(res.message || '') + '</span></div>';
       if (extFields) extFields.style.display = 'none';
     } else if (res.kind === 'status_not_allowed') {
       _ibResolvedKind = '';

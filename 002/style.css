@@ -163,6 +163,7 @@ body {
 .st-arrived_pending_putaway { background: #2196f3; }
 .st-putting_away { background: #9c27b0; }
 .st-unloading_putting_away { background: #d84315; }
+.st-partially_completed { background: #ff7043; }
 
 .biz-tag {
   display: inline-block;

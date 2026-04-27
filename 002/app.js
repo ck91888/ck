@@ -302,11 +302,19 @@ function feedbackTitleText(fb) {
 function inboundStatusLabel(status) {
   var lang = getLang();
   if (lang === 'ko') {
-    var map = {pending:'대기중',unloading:'하차중(입고가능)',unloading_putting_away:'하차중+입고중',arrived_pending_putaway:'입고대기',putting_away:'입고중',completed:'입고완료',cancelled:'취소됨'};
+    var map = {pending:'대기중',unloading:'하차중(입고가능)',unloading_putting_away:'하차중+입고중',arrived_pending_putaway:'입고대기',putting_away:'입고중',partially_completed:'부분 입고 완료',completed:'입고완료',cancelled:'취소됨'};
   } else {
-    var map = {pending:'待到库',unloading:'卸货中（可提前理货）',unloading_putting_away:'卸货中+理货中',arrived_pending_putaway:'已到库待理货',putting_away:'理货中',completed:'已入库',cancelled:'已取消'};
+    var map = {pending:'待到库',unloading:'卸货中（可提前理货）',unloading_putting_away:'卸货中+理货中',arrived_pending_putaway:'已到库待理货',putting_away:'理货中',partially_completed:'部分入库完成',completed:'已入库',cancelled:'已取消'};
   }
   return map[status] || stLabel(status);
+}
+
+// 入库业务类型 → 现场入库操作文案
+function inboundBizTaskLabel(biz) {
+  var lang = getLang();
+  var zh = { direct_ship: '代发入库', bulk: '大货入库', return: '退件入库' };
+  var ko = { direct_ship: '직배송 입고', bulk: '대량화물 입고', return: '반품 입고' };
+  return (lang === 'ko' ? ko : zh)[biz] || biz;
 }
 
 function bizLabel(biz) {
@@ -1205,14 +1213,24 @@ async function loadInboundList() {
     html += '<span class="st st-' + esc(p.status) + '">' + esc(inboundStatusLabel(p.status)) + '</span> ';
     html += accountTag(p);
     html += dynTag;
-    html += '<span class="biz-tag biz-' + esc(p.biz_class) + '">' + esc(bizLabel(p.biz_class)) + '</span> ';
-    html += esc(p.display_no || p.id) + ' · ' + esc(p.customer || "--") + ' · ' + esc(p.cargo_summary || "");
+    // 多业务类型 tag（兼容老数据：列表后端注入 biz_classes，缺则回退 biz_class 单值）
+    var bizArr = (p.biz_classes && p.biz_classes.length) ? p.biz_classes : (p.biz_class ? [p.biz_class] : []);
+    for (var bi = 0; bi < bizArr.length; bi++) {
+      html += '<span class="biz-tag biz-' + esc(bizArr[bi]) + '" style="margin-right:4px;">' + esc(bizLabel(bizArr[bi])) + '</span>';
+    }
+    html += ' ' + esc(p.display_no || p.id) + ' · ' + esc(p.customer || "--") + ' · ' + esc(p.cargo_summary || "");
     html += '</div>';
     var ibMeta = esc(p.plan_date || "") + ' · ' + esc(p.expected_arrival || "") + ' · ' + esc(fmtTime(p.created_at));
     if (p.accounted == 1 && (p.accounted_by || p.accounted_at)) {
       ibMeta += ' · ' + L("accounted_by_short") + ': ' + esc(p.accounted_by || "") + (p.accounted_at ? ' ' + esc(fmtTime(p.accounted_at)) : '');
     }
     html += '<div class="item-meta">' + ibMeta + '</div>';
+    // 未完成入库类型醒目提示（仅当多业务类型 + 至少一个 pending 时显示）
+    var missing = p.missing_biz_classes || p.pending_biz_classes || [];
+    if (bizArr.length > 1 && missing.length > 0 && p.status !== 'completed' && p.status !== 'cancelled') {
+      var missText = missing.map(function(b) { return inboundBizTaskLabel(b); }).join('、');
+      html += '<div style="font-size:12px;color:#c62828;background:#ffebee;border-left:3px solid #c62828;padding:3px 6px;margin-top:4px;">⚠️ 未完成入库类型 / 미완료 입고 유형: ' + esc(missText) + '</div>';
+    }
     html += '</div>';
   });
   html += '</div>';
@@ -1254,15 +1272,28 @@ function toggleIbcAutoOb() {
   document.getElementById("ibcAutoObFields").style.display = checked ? "" : "none";
 }
 
+function getIbcBizClasses() {
+  var nodes = document.querySelectorAll('#ibc-biz-classes .ibc-biz-chk');
+  var arr = [];
+  for (var i = 0; i < nodes.length; i++) {
+    if (nodes[i].checked) arr.push(nodes[i].value);
+  }
+  return arr;
+}
+
 async function submitInbound(btnEl) {
   var customer = document.getElementById("ibc-customer").value.trim();
   if (!customer) { alert("请填写客户 / 고객을 입력하세요"); return; }
+  // 业务类型至少选一个
+  var bizArr = getIbcBizClasses();
+  if (bizArr.length === 0) { alert("请至少选择一个业务类型（代发/大货/退件）/ 업무 유형을 1개 이상 선택하세요"); return; }
   // 严格校验：必须至少有一行 planned_qty>0 的明细
   var linesPre = getIbcLines();
   if (linesPre.length === 0) { alert("请至少填写一行货物明细 / 화물 명세를 1건 이상 입력하세요"); return; }
   withActionLock('submitInbound', btnEl || null, '提交中.../저장중...', async function() {
     var date = document.getElementById("ibc-date").value || kstToday();
-    var biz = document.getElementById("ibc-biz").value;
+    var biz_classes = bizArr;
+    var biz = biz_classes[0]; // 兼容旧字段
     var cargo = document.getElementById("ibc-cargo").value.trim();
     var arrival = document.getElementById("ibc-arrival").value.trim();
     var purpose = document.getElementById("ibc-purpose").value.trim();
@@ -1279,6 +1310,7 @@ async function submitInbound(btnEl) {
       plan_date: date,
       customer: customer,
       biz_class: biz,
+      biz_classes: biz_classes,
       cargo_summary: cargo,
       expected_arrival: arrival,
       purpose: purpose,
@@ -1314,10 +1346,13 @@ async function submitInbound(btnEl) {
       document.getElementById("ibcLinesBody").innerHTML = "";
       document.getElementById("ibc-auto-ob").checked = false;
       document.getElementById("ibcAutoObFields").style.display = "none";
+      // 重置业务类型多选
+      var chks = document.querySelectorAll('#ibc-biz-classes .ibc-biz-chk');
+      for (var i = 0; i < chks.length; i++) chks[i].checked = false;
       ensureFirstIbcLine();
       goTab("inbound");
     } else {
-      alert("失败 / 실패: " + (res ? res.error : "unknown"));
+      alert("失败 / 실패: " + (res ? (res.message || res.error) : "unknown"));
     }
   });
 }
@@ -1386,7 +1421,14 @@ async function loadInboundDetail() {
   }
   html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px;font-size:13px;">';
   html += '<div><b>' + L("status") + ':</b> <span class="st st-' + esc(p.status) + '">' + esc(inboundStatusLabel(p.status)) + '</span></div>';
-  html += '<div><b>' + L("biz_class") + ':</b> <span class="biz-tag biz-' + esc(p.biz_class) + '">' + esc(bizLabel(p.biz_class)) + '</span></div>';
+  // 多业务类型 tag
+  var detailBizArr = (res.biz_classes && res.biz_classes.length) ? res.biz_classes :
+                     ((p.biz_classes && p.biz_classes.length) ? p.biz_classes : (p.biz_class ? [p.biz_class] : []));
+  var bizTagsHtml = '';
+  for (var dbi = 0; dbi < detailBizArr.length; dbi++) {
+    bizTagsHtml += '<span class="biz-tag biz-' + esc(detailBizArr[dbi]) + '" style="margin-right:4px;">' + esc(bizLabel(detailBizArr[dbi])) + '</span>';
+  }
+  html += '<div><b>' + L("biz_class") + ':</b> ' + (bizTagsHtml || '--') + '</div>';
   html += '<div><b>' + L("plan_date") + ':</b> ' + esc(p.plan_date) + '</div>';
   html += '<div><b>' + L("customer") + ':</b> ' + esc(p.customer) + '</div>';
   html += '<div><b>' + L("cargo_summary") + ':</b> ' + esc(p.cargo_summary) + '</div>';
@@ -1398,6 +1440,46 @@ async function loadInboundDetail() {
     html += '<div style="grid-column:1/-1;"><b>直接完结人:</b> ' + esc(p.manual_completed_by) + ' · ' + esc(fmtTime(p.manual_completed_at)) + '</div>';
   }
   html += '</div></div>';
+
+  // --- 入库类型执行状态卡片 ---
+  var bizTasks = res.biz_tasks || [];
+  if (!isReturnSession && bizTasks.length > 0) {
+    var pendingTasks = bizTasks.filter(function(t) { return t.status !== 'completed'; });
+    var headerColor = pendingTasks.length === 0 ? '#1b5e20' : '#c62828';
+    html += '<div class="card">';
+    html += '<div class="card-title" style="display:flex;align-items:center;gap:8px;">入库类型执行状态 / 입고 유형별 작업 상태';
+    if (pendingTasks.length > 0) {
+      var missText2 = pendingTasks.map(function(t) { return inboundBizTaskLabel(t.biz_class); }).join('、');
+      html += '<span style="font-size:11px;color:#fff;background:' + headerColor + ';padding:2px 6px;border-radius:3px;">未完成 / 미완료: ' + esc(missText2) + '</span>';
+    } else {
+      html += '<span style="font-size:11px;color:#fff;background:' + headerColor + ';padding:2px 6px;border-radius:3px;">全部完成 / 전체 완료</span>';
+    }
+    html += '</div>';
+    html += '<table class="line-table"><thead><tr>';
+    html += '<th>业务类型 / 업무</th><th>对应操作 / 작업</th><th>状态 / 상태</th><th>完成人 / 완료자</th><th>完成时间 / 완료시간</th><th>工时(分钟) / 작업시간</th><th>作业</th>';
+    html += '</tr></thead><tbody>';
+    bizTasks.forEach(function(t) {
+      var stClass = (t.status === 'completed') ? 'st-completed' : 'st-pending';
+      var stText = (t.status === 'completed') ? (getLang() === 'ko' ? '완료' : '已完成') : (getLang() === 'ko' ? '미완료' : '未完成');
+      html += '<tr>';
+      html += '<td><span class="biz-tag biz-' + esc(t.biz_class) + '">' + esc(bizLabel(t.biz_class)) + '</span></td>';
+      html += '<td>' + esc(inboundBizTaskLabel(t.biz_class)) + '</td>';
+      html += '<td><span class="st ' + stClass + '">' + esc(stText) + '</span></td>';
+      // 完成人优先显示 worker_names（姓名串），fallback 到 completed_by（worker_id）
+      var doneBy = t.worker_names || t.completed_by || '';
+      html += '<td>' + esc(doneBy || '--') + '</td>';
+      html += '<td>' + esc(t.completed_at ? fmtTime(t.completed_at) : '--') + '</td>';
+      html += '<td>' + (t.total_minutes ? Math.round(t.total_minutes) : '--') + '</td>';
+      if (t.job_id) {
+        html += '<td><a href="javascript:void(0)" onclick="event.stopPropagation();openOrderOpsDetail(\'' + esc(t.job_id) + '\')">查看 / 보기</a></td>';
+      } else {
+        html += '<td>--</td>';
+      }
+      html += '</tr>';
+    });
+    html += '</tbody></table>';
+    html += '</div>';
+  }
 
   // --- Plan lines ---
   var unloadNotDone002 = (p.status === 'unloading' || p.status === 'unloading_putting_away');
@@ -1518,7 +1600,7 @@ async function loadInboundDetail() {
   // --- Actions ---
   html += '<div class="card">';
   html += '<button class="btn btn-outline btn-sm" onclick="printIbQr()">' + L("print") + '</button> ';
-  if (p.status === "arrived_pending_putaway" || p.status === "putting_away") {
+  if (p.status === "arrived_pending_putaway" || p.status === "putting_away" || p.status === "partially_completed") {
     html += '<button class="btn btn-success" onclick="markInboundCompleted(this)">文员直接完成入库 / 직접 입고 완료</button> ';
   }
   if (p.status === "pending" || p.status === "arrived_pending_putaway") {
@@ -1668,8 +1750,10 @@ async function markInboundCompleted(btnEl) {
       loadInboundDetail();
     } else if (res && res.error === "inbound_job_still_active") {
       alert("当前仍有进行中的入库任务，不能直接完结\n현재 진행 중인 입고 작업이 있어 직접 완결 불가");
+    } else if (res && res.error === "biz_tasks_pending") {
+      alert(res.message || "该入库计划还有未完成的入库类型，请先在现场完成对应入库操作。");
     } else {
-      alert(L("error") + ": " + (res ? res.error : "unknown"));
+      alert(L("error") + ": " + (res ? (res.message || res.error) : "unknown"));
     }
   });
 }

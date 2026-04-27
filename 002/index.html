@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>协同中心 V2 / 협업센터</title>
-  <link rel="stylesheet" href="style.css?v=20260427f">
+  <link rel="stylesheet" href="style.css?v=20260428a">
 </head>
 <body>
 
@@ -222,6 +222,7 @@
         <option value="unloading_putting_away">卸货中+理货中</option>
         <option value="arrived_pending_putaway">已到库待理货</option>
         <option value="putting_away">理货中</option>
+        <option value="partially_completed">部分入库完成 / 부분 입고 완료</option>
         <option value="processing">处理中</option>
         <option value="completed">已完成</option>
       </select>
@@ -250,13 +251,22 @@
         <input id="ibc-customer" type="text">
       </div>
       <div class="form-group">
-        <label>业务分类</label>
-        <select id="ibc-biz">
-          <option value="direct_ship">代发</option>
-          <option value="bulk">大货</option>
-          <option value="return">退件</option>
-          <option value="import">进口</option>
-        </select>
+        <label id="lbl_ibc_biz_classes">业务分类（可多选 / 다중 선택）</label>
+        <div id="ibc-biz-classes" style="display:flex;gap:14px;flex-wrap:wrap;padding:6px 0;">
+          <label style="display:inline-flex;align-items:center;gap:4px;font-weight:normal;cursor:pointer;">
+            <input type="checkbox" class="ibc-biz-chk" value="direct_ship">
+            <span>代发 / 직배송</span>
+          </label>
+          <label style="display:inline-flex;align-items:center;gap:4px;font-weight:normal;cursor:pointer;">
+            <input type="checkbox" class="ibc-biz-chk" value="bulk">
+            <span>大货 / 대량화물</span>
+          </label>
+          <label style="display:inline-flex;align-items:center;gap:4px;font-weight:normal;cursor:pointer;">
+            <input type="checkbox" class="ibc-biz-chk" value="return">
+            <span>退件 / 반품</span>
+          </label>
+        </div>
+        <div style="font-size:11px;color:#888;">至少选择一个业务类型；若同时选择多个，全部完成后整单才算入库完成。</div>
       </div>
       <div class="form-group">
         <label>货物摘要</label>
@@ -455,7 +465,7 @@
 
 <input type="file" id="fileInput" accept="image/*" style="display:none;" onchange="handleFileUpload(this)">
 
-<script src="config.js?v=20260427f"></script>
+<script src="config.js?v=20260428a"></script>
 <script src="../shared/qrcode.min.js"></script>
 <!--
   TODO(SheetJS 动态加载): xlsx.full.min.js ~923KB，目前同步加载，
@@ -465,6 +475,6 @@
   onVerifyFilePick / 表格导出流程。
 -->
 <script src="../shared/xlsx.full.min.js"></script>
-<script src="app.js?v=20260427f"></script>
+<script src="app.js?v=20260428a"></script>
 </body>
 </html>
