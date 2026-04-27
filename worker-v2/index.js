@@ -5321,10 +5321,10 @@ route("v2_dashboard_order_export", async (body, env) => {
   }))];
   const pickJobIds = jobs.filter(j => j.job_type === 'pick_direct').map(j => j.id);
 
-  // ---- 批量 IN 查询 helper ----
+  // ---- 批量 IN 查询 helper（D1 prepared statement 单条最多 100 bind 参数，CHUNK 取 80 留余量）----
   async function batchSelectIn(sqlTemplate, ids) {
     const out = [];
-    const CHUNK = 500;
+    const CHUNK = 80;
     for (let i = 0; i < ids.length; i += CHUNK) {
       const chunk = ids.slice(i, i + CHUNK);
       const placeholders = chunk.map(() => '?').join(',');

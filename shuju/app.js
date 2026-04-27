@@ -379,16 +379,24 @@ async function loadOrders(btn) {
 
 async function exportOrders(btn) {
   setBtnLoading(btn, true);
-  var params = ordersFilterParams();
-  params.action = "v2_dashboard_order_export";
-  params.limit = 10000;
-  delete params.offset;
-  var res = await api(params);
-  setBtnLoading(btn, false, "导出明细 CSV");
-  if (!res || !res.ok) { alert("导出失败: " + (res ? (res.message || res.error) : "unknown")); return; }
-  var rows = res.rows || [];
-  if (rows.length === 0) { alert("无数据可导出"); return; }
-  var csvRows = rows.map(function(r) {
+  try {
+    var params = ordersFilterParams();
+    params.action = "v2_dashboard_order_export";
+    params.limit = 10000;
+    delete params.offset;
+    var res = await api(params);
+    if (!res || !res.ok) {
+      var msg = res ? String(res.message || res.error || '') : 'unknown';
+      if (msg.indexOf('too many SQL variables') >= 0) {
+        alert('导出失败：本次数据量较大，系统正在按小批量查询修复。请刷新后重试。');
+      } else {
+        alert('导出失败: ' + msg);
+      }
+      return;
+    }
+    var rows = res.rows || [];
+    if (rows.length === 0) { alert("无数据可导出"); return; }
+    var csvRows = rows.map(function(r) {
     return {
       日期: r['日期'] || '',
       单号: r['单号'] || '',
@@ -426,11 +434,16 @@ async function exportOrders(btn) {
       job_id: r.job_id
     };
   });
-  var startD = (params.start_date || '').replace(/-/g, '');
-  var endD = (params.end_date || '').replace(/-/g, '');
-  var fname = 'orders_export_' + (startD || 'all') + '_' + (endD || 'all') + '.csv';
-  exportCsv(fname, csvRows);
-  if (res.truncated) alert('已达单次导出上限 10000 行，部分数据可能被截断。请缩小日期或筛选范围。');
+    var startD = (params.start_date || '').replace(/-/g, '');
+    var endD = (params.end_date || '').replace(/-/g, '');
+    var fname = 'orders_export_' + (startD || 'all') + '_' + (endD || 'all') + '.csv';
+    exportCsv(fname, csvRows);
+    if (res.truncated) alert('已达单次导出上限 10000 行，部分数据可能被截断。请缩小日期或筛选范围。');
+  } catch (e) {
+    alert('导出失败: ' + (e && e.message || e));
+  } finally {
+    setBtnLoading(btn, false, "导出明细 CSV");
+  }
 }
 
 async function openOrderDetail(jobId) {
