@@ -3769,7 +3769,20 @@ route("v2_pick_job_finalize", async (body, env) => {
       }
     }
 
-    // 1) 关闭残留 open segments（每段计算 minutes）
+    // ---- 安全收尾：在岗人员尚未全部完成时禁止 finalize ----
+    // 实时统计在岗 segment 数（不依赖 stored active_worker_count）
+    const activeRs = await env.DB.prepare(
+      "SELECT COUNT(*) as c, GROUP_CONCAT(worker_name, '、') as names FROM v2_ops_job_workers WHERE job_id=? AND left_at=''"
+    ).bind(job_id).first();
+    const activeCount = (activeRs && activeRs.c) || 0;
+    if (activeCount > 0) {
+      return { ok: false, error: "active_workers_still_working",
+        message: "仍有人员正在拣货，请先让所有人完成本次拣货后再整趟完成 / 아직 작업 중인 인원이 있습니다. 모두 완료 후 다시 시도하세요",
+        active_worker_count: activeCount,
+        active_worker_names: (activeRs && activeRs.names) || '' };
+    }
+
+    // 1) 关闭残留 open segments（每段计算 minutes）— 此时正常无残留，仅作兜底
     const stale = await env.DB.prepare(
       "SELECT id, worker_id, joined_at FROM v2_ops_job_workers WHERE job_id=? AND left_at=''"
     ).bind(job_id).all();

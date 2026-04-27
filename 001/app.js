@@ -620,18 +620,115 @@ function unitLabel(key) {
   return u ? u.zh + "/" + u.ko : key;
 }
 
+// ===== 卸货页辅助（自 001/patch.js 合并） =====
+function planNo(plan) { return (plan && (plan.display_no || plan.id)) || ''; }
+
+function selectedUnloadDisplayNo() {
+  var sel = document.getElementById('unloadPlanSelect');
+  if (!sel || sel.selectedIndex < 1) return '';
+  return sel.options[sel.selectedIndex].getAttribute('data-display-no') || '';
+}
+
+function renderUnloadPlanCard(planData, displayNo) {
+  if (!planData || !planData.plan) return;
+  _unloadPlanData = planData;
+  var p = planData.plan;
+  var lines = planData.lines || [];
+  var card = document.getElementById('unloadPlanCard');
+  var info = document.getElementById('unloadPlanInfo');
+  var area = document.getElementById('unloadPlanLinesArea');
+  if (card) card.style.display = '';
+  if (info) {
+    info.innerHTML = '<div><b>' + esc(displayNo || planNo(p)) + '</b> | ' +
+      esc(p.plan_date) + ' | ' + esc(p.customer || '') + '</div>' +
+      '<div class="muted">' + esc(p.cargo_summary || '') +
+      (p.remark ? ' — ' + esc(p.remark) : '') + '</div>';
+  }
+  if (area) {
+    if (lines.length > 0) {
+      var tbl = '<table class="mini-table"><tr><th>类型/유형</th><th>计划/계획</th></tr>';
+      lines.forEach(function(ln) { tbl += '<tr><td>' + unitLabel(ln.unit_type) + '</td><td>' + ln.planned_qty + '</td></tr>'; });
+      tbl += '</table>';
+      area.innerHTML = tbl;
+    } else {
+      area.innerHTML = '<span class="muted">无明细 / 명세 없음</span>';
+    }
+  }
+}
+
+async function previewSelectedPlan() {
+  var sel = document.getElementById('unloadPlanSelect');
+  var card = document.getElementById('unloadPlanCard');
+  if (!sel || !card) return;
+  var planId = sel.value || '';
+  if (!planId) { card.style.display = 'none'; return; }
+  var no = selectedUnloadDisplayNo();
+  var res = await api({ action: 'v2_inbound_plan_detail', id: planId });
+  if (res && res.ok && res.plan) {
+    renderUnloadPlanCard(res, no || planNo(res.plan));
+  } else {
+    card.style.display = 'none';
+  }
+}
+
+function stripDiffRequired() {
+  var diffArea = document.getElementById('unloadDiffArea');
+  if (!diffArea) return;
+  var lbl = diffArea.querySelector('label');
+  if (lbl) lbl.textContent = '现场差异说明 / 현장 차이 설명';
+}
+
+// 自 patch.js 合并：第二次 override 是最终有效逻辑（带 [现场动态]/[待补充] 标签）
+// 显式 limit:200，并在客户端二次过滤 completed/cancelled，避免被默认分页截断
+async function loadInboundPlans(selectId) {
+  var sel = document.getElementById(selectId);
+  if (!sel) return;
+  var current = sel.value || '';
+  var res = await api({
+    action: 'v2_inbound_plan_list',
+    start_date: '', end_date: '', status: '',
+    limit: 200, offset: 0
+  });
+  var items = (res && res.ok && res.items) ? res.items.slice() : [];
+
+  var opts = '<option value="">-- 选择入库计划/입고계획 선택 --</option>';
+  var byDate = {};
+  items.forEach(function(p) {
+    if (p.status === 'completed' || p.status === 'cancelled') return;
+    var d = p.plan_date || '';
+    if (!byDate[d]) byDate[d] = [];
+    byDate[d].push(p);
+  });
+  Object.keys(byDate).sort().reverse().forEach(function(d) {
+    byDate[d].sort(function(a, b) { return String(a.created_at || '').localeCompare(String(b.created_at || '')); });
+    byDate[d].forEach(function(p) {
+      var no = p.display_no || p.id;
+      var tag = (p.source_type === 'field_dynamic') ? '[现场动态] ' : '';
+      if (p.status === 'unloaded_pending_info') tag = '[待补充] ';
+      opts += '<option value="' + esc(p.id) + '" data-display-no="' + esc(no) + '">' +
+        tag + '[' + esc(no) + '] ' + esc(p.customer || '') + ' - ' + esc(p.cargo_summary || '') + '</option>';
+    });
+  });
+  sel.innerHTML = opts;
+  if (current) sel.value = current;
+
+  if (selectId === 'unloadPlanSelect') previewSelectedPlan();
+}
+
 async function initUnload() {
   _unloadPlanData = null;
   stopUnloadScan();
 
-  // If we have an active unload job, jump to working state
+  // 有进行中的卸货任务 → 直接进入 working
   if (_activeJobId) {
     var res = await api({ action: "v2_ops_job_detail", job_id: _activeJobId });
     if (res && res.ok && res.job && res.job.job_type === "unload" && res.job.status === "working") {
-      var planId = res.job.related_doc_id || "";
-      if (planId) {
-        var planRes = await api({ action: "v2_inbound_plan_detail", id: planId });
+      // 仅 inbound_plan 关联才回灌 plan 数据；feedback-first 流程 _unloadPlanData 保持 null
+      if (res.job.related_doc_type === "inbound_plan" && res.job.related_doc_id) {
+        var planRes = await api({ action: "v2_inbound_plan_detail", id: res.job.related_doc_id });
         if (planRes && planRes.ok) _unloadPlanData = planRes;
+      } else {
+        _unloadPlanData = null;
       }
       showUnloadWorking(res.job);
       startJobPoll("unload");
@@ -639,7 +736,6 @@ async function initUnload() {
     }
   }
 
-  // Show entry state
   showUnloadEntry();
   var interruptBanner = document.getElementById("unloadInterruptBanner");
   if (interruptBanner) interruptBanner.style.display = hasInterruptContext() ? "" : "none";
@@ -713,32 +809,15 @@ function showUnloadWorking(job) {
   document.getElementById("unloadWorkersCard").style.display = "";
   document.getElementById("unloadResultCard").style.display = "";
 
-  // Show plan info if available
   if (_unloadPlanData && _unloadPlanData.plan) {
-    var p = _unloadPlanData.plan;
-    var lines = _unloadPlanData.lines || [];
-    document.getElementById("unloadPlanCard").style.display = "";
-    document.getElementById("unloadPlanInfo").innerHTML =
-      '<div><b>' + esc(p.display_no || p.id) + '</b> | ' + esc(p.plan_date) + ' | ' + esc(p.customer) + '</div>' +
-      '<div class="muted">' + esc(p.cargo_summary) + (p.remark ? ' — ' + esc(p.remark) : '') + '</div>';
-
-    if (lines.length > 0) {
-      var tbl = '<table class="mini-table"><tr><th>类型/유형</th><th>计划/계획</th></tr>';
-      lines.forEach(function(ln) {
-        tbl += '<tr><td>' + unitLabel(ln.unit_type) + '</td><td>' + ln.planned_qty + '</td></tr>';
-      });
-      tbl += '</table>';
-      document.getElementById("unloadPlanLinesArea").innerHTML = tbl;
-    } else {
-      document.getElementById("unloadPlanLinesArea").innerHTML = '<span class="muted">无明细 / 명세 없음</span>';
-    }
+    renderUnloadPlanCard(_unloadPlanData, planNo(_unloadPlanData.plan));
   } else {
     document.getElementById("unloadPlanCard").style.display = "none";
   }
 
-  // Build result lines form
   buildUnloadResultForm();
   refreshUnloadWorkers();
+  stripDiffRequired();
 }
 
 function buildUnloadResultForm() {
@@ -846,12 +925,14 @@ async function loadInboundCandidates() {
 async function loadUnloadCandidates() {
   var sel = document.getElementById("unloadPlanSelect");
   if (!sel) return;
-  var res = await api({ action: "v2_inbound_plan_ops_candidates", scene: "unload", biz_class: "" });
+  // 显式 limit:200 防止下拉被默认 100 截断
+  var res = await api({ action: "v2_inbound_plan_ops_candidates", scene: "unload", biz_class: "", limit: 200 });
   var opts = '<option value="">-- 选择入库计划/입고계획 선택 --</option>';
   if (res && res.ok && res.items) {
     res.items.forEach(function(p) {
       var stText = STATUS_LABEL[p.status] ? ' [' + STATUS_LABEL[p.status].split('/')[0] + ']' : '';
-      opts += '<option value="' + esc(p.id) + '">' + '[' + esc(p.display_no || p.id) + ']' + stText + ' ' + esc(p.customer) + ' - ' + esc(p.cargo_summary) + '</option>';
+      var no = p.display_no || p.id;
+      opts += '<option value="' + esc(p.id) + '" data-display-no="' + esc(no) + '">[' + esc(no) + ']' + stText + ' ' + esc(p.customer) + ' - ' + esc(p.cargo_summary) + '</option>';
     });
   }
   sel.innerHTML = opts;
@@ -997,12 +1078,15 @@ async function startUnload(btnEl) {
 async function startUnloadNoPlan(btnEl) {
   if (hasOtherActiveJob()) return warnActiveJob();
   withActionLock('startUnloadNoPlan', btnEl || null, '提交中.../저장중...', async function() {
+    // 从挂起上下文带入 parent_job_id（自 patch.js 合并）
+    var interruptInfo = null;
+    try { interruptInfo = JSON.parse(localStorage.getItem(V2_INTERRUPT_KEY) || 'null'); } catch (e) {}
     var res = await api({
       action: "v2_unplanned_unload_start",
       worker_id: getWorkerId(),
       worker_name: getWorkerName(),
-      parent_job_id: "",
-      interrupt_type: ""
+      parent_job_id: (interruptInfo && interruptInfo.parent_job_id) || '',
+      interrupt_type: (interruptInfo && interruptInfo.parent_job_id) ? 'unload' : ''
     });
     if (res && res.ok) {
       saveActiveJob(res.job_id, res.worker_seg_id);
@@ -1098,9 +1182,20 @@ async function unloadComplete(btnEl) {
 
   withActionLock('unloadComplete', btnEl || null, '提交中.../저장중...', async function() {
     var diffNote = ((document.getElementById("unloadDiffNote") || {}).value || "").trim();
-    var remark = (document.getElementById("unloadRemark") || {}).value || "";
+    var remark = ((document.getElementById("unloadRemark") || {}).value || "").trim();
 
-    // Determine which finish API to call
+    // 自 patch.js 合并：实际数量与计划不一致但用户没填差异说明 → 自动补默认值（避免后端 diff_note_required）
+    var planLines = (_unloadPlanData && _unloadPlanData.lines) || [];
+    if (planLines.length > 0 && !diffNote) {
+      var actualMap = {};
+      resultLines.forEach(function(r) { actualMap[r.unit_type] = r.actual_qty; });
+      var hasDiff = false;
+      planLines.forEach(function(ln) {
+        if ((actualMap[ln.unit_type] || 0) !== (ln.planned_qty || 0)) hasDiff = true;
+      });
+      if (hasDiff) diffNote = '现场实收数量与计划数量不一致';
+    }
+
     var fbId = localStorage.getItem('v2_unplanned_fb_id') || '';
     var actionName = fbId ? 'v2_unplanned_unload_finish' : 'v2_unload_job_finish';
 
@@ -1110,7 +1205,7 @@ async function unloadComplete(btnEl) {
       worker_id: getWorkerId(),
       result_lines: resultLines,
       diff_note: diffNote,
-      remark: remark.trim(),
+      remark: remark,
       complete_job: true
     });
 
@@ -1129,6 +1224,28 @@ async function unloadComplete(btnEl) {
         clearActiveJob();
         _unloadPlanData = null;
         goPage("home");
+      }
+    } else if (res && res.error === "diff_note_required") {
+      // 自 patch.js 合并：自动补默认差异说明 + 重试一次
+      diffNote = '现场实收数量与计划数量不一致（自动补充）';
+      var dnEl = document.getElementById('unloadDiffNote');
+      if (dnEl) dnEl.value = diffNote;
+      var retry = await api({
+        action: actionName,
+        job_id: _activeJobId,
+        worker_id: getWorkerId(),
+        result_lines: resultLines,
+        diff_note: diffNote,
+        remark: remark,
+        complete_job: true
+      });
+      if (retry && retry.ok) {
+        alert("卸货已完成（已自动补充差异备注）/ 하차 완료 (차이 메모 자동 추가됨)");
+        localStorage.removeItem('v2_unplanned_fb_id');
+        var resumedR = await checkAndResumeParent();
+        if (!resumedR) { clearActiveJob(); _unloadPlanData = null; goPage("home"); }
+      } else {
+        alert("失败/실패: " + (retry ? (retry.message || retry.error) : "unknown"));
       }
     } else if (res && res.error === "already_completed") {
       alert("任务已完成，请勿重复提交\n작업이 이미 완료되었습니다. 중복 제출하지 마세요");
@@ -1149,7 +1266,7 @@ async function unloadComplete(btnEl) {
     } else if (res && res.error === "empty_result") {
       alert(res.message || "至少填写一项实际数量");
     } else {
-      alert("失败/실패: " + (res ? res.error : "unknown"));
+      alert("失败/실패: " + (res ? (res.message || res.error) : "unknown"));
     }
   });
 }
@@ -2331,16 +2448,22 @@ function addPickStartDoc() {
 }
 
 // 扫码/录入后查 v2_pick_doc_lookup，把"该单当前已有参与人员"显示给现场拣货人
+// 三态：loading（查询中）/ ok（参与人列表）/ error（网络失败，不阻塞开始）
 async function pickStartLookupOne(docNo) {
   if (!docNo) return;
+  _pickStartLookupCache[docNo] = { _state: 'loading', pick_doc_no: docNo };
+  renderPickStartLookupHint();
   try {
     var res = await api({ action: "v2_pick_doc_lookup", pick_doc_no: docNo });
     if (res && res.ok) {
+      res._state = 'ok';
       _pickStartLookupCache[docNo] = res;
     } else {
-      _pickStartLookupCache[docNo] = { found: false, pick_doc_no: docNo };
+      _pickStartLookupCache[docNo] = { _state: 'ok', found: false, pick_doc_no: docNo };
     }
-  } catch (e) { /* network / auth — 静默 */ }
+  } catch (e) {
+    _pickStartLookupCache[docNo] = { _state: 'error', pick_doc_no: docNo };
+  }
   renderPickStartLookupHint();
 }
 
@@ -2352,6 +2475,14 @@ function renderPickStartLookupHint() {
     var no = _pickStartDocNos[i];
     var info = _pickStartLookupCache[no];
     if (!info) continue;
+    if (info._state === 'loading') {
+      lines.push('<div style="color:#999;">⏳ ' + esc(no) + ' — 查询中... / 조회 중...</div>');
+      continue;
+    }
+    if (info._state === 'error') {
+      lines.push('<div style="color:#fa8c16;">' + esc(no) + ' — 参与人查询失败，但不影响开始；开始时以后端校验为准 / 참여자 조회 실패, 시작에는 영향 없음</div>');
+      continue;
+    }
     if (info.found === false) {
       lines.push('<div style="color:#ff4d4f;">⚠ ' + esc(no) + ' — 系统未找到该拣货单 / 시스템에서 찾을 수 없음</div>');
       continue;
@@ -2484,21 +2615,11 @@ function enterPickWorkingSection(startRes) {
       if (sa && _pickWorkingStartedAt) {
         sa.textContent = new Date(_pickWorkingStartedAt).toLocaleString();
       }
-      // 仅创建人能看到/触发整趟完成
-      var creator = res.job.created_by || '';
-      _pickWorkingTripCreatedBy = creator;
+      _pickWorkingTripCreatedBy = res.job.created_by || '';
+      // 计时页恒不显示整趟完成（按设计：自己还在岗就不可能整趟完成）
+      // 整趟完成仅出现在「进行中趟次」列表卡片，且需 active_worker_count=0 + 当前用户=创建人
       var wrap = document.getElementById("pickFinalizeWrap");
-      var btn = document.getElementById("pickFinalizeBtn");
-      var hint = document.getElementById("pickFinalizeHint");
-      if (wrap) {
-        if (creator && creator === getWorkerId()) {
-          wrap.style.display = "";
-          if (btn) btn.setAttribute('data-creator', creator);
-          if (hint) hint.textContent = "您是趟次创建人，可在确认所有人已完成后整趟收尾 / 차수 생성자: 모두 완료 후 마감 가능";
-        } else {
-          wrap.style.display = "none";
-        }
-      }
+      if (wrap) wrap.style.display = "none";
     }
   });
 
@@ -2644,9 +2765,11 @@ async function loadPickActiveList() {
     html += '<div class="trip-card-meta" style="margin-top:6px;">在岗拣货人 / 작업중:</div><div style="margin-top:2px;">' + wHtml + '</div>';
     html += '<div class="trip-card-meta" style="margin-top:6px;color:#999;font-size:11px;">趟次创建人 / 생성자: ' + esc(t.created_by || "--") + '</div>';
     if (canFinalize) {
-      html += '<div style="margin-top:8px;"><button class="btn btn-warning btn-sm" onclick="finalizePickJob(this,\'' + esc(t.id) + '\',\'' + esc(t.created_by || '') + '\')">整趟完成（仅创建人）/ 차수 전체 완료 (생성자만)</button></div>';
+      html += '<div style="margin-top:8px;"><button class="btn btn-warning btn-sm" onclick="finalizePickJob(this,\'' + esc(t.id) + '\',\'' + esc(t.created_by || '') + '\')">整趟完成（仅趟次创建人）/ 차수 전체 완료 (생성자만)</button></div>';
     } else if (noWorkerActive && t.status !== 'completed') {
-      html += '<div class="muted" style="margin-top:8px;font-size:11px;">仅趟次创建人或主管可整趟完成 / 차수 생성자 또는 관리자만 전체 완료 가능</div>';
+      html += '<div class="muted" style="margin-top:8px;font-size:11px;">仅趟次创建人可整趟完成 / 차수 생성자만 전체 완료 가능</div>';
+    } else if (!noWorkerActive && t.status !== 'completed') {
+      html += '<div class="muted" style="margin-top:8px;font-size:11px;">仍有人员在岗，需所有人完成本次拣货后才能整趟完成 / 작업 중 인원 있음, 모두 완료 후 마감 가능</div>';
     }
     html += '</div>';
   });
@@ -2687,6 +2810,11 @@ async function finalizePickJob(btnEl, jobId, createdBy) {
     } else if (res && res.error === "forbidden_not_creator") {
       alert((res.message || "只有趟次创建人或主管/管理员可以整趟完成") +
             (res.required_creator ? "\n\n创建人 / 생성자: " + res.required_creator : ""));
+    } else if (res && res.error === "active_workers_still_working") {
+      var msg = res.message || "仍有人员正在拣货，请先让所有人完成本次拣货后再整趟完成";
+      if (res.active_worker_names) msg += "\n\n在岗 / 작업중: " + res.active_worker_names;
+      alert(msg);
+      loadPickActiveList();
     } else if (res && res.error === "missing_worker_id") {
       alert(res.message || "请提供拣货人ID / worker_id 필요");
     } else if (res && res.error === "already_completed") {
@@ -3751,4 +3879,10 @@ async function finishVerifyScan(btnEl) {
 // ===== Init =====
 window.addEventListener("DOMContentLoaded", function() {
   checkBadgeAuth();
+  // 自 patch.js 合并：卸货计划下拉变更时预览
+  var unloadSel = document.getElementById('unloadPlanSelect');
+  if (unloadSel) {
+    unloadSel.addEventListener('change', previewSelectedPlan);
+  }
+  stripDiffRequired();
 });

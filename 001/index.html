@@ -5,7 +5,7 @@
   <!-- cache-bust: 20260415a -->
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
   <title>现场执行系统 V2 / 현장 실행 시스템</title>
-  <link rel="stylesheet" href="style.css?v=20260427c">
+  <link rel="stylesheet" href="style.css?v=20260427d">
   <script src="../shared/html5-qrcode.min.js"></script>
 </head>
 <body>
@@ -380,8 +380,8 @@
     <div class="card">
       <button class="btn btn-danger" onclick="finishPickJob(this)">完成本次拣货 / 이번 피킹 완료</button>
       <div id="pickFinalizeWrap" style="display:none;margin-top:6px;">
-        <button class="btn btn-warning btn-sm" id="pickFinalizeBtn" style="width:100%;" onclick="finalizePickJob(this, _activeJobId, _pickWorkingTripCreatedBy)">整趟完成（仅创建人，全员停止计时）/ 차수 전체 완료 (생성자만)</button>
-        <div class="muted" id="pickFinalizeHint" style="margin-top:4px;font-size:11px;">仅当所有人都已完成时使用 / 모두 작업이 끝났을 때만 사용</div>
+        <button class="btn btn-warning btn-sm" id="pickFinalizeBtn" style="width:100%;" onclick="finalizePickJob(this, _activeJobId, _pickWorkingTripCreatedBy)">整趟完成（仅趟次创建人）/ 차수 전체 완료 (생성자만)</button>
+        <div class="muted" id="pickFinalizeHint" style="margin-top:4px;font-size:11px;">所有人完成本次拣货后，由创建人在「进行中趟次」列表收尾 / 모두 완료 후 생성자가 마감</div>
       </div>
     </div>
 
@@ -810,7 +810,6 @@
 <input type="file" id="photoInput" accept="image/*" capture="environment" style="display:none;" onchange="handlePhotoUpload(this)">
 
 <script src="config.js?v=20260424f"></script>
-<script src="app.js?v=20260427c"></script>
-<script src="patch.js?v=20260424f"></script>
+<script src="app.js?v=20260427d"></script>
 </body>
 </html>
