@@ -5,7 +5,7 @@
   <!-- cache-bust: 20260415a -->
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
   <title>现场执行系统 V2 / 현장 실행 시스템</title>
-  <link rel="stylesheet" href="style.css?v=20260427b">
+  <link rel="stylesheet" href="style.css?v=20260427c">
   <script src="../shared/html5-qrcode.min.js"></script>
 </head>
 <body>
@@ -345,6 +345,7 @@
       <div id="pickStartScanReader" style="width:100%;max-width:280px;margin:0 auto;"></div>
       <button class="btn btn-outline btn-sm" id="pickStartScanBtn" onclick="togglePickStartScan()">扫码 / 스캔</button>
       <div id="pickStartDocList" style="margin-top:8px;font-size:13px;"></div>
+      <div id="pickStartLookupHint" style="margin-top:6px;font-size:12px;"></div>
       <div style="height:8px;"></div>
       <button class="btn btn-success" onclick="submitStartPickByDocs(this)">开始拣货 / 피킹 시작</button>
     </div>
@@ -378,9 +379,10 @@
 
     <div class="card">
       <button class="btn btn-danger" onclick="finishPickJob(this)">完成本次拣货 / 이번 피킹 완료</button>
-      <div style="height:6px;"></div>
-      <button class="btn btn-warning btn-sm" style="width:100%;" onclick="finalizePickJob(this, _activeJobId)">整趟完成（全员停止计时）/ 차수 전체 완료 (전원 종료)</button>
-      <div class="muted" style="margin-top:4px;font-size:11px;">仅当所有人都已完成时使用 / 모두 작업이 끝났을 때만 사용</div>
+      <div id="pickFinalizeWrap" style="display:none;margin-top:6px;">
+        <button class="btn btn-warning btn-sm" id="pickFinalizeBtn" style="width:100%;" onclick="finalizePickJob(this, _activeJobId, _pickWorkingTripCreatedBy)">整趟完成（仅创建人，全员停止计时）/ 차수 전체 완료 (생성자만)</button>
+        <div class="muted" id="pickFinalizeHint" style="margin-top:4px;font-size:11px;">仅当所有人都已完成时使用 / 모두 작업이 끝났을 때만 사용</div>
+      </div>
     </div>
 
     <div class="card">
@@ -808,7 +810,7 @@
 <input type="file" id="photoInput" accept="image/*" capture="environment" style="display:none;" onchange="handlePhotoUpload(this)">
 
 <script src="config.js?v=20260424f"></script>
-<script src="app.js?v=20260427b"></script>
+<script src="app.js?v=20260427c"></script>
 <script src="patch.js?v=20260424f"></script>
 </body>
 </html>

@@ -2161,14 +2161,18 @@ var _pickCreateScanner = null;
 var _pickStartScanner = null;
 var _pickWorkingDocList = [];    // 当前工作段的拣货单号
 var _pickWorkingStartedAt = null; // 当前工作段开始时间戳（ms）
+var _pickWorkingTripCreatedBy = '';  // 当前趟次创建人 worker_id（用于 finalize 权限判断）
+var _pickStartLookupCache = {};      // pick_doc_no → v2_pick_doc_lookup 结果（用于扫码后显示参与人）
 var _pickElapsedTimer = null;
 var _pickMode = 'start';         // 'start' | 'create'
 
 function initPickDirect() {
   _pickCreateDocNos = [];
   _pickStartDocNos = [];
+  _pickStartLookupCache = {};
   renderPickDocList("pickCreateDocList", _pickCreateDocNos, "_pickCreateDocNos", "pickCreateDocList");
   renderPickDocList("pickStartDocList", _pickStartDocNos, "_pickStartDocNos", "pickStartDocList");
+  renderPickStartLookupHint();
 
   var inpC = document.getElementById("pickCreateDocInput");
   if (inpC) inpC.onkeydown = function(e) { if (e.key === "Enter") { e.preventDefault(); addPickCreateDoc(); } };
@@ -2220,10 +2224,12 @@ function renderPickDocList(containerId, docs, varName, refreshContainerId) {
     el.innerHTML = '<span class="muted">未添加拣货单号 / 피킹번호 미추가</span>';
     return;
   }
+  // start 列表删单号时同步刷新参与人提示
+  var extraHook = (varName === '_pickStartDocNos') ? ';renderPickStartLookupHint()' : '';
   var html = '<div class="tag-wrap">';
   docs.forEach(function(no, i) {
     html += '<span class="doc-tag">' + esc(no);
-    html += ' <span class="remove" onclick="' + varName + '.splice(' + i + ',1);renderPickDocList(\'' + (refreshContainerId || containerId) + '\',' + varName + ',\'' + varName + '\',\'' + (refreshContainerId || containerId) + '\');">&times;</span>';
+    html += ' <span class="remove" onclick="' + varName + '.splice(' + i + ',1);renderPickDocList(\'' + (refreshContainerId || containerId) + '\',' + varName + ',\'' + varName + '\',\'' + (refreshContainerId || containerId) + '\')' + extraHook + ';">&times;</span>';
     html += '</span>';
   });
   html += '</div>';
@@ -2297,7 +2303,7 @@ async function submitCreatePickTrip(btnEl) {
     });
     if (res && res.ok) {
       var trip = res.trip_no || res.display_no || res.job_id;
-      alert("趟次已创建：" + trip + "\n不会记录您的拣货工时，请将拣货单交给实际拣货人扫码开始。\n차수 생성됨: " + trip + "\n작업시간은 기록되지 않습니다. 피킹번호를 작업자에게 전달해 스캔하여 시작하세요。");
+      alert("趟次已创建：" + trip + "\n趟次已创建，不记录你的拣货工时。请把拣货单交给实际拣货人扫码开始。\n\n차수 생성됨: " + trip + "\n차수가 생성되었습니다. 작업시간은 기록되지 않으며, 피킹번호를 실제 작업자에게 전달해 스캔하여 시작하세요.");
       _pickCreateDocNos = [];
       renderPickDocList("pickCreateDocList", _pickCreateDocNos, "_pickCreateDocNos", "pickCreateDocList");
       stopPickCreateScan();
@@ -2319,8 +2325,48 @@ function addPickStartDoc() {
   if (_pickStartDocNos.indexOf(val) === -1) {
     _pickStartDocNos.push(val);
     renderPickDocList("pickStartDocList", _pickStartDocNos, "_pickStartDocNos", "pickStartDocList");
+    pickStartLookupOne(val);
   }
   if (inp) { inp.value = ""; inp.focus(); }
+}
+
+// 扫码/录入后查 v2_pick_doc_lookup，把"该单当前已有参与人员"显示给现场拣货人
+async function pickStartLookupOne(docNo) {
+  if (!docNo) return;
+  try {
+    var res = await api({ action: "v2_pick_doc_lookup", pick_doc_no: docNo });
+    if (res && res.ok) {
+      _pickStartLookupCache[docNo] = res;
+    } else {
+      _pickStartLookupCache[docNo] = { found: false, pick_doc_no: docNo };
+    }
+  } catch (e) { /* network / auth — 静默 */ }
+  renderPickStartLookupHint();
+}
+
+function renderPickStartLookupHint() {
+  var el = document.getElementById("pickStartLookupHint");
+  if (!el) return;
+  var lines = [];
+  for (var i = 0; i < _pickStartDocNos.length; i++) {
+    var no = _pickStartDocNos[i];
+    var info = _pickStartLookupCache[no];
+    if (!info) continue;
+    if (info.found === false) {
+      lines.push('<div style="color:#ff4d4f;">⚠ ' + esc(no) + ' — 系统未找到该拣货单 / 시스템에서 찾을 수 없음</div>');
+      continue;
+    }
+    var parts = info.participants || [];
+    var actives = parts.filter(function(p) { return p.status === 'working'; }).map(function(p) { return p.worker_name || p.worker_id; });
+    var done = parts.filter(function(p) { return p.status === 'completed'; }).map(function(p) { return p.worker_name || p.worker_id; });
+    var pieces = [];
+    if (actives.length > 0) pieces.push('<span style="color:#1677ff;">当前已有参与人员/현재 작업중: ' + esc(actives.join("、")) + '</span>');
+    if (done.length > 0) pieces.push('<span style="color:#888;">曾参与/이전 작업: ' + esc(done.join("、")) + '</span>');
+    if (parts.length === 0) pieces.push('<span style="color:#52c41a;">尚无人参与，将由你首次开始 / 첫 작업자</span>');
+    var stTip = (info.pick_status === 'completed') ? '（已完成）' : '';
+    lines.push('<div>' + esc(no) + stTip + ' · ' + pieces.join(' · ') + (actives.length > 0 ? '　<span style="color:#999;">你将加入该拣货单的共同拣货 / 함께 작업합니다</span>' : '') + '</div>');
+  }
+  el.innerHTML = lines.join('');
 }
 
 function togglePickStartScan() {
@@ -2339,6 +2385,7 @@ function togglePickStartScan() {
         if (_pickStartDocNos.indexOf(code) === -1) {
           _pickStartDocNos.push(code);
           renderPickDocList("pickStartDocList", _pickStartDocNos, "_pickStartDocNos", "pickStartDocList");
+          pickStartLookupOne(code);
         }
       },
       function() {}
@@ -2382,7 +2429,9 @@ async function submitStartPickByDocs(btnEl) {
       _pickWorkingDocList = (res.picked_doc_nos || []).slice();
       _pickWorkingStartedAt = res.started_at ? new Date(res.started_at).getTime() : Date.now();
       _pickStartDocNos = [];
+      _pickStartLookupCache = {};
       renderPickDocList("pickStartDocList", _pickStartDocNos, "_pickStartDocNos", "pickStartDocList");
+      renderPickStartLookupHint();
       stopPickStartScan();
       enterPickWorkingSection(res);
     } else if (res && res.error === "cross_trip_not_allowed") {
@@ -2417,7 +2466,7 @@ function enterPickWorkingSection(startRes) {
   var pickerEl = document.getElementById("pickWorkingPicker");
   if (pickerEl) pickerEl.textContent = (getWorkerName() || getWorkerId() || "--");
 
-  // 标题 + 开始时间
+  // 标题 + 开始时间 + finalize 按钮显隐
   api({ action: "v2_ops_job_detail", job_id: _activeJobId }).then(function(res) {
     if (res && res.ok && res.job) {
       var t = document.getElementById("pickWorkingTitle");
@@ -2434,6 +2483,21 @@ function enterPickWorkingSection(startRes) {
       var sa = document.getElementById("pickWorkingStartedAt");
       if (sa && _pickWorkingStartedAt) {
         sa.textContent = new Date(_pickWorkingStartedAt).toLocaleString();
+      }
+      // 仅创建人能看到/触发整趟完成
+      var creator = res.job.created_by || '';
+      _pickWorkingTripCreatedBy = creator;
+      var wrap = document.getElementById("pickFinalizeWrap");
+      var btn = document.getElementById("pickFinalizeBtn");
+      var hint = document.getElementById("pickFinalizeHint");
+      if (wrap) {
+        if (creator && creator === getWorkerId()) {
+          wrap.style.display = "";
+          if (btn) btn.setAttribute('data-creator', creator);
+          if (hint) hint.textContent = "您是趟次创建人，可在确认所有人已完成后整趟收尾 / 차수 생성자: 모두 완료 후 마감 가능";
+        } else {
+          wrap.style.display = "none";
+        }
       }
     }
   });
@@ -2567,9 +2631,11 @@ async function loadPickActiveList() {
                   : '待开始 / 시작 대기';
     var summary = '待:' + (t.pick_doc_pending_count || 0) + ' / 中:' + (t.pick_doc_working_count || 0) + ' / 完:' + (t.pick_doc_completed_count || 0);
 
-    // 仅当无人在岗（pending 态）时允许 active list 显示 finalize 入口；working 时由计时页内触发
-    // 用 workers 数组长度判定，比 stored active_worker_count 更可靠
-    var canFinalize = (t.status !== 'completed') && ((t.workers || []).length === 0);
+    // 仅当 (无人在岗) 且 (当前 worker 是趟次创建人) 时显示 finalize 入口
+    // 后端会再做一次权限校验（创建人/ADMINKEY），前端不渲染避免误点
+    var noWorkerActive = (t.workers || []).length === 0;
+    var isCreator = (t.created_by && t.created_by === getWorkerId());
+    var canFinalize = (t.status !== 'completed') && noWorkerActive && isCreator;
 
     html += '<div class="trip-card">';
     html += '<div class="trip-card-header"><span class="trip-tag">' + esc(t.display_no || t.id) + '</span>';
@@ -2578,16 +2644,23 @@ async function loadPickActiveList() {
     html += '<div class="trip-card-meta" style="margin-top:6px;">在岗拣货人 / 작업중:</div><div style="margin-top:2px;">' + wHtml + '</div>';
     html += '<div class="trip-card-meta" style="margin-top:6px;color:#999;font-size:11px;">趟次创建人 / 생성자: ' + esc(t.created_by || "--") + '</div>';
     if (canFinalize) {
-      html += '<div style="margin-top:8px;"><button class="btn btn-warning btn-sm" onclick="finalizePickJob(this,\'' + esc(t.id) + '\')">整趟完成 / 차수 전체 완료</button></div>';
+      html += '<div style="margin-top:8px;"><button class="btn btn-warning btn-sm" onclick="finalizePickJob(this,\'' + esc(t.id) + '\',\'' + esc(t.created_by || '') + '\')">整趟完成（仅创建人）/ 차수 전체 완료 (생성자만)</button></div>';
+    } else if (noWorkerActive && t.status !== 'completed') {
+      html += '<div class="muted" style="margin-top:8px;font-size:11px;">仅趟次创建人或主管可整趟完成 / 차수 생성자 또는 관리자만 전체 완료 가능</div>';
     }
     html += '</div>';
   });
   el.innerHTML = html;
 }
 
-async function finalizePickJob(btnEl, jobId) {
+async function finalizePickJob(btnEl, jobId, createdBy) {
   if (!jobId) return;
-  if (!confirm("整趟完成后将关闭所有人的计时段，并把全部拣货单标记为已完成。\n继续吗？\n\n전체 완료 시 모든 작업자의 시간 기록이 종료되며, 모든 피킹번호가 완료 처리됩니다. 계속하시겠습니까?")) return;
+  // 前端权限拦截：非创建人直接劝退（后端会再校验一次）
+  if (createdBy && createdBy !== getWorkerId()) {
+    alert("只有趟次创建人或主管/管理员可以整趟完成\n차수 생성자 또는 관리자만 전체 완료 가능\n\n创建人 / 생성자: " + createdBy);
+    return;
+  }
+  if (!confirm("确认整趟完成？\n这会结束该趟次所有仍在进行中的拣货计时。\n\n전체 완료를 확인하시겠습니까?\n해당 차수의 진행 중인 모든 피킹 작업시간이 종료됩니다.")) return;
   withActionLock('finalizePickJob_' + jobId, btnEl || null, '提交中.../저장중...', async function() {
     var res = await api({
       action: "v2_pick_job_finalize",
@@ -2611,6 +2684,11 @@ async function finalizePickJob(btnEl, jobId) {
       } else {
         loadPickActiveList();
       }
+    } else if (res && res.error === "forbidden_not_creator") {
+      alert((res.message || "只有趟次创建人或主管/管理员可以整趟完成") +
+            (res.required_creator ? "\n\n创建人 / 생성자: " + res.required_creator : ""));
+    } else if (res && res.error === "missing_worker_id") {
+      alert(res.message || "请提供拣货人ID / worker_id 필요");
     } else if (res && res.error === "already_completed") {
       alert("趟次已完成 / 차수 완료");
       loadPickActiveList();

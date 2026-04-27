@@ -682,13 +682,14 @@ const MIGRATIONS = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_v2_pwd_job ON v2_pick_worker_docs(job_id)`,
   `CREATE INDEX IF NOT EXISTS idx_v2_pwd_segment ON v2_pick_worker_docs(segment_id)`,
-  `CREATE INDEX IF NOT EXISTS idx_v2_pwd_doc ON v2_pick_worker_docs(job_id, pick_doc_no)`,
   `CREATE INDEX IF NOT EXISTS idx_v2_pwd_worker ON v2_pick_worker_docs(worker_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_pwd_pick_doc ON v2_pick_worker_docs(pick_doc_no)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_pwd_job_doc ON v2_pick_worker_docs(job_id, pick_doc_no)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_pwd_seg_doc ON v2_pick_worker_docs(segment_id, pick_doc_no)`,
 ];
 
 // 每次发布迁移变化时手动 +1（patch 段），冷启动只比对一次字符串即可跳过整段 MIGRATIONS
-const CURRENT_SCHEMA_VERSION = 'v2.20260427b';
+const CURRENT_SCHEMA_VERSION = 'v2.20260427c';
 
 let _migrated = false;
 async function ensureMigrated(db) {
@@ -3751,6 +3752,21 @@ route("v2_pick_job_finalize", async (body, env) => {
     }
     if (job.status === 'cancelled') {
       return { ok: false, error: "already_cancelled", message: "趟次已取消" };
+    }
+
+    // ---- 权限收口：仅 ADMINKEY 或 趟次创建人 可整趟完成 ----
+    // OPSKEY 调用时必须 worker_id === job.created_by，否则拒绝
+    const isAdminCall = isAdmin(body, env);
+    if (!isAdminCall) {
+      if (!worker_id) {
+        return { ok: false, error: "missing_worker_id",
+          message: "请提供拣货人ID / worker_id 필요" };
+      }
+      if (worker_id !== (job.created_by || '')) {
+        return { ok: false, error: "forbidden_not_creator",
+          message: "只有趟次创建人或主管/管理员可以整趟完成 / 차수 생성자 또는 관리자만 전체 완료 가능",
+          required_creator: job.created_by || '' };
+      }
     }
 
     // 1) 关闭残留 open segments（每段计算 minutes）
