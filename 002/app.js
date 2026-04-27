@@ -2030,6 +2030,8 @@ async function loadOrderOpsDetail(id) {
   // === Card 2: Pick Docs (if applicable) ===
   if (j.job_type === 'pick_direct') {
     html += '<div class="card"><div class="card-title">' + L("order_ops_detail_pick_docs") + '</div><div id="orderOpsPickDocs"><span class="muted">' + L("loading") + '</span></div></div>';
+    html += '<div class="card"><div class="card-title">' + L("order_ops_detail_pwd_by_doc") + '</div><div id="orderOpsPickByDoc"><span class="muted">' + L("loading") + '</span></div></div>';
+    html += '<div class="card"><div class="card-title">' + L("order_ops_detail_pwd_by_worker") + '</div><div id="orderOpsPickByWorker"><span class="muted">' + L("loading") + '</span></div></div>';
   }
 
   // === Card 3: Workers ===
@@ -2118,18 +2120,120 @@ async function loadOrderOpsDetail(id) {
 
   body.innerHTML = html;
 
-  // Load pick docs if applicable
+  // Load pick docs + breakdown if applicable
   if (j.job_type === 'pick_direct') {
-    var pdRes = await api({ action: "v2_pick_job_docs_list", job_id: j.id });
-    var pdEl = document.getElementById("orderOpsPickDocs");
-    if (pdEl && pdRes && pdRes.ok && pdRes.docs) {
-      if (pdRes.docs.length > 0) {
-        pdEl.innerHTML = '<div class="tag-wrap">' + pdRes.docs.map(function(d) {
-          return '<span class="doc-tag">' + esc(d.pick_doc_no) + '</span>';
-        }).join('') + '</div>';
-      } else {
-        pdEl.innerHTML = '<span class="muted">无拣货单号</span>';
-      }
+    var bkRes = await api({ action: "v2_pick_job_breakdown", job_id: j.id });
+    renderPickBreakdown(bkRes);
+  }
+}
+
+function renderPickBreakdown(bkRes) {
+  var pdEl = document.getElementById("orderOpsPickDocs");
+  var byDocEl = document.getElementById("orderOpsPickByDoc");
+  var byWorkerEl = document.getElementById("orderOpsPickByWorker");
+  if (!bkRes || !bkRes.ok) {
+    if (pdEl) pdEl.innerHTML = '<span class="muted">' + L("no_data") + '</span>';
+    if (byDocEl) byDocEl.innerHTML = '<span class="muted">' + L("no_data") + '</span>';
+    if (byWorkerEl) byWorkerEl.innerHTML = '<span class="muted">' + L("no_data") + '</span>';
+    return;
+  }
+  var docsView = bkRes.docs_view || [];
+  var workersView = bkRes.workers_view || [];
+
+  // 顶部拣货单号 tag 列表（按总状态着色）
+  if (pdEl) {
+    if (docsView.length === 0) {
+      pdEl.innerHTML = '<span class="muted">' + L("no_data") + '</span>';
+    } else {
+      pdEl.innerHTML = '<div class="tag-wrap">' + docsView.map(function(d) {
+        var st = d.pick_status || 'pending';
+        return '<span class="doc-tag is-' + esc(st) + '">' + esc(d.pick_doc_no) + '</span>';
+      }).join('') + '</div>';
+    }
+  }
+
+  // 按单视角：每张单 + 参与人员表格
+  if (byDocEl) {
+    if (docsView.length === 0) {
+      byDocEl.innerHTML = '<span class="muted">' + L("no_data") + '</span>';
+    } else {
+      var dh = '';
+      docsView.forEach(function(d) {
+        var st = d.pick_status || 'pending';
+        var stText = (st === 'completed') ? '已完成/완료' : (st === 'working') ? '拣货中/피킹중' : '待拣/대기';
+        dh += '<div style="border-bottom:1px solid #f0f0f0;padding:10px 0;">';
+        dh += '<div style="margin-bottom:6px;"><span class="doc-tag is-' + esc(st) + '">' + esc(d.pick_doc_no) + '</span> ';
+        dh += '<span class="st st-' + esc(st) + '" style="margin-left:6px;">' + esc(stText) + '</span> ';
+        dh += '<span class="muted" style="margin-left:6px;font-size:12px;">' + L("order_ops_detail_pwd_total_pickers") + ': ' + (d.participants || []).length + '</span>';
+        dh += '</div>';
+        var parts = d.participants || [];
+        if (parts.length === 0) {
+          dh += '<span class="muted">' + L("no_data") + '</span>';
+        } else {
+          dh += '<table class="simple-table"><thead><tr>';
+          dh += '<th>' + L("order_ops_detail_pwd_picker") + '</th>';
+          dh += '<th>' + L("order_ops_detail_pwd_started_at") + '</th>';
+          dh += '<th>' + L("order_ops_detail_pwd_finished_at") + '</th>';
+          dh += '<th>' + L("order_ops_detail_pwd_minutes") + '</th>';
+          dh += '<th>' + L("order_ops_detail_pwd_status") + '</th>';
+          dh += '</tr></thead><tbody>';
+          parts.forEach(function(p) {
+            var pst = p.status || 'working';
+            var pstText = (pst === 'completed') ? '已完成/완료' : '进行中/진행중';
+            dh += '<tr>';
+            dh += '<td>' + esc(p.worker_name || p.worker_id || '--') + '</td>';
+            dh += '<td class="col-time">' + esc(fmtTime(p.started_at)) + '</td>';
+            dh += '<td class="col-time">' + (p.finished_at ? esc(fmtTime(p.finished_at)) : '<span class="st st-working">--</span>') + '</td>';
+            dh += '<td class="col-num">' + (p.minutes_worked != null ? Math.round(p.minutes_worked * 10) / 10 : '--') + '</td>';
+            dh += '<td><span class="st st-' + esc(pst === 'completed' ? 'completed' : 'working') + '">' + esc(pstText) + '</span></td>';
+            dh += '</tr>';
+          });
+          dh += '</tbody></table>';
+        }
+        dh += '</div>';
+      });
+      byDocEl.innerHTML = dh;
+    }
+  }
+
+  // 按人视角：每人 + total_minutes + 参与的单
+  if (byWorkerEl) {
+    if (workersView.length === 0) {
+      byWorkerEl.innerHTML = '<span class="muted">' + L("no_data") + '</span>';
+    } else {
+      var wh = '';
+      workersView.forEach(function(w) {
+        wh += '<div style="border-bottom:1px solid #f0f0f0;padding:10px 0;">';
+        wh += '<div style="margin-bottom:6px;"><b>' + esc(w.worker_name || w.worker_id || '--') + '</b> ';
+        wh += '<span class="muted" style="margin-left:8px;font-size:12px;">' + L("order_ops_detail_pwd_total_minutes") + ': <b style="color:#1677ff;">' + (w.total_minutes || 0) + '</b></span></div>';
+        var docs = w.pick_doc_nos || [];
+        if (docs.length > 0) {
+          wh += '<div class="detail-field"><b>' + L("order_ops_detail_pwd_picked_docs") + ':</b> <div class="tag-wrap" style="margin-top:4px;">';
+          wh += docs.map(function(d) { return '<span class="doc-tag">' + esc(d) + '</span>'; }).join('');
+          wh += '</div></div>';
+        }
+        var segs = w.segments || [];
+        if (segs.length > 0) {
+          wh += '<div class="detail-field" style="margin-top:6px;"><b>' + L("order_ops_detail_pwd_segments") + ':</b></div>';
+          wh += '<table class="simple-table"><thead><tr>';
+          wh += '<th>' + L("order_ops_detail_pwd_started_at") + '</th>';
+          wh += '<th>' + L("order_ops_detail_pwd_finished_at") + '</th>';
+          wh += '<th>' + L("order_ops_detail_pwd_minutes") + '</th>';
+          wh += '<th>' + L("order_ops_detail_pwd_picked_docs") + '</th>';
+          wh += '</tr></thead><tbody>';
+          segs.forEach(function(s) {
+            wh += '<tr>';
+            wh += '<td class="col-time">' + esc(fmtTime(s.joined_at)) + '</td>';
+            wh += '<td class="col-time">' + (s.left_at ? esc(fmtTime(s.left_at)) : '<span class="st st-working">--</span>') + '</td>';
+            wh += '<td class="col-num">' + (s.minutes_worked != null ? Math.round(s.minutes_worked * 10) / 10 : '--') + '</td>';
+            wh += '<td>' + (s.pick_doc_nos || []).map(function(d) { return '<span class="doc-tag" style="margin-right:2px;">' + esc(d) + '</span>'; }).join('') + '</td>';
+            wh += '</tr>';
+          });
+          wh += '</tbody></table>';
+        }
+        wh += '</div>';
+      });
+      byWorkerEl.innerHTML = wh;
     }
   }
 }

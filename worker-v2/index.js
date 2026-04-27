@@ -653,10 +653,42 @@ const MIGRATIONS = [
   `CREATE INDEX IF NOT EXISTS idx_v2_outbound_status_date_created ON v2_outbound_orders(status, order_date, created_at)`,
   `CREATE INDEX IF NOT EXISTS idx_v2_feedback_status_created ON v2_field_feedbacks(status, created_at)`,
   `CREATE INDEX IF NOT EXISTS idx_v2_inbound_status_date_created ON v2_inbound_plans(status, plan_date, created_at)`,
+
+  // ---- 代发拣货（v2.20260427a）：拣货单级状态字段（pick_status 表示"整张单总状态"，非个人独占）----
+  `ALTER TABLE v2_ops_job_pick_docs ADD COLUMN pick_status TEXT DEFAULT 'pending'`,
+  `ALTER TABLE v2_ops_job_pick_docs ADD COLUMN pick_started_at TEXT DEFAULT ''`,
+  `ALTER TABLE v2_ops_job_pick_docs ADD COLUMN pick_finished_at TEXT DEFAULT ''`,
+  // legacy informational 字段（多人共拣后不再代表归属，仅留首位拣货人参考）
+  `ALTER TABLE v2_ops_job_pick_docs ADD COLUMN picked_by_worker_id TEXT DEFAULT ''`,
+  `ALTER TABLE v2_ops_job_pick_docs ADD COLUMN picked_by_worker_name TEXT DEFAULT ''`,
+  `ALTER TABLE v2_ops_job_pick_docs ADD COLUMN picker_segment_id TEXT DEFAULT ''`,
+  `ALTER TABLE v2_ops_job_pick_docs ADD COLUMN assigned_worker_id TEXT DEFAULT ''`,
+  `ALTER TABLE v2_ops_job_pick_docs ADD COLUMN assigned_worker_name TEXT DEFAULT ''`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_pick_docs_status ON v2_ops_job_pick_docs(pick_status)`,
+
+  // ---- 代发拣货（v2.20260427b）：人-单 多对多明细（同一单可多人共拣，同 segment 可多单）----
+  `CREATE TABLE IF NOT EXISTS v2_pick_worker_docs (
+    id TEXT PRIMARY KEY,
+    job_id TEXT DEFAULT '',
+    segment_id TEXT DEFAULT '',
+    worker_id TEXT DEFAULT '',
+    worker_name TEXT DEFAULT '',
+    pick_doc_no TEXT DEFAULT '',
+    started_at TEXT DEFAULT '',
+    finished_at TEXT DEFAULT '',
+    minutes_worked REAL DEFAULT 0,
+    status TEXT DEFAULT 'working',
+    created_at TEXT DEFAULT ''
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_pwd_job ON v2_pick_worker_docs(job_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_pwd_segment ON v2_pick_worker_docs(segment_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_pwd_doc ON v2_pick_worker_docs(job_id, pick_doc_no)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_pwd_worker ON v2_pick_worker_docs(worker_id)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_pwd_seg_doc ON v2_pick_worker_docs(segment_id, pick_doc_no)`,
 ];
 
 // 每次发布迁移变化时手动 +1（patch 段），冷启动只比对一次字符串即可跳过整段 MIGRATIONS
-const CURRENT_SCHEMA_VERSION = 'v2.20260424f';
+const CURRENT_SCHEMA_VERSION = 'v2.20260427b';
 
 let _migrated = false;
 async function ensureMigrated(db) {
@@ -3168,46 +3200,37 @@ route("v2_scan_batch_list", async (body, env) => {
 
 // =====================================================
 // PICK DIRECT — 代发拣货
+// 流程语义（v2.20260427a 重构）：
+//   1) v2_pick_job_start          : 仅创建趟次（pending 态），录入 pick_doc_nos，不计任何工时
+//   2) v2_pick_job_start_by_docs  : 实际拣货人扫码 N 个拣货单 → 同一趟次内开 segment，开始计时
+//   3) v2_pick_job_finish         : 当前拣货人完成自己这一段单，趟次内多人各自独立结算
+//   4) v2_pick_doc_lookup         : 现场扫码识别单号归属/状态/可否开始
+//   created_by 仅代表趟次录入人，不代表拣货人
 // =====================================================
 route("v2_pick_job_start", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
-  const worker_id = String(body.worker_id || "").trim();
+  const worker_id = String(body.worker_id || "").trim();   // creator id（仅审计，不计时）
   const worker_name = String(body.worker_name || "").trim();
-  if (!worker_id) return err("missing worker_id");
 
   // pick_doc_nos: array of pick document numbers
   let pick_doc_nos = body.pick_doc_nos || [];
   if (typeof pick_doc_nos === 'string') {
     pick_doc_nos = pick_doc_nos.split(',').map(s => s.trim()).filter(Boolean);
   }
+  pick_doc_nos = Array.from(new Set(
+    pick_doc_nos.map(s => String(s || '').trim()).filter(Boolean)
+  ));
   if (pick_doc_nos.length === 0) return err("missing pick_doc_nos");
 
   return withIdem(env, body, "v2_pick_job_start", async () => {
     const t = now();
 
-    const busy = await checkWorkerBusy(env, worker_id, null);
-    if (busy) return { ok: false, error: "worker_has_active_job", active_job_id: busy.job_id, active_job_type: busy.job_type };
-
-    // Cross-trip worker exclusion: same worker cannot be in 2 active pick trips
-    const workerConflict = await env.DB.prepare(
-      `SELECT j.id, j.display_no FROM v2_ops_jobs j
-       JOIN v2_ops_job_workers w ON w.job_id = j.id
-       WHERE j.job_type='pick_direct' AND j.status IN ('pending','working')
-       AND j.is_temporary_interrupt=0 AND w.worker_id=? AND w.left_at=''
-       LIMIT 1`
-    ).bind(worker_id).first();
-    if (workerConflict) {
-      return { ok: false, error: "worker_already_in_pick_trip",
-        message: "您已在趟次 " + (workerConflict.display_no || workerConflict.id) + " 中，请先完成后再开始新趟次",
-        conflict_trip: workerConflict.display_no || workerConflict.id };
-    }
-
-    // Conflict check: reject if any doc_no is already in an active trip
+    // 单号占用冲突：拒绝重复录入到第二个未完成趟次
     for (const docNo of pick_doc_nos) {
       const conflict = await env.DB.prepare(
         `SELECT j.id, j.display_no FROM v2_ops_jobs j
          JOIN v2_ops_job_pick_docs pd ON pd.job_id = j.id
-         WHERE j.job_type='pick_direct' AND j.status IN ('pending','working')
+         WHERE j.job_type='pick_direct' AND j.status IN ('pending','working','awaiting_close')
          AND j.is_temporary_interrupt=0 AND pd.pick_doc_no=?
          LIMIT 1`
       ).bind(docNo).first();
@@ -3218,32 +3241,318 @@ route("v2_pick_job_start", async (body, env) => {
       }
     }
 
-    // Generate trip number
     const trip_no = await nextPickTripNo(env);
     const job_id = "JOB-" + uid();
 
+    // 趟次仅 pending，等拣货人扫码切换到 working；active_worker_count=0
     await env.DB.prepare(`
       INSERT INTO v2_ops_jobs(id, flow_stage, biz_class, job_type, related_doc_type, related_doc_id,
         status, parent_job_id, is_temporary_interrupt, interrupt_type, created_by, created_at, updated_at,
         active_worker_count, display_no)
-      VALUES(?,'order_op','direct_ship','pick_direct','','','working','',0,'',?,?,?,1,?)
+      VALUES(?,'order_op','direct_ship','pick_direct','','','pending','',0,'',?,?,?,0,?)
     `).bind(job_id, worker_id, t, t, trip_no).run();
 
-    // Insert pick doc nos
+    // 写 pick docs（pick_status 默认 'pending'）
+    const docRows = [];
     for (const docNo of pick_doc_nos) {
+      const pd_id = "PD-" + uid();
       await env.DB.prepare(
-        "INSERT INTO v2_ops_job_pick_docs(id, job_id, pick_doc_no, created_at) VALUES(?,?,?,?)"
-      ).bind("PD-" + uid(), job_id, docNo, t).run();
+        "INSERT INTO v2_ops_job_pick_docs(id, job_id, pick_doc_no, pick_status, created_at) VALUES(?,?,?, 'pending', ?)"
+      ).bind(pd_id, job_id, docNo, t).run();
+      docRows.push({ id: pd_id, pick_doc_no: docNo, pick_status: 'pending' });
     }
 
-    // Add creator as first worker
+    return {
+      ok: true,
+      job_id,
+      trip_no,
+      display_no: trip_no,
+      pick_doc_nos: pick_doc_nos,
+      pick_docs: docRows,
+      created_by: worker_id,
+      is_new_job: true
+    };
+  });
+});
+
+// =====================================================
+// 实际拣货人扫码开始 — 一次可扫 N 个拣货单一起开拣
+// 多对多语义：同一个 pick_doc 允许多人共同参与；通过 v2_pick_worker_docs 记录每人每单的明细
+// =====================================================
+route("v2_pick_job_start_by_docs", async (body, env) => {
+  if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  const worker_id = String(body.worker_id || "").trim();
+  const worker_name = String(body.worker_name || "").trim();
+  if (!worker_id) return err("missing worker_id");
+
+  let pick_doc_nos = body.pick_doc_nos || [];
+  if (typeof pick_doc_nos === 'string') {
+    pick_doc_nos = pick_doc_nos.split(',').map(s => s.trim()).filter(Boolean);
+  }
+  pick_doc_nos = Array.from(new Set(
+    pick_doc_nos.map(s => String(s || '').trim()).filter(Boolean)
+  ));
+  if (pick_doc_nos.length === 0) return err("missing pick_doc_nos");
+
+  return withIdem(env, body, "v2_pick_job_start_by_docs", async () => {
+    const t = now();
+
+    // 当前 worker 不能有其他活跃任务（业务规则：一人同时只能在一个 active job）
+    const busy = await checkWorkerBusy(env, worker_id, null);
+    if (busy) {
+      return { ok: false, error: "worker_has_active_job",
+        message: "您当前已有进行中的任务，请先完成或暂离后再开始拣货",
+        active_job_id: busy.job_id, active_job_type: busy.job_type };
+    }
+
+    // 解析每个拣货单 → 所属 job + 当前状态
+    const docs = [];
+    for (const docNo of pick_doc_nos) {
+      const row = await env.DB.prepare(
+        `SELECT pd.*, j.id as j_id, j.display_no as j_display_no, j.status as j_status,
+                j.is_temporary_interrupt as j_interrupt
+         FROM v2_ops_job_pick_docs pd
+         JOIN v2_ops_jobs j ON j.id = pd.job_id
+         WHERE j.job_type='pick_direct' AND pd.pick_doc_no=?
+         ORDER BY pd.created_at DESC LIMIT 1`
+      ).bind(docNo).first();
+      if (!row) {
+        return { ok: false, error: "doc_not_found",
+          message: "拣货单 " + docNo + " 不存在，请确认是否已创建趟次",
+          conflict_doc_no: docNo };
+      }
+      if (row.j_status === 'completed') {
+        return { ok: false, error: "trip_already_completed",
+          message: "拣货单 " + docNo + " 所属趟次已完成",
+          conflict_doc_no: docNo };
+      }
+      if (row.j_status === 'cancelled') {
+        return { ok: false, error: "trip_cancelled",
+          message: "拣货单 " + docNo + " 所属趟次已取消",
+          conflict_doc_no: docNo };
+      }
+      if (row.j_interrupt) {
+        return { ok: false, error: "trip_interrupted",
+          message: "拣货单 " + docNo + " 所属趟次正处于临时挂起",
+          conflict_doc_no: docNo };
+      }
+      // 注意：不再检查 pick_status='working' 的"独占"，允许多人共拣
+      docs.push(row);
+    }
+
+    // 跨趟次拒绝：所有扫描单必须属于同一个趟次
+    const jobIds = Array.from(new Set(docs.map(d => d.j_id)));
+    if (jobIds.length > 1) {
+      const tripNos = Array.from(new Set(docs.map(d => d.j_display_no || d.j_id)));
+      return { ok: false, error: "cross_trip_not_allowed",
+        message: "不能跨趟次同时拣货（涉及趟次：" + tripNos.join(", ") + "），请确认拣货单号",
+        trips: tripNos };
+    }
+
+    const job_id = jobIds[0];
+
+    // 创建拣货人 segment（开始计时）
     const seg_id = "WS-" + uid();
     await env.DB.prepare(`
       INSERT INTO v2_ops_job_workers(id, job_id, worker_id, worker_name, joined_at)
       VALUES(?,?,?,?,?)
     `).bind(seg_id, job_id, worker_id, worker_name, t).run();
 
-    return { ok: true, job_id, worker_seg_id: seg_id, trip_no, is_new_job: true };
+    // 写多对多明细 v2_pick_worker_docs（每个单一条）
+    for (const d of docs) {
+      const pwd_id = "PWD-" + uid();
+      await env.DB.prepare(`
+        INSERT INTO v2_pick_worker_docs(id, job_id, segment_id, worker_id, worker_name,
+          pick_doc_no, started_at, status, created_at)
+        VALUES(?,?,?,?,?,?,?, 'working', ?)
+      `).bind(pwd_id, job_id, seg_id, worker_id, worker_name, d.pick_doc_no, t, t).run();
+
+      // pick_doc 总状态：pending → working（"至少一人开始过"），不绑定独占
+      // pick_started_at 仅在首次开始时写入；首位 picker 信息仅作参考，不代表独占
+      if ((d.pick_status || 'pending') === 'pending') {
+        await env.DB.prepare(
+          `UPDATE v2_ops_job_pick_docs
+           SET pick_status='working',
+               pick_started_at=COALESCE(NULLIF(pick_started_at,''), ?),
+               picked_by_worker_id=COALESCE(NULLIF(picked_by_worker_id,''), ?),
+               picked_by_worker_name=COALESCE(NULLIF(picked_by_worker_name,''), ?)
+           WHERE id=?`
+        ).bind(t, worker_id, worker_name, d.id).run();
+      }
+    }
+
+    // 趟次 → working；重算 active_worker_count
+    await env.DB.prepare(
+      "UPDATE v2_ops_jobs SET status='working', updated_at=? WHERE id=?"
+    ).bind(t, job_id).run();
+    await recalcActiveCount(env, job_id, t);
+
+    const job = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
+    const allDocs = await env.DB.prepare(
+      "SELECT * FROM v2_ops_job_pick_docs WHERE job_id=? ORDER BY created_at"
+    ).bind(job_id).all();
+
+    return {
+      ok: true,
+      job_id,
+      worker_seg_id: seg_id,
+      trip_no: job ? (job.display_no || '') : '',
+      display_no: job ? (job.display_no || '') : '',
+      started_at: t,
+      picked_doc_nos: docs.map(d => d.pick_doc_no),
+      job_pick_docs: allDocs.results || []
+    };
+  });
+});
+
+// =====================================================
+// 扫码识别拣货单 — 返回趟次/总状态/已参与人员；不做写操作
+// =====================================================
+route("v2_pick_doc_lookup", async (body, env) => {
+  if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  const docNo = String(body.pick_doc_no || "").trim();
+  if (!docNo) return err("missing pick_doc_no");
+
+  const row = await env.DB.prepare(
+    `SELECT pd.*, j.id as j_id, j.display_no as j_display_no, j.status as j_status,
+            j.is_temporary_interrupt as j_interrupt,
+            j.created_by as j_created_by, j.created_at as j_created_at
+     FROM v2_ops_job_pick_docs pd
+     JOIN v2_ops_jobs j ON j.id = pd.job_id
+     WHERE j.job_type='pick_direct' AND pd.pick_doc_no=?
+     ORDER BY pd.created_at DESC LIMIT 1`
+  ).bind(docNo).first();
+  if (!row) {
+    return json({ ok: true, found: false, pick_doc_no: docNo });
+  }
+  const pickStatus = row.pick_status || 'pending';
+  // 参与人员明细（多对多）
+  const partsRs = await env.DB.prepare(
+    `SELECT worker_id, worker_name, started_at, finished_at, minutes_worked, status
+     FROM v2_pick_worker_docs WHERE job_id=? AND pick_doc_no=? ORDER BY started_at`
+  ).bind(row.j_id, row.pick_doc_no).all();
+  const participants = partsRs.results || [];
+  const can_join = (
+    row.j_status !== 'completed' &&
+    row.j_status !== 'cancelled' &&
+    !row.j_interrupt
+  );
+  return json({
+    ok: true,
+    found: true,
+    pick_doc_no: row.pick_doc_no,
+    pick_status: pickStatus,
+    pick_started_at: row.pick_started_at || '',
+    pick_finished_at: row.pick_finished_at || '',
+    job_id: row.j_id,
+    job_display_no: row.j_display_no || '',
+    job_status: row.j_status || '',
+    job_interrupted: !!row.j_interrupt,
+    job_created_by: row.j_created_by || '',
+    job_created_at: row.j_created_at || '',
+    participants,
+    active_picker_count: participants.filter(p => p.status === 'working').length,
+    can_join,
+    can_start: can_join  // 新语义：可加入即可开始
+  });
+});
+
+// =====================================================
+// PICK BREAKDOWN — 按单/按人双视角明细（供 002 详情、看板使用）
+// =====================================================
+route("v2_pick_job_breakdown", async (body, env) => {
+  if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  const job_id = String(body.job_id || "").trim();
+  if (!job_id) return err("missing job_id");
+
+  const docsRs = await env.DB.prepare(
+    `SELECT id, pick_doc_no, pick_status, pick_started_at, pick_finished_at, created_at
+     FROM v2_ops_job_pick_docs WHERE job_id=? ORDER BY created_at`
+  ).bind(job_id).all();
+  const pwdRs = await env.DB.prepare(
+    `SELECT id, segment_id, worker_id, worker_name, pick_doc_no,
+            started_at, finished_at, minutes_worked, status, created_at
+     FROM v2_pick_worker_docs WHERE job_id=? ORDER BY started_at, created_at`
+  ).bind(job_id).all();
+  const segsRs = await env.DB.prepare(
+    `SELECT id, worker_id, worker_name, joined_at, left_at, minutes_worked, leave_reason
+     FROM v2_ops_job_workers WHERE job_id=? ORDER BY joined_at`
+  ).bind(job_id).all();
+
+  const docs = docsRs.results || [];
+  const pwds = pwdRs.results || [];
+  const segs = segsRs.results || [];
+
+  // 按单分组：每张单的参与人员明细
+  const byDoc = {};
+  for (const d of docs) {
+    byDoc[d.pick_doc_no] = {
+      pick_doc_no: d.pick_doc_no,
+      pick_status: d.pick_status || 'pending',
+      pick_started_at: d.pick_started_at || '',
+      pick_finished_at: d.pick_finished_at || '',
+      participants: []
+    };
+  }
+  for (const p of pwds) {
+    if (!byDoc[p.pick_doc_no]) {
+      // 有可能 pick_doc 被删但 pwd 还在（理论上不该）
+      byDoc[p.pick_doc_no] = {
+        pick_doc_no: p.pick_doc_no, pick_status: 'unknown',
+        pick_started_at: '', pick_finished_at: '', participants: []
+      };
+    }
+    byDoc[p.pick_doc_no].participants.push({
+      worker_id: p.worker_id,
+      worker_name: p.worker_name,
+      segment_id: p.segment_id,
+      started_at: p.started_at,
+      finished_at: p.finished_at,
+      minutes_worked: Number(p.minutes_worked) || 0,
+      status: p.status
+    });
+  }
+
+  // 按人分组：每人参与的单 + 总耗时
+  const byWorker = {};
+  for (const s of segs) {
+    if (!byWorker[s.worker_id]) {
+      byWorker[s.worker_id] = {
+        worker_id: s.worker_id,
+        worker_name: s.worker_name,
+        segments: [],
+        pick_doc_nos: [],
+        total_minutes: 0
+      };
+    }
+    const segPwds = pwds.filter(p => p.segment_id === s.id);
+    byWorker[s.worker_id].segments.push({
+      segment_id: s.id,
+      joined_at: s.joined_at,
+      left_at: s.left_at || '',
+      minutes_worked: Number(s.minutes_worked) || 0,
+      leave_reason: s.leave_reason || '',
+      pick_doc_nos: segPwds.map(p => p.pick_doc_no)
+    });
+    byWorker[s.worker_id].total_minutes += (Number(s.minutes_worked) || 0);
+    for (const p of segPwds) {
+      if (byWorker[s.worker_id].pick_doc_nos.indexOf(p.pick_doc_no) === -1) {
+        byWorker[s.worker_id].pick_doc_nos.push(p.pick_doc_no);
+      }
+    }
+  }
+  // 圆整 total_minutes
+  Object.values(byWorker).forEach(w => {
+    w.total_minutes = Math.round(w.total_minutes * 10) / 10;
+  });
+
+  return json({
+    ok: true,
+    job_id,
+    docs_view: Object.values(byDoc),
+    workers_view: Object.values(byWorker),
+    segments: segs,
+    pick_worker_docs: pwds
   });
 });
 
@@ -3252,9 +3561,28 @@ route("v2_pick_job_docs_list", async (body, env) => {
   const job_id = String(body.job_id || "").trim();
   if (!job_id) return err("missing job_id");
   const allDocs = await env.DB.prepare(
-    "SELECT pick_doc_no, created_at FROM v2_ops_job_pick_docs WHERE job_id=? ORDER BY created_at"
+    `SELECT id, job_id, pick_doc_no, pick_status, pick_started_at, pick_finished_at, created_at
+     FROM v2_ops_job_pick_docs WHERE job_id=? ORDER BY created_at`
   ).bind(job_id).all();
-  return json({ ok: true, docs: allDocs.results || [] });
+  const pwds = await env.DB.prepare(
+    `SELECT pick_doc_no, worker_id, worker_name, segment_id, started_at, finished_at,
+            minutes_worked, status
+     FROM v2_pick_worker_docs WHERE job_id=? ORDER BY started_at`
+  ).bind(job_id).all();
+  const partsByDoc = {};
+  for (const p of (pwds.results || [])) {
+    if (!partsByDoc[p.pick_doc_no]) partsByDoc[p.pick_doc_no] = [];
+    partsByDoc[p.pick_doc_no].push(p);
+  }
+  const docs = (allDocs.results || []).map(d => {
+    const parts = partsByDoc[d.pick_doc_no] || [];
+    return Object.assign({}, d, {
+      participants: parts,
+      active_picker_count: parts.filter(p => p.status === 'working').length,
+      total_picker_count: new Set(parts.map(p => p.worker_id)).size
+    });
+  });
+  return json({ ok: true, docs });
 });
 
 route("v2_pick_job_add_docs", async (body, env) => {
@@ -3308,73 +3636,197 @@ route("v2_pick_job_add_docs", async (body, env) => {
   });
 });
 
+// =====================================================
+// PICK FINISH — 当前拣货人完成"自己这一段"
+// 多对多语义：
+//   - 仅关闭当前 worker 的 open segment（同单仍可被其他人继续拣）
+//   - 把该 segment 对应的 v2_pick_worker_docs → status='completed' + finished_at + minutes_worked
+//   - 不自动把整张拣货单标记 completed，整趟次也不自动 completed
+//   - 趟次完成由 v2_pick_job_finalize 显式触发
+//   - 当 active=0 且仍有 working 中的 pwd 时：视为"全员暂离"，趟次仍 pending（等待恢复或 finalize）
+// =====================================================
 route("v2_pick_job_finish", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
   const job_id = String(body.job_id || "").trim();
   const worker_id = String(body.worker_id || "").trim();
   if (!job_id) return err("missing job_id");
+  if (!worker_id) return err("missing worker_id");
 
   return withIdem(env, body, "v2_pick_job_finish", async () => {
     const t = now();
 
-    // Idempotency fallback: already completed
-    const jobCheck = await env.DB.prepare("SELECT status FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
-    if (jobCheck && jobCheck.status === 'completed') {
-      return { ok: false, error: "already_completed", message: "任务已完成，请勿重复提交" };
+    const jobCheck = await env.DB.prepare(
+      "SELECT id, status FROM v2_ops_jobs WHERE id=?"
+    ).bind(job_id).first();
+    if (!jobCheck) return { ok: false, error: "job_not_found", message: "趟次不存在" };
+    if (jobCheck.status === 'cancelled') {
+      return { ok: false, error: "already_cancelled", message: "趟次已取消" };
     }
 
-    // 1. Close this worker's segments only
-    await closeAllOpenSegs(env, job_id, worker_id, t, 'finished');
-
-    // 2. Recalc active count
-    const realCount = await recalcActiveCount(env, job_id, t);
-
-    // 3. If others still working, block completion
-    if (realCount > 0) {
-      return { ok: false, error: "others_still_working",
-        message: "您已退出此趟次，还有 " + realCount + " 人继续作业",
-        active_worker_count: realCount };
+    // 找到当前 worker 的 open segment（最近一段）
+    const openSeg = await findOpenSeg(env, job_id, worker_id);
+    if (!openSeg) {
+      if (jobCheck.status === 'completed') {
+        return { ok: false, error: "already_completed", message: "趟次已完成，请勿重复提交" };
+      }
+      return { ok: false, error: "no_open_segment",
+        message: "您未在该趟次中拣货，无法完成" };
     }
 
-    // 4. Last person — save result and complete
+    // 1) 关闭 segment（计算 minutes_worked）
+    const minutes = Math.round(
+      (new Date(t).getTime() - new Date(openSeg.joined_at).getTime()) / 60000 * 10
+    ) / 10;
+    const minutesSafe = Math.max(0, minutes);
+    await env.DB.prepare(
+      "UPDATE v2_ops_job_workers SET left_at=?, minutes_worked=?, leave_reason='finished' WHERE id=?"
+    ).bind(t, minutesSafe, openSeg.id).run();
+
+    // 2) 关闭该 segment 名下所有 v2_pick_worker_docs（多对多明细）
+    const pwdRs = await env.DB.prepare(
+      "SELECT * FROM v2_pick_worker_docs WHERE segment_id=? AND status='working'"
+    ).bind(openSeg.id).all();
+    const segPwds = pwdRs.results || [];
+    for (const pwd of segPwds) {
+      await env.DB.prepare(
+        "UPDATE v2_pick_worker_docs SET status='completed', finished_at=?, minutes_worked=? WHERE id=?"
+      ).bind(t, minutesSafe, pwd.id).run();
+    }
+    const segDocNos = segPwds.map(p => p.pick_doc_no);
+
+    // 3) 写本拣货人段独立的结果记录（便于按拣货人分组展示）
     const remark = String(body.remark || "").trim();
     const result_note = String(body.result_note || "").trim();
-
-    const allDocs = await env.DB.prepare(
-      "SELECT pick_doc_no FROM v2_ops_job_pick_docs WHERE job_id=? ORDER BY created_at"
-    ).bind(job_id).all();
-    const docNos = (allDocs.results || []).map(r => r.pick_doc_no);
-
     const result_id = "RES-" + uid();
     await env.DB.prepare(`
       INSERT INTO v2_ops_job_results(id, job_id, remark, result_json, result_lines_json, created_by, created_at)
       VALUES(?,?,?,?,?,?,?)
     `).bind(result_id, job_id, remark, JSON.stringify({
+      segment_id: openSeg.id,
+      worker_id,
+      worker_name: openSeg.worker_name || '',
+      pick_doc_nos: segDocNos,
+      minutes_worked: minutesSafe,
       result_note,
-      pick_doc_nos: docNos
+      kind: 'segment_finish'
     }), '[]', worker_id, t).run();
 
-    // Complete job — close any stale open segments (safety net)
+    // 4) 重算 active count；趟次状态：active>0 → working，否则 → pending（等待 finalize）
+    const realCount = await recalcActiveCount(env, job_id, t);
+    const newStatus = (realCount > 0) ? 'working' : 'pending';
     await env.DB.prepare(
-      "UPDATE v2_ops_jobs SET status='completed', active_worker_count=0, updated_at=? WHERE id=?"
-    ).bind(t, job_id).run();
-    await env.DB.prepare(
-      "UPDATE v2_ops_job_workers SET left_at=?, leave_reason='job_completed' WHERE job_id=? AND left_at=''"
-    ).bind(t, job_id).run();
+      "UPDATE v2_ops_jobs SET status=?, updated_at=? WHERE id=?"
+    ).bind(newStatus, t, job_id).run();
 
-    return { ok: true };
+    return {
+      ok: true,
+      job_id,
+      segment_id: openSeg.id,
+      minutes_worked: minutesSafe,
+      finished_pick_doc_nos: segDocNos,
+      job_status: newStatus,
+      active_worker_count: realCount
+    };
   });
 });
 
 // =====================================================
-// PICK DIRECT — 活跃趟次列表
+// PICK FINALIZE — 趟次整体完结（由创建人/主管/最后一位拣货人触发）
+// 关闭所有残留 segment、所有未完结的 pwd、所有 pick_docs → completed；趟次 → completed
+// =====================================================
+route("v2_pick_job_finalize", async (body, env) => {
+  if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  const job_id = String(body.job_id || "").trim();
+  const worker_id = String(body.worker_id || "").trim();
+  if (!job_id) return err("missing job_id");
+
+  return withIdem(env, body, "v2_pick_job_finalize", async () => {
+    const t = now();
+    const job = await env.DB.prepare(
+      "SELECT * FROM v2_ops_jobs WHERE id=? AND job_type='pick_direct'"
+    ).bind(job_id).first();
+    if (!job) return { ok: false, error: "job_not_found", message: "趟次不存在" };
+    if (job.status === 'completed') {
+      return { ok: false, error: "already_completed", message: "趟次已完成，请勿重复提交" };
+    }
+    if (job.status === 'cancelled') {
+      return { ok: false, error: "already_cancelled", message: "趟次已取消" };
+    }
+
+    // 1) 关闭残留 open segments（每段计算 minutes）
+    const stale = await env.DB.prepare(
+      "SELECT id, worker_id, joined_at FROM v2_ops_job_workers WHERE job_id=? AND left_at=''"
+    ).bind(job_id).all();
+    for (const s of (stale.results || [])) {
+      const m = Math.max(0, Math.round(
+        (new Date(t).getTime() - new Date(s.joined_at).getTime()) / 60000 * 10
+      ) / 10);
+      await env.DB.prepare(
+        "UPDATE v2_ops_job_workers SET left_at=?, minutes_worked=?, leave_reason='finalize' WHERE id=?"
+      ).bind(t, m, s.id).run();
+      // 关该 segment 名下未完成的 pwd
+      await env.DB.prepare(
+        "UPDATE v2_pick_worker_docs SET status='completed', finished_at=?, minutes_worked=? WHERE segment_id=? AND status='working'"
+      ).bind(t, m, s.id).run();
+    }
+
+    // 2) pick_docs 全部 → completed
+    await env.DB.prepare(
+      "UPDATE v2_ops_job_pick_docs SET pick_status='completed', pick_finished_at=COALESCE(NULLIF(pick_finished_at,''), ?) WHERE job_id=? AND pick_status!='completed'"
+    ).bind(t, job_id).run();
+
+    // 3) 写整趟次最终结果记录
+    const remark = String(body.remark || "").trim();
+    const result_note = String(body.result_note || "").trim();
+    const allDocs = await env.DB.prepare(
+      "SELECT pick_doc_no FROM v2_ops_job_pick_docs WHERE job_id=? ORDER BY created_at"
+    ).bind(job_id).all();
+    const docNos = (allDocs.results || []).map(r => r.pick_doc_no);
+    const totalsRs = await env.DB.prepare(
+      `SELECT COUNT(DISTINCT worker_id) as worker_count,
+              COUNT(*) as pwd_count,
+              COALESCE(SUM(minutes_worked), 0) as total_minutes
+       FROM v2_pick_worker_docs WHERE job_id=?`
+    ).bind(job_id).first();
+    const result_id = "RES-" + uid();
+    await env.DB.prepare(`
+      INSERT INTO v2_ops_job_results(id, job_id, remark, result_json, result_lines_json, created_by, created_at)
+      VALUES(?,?,?,?,?,?,?)
+    `).bind(result_id, job_id, remark, JSON.stringify({
+      kind: 'trip_finalize',
+      pick_doc_nos: docNos,
+      worker_count: (totalsRs && totalsRs.worker_count) || 0,
+      total_pwd: (totalsRs && totalsRs.pwd_count) || 0,
+      total_minutes: Math.round(((totalsRs && totalsRs.total_minutes) || 0) * 10) / 10,
+      result_note,
+      finalized_by: worker_id
+    }), '[]', worker_id, t).run();
+
+    // 4) job → completed
+    await env.DB.prepare(
+      "UPDATE v2_ops_jobs SET status='completed', active_worker_count=0, updated_at=? WHERE id=?"
+    ).bind(t, job_id).run();
+
+    return {
+      ok: true,
+      job_id,
+      finalized_at: t,
+      pick_doc_count: docNos.length,
+      worker_count: (totalsRs && totalsRs.worker_count) || 0,
+      total_minutes: Math.round(((totalsRs && totalsRs.total_minutes) || 0) * 10) / 10
+    };
+  });
+});
+
+// =====================================================
+// PICK DIRECT — 活跃趟次列表（含 pending 趟次，便于现场看到"待拣"）
 // =====================================================
 route("v2_pick_job_active_list", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
 
   const rs = await env.DB.prepare(
     `SELECT * FROM v2_ops_jobs
-     WHERE job_type='pick_direct' AND status IN ('pending','working')
+     WHERE job_type='pick_direct' AND status IN ('pending','working','awaiting_close')
      AND is_temporary_interrupt=0
      ORDER BY created_at DESC LIMIT 50`
   ).all();
@@ -3382,11 +3834,39 @@ route("v2_pick_job_active_list", async (body, env) => {
   const items = [];
   for (const job of (rs.results || [])) {
     const pds = await env.DB.prepare(
-      "SELECT pick_doc_no FROM v2_ops_job_pick_docs WHERE job_id=? ORDER BY created_at"
+      `SELECT pick_doc_no, pick_status, pick_started_at, pick_finished_at
+       FROM v2_ops_job_pick_docs WHERE job_id=? ORDER BY created_at`
     ).bind(job.id).all();
     const workers = await env.DB.prepare(
       "SELECT worker_id, worker_name FROM v2_ops_job_workers WHERE job_id=? AND left_at=''"
     ).bind(job.id).all();
+    const pwds = await env.DB.prepare(
+      `SELECT pick_doc_no, worker_id, worker_name, status FROM v2_pick_worker_docs WHERE job_id=?`
+    ).bind(job.id).all();
+
+    const partsByDoc = {};
+    for (const p of (pwds.results || [])) {
+      if (!partsByDoc[p.pick_doc_no]) partsByDoc[p.pick_doc_no] = [];
+      partsByDoc[p.pick_doc_no].push(p);
+    }
+    const docList = (pds.results || []).map(d => {
+      const parts = partsByDoc[d.pick_doc_no] || [];
+      const activeNames = Array.from(new Set(parts.filter(p => p.status === 'working').map(p => p.worker_name).filter(Boolean)));
+      const allNames = Array.from(new Set(parts.map(p => p.worker_name).filter(Boolean)));
+      return Object.assign({}, d, {
+        active_picker_names: activeNames,
+        all_picker_names: allNames,
+        active_picker_count: activeNames.length,
+        total_picker_count: allNames.length
+      });
+    });
+    let pendingCnt = 0, workingCnt = 0, completedCnt = 0;
+    for (const d of docList) {
+      const st = d.pick_status || 'pending';
+      if (st === 'completed') completedCnt++;
+      else if (st === 'working') workingCnt++;
+      else pendingCnt++;
+    }
     items.push({
       id: job.id,
       display_no: job.display_no || '',
@@ -3394,7 +3874,11 @@ route("v2_pick_job_active_list", async (body, env) => {
       active_worker_count: job.active_worker_count || 0,
       created_by: job.created_by || '',
       created_at: job.created_at,
-      pick_doc_nos: (pds.results || []).map(r => r.pick_doc_no),
+      pick_doc_nos: docList.map(r => r.pick_doc_no),
+      pick_docs: docList,
+      pick_doc_pending_count: pendingCnt,
+      pick_doc_working_count: workingCnt,
+      pick_doc_completed_count: completedCnt,
       workers: (workers.results || []).map(w => ({ id: w.worker_id, name: w.worker_name }))
     });
   }
@@ -3402,59 +3886,15 @@ route("v2_pick_job_active_list", async (body, env) => {
 });
 
 // =====================================================
-// PICK DIRECT — 加入已有趟次
+// PICK DIRECT — 加入趟次（已废弃；新流程必须扫描具体拣货单号）
+// 保留路由仅为旧客户端兼容兜底，直接返回引导错误。
 // =====================================================
 route("v2_pick_job_join", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
-  const job_id = String(body.job_id || "").trim();
-  const worker_id = String(body.worker_id || "").trim();
-  const worker_name = String(body.worker_name || "").trim();
-  if (!job_id || !worker_id) return err("missing job_id or worker_id");
-
-  return withIdem(env, body, "v2_pick_job_join", async () => {
-    const t = now();
-    const job = await env.DB.prepare(
-      "SELECT * FROM v2_ops_jobs WHERE id=? AND job_type='pick_direct'"
-    ).bind(job_id).first();
-    if (!job) return { ok: false, error: "trip not found" };
-    if (job.status === 'completed') return { ok: false, error: "trip_already_completed" };
-
-    // Dedup: already has open segment in this same trip
-    const dup = await findOpenSeg(env, job_id, worker_id);
-    if (dup) {
-      return { ok: true, job_id, worker_seg_id: dup.id, already_joined: true,
-        trip_no: job.display_no || '' };
-    }
-
-    const busy = await checkWorkerBusy(env, worker_id, job_id);
-    if (busy) return { ok: false, error: "worker_has_active_job", active_job_id: busy.job_id, active_job_type: busy.job_type };
-
-    // Cross-trip worker exclusion: same worker cannot be in 2 active pick trips
-    const workerConflict = await env.DB.prepare(
-      `SELECT j.id, j.display_no FROM v2_ops_jobs j
-       JOIN v2_ops_job_workers w ON w.job_id = j.id
-       WHERE j.job_type='pick_direct' AND j.status IN ('pending','working')
-       AND j.is_temporary_interrupt=0 AND w.worker_id=? AND w.left_at='' AND j.id!=?
-       LIMIT 1`
-    ).bind(worker_id, job_id).first();
-    if (workerConflict) {
-      return { ok: false, error: "worker_already_in_pick_trip",
-        message: "您已在趟次 " + (workerConflict.display_no || workerConflict.id) + " 中，请先完成后再加入其他趟次",
-        conflict_trip: workerConflict.display_no || workerConflict.id };
-    }
-
-    // Add worker segment
-    const seg_id = "WS-" + uid();
-    await env.DB.prepare(`
-      INSERT INTO v2_ops_job_workers(id, job_id, worker_id, worker_name, joined_at)
-      VALUES(?,?,?,?,?)
-    `).bind(seg_id, job_id, worker_id, worker_name, t).run();
-
-    await env.DB.prepare(
-      "UPDATE v2_ops_jobs SET active_worker_count=active_worker_count+1, updated_at=?, status='working' WHERE id=?"
-    ).bind(t, job_id).run();
-
-    return { ok: true, job_id, worker_seg_id: seg_id, trip_no: job.display_no || '' };
+  return json({
+    ok: false,
+    error: "deprecated_use_start_by_docs",
+    message: "新流程：实际拣货人请扫描手中的拣货单号开始拣货，不再支持直接加入趟次"
   });
 });
 

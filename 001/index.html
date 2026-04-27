@@ -5,7 +5,7 @@
   <!-- cache-bust: 20260415a -->
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
   <title>现场执行系统 V2 / 현장 실행 시스템</title>
-  <link rel="stylesheet" href="style.css?v=20260414c">
+  <link rel="stylesheet" href="style.css?v=20260427b">
   <script src="../shared/html5-qrcode.min.js"></script>
 </head>
 <body>
@@ -298,65 +298,104 @@
   </div>
 </div>
 
-<!-- Pick Direct (代发拣货 — 趟次制) -->
+<!-- Pick Direct (代发拣货 — 趟次制 v2.20260427a) -->
 <div id="page-pick_direct" class="page">
   <div class="topbar">
     <button class="back-btn" onclick="goPage('order_op_menu')">← 返回/뒤로</button>
     <div class="page-title">代发拣货 / 직배송 피킹</div>
   </div>
 
-  <!-- Section A: 新建趟次 / 가입 활성 트립 -->
-  <div id="pickNewSection">
+  <!-- 模式切换：开始拣货（默认） / 创建趟次 -->
+  <div class="card pick-mode-bar" id="pickModeBar">
+    <div style="display:flex;gap:6px;">
+      <button id="pickModeStartBtn" class="btn btn-primary btn-sm" style="flex:1;" onclick="switchPickMode('start')">开始拣货 / 피킹 시작</button>
+      <button id="pickModeCreateBtn" class="btn btn-outline btn-sm" style="flex:1;" onclick="switchPickMode('create')">创建趟次 / 차수 생성</button>
+    </div>
+    <div class="muted" id="pickModeHint" style="margin-top:6px;font-size:12px;">扫描您手中的拣货单号开始拣货 / 가지고 계신 피킹번호를 스캔하여 시작하세요</div>
+  </div>
+
+  <!-- A: 创建趟次（不计工时） -->
+  <div id="pickCreateSection" style="display:none;">
     <div class="card">
-      <div class="card-title">新建趟次 / 새 트립 생성</div>
+      <div class="card-title">创建拣货趟次（不记录工时）/ 피킹 차수 생성 (작업시간 기록 안 함)</div>
+      <div class="muted" style="margin-bottom:8px;">趟次创建人不等于实际拣货人，创建后请将拣货单交给拣货人扫码开始<br>차수 생성자는 실제 작업자가 아닙니다. 생성 후 피킹번호를 작업자에게 전달해 스캔하여 시작하세요</div>
       <div style="display:flex;gap:6px;">
-        <input type="text" id="pickDocInput" placeholder="输入或扫码拣货单号 / 피킹번호 입력" style="flex:1;">
-        <button class="btn btn-outline btn-sm" onclick="addPickDoc()">添加/추가</button>
+        <input type="text" id="pickCreateDocInput" placeholder="输入或扫码拣货单号 / 피킹번호 입력" style="flex:1;">
+        <button class="btn btn-outline btn-sm" onclick="addPickCreateDoc()">添加/추가</button>
       </div>
       <div style="height:6px;"></div>
-      <div id="pickScanReader" style="width:100%;max-width:280px;margin:0 auto;"></div>
-      <button class="btn btn-outline btn-sm" id="pickScanBtn" onclick="startPickScan()">扫码 / 스캔</button>
-      <div id="pickDocList" style="margin-top:8px;font-size:13px;"></div>
+      <div id="pickCreateScanReader" style="width:100%;max-width:280px;margin:0 auto;"></div>
+      <button class="btn btn-outline btn-sm" id="pickCreateScanBtn" onclick="togglePickCreateScan()">扫码 / 스캔</button>
+      <div id="pickCreateDocList" style="margin-top:8px;font-size:13px;"></div>
       <div style="height:8px;"></div>
-      <button class="btn btn-success" onclick="startPickJob(this)">创建趟次 / 트립 생성</button>
+      <button class="btn btn-success" onclick="submitCreatePickTrip(this)">创建拣货趟次 / 피킹 차수 생성</button>
+    </div>
+  </div>
+
+  <!-- B: 实际拣货人扫码开始 -->
+  <div id="pickStartSection">
+    <div class="card">
+      <div class="card-title">扫码开始拣货 / 피킹번호 스캔하여 시작</div>
+      <div class="muted" style="margin-bottom:8px;">扫描或录入本次要拣的拣货单号，可一次添加多个，点击"开始拣货"开始计时<br>이번에 작업할 피킹번호를 스캔하거나 입력하세요. 여러 장 가능, "피킹 시작" 누르면 작업시간 기록 시작</div>
+      <div style="display:flex;gap:6px;">
+        <input type="text" id="pickStartDocInput" placeholder="输入或扫码拣货单号 / 피킹번호" style="flex:1;">
+        <button class="btn btn-outline btn-sm" onclick="addPickStartDoc()">添加/추가</button>
+      </div>
+      <div style="height:6px;"></div>
+      <div id="pickStartScanReader" style="width:100%;max-width:280px;margin:0 auto;"></div>
+      <button class="btn btn-outline btn-sm" id="pickStartScanBtn" onclick="togglePickStartScan()">扫码 / 스캔</button>
+      <div id="pickStartDocList" style="margin-top:8px;font-size:13px;"></div>
+      <div style="height:8px;"></div>
+      <button class="btn btn-success" onclick="submitStartPickByDocs(this)">开始拣货 / 피킹 시작</button>
     </div>
 
     <div class="card">
-      <div class="card-title">进行中趟次 / 진행중 트립 <button class="btn btn-outline btn-sm" style="float:right;font-size:11px;" onclick="loadPickActiveList()">刷新/새로고침</button></div>
+      <div class="card-title">进行中趟次 / 진행중 차수 <button class="btn btn-outline btn-sm" style="float:right;font-size:11px;" onclick="loadPickActiveList()">刷新/새로고침</button></div>
       <div id="pickActiveList"><span class="muted">加载中.../로딩중...</span></div>
     </div>
   </div>
 
-  <!-- Section B: 趟次作业中 (joined a trip) -->
+  <!-- C: 拣货中（计时页） -->
   <div id="pickWorkingSection" style="display:none;">
     <div class="card">
-      <div class="card-title" id="pickTripTitle">趟次 --</div>
-      <div style="display:flex;gap:6px;">
-        <input type="text" id="pickAddDocInput" placeholder="追加拣货单号 / 피킹번호 추가" style="flex:1;">
-        <button class="btn btn-outline btn-sm" onclick="addPickDocToTrip()">添加/추가</button>
+      <div class="card-title" id="pickWorkingTitle">趟次 / 차수: --</div>
+      <div class="detail-grid">
+        <div class="detail-field"><b>当前拣货人 / 현재 작업자:</b> <span id="pickWorkingPicker">--</span></div>
+        <div class="detail-field"><b>开始时间 / 시작 시간:</b> <span id="pickWorkingStartedAt">--</span></div>
+        <div class="detail-field"><b>已用时 / 경과 시간:</b> <span id="pickWorkingElapsed" style="font-family:monospace;font-weight:700;color:#1677ff;">0m 0s</span></div>
+        <div class="detail-field"><b>本次拣货单 / 이번 피킹번호:</b> <span id="pickWorkingDocCount">0</span> 张/장</div>
       </div>
-      <div style="height:6px;"></div>
-      <div id="pickTripScanReader" style="width:100%;max-width:280px;margin:0 auto;"></div>
-      <button class="btn btn-outline btn-sm" id="pickTripScanBtn" onclick="startPickTripScan()">扫码 / 스캔</button>
-      <div id="pickTripDocList" style="margin-top:8px;font-size:13px;"></div>
+      <div id="pickWorkingDocList" style="margin-top:8px;font-size:13px;"></div>
     </div>
+
     <div class="card">
-      <button class="btn btn-danger" onclick="finishPickJob(this)">完成拣货 / 피킹 완료</button>
-    </div>
-    <div class="card">
-      <div class="card-title">当前参与人员 / 현재 참여 인원</div>
-      <div id="pickWorkers" class="workers-panel"><span class="muted">--</span></div>
-    </div>
-    <div class="card" id="pickResultCard" style="display:none;">
-      <div class="card-title">拣货结果 / 피킹 결과</div>
+      <div class="card-title">本次结果（可选）/ 이번 결과 (선택)</div>
       <label>备注 / 비고</label>
       <textarea id="pickRemark" rows="2" placeholder="可选备注 / 선택 비고"></textarea>
       <label>结果说明 / 결과 설명</label>
       <textarea id="pickResultNote" rows="2" placeholder="可选说明 / 선택 설명"></textarea>
     </div>
+
+    <div class="card">
+      <button class="btn btn-danger" onclick="finishPickJob(this)">完成本次拣货 / 이번 피킹 완료</button>
+      <div style="height:6px;"></div>
+      <button class="btn btn-warning btn-sm" style="width:100%;" onclick="finalizePickJob(this, _activeJobId)">整趟完成（全员停止计时）/ 차수 전체 완료 (전원 종료)</button>
+      <div class="muted" style="margin-top:4px;font-size:11px;">仅当所有人都已完成时使用 / 모두 작업이 끝났을 때만 사용</div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">趟次内全部拣货单 / 차수 내 전체 피킹번호</div>
+      <div id="pickWorkingTripDocList"><span class="muted">--</span></div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">参与人员 / 참여 인원</div>
+      <div id="pickWorkers" class="workers-panel"><span class="muted">--</span></div>
+    </div>
+
     <div class="interrupt-bar">
       <button class="btn btn-warning btn-sm" onclick="interruptToUnload()">挂起→临时卸货 / 임시 하차</button>
-      <button class="btn btn-warning btn-sm" onclick="interruptToLoad()">挂起→临시装货 / 임시 상차</button>
+      <button class="btn btn-warning btn-sm" onclick="interruptToLoad()">挂起→临时装货 / 임시 상차</button>
     </div>
   </div>
 </div>
@@ -769,7 +808,7 @@
 <input type="file" id="photoInput" accept="image/*" capture="environment" style="display:none;" onchange="handlePhotoUpload(this)">
 
 <script src="config.js?v=20260424f"></script>
-<script src="app.js?v=20260424f"></script>
+<script src="app.js?v=20260427b"></script>
 <script src="patch.js?v=20260424f"></script>
 </body>
 </html>

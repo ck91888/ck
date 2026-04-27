@@ -120,7 +120,7 @@ var _WRITE_ACTIONS = [
   'v2_inbound_job_start','v2_inbound_job_finish',
   'v2_inbound_mark_completed',
   'v2_ops_job_start','v2_ops_job_leave','v2_ops_job_finish','v2_ops_job_resume',
-  'v2_pick_job_start','v2_pick_job_join','v2_pick_job_add_docs','v2_pick_job_finish',
+  'v2_pick_job_start','v2_pick_job_start_by_docs','v2_pick_job_join','v2_pick_job_add_docs','v2_pick_job_finish','v2_pick_job_finalize',
   'v2_bulk_op_job_start','v2_bulk_op_job_finish',
   'v2_correction_request_create','v2_admin_dirty_data_cleanup',
   'v2_verify_batch_upload','v2_verify_batch_update_status',
@@ -2153,63 +2153,372 @@ async function handleIssueLeave(btnEl) {
   });
 }
 
-// ===== Pick Direct (代发拣货 — 趟次制) =====
-var _pickDocNos = [];
-var _pickScanner = null;
-var _pickTripScanner = null;
-var _pickTripNo = '';  // current trip display_no
+// ===== Pick Direct (代发拣货 — 趟次制 v2.20260427a) =====
+// 流程：A 创建趟次（不计工时）→ 实际拣货人 B 扫描手中的拣货单号开始计时 → 完成本次拣货
+var _pickCreateDocNos = [];      // 创建趟次时录入的单号（暂存）
+var _pickStartDocNos = [];       // 实际拣货人开始时扫描的单号（暂存）
+var _pickCreateScanner = null;
+var _pickStartScanner = null;
+var _pickWorkingDocList = [];    // 当前工作段的拣货单号
+var _pickWorkingStartedAt = null; // 当前工作段开始时间戳（ms）
+var _pickElapsedTimer = null;
+var _pickMode = 'start';         // 'start' | 'create'
 
 function initPickDirect() {
-  _pickDocNos = [];
-  _pickTripNo = '';
-  renderPickDocList("pickDocList", _pickDocNos, true);
+  _pickCreateDocNos = [];
+  _pickStartDocNos = [];
+  renderPickDocList("pickCreateDocList", _pickCreateDocNos, "_pickCreateDocNos", "pickCreateDocList");
+  renderPickDocList("pickStartDocList", _pickStartDocNos, "_pickStartDocNos", "pickStartDocList");
 
-  var inp = document.getElementById("pickDocInput");
-  if (inp) inp.onkeydown = function(e) { if (e.key === "Enter") { e.preventDefault(); addPickDoc(); } };
-  var inp2 = document.getElementById("pickAddDocInput");
-  if (inp2) inp2.onkeydown = function(e) { if (e.key === "Enter") { e.preventDefault(); addPickDocToTrip(); } };
+  var inpC = document.getElementById("pickCreateDocInput");
+  if (inpC) inpC.onkeydown = function(e) { if (e.key === "Enter") { e.preventDefault(); addPickCreateDoc(); } };
+  var inpS = document.getElementById("pickStartDocInput");
+  if (inpS) inpS.onkeydown = function(e) { if (e.key === "Enter") { e.preventDefault(); addPickStartDoc(); } };
 
   if (_activeJobId) {
-    // Already in a trip — show working section
-    showPickWorkingSection();
+    enterPickWorkingSection();
   } else {
-    // Show new trip + active list
-    showPickNewSection();
+    switchPickMode('start');
     loadPickActiveList();
   }
   startJobPoll("pick");
 }
 
-function showPickNewSection() {
-  var ns = document.getElementById("pickNewSection");
-  var ws = document.getElementById("pickWorkingSection");
-  if (ns) ns.style.display = "";
-  if (ws) ws.style.display = "none";
+function switchPickMode(mode) {
+  if (_activeJobId) return; // 工作中不允许切模式
+  _pickMode = (mode === 'create') ? 'create' : 'start';
+  var startSec = document.getElementById("pickStartSection");
+  var createSec = document.getElementById("pickCreateSection");
+  var workSec = document.getElementById("pickWorkingSection");
+  var btnStart = document.getElementById("pickModeStartBtn");
+  var btnCreate = document.getElementById("pickModeCreateBtn");
+  var hint = document.getElementById("pickModeHint");
+  if (workSec) workSec.style.display = "none";
+  if (_pickMode === 'create') {
+    if (startSec) startSec.style.display = "none";
+    if (createSec) createSec.style.display = "";
+    if (btnStart) { btnStart.classList.remove("btn-primary"); btnStart.classList.add("btn-outline"); }
+    if (btnCreate) { btnCreate.classList.remove("btn-outline"); btnCreate.classList.add("btn-primary"); }
+    if (hint) hint.textContent = "录入拣货单号生成趟次（仅录入，不计工时）/ 피킹번호 입력하여 차수 생성 (작업시간 미기록)";
+  } else {
+    if (startSec) startSec.style.display = "";
+    if (createSec) createSec.style.display = "none";
+    if (btnStart) { btnStart.classList.remove("btn-outline"); btnStart.classList.add("btn-primary"); }
+    if (btnCreate) { btnCreate.classList.remove("btn-primary"); btnCreate.classList.add("btn-outline"); }
+    if (hint) hint.textContent = "扫描您手中的拣货单号开始拣货 / 가지고 계신 피킹번호를 스캔하여 시작하세요";
+  }
+  // 切模式时停所有扫码
+  stopPickCreateScan();
+  stopPickStartScan();
 }
 
-function showPickWorkingSection() {
-  var ns = document.getElementById("pickNewSection");
-  var ws = document.getElementById("pickWorkingSection");
-  if (ns) ns.style.display = "none";
-  if (ws) ws.style.display = "";
-  document.getElementById("pickResultCard").style.display = "";
+// 拣货单标签渲染：可选 removable 数组绑定（变量名）
+function renderPickDocList(containerId, docs, varName, refreshContainerId) {
+  var el = document.getElementById(containerId);
+  if (!el) return;
+  if (!docs || docs.length === 0) {
+    el.innerHTML = '<span class="muted">未添加拣货单号 / 피킹번호 미추가</span>';
+    return;
+  }
+  var html = '<div class="tag-wrap">';
+  docs.forEach(function(no, i) {
+    html += '<span class="doc-tag">' + esc(no);
+    html += ' <span class="remove" onclick="' + varName + '.splice(' + i + ',1);renderPickDocList(\'' + (refreshContainerId || containerId) + '\',' + varName + ',\'' + varName + '\',\'' + (refreshContainerId || containerId) + '\');">&times;</span>';
+    html += '</span>';
+  });
+  html += '</div>';
+  el.innerHTML = html;
+}
 
-  // Load trip info
+// ---- 创建趟次 mode ----
+function addPickCreateDoc() {
+  var inp = document.getElementById("pickCreateDocInput");
+  var val = (inp ? inp.value : "").trim();
+  if (!val) return;
+  if (_pickCreateDocNos.indexOf(val) === -1) {
+    _pickCreateDocNos.push(val);
+    renderPickDocList("pickCreateDocList", _pickCreateDocNos, "_pickCreateDocNos", "pickCreateDocList");
+  }
+  if (inp) { inp.value = ""; inp.focus(); }
+}
+
+function togglePickCreateScan() {
+  if (_pickCreateScanner) { stopPickCreateScan(); return; }
+  var readerEl = document.getElementById("pickCreateScanReader");
+  if (!readerEl) return;
+  readerEl.innerHTML = "";
+  try {
+    _pickCreateScanner = new Html5Qrcode("pickCreateScanReader");
+    _pickCreateScanner.start(
+      { facingMode: "environment" },
+      { fps: 10, qrbox: { width: 250, height: 150 } },
+      function(decoded) {
+        var code = String(decoded || "").trim();
+        if (!code) return;
+        if (_pickCreateDocNos.indexOf(code) === -1) {
+          _pickCreateDocNos.push(code);
+          renderPickDocList("pickCreateDocList", _pickCreateDocNos, "_pickCreateDocNos", "pickCreateDocList");
+        }
+      },
+      function() {}
+    ).catch(function(e) {
+      alert("摄像头启动失败 / 카메라 시작 실패: " + e);
+      _pickCreateScanner = null;
+    });
+    var btn = document.getElementById("pickCreateScanBtn");
+    if (btn) btn.textContent = "停止扫码 / 스캔 중지";
+  } catch(e) {
+    alert("扫码不可用 / 스캔 불가: " + e.message);
+  }
+}
+
+function stopPickCreateScan() {
+  if (_pickCreateScanner) {
+    try { _pickCreateScanner.stop(); } catch(e) {}
+    _pickCreateScanner = null;
+    var el = document.getElementById("pickCreateScanReader");
+    if (el) el.innerHTML = "";
+    var btn = document.getElementById("pickCreateScanBtn");
+    if (btn) btn.textContent = "扫码 / 스캔";
+  }
+}
+
+async function submitCreatePickTrip(btnEl) {
+  if (_pickCreateDocNos.length === 0) {
+    alert("请先添加至少一个拣货单号\n최소 하나의 피킹번호를 추가하세요");
+    return;
+  }
+  withActionLock('submitCreatePickTrip', btnEl || null, '创建中.../생성중...', async function() {
+    var res = await api({
+      action: "v2_pick_job_start",
+      pick_doc_nos: _pickCreateDocNos,
+      worker_id: getWorkerId(),
+      worker_name: getWorkerName()
+    });
+    if (res && res.ok) {
+      var trip = res.trip_no || res.display_no || res.job_id;
+      alert("趟次已创建：" + trip + "\n不会记录您的拣货工时，请将拣货单交给实际拣货人扫码开始。\n차수 생성됨: " + trip + "\n작업시간은 기록되지 않습니다. 피킹번호를 작업자에게 전달해 스캔하여 시작하세요。");
+      _pickCreateDocNos = [];
+      renderPickDocList("pickCreateDocList", _pickCreateDocNos, "_pickCreateDocNos", "pickCreateDocList");
+      stopPickCreateScan();
+      switchPickMode('start');
+      loadPickActiveList();
+    } else if (res && res.error === "doc_conflict") {
+      alert(res.message || "拣货单号冲突 / 피킹번호 충돌");
+    } else {
+      alert("失败/실패: " + (res ? (res.message || res.error) : "unknown"));
+    }
+  });
+}
+
+// ---- 实际拣货人扫码开始 mode ----
+function addPickStartDoc() {
+  var inp = document.getElementById("pickStartDocInput");
+  var val = (inp ? inp.value : "").trim();
+  if (!val) return;
+  if (_pickStartDocNos.indexOf(val) === -1) {
+    _pickStartDocNos.push(val);
+    renderPickDocList("pickStartDocList", _pickStartDocNos, "_pickStartDocNos", "pickStartDocList");
+  }
+  if (inp) { inp.value = ""; inp.focus(); }
+}
+
+function togglePickStartScan() {
+  if (_pickStartScanner) { stopPickStartScan(); return; }
+  var readerEl = document.getElementById("pickStartScanReader");
+  if (!readerEl) return;
+  readerEl.innerHTML = "";
+  try {
+    _pickStartScanner = new Html5Qrcode("pickStartScanReader");
+    _pickStartScanner.start(
+      { facingMode: "environment" },
+      { fps: 10, qrbox: { width: 250, height: 150 } },
+      function(decoded) {
+        var code = String(decoded || "").trim();
+        if (!code) return;
+        if (_pickStartDocNos.indexOf(code) === -1) {
+          _pickStartDocNos.push(code);
+          renderPickDocList("pickStartDocList", _pickStartDocNos, "_pickStartDocNos", "pickStartDocList");
+        }
+      },
+      function() {}
+    ).catch(function(e) {
+      alert("摄像头启动失败 / 카메라 시작 실패: " + e);
+      _pickStartScanner = null;
+    });
+    var btn = document.getElementById("pickStartScanBtn");
+    if (btn) btn.textContent = "停止扫码 / 스캔 중지";
+  } catch(e) {
+    alert("扫码不可用 / 스캔 불가: " + e.message);
+  }
+}
+
+function stopPickStartScan() {
+  if (_pickStartScanner) {
+    try { _pickStartScanner.stop(); } catch(e) {}
+    _pickStartScanner = null;
+    var el = document.getElementById("pickStartScanReader");
+    if (el) el.innerHTML = "";
+    var btn = document.getElementById("pickStartScanBtn");
+    if (btn) btn.textContent = "扫码 / 스캔";
+  }
+}
+
+async function submitStartPickByDocs(btnEl) {
+  if (hasOtherActiveJob()) return warnActiveJob();
+  if (_pickStartDocNos.length === 0) {
+    alert("请先扫描或添加至少一个拣货单号\n최소 하나의 피킹번호를 스캔/추가하세요");
+    return;
+  }
+  withActionLock('submitStartPickByDocs', btnEl || null, '提交中.../저장중...', async function() {
+    var res = await api({
+      action: "v2_pick_job_start_by_docs",
+      pick_doc_nos: _pickStartDocNos,
+      worker_id: getWorkerId(),
+      worker_name: getWorkerName()
+    });
+    if (res && res.ok) {
+      saveActiveJob(res.job_id, res.worker_seg_id);
+      _pickWorkingDocList = (res.picked_doc_nos || []).slice();
+      _pickWorkingStartedAt = res.started_at ? new Date(res.started_at).getTime() : Date.now();
+      _pickStartDocNos = [];
+      renderPickDocList("pickStartDocList", _pickStartDocNos, "_pickStartDocNos", "pickStartDocList");
+      stopPickStartScan();
+      enterPickWorkingSection(res);
+    } else if (res && res.error === "cross_trip_not_allowed") {
+      alert(res.message || "不能跨趟次同时拣货");
+    } else if (res && res.error === "doc_not_found") {
+      alert(res.message || "拣货单号未找到");
+    } else if (res && res.error === "trip_already_completed") {
+      alert(res.message || "趟次已完成 / 차수가 이미 완료됨");
+    } else if (res && res.error === "trip_cancelled") {
+      alert(res.message || "趟次已取消 / 차수가 취소됨");
+    } else if (res && res.error === "trip_interrupted") {
+      alert(res.message || "趟次正在临时挂起 / 차수가 임시 중단됨");
+    } else if (res && res.error === "worker_has_active_job") {
+      alert(res.message || "您当前已有活跃任务，请先完成或暂离");
+    } else {
+      alert("失败/실패: " + (res ? (res.message || res.error) : "unknown"));
+    }
+  });
+}
+
+function enterPickWorkingSection(startRes) {
+  var startSec = document.getElementById("pickStartSection");
+  var createSec = document.getElementById("pickCreateSection");
+  var workSec = document.getElementById("pickWorkingSection");
+  var modeBar = document.getElementById("pickModeBar");
+  if (startSec) startSec.style.display = "none";
+  if (createSec) createSec.style.display = "none";
+  if (workSec) workSec.style.display = "";
+  if (modeBar) modeBar.style.display = "none";
+
+  // 当前拣货人
+  var pickerEl = document.getElementById("pickWorkingPicker");
+  if (pickerEl) pickerEl.textContent = (getWorkerName() || getWorkerId() || "--");
+
+  // 标题 + 开始时间
   api({ action: "v2_ops_job_detail", job_id: _activeJobId }).then(function(res) {
     if (res && res.ok && res.job) {
-      _pickTripNo = res.job.display_no || '';
-      var title = document.getElementById("pickTripTitle");
-      if (title) title.textContent = "趟次/트립: " + (_pickTripNo || _activeJobId);
+      var t = document.getElementById("pickWorkingTitle");
+      if (t) t.textContent = "趟次/차수: " + (res.job.display_no || _activeJobId);
+      // 找当前 worker 自己的 open segment 作为开始时间
+      var mySeg = (res.workers || []).find(function(w) {
+        return w.worker_id === getWorkerId() && !w.left_at;
+      });
+      if (mySeg && mySeg.joined_at) {
+        _pickWorkingStartedAt = new Date(mySeg.joined_at).getTime();
+      } else if (!_pickWorkingStartedAt) {
+        _pickWorkingStartedAt = Date.now();
+      }
+      var sa = document.getElementById("pickWorkingStartedAt");
+      if (sa && _pickWorkingStartedAt) {
+        sa.textContent = new Date(_pickWorkingStartedAt).toLocaleString();
+      }
     }
   });
-  // Load docs for this trip
-  api({ action: "v2_pick_job_docs_list", job_id: _activeJobId }).then(function(res) {
-    if (res && res.ok && res.docs) {
-      var docs = res.docs.map(function(d) { return d.pick_doc_no; });
-      renderPickDocList("pickTripDocList", docs, false);
-    }
-  });
+
+  // 我本次的拣货单 + 趟次全部拣货单
+  refreshPickWorkingDocs();
   refreshPickWorkers();
+  startPickElapsedTimer();
+}
+
+function refreshPickWorkingDocs() {
+  if (!_activeJobId) return;
+  api({ action: "v2_pick_job_docs_list", job_id: _activeJobId }).then(function(res) {
+    if (!res || !res.ok) return;
+    var docs = res.docs || [];
+    // 全部拣货单（按总状态着色 + 参与人员标注）
+    var tripEl = document.getElementById("pickWorkingTripDocList");
+    if (tripEl) {
+      if (docs.length === 0) {
+        tripEl.innerHTML = '<span class="muted">无 / 없음</span>';
+      } else {
+        var html = '<div class="tag-wrap">';
+        docs.forEach(function(d) {
+          var st = d.pick_status || 'pending';
+          var cls = 'doc-tag is-' + st;
+          var parts = d.participants || [];
+          var activeNames = parts.filter(function(p) { return p.status === 'working'; }).map(function(p) { return p.worker_name; }).filter(Boolean);
+          var allNames = Array.from(new Set(parts.map(function(p) { return p.worker_name; }).filter(Boolean)));
+          var hint = '';
+          if (st === 'working' && activeNames.length > 0) {
+            hint = '<span class="picker-hint">@' + esc(activeNames.join("、")) + '</span>';
+          } else if (st === 'completed' && allNames.length > 0) {
+            hint = '<span class="picker-hint">✓' + esc(allNames.join("、")) + '</span>';
+          }
+          html += '<span class="' + cls + '">' + esc(d.pick_doc_no) + hint + '</span>';
+        });
+        html += '</div>';
+        tripEl.innerHTML = html;
+      }
+    }
+    // 我本次的拣货单（用 _activeSegId 匹配 participants.segment_id）
+    var myDocs = docs.filter(function(d) {
+      return (d.participants || []).some(function(p) {
+        return p.segment_id && p.segment_id === _activeSegId && p.status === 'working';
+      });
+    });
+    if (myDocs.length === 0) {
+      // 兜底：worker_id + working
+      myDocs = docs.filter(function(d) {
+        return (d.participants || []).some(function(p) {
+          return p.worker_id === getWorkerId() && p.status === 'working';
+        });
+      });
+    }
+    _pickWorkingDocList = myDocs.map(function(d) { return d.pick_doc_no; });
+    var myEl = document.getElementById("pickWorkingDocList");
+    if (myEl) {
+      if (myDocs.length === 0) {
+        myEl.innerHTML = '<span class="muted">无 / 없음</span>';
+      } else {
+        myEl.innerHTML = '<div class="tag-wrap">' + myDocs.map(function(d) {
+          return '<span class="doc-tag is-working">' + esc(d.pick_doc_no) + '</span>';
+        }).join('') + '</div>';
+      }
+    }
+    var cntEl = document.getElementById("pickWorkingDocCount");
+    if (cntEl) cntEl.textContent = String(myDocs.length);
+  });
+}
+
+function startPickElapsedTimer() {
+  if (_pickElapsedTimer) clearInterval(_pickElapsedTimer);
+  _pickElapsedTimer = setInterval(function() {
+    if (!_pickWorkingStartedAt) return;
+    var sec = Math.floor((Date.now() - _pickWorkingStartedAt) / 1000);
+    var h = Math.floor(sec / 3600);
+    var m = Math.floor((sec % 3600) / 60);
+    var s = sec % 60;
+    var el = document.getElementById("pickWorkingElapsed");
+    if (el) el.textContent = (h > 0 ? h + "h " : "") + m + "m " + s + "s";
+  }, 1000);
+}
+
+function stopPickElapsedTimer() {
+  if (_pickElapsedTimer) { clearInterval(_pickElapsedTimer); _pickElapsedTimer = null; }
 }
 
 async function loadPickActiveList() {
@@ -2223,211 +2532,91 @@ async function loadPickActiveList() {
   }
   var items = res.items || [];
   if (items.length === 0) {
-    el.innerHTML = '<span class="muted">暂无进行中趟次 / 진행중 트립 없음</span>';
+    el.innerHTML = '<span class="muted">暂无进行中趟次 / 진행중 차수 없음</span>';
     return;
   }
   var html = '';
   items.forEach(function(t) {
-    var docsHtml = '--';
-    if (t.pick_doc_nos && t.pick_doc_nos.length > 0) {
-      docsHtml = '<div class="tag-wrap">' + t.pick_doc_nos.map(function(d) {
-        return '<span class="doc-tag">' + esc(d) + '</span>';
+    var docList = t.pick_docs || [];
+    var docsHtml = '<span class="muted">--</span>';
+    if (docList.length > 0) {
+      docsHtml = '<div class="tag-wrap">' + docList.map(function(d) {
+        var st = d.pick_status || 'pending';
+        var cls = 'doc-tag is-' + st;
+        var activeNames = d.active_picker_names || [];
+        var allNames = d.all_picker_names || [];
+        var hint = '';
+        if (st === 'working' && activeNames.length > 0) {
+          hint = '<span class="picker-hint">@' + esc(activeNames.join("、")) + '</span>';
+        } else if (st === 'completed' && allNames.length > 0) {
+          hint = '<span class="picker-hint">✓' + esc(allNames.join("、")) + '</span>';
+        } else if (allNames.length > 0) {
+          hint = '<span class="picker-hint">' + allNames.length + '人/명</span>';
+        }
+        return '<span class="' + cls + '">' + esc(d.pick_doc_no) + hint + '</span>';
       }).join('') + '</div>';
     }
     var wNames = (t.workers || []).map(function(w) { return w.name || w.id; });
     var wHtml = wNames.length > 0 ? wNames.map(function(n) {
       return '<span class="worker-tag">' + esc(n) + '</span>';
-    }).join('') : '<span class="muted">--</span>';
+    }).join('') : '<span class="muted">无 / 없음</span>';
+
+    var stCls = t.status || 'pending';
+    var stLabel = (t.status === 'working') ? '拣货中 / 피킹중'
+                  : (t.status === 'awaiting_close') ? '待收尾 / 마감 대기'
+                  : '待开始 / 시작 대기';
+    var summary = '待:' + (t.pick_doc_pending_count || 0) + ' / 中:' + (t.pick_doc_working_count || 0) + ' / 完:' + (t.pick_doc_completed_count || 0);
+
+    // 仅当无人在岗（pending 态）时允许 active list 显示 finalize 入口；working 时由计时页内触发
+    // 用 workers 数组长度判定，比 stored active_worker_count 更可靠
+    var canFinalize = (t.status !== 'completed') && ((t.workers || []).length === 0);
 
     html += '<div class="trip-card">';
     html += '<div class="trip-card-header"><span class="trip-tag">' + esc(t.display_no || t.id) + '</span>';
-    html += '<span class="st st-working">' + (t.active_worker_count || 0) + '人参与</span></div>';
-    html += '<div class="trip-card-meta">拣货单/피킹번호:</div>' + docsHtml;
-    html += '<div class="trip-card-meta" style="margin-top:6px;">参与人/참여자:</div><div style="margin-top:2px;">' + wHtml + '</div>';
-    html += '<div style="margin-top:8px;"><button class="btn btn-primary btn-sm" onclick="joinPickTrip(\'' + esc(t.id) + '\',this)">加入此趟次 / 이 트립 참여</button></div>';
+    html += '<span class="st st-' + esc(stCls) + '">' + esc(stLabel) + '</span></div>';
+    html += '<div class="trip-card-meta">拣货单 / 피킹번호 (' + esc(summary) + '):</div>' + docsHtml;
+    html += '<div class="trip-card-meta" style="margin-top:6px;">在岗拣货人 / 작업중:</div><div style="margin-top:2px;">' + wHtml + '</div>';
+    html += '<div class="trip-card-meta" style="margin-top:6px;color:#999;font-size:11px;">趟次创建人 / 생성자: ' + esc(t.created_by || "--") + '</div>';
+    if (canFinalize) {
+      html += '<div style="margin-top:8px;"><button class="btn btn-warning btn-sm" onclick="finalizePickJob(this,\'' + esc(t.id) + '\')">整趟完成 / 차수 전체 완료</button></div>';
+    }
     html += '</div>';
   });
   el.innerHTML = html;
 }
 
-function renderPickDocList(containerId, docs, removable) {
-  var el = document.getElementById(containerId);
-  if (!el) return;
-  if (!docs || docs.length === 0) {
-    el.innerHTML = '<span class="muted">未添加拣货单号 / 피킹번호 미추가</span>';
-    return;
-  }
-  var html = '<div class="tag-wrap">';
-  docs.forEach(function(no, i) {
-    html += '<span class="doc-tag">' + esc(no);
-    if (removable) {
-      html += ' <span class="remove" onclick="_pickDocNos.splice(' + i + ',1);renderPickDocList(\'pickDocList\',_pickDocNos,true);">&times;</span>';
-    }
-    html += '</span>';
-  });
-  html += '</div>';
-  el.innerHTML = html;
-}
-
-function addPickDoc() {
-  var inp = document.getElementById("pickDocInput");
-  var val = (inp ? inp.value : "").trim();
-  if (!val) return;
-  if (_pickDocNos.indexOf(val) === -1) {
-    _pickDocNos.push(val);
-    renderPickDocList("pickDocList", _pickDocNos, true);
-  }
-  if (inp) inp.value = "";
-  inp.focus();
-}
-
-function addPickDocToTrip() {
-  var inp = document.getElementById("pickAddDocInput");
-  var val = (inp ? inp.value : "").trim();
-  if (!val || !_activeJobId) return;
-  api({ action: "v2_pick_job_add_docs", job_id: _activeJobId, pick_doc_nos: [val] }).then(function(res) {
-    if (res && res.ok) {
-      var docs = (res.docs || []).map(function(d) { return d.pick_doc_no; });
-      renderPickDocList("pickTripDocList", docs, false);
-      if (inp) inp.value = "";
-      inp.focus();
-    } else if (res && res.error === "doc_conflict") {
-      alert(res.message || "拣货单号冲突");
-    } else {
-      alert("失败/실패: " + (res ? res.error : "unknown"));
-    }
-  });
-}
-
-function startPickScan() {
-  if (_pickScanner) { stopPickScan(); return; }
-  var readerEl = document.getElementById("pickScanReader");
-  if (!readerEl) return;
-  readerEl.innerHTML = "";
-  try {
-    _pickScanner = new Html5Qrcode("pickScanReader");
-    _pickScanner.start(
-      { facingMode: "environment" },
-      { fps: 10, qrbox: { width: 250, height: 150 } },
-      function(decoded) {
-        var code = String(decoded || "").trim();
-        if (!code) return;
-        if (_pickDocNos.indexOf(code) === -1) {
-          _pickDocNos.push(code);
-          renderPickDocList("pickDocList", _pickDocNos, true);
-        }
-      },
-      function() {}
-    ).catch(function(e) {
-      alert("摄像头启动失败 / 카메라 시작 실패: " + e);
-      _pickScanner = null;
-    });
-    document.getElementById("pickScanBtn").textContent = "停止扫码 / 스캔 중지";
-  } catch(e) {
-    alert("扫码不可用 / 스캔 불가: " + e.message);
-  }
-}
-
-function stopPickScan() {
-  if (_pickScanner) {
-    try { _pickScanner.stop(); } catch(e) {}
-    _pickScanner = null;
-    var el = document.getElementById("pickScanReader");
-    if (el) el.innerHTML = "";
-    document.getElementById("pickScanBtn").textContent = "扫码 / 스캔";
-  }
-}
-
-function startPickTripScan() {
-  if (_pickTripScanner) { stopPickTripScan(); return; }
-  var readerEl = document.getElementById("pickTripScanReader");
-  if (!readerEl) return;
-  readerEl.innerHTML = "";
-  try {
-    _pickTripScanner = new Html5Qrcode("pickTripScanReader");
-    _pickTripScanner.start(
-      { facingMode: "environment" },
-      { fps: 10, qrbox: { width: 250, height: 150 } },
-      function(decoded) {
-        var code = String(decoded || "").trim();
-        if (!code || !_activeJobId) return;
-        api({ action: "v2_pick_job_add_docs", job_id: _activeJobId, pick_doc_nos: [code] }).then(function(res) {
-          if (res && res.ok) {
-            var docs = (res.docs || []).map(function(d) { return d.pick_doc_no; });
-            renderPickDocList("pickTripDocList", docs, false);
-          } else if (res && res.error === "doc_conflict") {
-            alert(res.message || "拣货单号冲突");
-          }
-        });
-      },
-      function() {}
-    ).catch(function(e) {
-      alert("摄像头启动失败 / 카메라 시작 실패: " + e);
-      _pickTripScanner = null;
-    });
-    document.getElementById("pickTripScanBtn").textContent = "停止扫码 / 스캔 중지";
-  } catch(e) {
-    alert("扫码不可用 / 스캔 불가: " + e.message);
-  }
-}
-
-function stopPickTripScan() {
-  if (_pickTripScanner) {
-    try { _pickTripScanner.stop(); } catch(e) {}
-    _pickTripScanner = null;
-    var el = document.getElementById("pickTripScanReader");
-    if (el) el.innerHTML = "";
-    document.getElementById("pickTripScanBtn").textContent = "扫码 / 스캔";
-  }
-}
-
-async function startPickJob(btnEl) {
-  if (hasOtherActiveJob()) return warnActiveJob();
-  if (_pickDocNos.length === 0) {
-    alert("请先添加至少一个拣货单号\n최소 하나의 피킹번호를 추가하세요");
-    return;
-  }
-  withActionLock('startPickJob', btnEl || null, '创建中.../생성중...', async function() {
+async function finalizePickJob(btnEl, jobId) {
+  if (!jobId) return;
+  if (!confirm("整趟完成后将关闭所有人的计时段，并把全部拣货单标记为已完成。\n继续吗？\n\n전체 완료 시 모든 작업자의 시간 기록이 종료되며, 모든 피킹번호가 완료 처리됩니다. 계속하시겠습니까?")) return;
+  withActionLock('finalizePickJob_' + jobId, btnEl || null, '提交中.../저장중...', async function() {
     var res = await api({
-      action: "v2_pick_job_start",
-      pick_doc_nos: _pickDocNos,
-      worker_id: getWorkerId(),
-      worker_name: getWorkerName()
-    });
-    if (res && res.ok) {
-      saveActiveJob(res.job_id, res.worker_seg_id);
-      _pickTripNo = res.trip_no || '';
-      alert("趟次已创建 / 트립 생성됨: " + (_pickTripNo || res.job_id));
-      _pickDocNos = [];
-      showPickWorkingSection();
-    } else if (res && res.error === "doc_conflict") {
-      alert(res.message || "拣货单号冲突 / 피킹번호 충돌");
-    } else if (res && res.error === "worker_already_in_pick_trip") {
-      alert(res.message || "您已在另一个趟次中，请先完成\n이미 다른 트립에 참여 중입니다");
-    } else {
-      alert("失败/실패: " + (res ? (res.message || res.error) : "unknown"));
-    }
-  });
-}
-
-async function joinPickTrip(jobId, btnEl) {
-  if (hasOtherActiveJob()) return warnActiveJob();
-  withActionLock('joinPickTrip', btnEl || null, '加入中.../참여중...', async function() {
-    var res = await api({
-      action: "v2_pick_job_join",
+      action: "v2_pick_job_finalize",
       job_id: jobId,
       worker_id: getWorkerId(),
-      worker_name: getWorkerName()
+      remark: (document.getElementById("pickRemark") || {}).value || "",
+      result_note: (document.getElementById("pickResultNote") || {}).value || ""
     });
     if (res && res.ok) {
-      saveActiveJob(res.job_id, res.worker_seg_id);
-      _pickTripNo = res.trip_no || '';
-      if (!res.already_joined) {
-        alert("已加入趟次 / 트립 참여됨: " + (_pickTripNo || jobId));
+      var msg = "整趟次已完成 / 차수 전체 완료\n";
+      msg += "拣货单/피킹번호: " + (res.pick_doc_count || 0) + " 张/장\n";
+      msg += "参与人数/참여 인원: " + (res.worker_count || 0) + " 人/명\n";
+      msg += "总用时/총 소요: " + (res.total_minutes || 0) + " 分钟/분";
+      alert(msg);
+      stopPickCreateScan();
+      stopPickStartScan();
+      stopPickElapsedTimer();
+      if (_activeJobId === jobId) {
+        clearActiveJob();
+        goPage("order_op_menu");
+      } else {
+        loadPickActiveList();
       }
-      showPickWorkingSection();
-    } else if (res && res.error === "worker_already_in_pick_trip") {
-      alert(res.message || "您已在另一个趟次中，请先完成\n이미 다른 트립에 참여 중입니다");
+    } else if (res && res.error === "already_completed") {
+      alert("趟次已完成 / 차수 완료");
+      loadPickActiveList();
+    } else if (res && res.error === "already_cancelled") {
+      alert("趟次已取消 / 차수 취소됨");
+      loadPickActiveList();
     } else {
       alert("失败/실패: " + (res ? (res.message || res.error) : "unknown"));
     }
@@ -2446,22 +2635,31 @@ async function finishPickJob(btnEl) {
       result_note: (document.getElementById("pickResultNote") || {}).value || ""
     });
     if (res && res.ok) {
-      alert("拣货已完成 / 피킹 완료");
-      stopPickScan();
-      stopPickTripScan();
+      var msg = "本次拣货已完成 / 이번 피킹 완료\n用时/소요: " + (res.minutes_worked != null ? res.minutes_worked + " 分钟/분" : "--");
+      if (res.finished_pick_doc_nos && res.finished_pick_doc_nos.length > 0) {
+        msg += "\n本次参与的拣货单/이번 피킹번호: " + res.finished_pick_doc_nos.join(", ");
+      }
+      if ((res.active_worker_count || 0) > 0) {
+        msg += "\n该趟次仍有 " + res.active_worker_count + " 人在拣货 / 차수 내 " + res.active_worker_count + "명 작업중";
+      } else {
+        msg += "\n该趟次已无人在岗，请由创建人或主管点【整趟完成】结束趟次\n작업자가 모두 종료. 생성자/관리자가 [차수 전체 완료]를 눌러 마감하세요";
+      }
+      alert(msg);
+      stopPickCreateScan();
+      stopPickStartScan();
+      stopPickElapsedTimer();
       clearActiveJob();
       goPage("order_op_menu");
     } else if (res && res.error === "already_completed") {
-      alert("任务已完成，请勿重复提交\n작업이 이미 완료되었습니다");
+      alert("趟次已完成 / 차수 완료");
       clearActiveJob();
       goPage("order_op_menu");
-    } else if (res && res.error === "others_still_working") {
-      var _np = res.active_worker_count || "?";
-      alert("您已退出此趟次，还有 " + _np + " 人继续作业\n현재 트립에서 퇴장했습니다. " + _np + "명이 계속 작업 중입니다");
+    } else if (res && res.error === "no_open_segment") {
+      alert("您未在该趟次中拣货 / 이 차수에서 작업 중이 아닙니다");
       clearActiveJob();
       goPage("order_op_menu");
     } else {
-      alert("失败/실패: " + (res ? res.error : "unknown"));
+      alert("失败/실패: " + (res ? (res.message || res.error) : "unknown"));
     }
   });
 }
@@ -2469,7 +2667,10 @@ async function finishPickJob(btnEl) {
 async function refreshPickWorkers() {
   if (!_activeJobId) return;
   var res = await api({ action: "v2_ops_job_detail", job_id: _activeJobId });
-  if (res && res.ok) renderWorkers("pickWorkers", res.workers);
+  if (res && res.ok) {
+    renderWorkers("pickWorkers", res.workers);
+    refreshPickWorkingDocs();
+  }
 }
 
 // ===== Bulk Op (大货操作) =====
