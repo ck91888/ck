@@ -1,0 +1,900 @@
+// CK 仓库数据看板 — app.js
+// 现有: realtime / live docs / correction
+// 新增: 单子数据 orders / 工时分析 workhours / WMS 导入 wms / 管理看板 management
+
+var _currentTab = "realtime";
+var _refreshTimer = null;
+
+// ===== 通用 utils =====
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, function(c) {
+    return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c];
+  });
+}
+function getKey() { return localStorage.getItem(SHUJU_KEY_STORAGE) || ""; }
+function setKey(k) { localStorage.setItem(SHUJU_KEY_STORAGE, k); }
+
+async function api(params) {
+  params.k = getKey();
+  try {
+    var res = await fetch(V2_API, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(params)
+    });
+    return await res.json();
+  } catch(e) { return { ok: false, error: e.message }; }
+}
+
+function fmtTime(isoStr) {
+  if (!isoStr) return "--";
+  try {
+    var d = new Date(isoStr);
+    if (isNaN(d.getTime())) return isoStr;
+    var kst = new Date(d.getTime() + 9 * 3600 * 1000);
+    return kst.toISOString().slice(5, 16).replace("T", " ");
+  } catch(e) { return isoStr; }
+}
+function minutesSince(isoStr) {
+  if (!isoStr) return "--";
+  var t = new Date(isoStr).getTime();
+  if (isNaN(t)) return "--";
+  return Math.round((Date.now() - t) / 60000);
+}
+function fmtMinutes(m) {
+  m = Number(m) || 0;
+  if (m < 60) return m + " 分";
+  var h = Math.floor(m / 60), r = m % 60;
+  return h + " 小时 " + (r > 0 ? r + " 分" : "");
+}
+function fmtNumber(n) {
+  n = Number(n) || 0;
+  return (Math.round(n * 10) / 10).toLocaleString();
+}
+function defaultDateRangeToday() {
+  var d = new Date(Date.now() + 9 * 3600 * 1000);
+  return d.toISOString().slice(0, 10);
+}
+function setBtnLoading(btn, loading, originalText) {
+  if (!btn) return;
+  if (loading) {
+    btn.dataset._origText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "加载中...";
+  } else {
+    btn.disabled = false;
+    btn.textContent = originalText || btn.dataset._origText || btn.textContent;
+  }
+}
+
+// CSV 导出
+function exportCsv(filename, rows) {
+  if (!rows || rows.length === 0) { alert("无数据可导出"); return; }
+  var keys = Object.keys(rows[0]);
+  var lines = [keys.join(",")];
+  rows.forEach(function(r) {
+    lines.push(keys.map(function(k) {
+      var v = r[k] == null ? "" : String(r[k]);
+      if (v.indexOf(',') >= 0 || v.indexOf('"') >= 0 || v.indexOf('\n') >= 0) {
+        v = '"' + v.replace(/"/g, '""') + '"';
+      }
+      return v;
+    }).join(","));
+  });
+  var bom = "﻿";
+  var blob = new Blob([bom + lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click();
+  setTimeout(function() { URL.revokeObjectURL(url); a.remove(); }, 200);
+}
+
+function statusTag(s) {
+  var cls = "tag-gray";
+  if (s === "working") cls = "tag-green";
+  else if (s === "awaiting_close") cls = "tag-orange";
+  else if (s === "pending") cls = "tag-blue";
+  else if (s === "completed") cls = "tag-purple";
+  return '<span class="tag ' + cls + '">' + esc(statusLabel(s)) + '</span>';
+}
+
+// ===== Login / Auth =====
+function doLogin() {
+  var key = document.getElementById("loginKey").value.trim();
+  if (!key) return;
+  setKey(key);
+  api({ action: "v2_auth_check" }).then(function(res) {
+    if (res && res.ok) {
+      showApp();
+    } else {
+      var el = document.getElementById("loginError");
+      el.style.display = "";
+      el.textContent = "访问码错误或网络异常";
+    }
+  });
+}
+function doLogout() {
+  localStorage.removeItem(SHUJU_KEY_STORAGE);
+  location.reload();
+}
+function checkAuth() {
+  var k = getKey();
+  if (!k) return;
+  api({ action: "v2_auth_check" }).then(function(res) {
+    if (res && res.ok) showApp();
+  });
+}
+function showApp() {
+  document.getElementById("loginWrap").style.display = "none";
+  document.getElementById("appWrap").style.display = "";
+  startClock();
+  initFilterSelects();
+  // 首次默认日期
+  setDefaultDateInputs();
+  loadRealtime();
+  loadLiveDocs();
+  _refreshTimer = setInterval(function() {
+    if (_currentTab === "realtime") {
+      loadRealtime();
+      loadLiveDocs();
+    }
+  }, 30000);
+}
+function startClock() {
+  function tick() {
+    var d = new Date(Date.now() + 9 * 3600 * 1000);
+    var el = document.getElementById("headerClock");
+    if (el) el.textContent = d.toISOString().slice(0,10) + " " + d.toISOString().slice(11,19) + " KST";
+  }
+  tick();
+  setInterval(tick, 1000);
+}
+
+function initFilterSelects() {
+  // 单子数据 / 工时分析 共用 flow_stage 与 job_type select
+  ['ordersFilterFlow', 'whFilterFlow'].forEach(function(id) {
+    var el = document.getElementById(id);
+    if (el && !el.dataset._init) {
+      el.innerHTML = FLOW_STAGE_OPTIONS.map(function(o) {
+        return '<option value="' + esc(o.value) + '">' + esc(o.label) + '</option>';
+      }).join('');
+      el.dataset._init = '1';
+    }
+  });
+  ['ordersFilterJobType', 'whFilterJobType'].forEach(function(id) {
+    var el = document.getElementById(id);
+    if (el && !el.dataset._init) {
+      el.innerHTML = JOB_TYPE_OPTIONS.map(function(o) {
+        return '<option value="' + esc(o.value) + '">' + esc(o.label) + '</option>';
+      }).join('');
+      el.dataset._init = '1';
+    }
+  });
+}
+
+function setDefaultDateInputs() {
+  var today = defaultDateRangeToday();
+  ['whFilterStart', 'whFilterEnd', 'mgmtFilterStart', 'mgmtFilterEnd'].forEach(function(id) {
+    var el = document.getElementById(id);
+    if (el && !el.value) el.value = today;
+  });
+}
+
+function switchTab(tab, btn) {
+  _currentTab = tab;
+  var tabs = document.querySelectorAll(".tab-bar button");
+  for (var i = 0; i < tabs.length; i++) tabs[i].classList.remove("active");
+  if (btn) btn.classList.add("active");
+  ["realtime","orders","workhours","wms","management"].forEach(function(t) {
+    var el = document.getElementById("tab-" + t);
+    if (el) el.style.display = (t === tab) ? "" : "none";
+  });
+  if (tab === "realtime") { loadRealtime(); loadLiveDocs(); }
+  else if (tab === "orders" && !window._ordersLoaded) { window._ordersLoaded = true; loadOrders(); }
+  else if (tab === "workhours" && !window._workhoursLoaded) { window._workhoursLoaded = true; loadWorkhours(); }
+  else if (tab === "wms" && !window._wmsLoaded) { window._wmsLoaded = true; loadWmsBatches(); }
+  else if (tab === "management" && !window._managementLoaded) { window._managementLoaded = true; loadManagement(); }
+}
+
+// ===== Realtime overview =====
+async function loadRealtime() {
+  var res = await api({ action: "v2_dashboard_realtime_overview" });
+  if (!res || !res.ok) return;
+
+  document.getElementById("statActiveWorkers").textContent = res.current_active_workers || 0;
+  document.getElementById("statTodayLogins").textContent = res.today_login_workers || 0;
+  document.getElementById("statActiveJobs").textContent = res.current_active_jobs || 0;
+  document.getElementById("statActiveDocs").textContent = res.current_active_docs || 0;
+
+  var workers = res.worker_live_status || [];
+  var tbody = document.getElementById("workerLiveBody");
+  if (workers.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="9" class="muted" style="text-align:center;">当前没有在岗人员</td></tr>';
+  } else {
+    var html = "";
+    workers.forEach(function(w) {
+      html += "<tr>";
+      html += "<td><b>" + esc(w.worker_name) + "</b></td>";
+      html += "<td>" + esc(bizLabel(w.biz_class)) + "</td>";
+      html += "<td>" + esc(flowLabel(w.flow_stage)) + "</td>";
+      html += "<td>" + esc(jobTypeLabel(w.job_type)) + "</td>";
+      html += "<td>" + esc(w.display_no || w.related_doc_id || "--") + "</td>";
+      html += "<td>" + esc(fmtTime(w.joined_at)) + "</td>";
+      html += "<td>" + minutesSince(w.joined_at) + "</td>";
+      html += "<td>" + statusTag(w.job_status) + "</td>";
+      html += '<td><button class="row-action warn" onclick="markAnomaly(\'worker\',\'' + esc(w.worker_id) + '\')">标记异常</button></td>';
+      html += "</tr>";
+    });
+    tbody.innerHTML = html;
+  }
+
+  var breakdown = res.biz_breakdown || [];
+  var grid = document.getElementById("bizBreakdown");
+  if (breakdown.length === 0) {
+    grid.innerHTML = '<div class="muted" style="padding:20px;text-align:center;">当前无活跃业务</div>';
+  } else {
+    var bhtml = "";
+    breakdown.forEach(function(b) {
+      bhtml += '<div class="biz-item">';
+      bhtml += '<div class="biz-name">' + esc(jobTypeLabel(b.job_type) || flowLabel(b.flow_stage)) + '</div>';
+      bhtml += '<div class="biz-nums"><b>' + (b.worker_count || 0) + '</b> 人 / <b>' + (b.job_count || 0) + '</b> 个任务</div>';
+      bhtml += '</div>';
+    });
+    grid.innerHTML = bhtml;
+  }
+}
+
+async function loadLiveDocs() {
+  var res = await api({ action: "v2_dashboard_live_docs" });
+  var tbody = document.getElementById("liveDocsBody");
+  if (!res || !res.ok) {
+    tbody.innerHTML = '<tr><td colspan="8" class="muted" style="text-align:center;">加载失败</td></tr>';
+    return;
+  }
+  var docs = res.docs || [];
+  if (docs.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="8" class="muted" style="text-align:center;">当前没有进行中的单子</td></tr>';
+    return;
+  }
+  var docFlows = {};
+  docs.forEach(function(d) {
+    var key = d.related_doc_id || d.job_id;
+    if (!docFlows[key]) docFlows[key] = [];
+    docFlows[key].push(d.flow_stage);
+  });
+  var html = "";
+  docs.forEach(function(d) {
+    var key = d.related_doc_id || d.job_id;
+    var flows = docFlows[key] || [];
+    var isParallel = flows.indexOf("unload") !== -1 && flows.indexOf("inbound") !== -1;
+    html += "<tr>";
+    html += "<td><b>" + esc(d.display_no || d.related_doc_id || d.job_id) + "</b></td>";
+    html += "<td>" + esc(bizLabel(d.biz_class)) + "</td>";
+    html += "<td>" + esc(flowLabel(d.flow_stage)) + (isParallel ? ' <span class="tag tag-orange" style="font-size:10px;">并行</span>' : '') + "</td>";
+    html += "<td>" + esc(d.worker_names || "--") + "</td>";
+    html += "<td>" + esc(fmtTime(d.created_at)) + "</td>";
+    html += "<td>" + minutesSince(d.created_at) + "</td>";
+    html += "<td>" + statusTag(d.status) + "</td>";
+    html += '<td><button class="row-action warn" onclick="markAnomaly(\'doc\',\'' + esc(d.job_id) + '\')">标记异常</button>';
+    html += ' <button class="row-action" onclick="requestCorrection(\'' + esc(d.job_id) + '\')">发起修正</button></td>';
+    html += "</tr>";
+  });
+  tbody.innerHTML = html;
+}
+
+async function markAnomaly(type, id) {
+  var reason = prompt("请填写异常说明（将记入修正申请表）:");
+  if (!reason || !reason.trim()) return;
+  var reporter = prompt("您的姓名/工号:");
+  if (!reporter || !reporter.trim()) return;
+  var res = await api({
+    action: "v2_correction_request_create",
+    type: type, target_id: id, reporter: reporter.trim(), reason: reason.trim()
+  });
+  if (res && res.ok) alert("已提交修正申请 #" + res.id + "\n主管将另行处理，不会直接修改业务数据");
+  else alert("提交失败：" + (res ? (res.message || res.error) : "unknown"));
+}
+async function requestCorrection(jobId) {
+  var reason = prompt("请填写修正诉求（工时/人员/结果 等）:");
+  if (!reason || !reason.trim()) return;
+  var reporter = prompt("您的姓名/工号:");
+  if (!reporter || !reporter.trim()) return;
+  var res = await api({
+    action: "v2_correction_request_create",
+    type: "job", target_id: jobId, reporter: reporter.trim(), reason: reason.trim()
+  });
+  if (res && res.ok) alert("已提交修正申请 #" + res.id);
+  else alert("提交失败：" + (res ? (res.message || res.error) : "unknown"));
+}
+
+// =====================================================
+// 单子数据 (orders)
+// =====================================================
+var _ordersItems = [];
+
+function ordersFilterParams() {
+  return {
+    start_date: document.getElementById("ordersFilterStart").value || '',
+    end_date: document.getElementById("ordersFilterEnd").value || '',
+    flow_stage: document.getElementById("ordersFilterFlow").value || '',
+    job_type: document.getElementById("ordersFilterJobType").value || '',
+    worker_name: document.getElementById("ordersFilterWorker").value.trim(),
+    doc_no: document.getElementById("ordersFilterDoc").value.trim(),
+    limit: 200, offset: 0
+  };
+}
+
+async function loadOrders(btn) {
+  var tbody = document.getElementById("ordersBody");
+  tbody.innerHTML = '<tr><td colspan="11" class="muted" style="text-align:center;">加载中...</td></tr>';
+  setBtnLoading(btn, true);
+  var params = ordersFilterParams();
+  params.action = "v2_dashboard_order_list";
+  var res = await api(params);
+  setBtnLoading(btn, false, "查询");
+  if (!res || !res.ok) {
+    tbody.innerHTML = '<tr><td colspan="11" class="muted" style="text-align:center;">加载失败: ' + esc(res && (res.message || res.error)) + '</td></tr>';
+    return;
+  }
+  _ordersItems = res.items || [];
+  document.getElementById("ordersTotal").textContent = (res.total || 0) + ' 条 (显示前 ' + _ordersItems.length + ')';
+  if (_ordersItems.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="11" class="muted" style="text-align:center;">暂无数据</td></tr>';
+    return;
+  }
+  var html = '';
+  _ordersItems.forEach(function(j) {
+    html += '<tr>';
+    html += '<td>' + esc((j.created_at || '').slice(0, 10)) + '</td>';
+    html += '<td><b>' + esc(j.display_no || j.related_doc_id || j.id) + '</b></td>';
+    html += '<td>' + esc(flowLabel(j.flow_stage)) + '</td>';
+    html += '<td>' + esc(jobTypeLabel(j.job_type)) + '</td>';
+    html += '<td>' + esc(bizLabel(j.biz_class)) + '</td>';
+    html += '<td>' + statusTag(j.status) + '</td>';
+    html += '<td>' + (j.worker_count || 0) + '</td>';
+    html += '<td>' + fmtMinutes(j.total_minutes) + '</td>';
+    html += '<td>' + esc(fmtTime(j.started_at)) + '</td>';
+    html += '<td>' + esc(fmtTime(j.ended_at)) + '</td>';
+    html += '<td><button class="row-action" onclick="openOrderDetail(\'' + esc(j.id) + '\')">详情</button></td>';
+    html += '</tr>';
+  });
+  tbody.innerHTML = html;
+}
+
+function exportOrders() {
+  if (_ordersItems.length === 0) { alert("无数据"); return; }
+  var rows = _ordersItems.map(function(j) {
+    return {
+      日期: (j.created_at || '').slice(0, 10),
+      单号: j.display_no || j.related_doc_id || j.id,
+      业务阶段: flowLabel(j.flow_stage),
+      任务类型: jobTypeLabel(j.job_type),
+      业务分类: bizLabel(j.biz_class),
+      状态: statusLabel(j.status),
+      参与人数: j.worker_count || 0,
+      总分钟: j.total_minutes || 0,
+      开始时间: fmtTime(j.started_at),
+      结束时间: fmtTime(j.ended_at),
+      job_id: j.id
+    };
+  });
+  exportCsv("orders_" + defaultDateRangeToday() + ".csv", rows);
+}
+
+async function openOrderDetail(jobId) {
+  var modal = document.getElementById("orderDetailModal");
+  var body = document.getElementById("orderDetailBody");
+  body.innerHTML = '<div class="muted">加载中...</div>';
+  modal.style.display = '';
+  var res = await api({ action: "v2_dashboard_order_detail", job_id: jobId });
+  if (!res || !res.ok) {
+    body.innerHTML = '<div class="muted">加载失败</div>';
+    return;
+  }
+  var j = res.job || {};
+  var html = '';
+  html += '<h3>基本信息</h3>';
+  html += '<table class="data-table"><tr><th>job_id</th><td>' + esc(j.id) + '</td>';
+  html += '<th>display_no</th><td>' + esc(j.display_no || '--') + '</td></tr>';
+  html += '<tr><th>业务阶段</th><td>' + esc(flowLabel(j.flow_stage)) + '</td>';
+  html += '<th>任务类型</th><td>' + esc(jobTypeLabel(j.job_type)) + '</td></tr>';
+  html += '<tr><th>业务分类</th><td>' + esc(bizLabel(j.biz_class)) + '</td>';
+  html += '<th>状态</th><td>' + statusTag(j.status) + '</td></tr>';
+  html += '<tr><th>related_doc_id</th><td>' + esc(j.related_doc_id || '--') + '</td>';
+  html += '<th>linked_outbound_order_id</th><td>' + esc(j.linked_outbound_order_id || '--') + '</td></tr>';
+  html += '<tr><th>created_at</th><td>' + esc(fmtTime(j.created_at)) + '</td>';
+  html += '<th>updated_at</th><td>' + esc(fmtTime(j.updated_at)) + '</td></tr>';
+  html += '</table>';
+
+  // 参与人员
+  var workers = res.workers || [];
+  html += '<h3 style="margin-top:14px;">参与人员 (' + workers.length + ')</h3>';
+  if (workers.length === 0) html += '<div class="muted">无</div>';
+  else {
+    html += '<table class="data-table"><thead><tr><th>员工</th><th>开始</th><th>结束</th><th>分钟</th><th>离开原因</th></tr></thead><tbody>';
+    workers.forEach(function(w) {
+      html += '<tr><td>' + esc(w.worker_name || w.worker_id) + '</td>';
+      html += '<td>' + esc(fmtTime(w.joined_at)) + '</td>';
+      html += '<td>' + esc(fmtTime(w.left_at)) + '</td>';
+      html += '<td>' + (w.minutes_worked || 0) + '</td>';
+      html += '<td>' + esc(w.leave_reason || '--') + '</td></tr>';
+    });
+    html += '</tbody></table>';
+  }
+
+  // result
+  var results = res.results || [];
+  if (results.length > 0) {
+    html += '<h3 style="margin-top:14px;">作业结果 (' + results.length + ')</h3>';
+    html += '<table class="data-table"><thead><tr><th>箱数</th><th>板数</th><th>备注</th><th>result_json</th><th>created_by</th><th>created_at</th></tr></thead><tbody>';
+    results.forEach(function(r) {
+      var rj = r.result_json == null ? '' : String(r.result_json);
+      if (rj.length > 200) rj = rj.slice(0, 200) + '...';
+      html += '<tr><td>' + (r.box_count || 0) + '</td>';
+      html += '<td>' + (r.pallet_count || 0) + '</td>';
+      html += '<td>' + esc(r.remark || '--') + '</td>';
+      html += '<td><code style="font-size:11px;">' + esc(rj) + '</code></td>';
+      html += '<td>' + esc(r.created_by || '--') + '</td>';
+      html += '<td>' + esc(fmtTime(r.created_at)) + '</td></tr>';
+    });
+    html += '</tbody></table>';
+  }
+
+  // pick_worker_docs (代发拣货特有)
+  var pwd = res.pick_worker_docs || [];
+  if (pwd.length > 0) {
+    html += '<h3 style="margin-top:14px;">代发拣货分组 — 按拣货单</h3>';
+    var byDoc = {};
+    pwd.forEach(function(p) {
+      var k = p.pick_doc_no;
+      if (!byDoc[k]) byDoc[k] = [];
+      byDoc[k].push(p);
+    });
+    html += '<table class="data-table"><thead><tr><th>拣货单号</th><th>参与人</th></tr></thead><tbody>';
+    Object.keys(byDoc).forEach(function(d) {
+      var ws = byDoc[d].map(function(p) {
+        return esc(p.worker_name || p.worker_id) + (p.left_at ? '(已完成 ' + (p.minutes_worked||0) + '分)' : '(进行中)');
+      }).join('、');
+      html += '<tr><td><b>' + esc(d) + '</b></td><td>' + ws + '</td></tr>';
+    });
+    html += '</tbody></table>';
+
+    html += '<h3 style="margin-top:14px;">代发拣货分组 — 按人员</h3>';
+    var byWk = {};
+    pwd.forEach(function(p) {
+      var k = p.worker_name || p.worker_id;
+      if (!byWk[k]) byWk[k] = [];
+      byWk[k].push(p);
+    });
+    html += '<table class="data-table"><thead><tr><th>员工</th><th>参与了哪些拣货单</th></tr></thead><tbody>';
+    Object.keys(byWk).forEach(function(w) {
+      var ds = byWk[w].map(function(p) { return esc(p.pick_doc_no); }).join('、');
+      html += '<tr><td><b>' + esc(w) + '</b></td><td>' + ds + '</td></tr>';
+    });
+    html += '</tbody></table>';
+  }
+
+  body.innerHTML = html;
+}
+
+function closeOrderDetail() {
+  document.getElementById("orderDetailModal").style.display = 'none';
+}
+
+// =====================================================
+// 工时分析 (workhours)
+// =====================================================
+var _whSummary = null;
+
+function whFilterParams() {
+  return {
+    start_date: document.getElementById("whFilterStart").value || '',
+    end_date: document.getElementById("whFilterEnd").value || '',
+    worker_name: document.getElementById("whFilterWorker").value.trim(),
+    flow_stage: document.getElementById("whFilterFlow").value || '',
+    job_type: document.getElementById("whFilterJobType").value || ''
+  };
+}
+
+async function loadWorkhours(btn) {
+  setBtnLoading(btn, true);
+  var params = whFilterParams();
+  params.action = "v2_dashboard_workhour_summary";
+  var res = await api(params);
+  setBtnLoading(btn, false, "查询");
+  if (!res || !res.ok) {
+    document.getElementById("whSummaryRow").innerHTML = '<div class="muted">加载失败</div>';
+    return;
+  }
+  _whSummary = res;
+  var s = res.summary || {};
+
+  // 顶部统计卡
+  var cards = [
+    { label: '总工时', value: fmtMinutes(s.total_minutes || 0), sub: s.total_hours + ' 小时' },
+    { label: '参与人数', value: s.worker_count || 0 },
+    { label: '任务数', value: s.job_count || 0 },
+    { label: '人均工时', value: fmtMinutes(s.avg_minutes_per_worker || 0) },
+    { label: '最长单段', value: fmtMinutes(s.max_segment_minutes || 0) },
+    { label: '异常段', value: s.anomaly_count || 0, sub: '> 240分 或 ≤0分' }
+  ];
+  var ch = '';
+  cards.forEach(function(c) {
+    ch += '<div class="stat-card"><div class="stat-label">' + esc(c.label) + '</div>';
+    ch += '<div class="stat-value">' + esc(c.value) + '</div>';
+    if (c.sub) ch += '<div class="stat-sub">' + esc(c.sub) + '</div>';
+    ch += '</div>';
+  });
+  document.getElementById("whSummaryRow").innerHTML = ch;
+
+  // 表 1: 按员工
+  var bw = res.by_worker || [];
+  var tb1 = '';
+  if (bw.length === 0) tb1 = '<tr><td colspan="5" class="muted" style="text-align:center;">暂无数据</td></tr>';
+  else bw.forEach(function(w) {
+    tb1 += '<tr><td><b>' + esc(w.worker_name) + '</b></td>';
+    tb1 += '<td>' + (w.total_minutes || 0) + '</td>';
+    tb1 += '<td>' + (w.total_hours || 0) + '</td>';
+    tb1 += '<td>' + (w.job_count || 0) + '</td>';
+    tb1 += '<td>' + (w.avg_minutes_per_job || 0) + '</td>';
+    tb1 += '<td>' + (w.max_segment_minutes || 0) + '</td></tr>';
+  });
+  document.getElementById("whByWorkerBody").innerHTML = tb1;
+
+  // 表 2: 按任务类型
+  var bj = res.by_job_type || [];
+  var tb2 = '';
+  if (bj.length === 0) tb2 = '<tr><td colspan="5" class="muted" style="text-align:center;">暂无数据</td></tr>';
+  else bj.forEach(function(j) {
+    tb2 += '<tr><td><b>' + esc(jobTypeLabel(j.job_type)) + '</b></td>';
+    tb2 += '<td>' + (j.total_minutes || 0) + '</td>';
+    tb2 += '<td>' + (j.worker_count || 0) + '</td>';
+    tb2 += '<td>' + (j.job_count || 0) + '</td>';
+    tb2 += '<td>' + (j.avg_minutes_per_worker || 0) + '</td></tr>';
+  });
+  document.getElementById("whByJobTypeBody").innerHTML = tb2;
+
+  // 表 3: 段明细 (前 200 条)
+  var segs = res.segments || [];
+  var tb3 = '';
+  if (segs.length === 0) tb3 = '<tr><td colspan="8" class="muted" style="text-align:center;">暂无数据</td></tr>';
+  else segs.slice(0, 200).forEach(function(s) {
+    var anomalyTag = s.anomaly ? ' <span class="tag tag-red" style="font-size:10px;">异常</span>' : '';
+    var activeTag = s.active ? ' <span class="tag tag-green" style="font-size:10px;">在岗</span>' : '';
+    tb3 += '<tr><td>' + esc(s.worker_name) + '</td>';
+    tb3 += '<td>' + esc((s.joined_at || '').slice(0, 10)) + '</td>';
+    tb3 += '<td>' + esc(jobTypeLabel(s.job_type)) + '</td>';
+    tb3 += '<td>' + esc(s.display_no || s.job_id) + '</td>';
+    tb3 += '<td>' + esc(fmtTime(s.joined_at)) + '</td>';
+    tb3 += '<td>' + esc(fmtTime(s.left_at)) + '</td>';
+    tb3 += '<td>' + (s.minutes || 0) + activeTag + anomalyTag + '</td>';
+    tb3 += '<td>' + statusTag(s.status) + '</td></tr>';
+  });
+  document.getElementById("whSegmentsBody").innerHTML = tb3;
+  if (res.truncated) {
+    document.getElementById("whSegmentsHint").textContent = '* 段数已截断为 1000 条，请缩小日期/筛选范围';
+  } else {
+    document.getElementById("whSegmentsHint").textContent = '';
+  }
+}
+
+function exportWorkhoursSegments() {
+  if (!_whSummary) { alert("请先查询"); return; }
+  var rows = (_whSummary.segments || []).map(function(s) {
+    return {
+      员工: s.worker_name, 日期: (s.joined_at || '').slice(0, 10),
+      任务类型: jobTypeLabel(s.job_type), 任务号: s.display_no || s.job_id,
+      开始: fmtTime(s.joined_at), 结束: fmtTime(s.left_at),
+      分钟: s.minutes, 状态: statusLabel(s.status),
+      在岗: s.active, 异常: s.anomaly ? 1 : 0
+    };
+  });
+  exportCsv("workhour_segments_" + defaultDateRangeToday() + ".csv", rows);
+}
+
+// =====================================================
+// WMS 导入 (wms)
+// =====================================================
+var _wmsHeaders = [];
+var _wmsRows = [];      // normalized rows ready to upload
+var _wmsRawRows = [];   // 原始解析行
+var _wmsFieldMap = {};  // 标准字段 → 原始表头
+
+function normalizeHeader(h) {
+  return String(h || '').trim().toLowerCase().replace(/\s+/g, '');
+}
+
+function detectFieldMap(headers) {
+  var map = {};
+  var normHeaders = headers.map(normalizeHeader);
+  Object.keys(WMS_FIELD_ALIASES).forEach(function(stdField) {
+    var aliases = WMS_FIELD_ALIASES[stdField];
+    for (var i = 0; i < normHeaders.length; i++) {
+      var h = normHeaders[i];
+      for (var k = 0; k < aliases.length; k++) {
+        var a = String(aliases[k]).toLowerCase().replace(/\s+/g, '');
+        if (h === a) { map[stdField] = headers[i]; return; }
+      }
+    }
+  });
+  return map;
+}
+
+function normalizeWmsRows(rawRows, headerMap, importType) {
+  return rawRows.map(function(row) {
+    var out = { import_type: importType, raw: row };
+    Object.keys(headerMap).forEach(function(stdField) {
+      var origHeader = headerMap[stdField];
+      var v = row[origHeader];
+      if (v == null) v = '';
+      out[stdField] = v;
+    });
+    // 数字字段
+    out.qty = Number(out.qty) || 0;
+    out.box_count = Number(out.box_count) || 0;
+    // 日期：尽量挤成 YYYY-MM-DD
+    if (out.work_date) {
+      var s = String(out.work_date).trim();
+      // Excel 序列号
+      if (/^\d{4,6}$/.test(s) && Number(s) > 30000) {
+        var d = new Date((Number(s) - 25569) * 86400 * 1000);
+        s = d.toISOString().slice(0, 10);
+      } else {
+        s = s.replace(/\//g, '-').slice(0, 10);
+      }
+      out.work_date = s;
+    }
+    return out;
+  });
+}
+
+async function parseExcelOrCsv(file) {
+  return new Promise(function(resolve, reject) {
+    var reader = new FileReader();
+    reader.onload = function(e) {
+      try {
+        var data = new Uint8Array(e.target.result);
+        if (typeof XLSX === 'undefined') return reject(new Error('SheetJS 未加载'));
+        var wb = XLSX.read(data, { type: 'array', cellDates: true });
+        var sheetName = wb.SheetNames[0];
+        var sheet = wb.Sheets[sheetName];
+        var rows = XLSX.utils.sheet_to_json(sheet, { defval: '', raw: false });
+        var headers = [];
+        if (rows.length > 0) headers = Object.keys(rows[0]);
+        else {
+          // 退化：用 sheet_to_json header:1
+          var arr = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
+          if (arr.length > 0) headers = arr[0];
+        }
+        resolve({ headers: headers, rows: rows });
+      } catch(err) { reject(err); }
+    };
+    reader.onerror = reject;
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+async function onWmsFilePick(input) {
+  var file = input.files[0];
+  if (!file) return;
+  var status = document.getElementById("wmsParseStatus");
+  status.textContent = '解析中...';
+  try {
+    var parsed = await parseExcelOrCsv(file);
+    _wmsHeaders = parsed.headers;
+    _wmsRawRows = parsed.rows;
+    _wmsFieldMap = detectFieldMap(_wmsHeaders);
+    var importType = document.getElementById("wmsImportType").value;
+    _wmsRows = normalizeWmsRows(_wmsRawRows, _wmsFieldMap, importType);
+    document.getElementById("wmsFileName").textContent = file.name + ' (' + _wmsRawRows.length + ' 行)';
+    renderWmsPreview();
+    status.textContent = '';
+    document.getElementById("wmsImportBtn").disabled = (_wmsRows.length === 0);
+  } catch(e) {
+    status.textContent = '解析失败: ' + e.message;
+    _wmsRows = [];
+    document.getElementById("wmsImportBtn").disabled = true;
+  }
+}
+
+function renderWmsPreview() {
+  // 1) headers + map
+  var mapHtml = '<table class="data-table"><thead><tr><th>标准字段</th><th>识别到的表头</th></tr></thead><tbody>';
+  Object.keys(WMS_FIELD_ALIASES).forEach(function(f) {
+    var got = _wmsFieldMap[f] || '<span style="color:#bbb;">未识别</span>';
+    mapHtml += '<tr><td><b>' + esc(f) + '</b></td><td>' + got + '</td></tr>';
+  });
+  mapHtml += '</tbody></table>';
+  document.getElementById("wmsFieldMap").innerHTML = mapHtml;
+
+  // 2) preview top 20
+  var preview = _wmsRows.slice(0, 20);
+  if (preview.length === 0) {
+    document.getElementById("wmsPreviewBody").innerHTML = '<tr><td colspan="9" class="muted" style="text-align:center;">暂无数据</td></tr>';
+    return;
+  }
+  var html = '';
+  preview.forEach(function(r) {
+    html += '<tr>';
+    html += '<td>' + esc(r.work_date || '') + '</td>';
+    html += '<td>' + esc(r.operated_at || '') + '</td>';
+    html += '<td>' + esc(r.worker_name || '') + '</td>';
+    html += '<td>' + esc(r.doc_no || '') + '</td>';
+    html += '<td>' + esc(r.customer || '') + '</td>';
+    html += '<td>' + esc(r.sku || '') + '</td>';
+    html += '<td>' + (r.qty || 0) + '</td>';
+    html += '<td>' + (r.box_count || 0) + '</td>';
+    html += '<td>' + esc(r.operation_type || '') + '</td>';
+    html += '</tr>';
+  });
+  document.getElementById("wmsPreviewBody").innerHTML = html;
+}
+
+function onWmsImportTypeChange() {
+  if (_wmsRawRows.length > 0) {
+    var importType = document.getElementById("wmsImportType").value;
+    _wmsRows = normalizeWmsRows(_wmsRawRows, _wmsFieldMap, importType);
+    renderWmsPreview();
+  }
+}
+
+async function submitWmsImport(btn) {
+  if (_wmsRows.length === 0) { alert('请先选择文件'); return; }
+  if (_wmsRows.length > 5000) { alert('单次最多导入 5000 行，请分批'); return; }
+  var importType = document.getElementById("wmsImportType").value;
+  var uploadedBy = (document.getElementById("wmsUploadedBy").value || '').trim();
+  if (!uploadedBy) { alert('请填写导入人姓名'); return; }
+  var fileName = document.getElementById("wmsFileName").textContent.split(' (')[0] || '';
+  setBtnLoading(btn, true);
+  var res = await api({
+    action: "v2_dashboard_wms_import",
+    import_type: importType,
+    file_name: fileName,
+    uploaded_by: uploadedBy,
+    headers: _wmsHeaders,
+    rows: _wmsRows,
+    client_req_id: 'WMS-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8)
+  });
+  setBtnLoading(btn, false, "导入");
+  if (res && res.ok) {
+    alert('导入成功 batch_id=' + res.batch_id + '，共 ' + res.row_count + ' 行');
+    _wmsRows = []; _wmsRawRows = []; _wmsHeaders = []; _wmsFieldMap = {};
+    document.getElementById("wmsFile").value = '';
+    document.getElementById("wmsFileName").textContent = '';
+    document.getElementById("wmsPreviewBody").innerHTML = '';
+    document.getElementById("wmsFieldMap").innerHTML = '';
+    document.getElementById("wmsImportBtn").disabled = true;
+    loadWmsBatches();
+  } else {
+    alert('导入失败: ' + (res ? (res.message || res.error) : 'unknown'));
+  }
+}
+
+async function loadWmsBatches() {
+  var tbody = document.getElementById("wmsBatchesBody");
+  tbody.innerHTML = '<tr><td colspan="8" class="muted" style="text-align:center;">加载中...</td></tr>';
+  var res = await api({ action: "v2_dashboard_wms_batches", limit: 100, offset: 0 });
+  if (!res || !res.ok) {
+    tbody.innerHTML = '<tr><td colspan="8" class="muted" style="text-align:center;">加载失败</td></tr>';
+    return;
+  }
+  var items = res.items || [];
+  if (items.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="8" class="muted" style="text-align:center;">尚无导入批次</td></tr>';
+    return;
+  }
+  var html = '';
+  items.forEach(function(b) {
+    html += '<tr>';
+    html += '<td>' + esc(fmtTime(b.created_at)) + '</td>';
+    html += '<td>' + esc(importTypeLabel(b.import_type)) + '</td>';
+    html += '<td>' + esc(b.file_name || '--') + '</td>';
+    html += '<td>' + (b.row_count || 0) + '</td>';
+    html += '<td>' + esc(b.date_from || '--') + ' ~ ' + esc(b.date_to || '--') + '</td>';
+    html += '<td>' + esc(b.uploaded_by || '--') + '</td>';
+    html += '<td>' + esc(b.status || '--') + '</td>';
+    html += '<td><button class="row-action" onclick="openWmsBatchDetail(\'' + esc(b.id) + '\')">查看</button></td>';
+    html += '</tr>';
+  });
+  tbody.innerHTML = html;
+}
+
+async function openWmsBatchDetail(batchId) {
+  var modal = document.getElementById("wmsBatchModal");
+  var body = document.getElementById("wmsBatchBody");
+  body.innerHTML = '<div class="muted">加载中...</div>';
+  modal.style.display = '';
+  var res = await api({ action: "v2_dashboard_wms_batch_detail", batch_id: batchId, limit: 200, offset: 0 });
+  if (!res || !res.ok) {
+    body.innerHTML = '<div class="muted">加载失败</div>';
+    return;
+  }
+  var b = res.batch || {};
+  var rows = res.rows || [];
+  var html = '<h3>批次信息</h3>';
+  html += '<div class="muted">' + esc(b.id) + ' · ' + esc(importTypeLabel(b.import_type)) +
+    ' · ' + esc(b.file_name) + ' · ' + (b.row_count || 0) + ' 行 · ' + esc(b.uploaded_by) + '</div>';
+  html += '<h3 style="margin-top:14px;">前 ' + rows.length + ' 行明细</h3>';
+  html += '<table class="data-table"><thead><tr><th>日期</th><th>时间</th><th>员工</th><th>单号</th><th>客户</th><th>SKU</th><th>数量</th><th>箱数</th></tr></thead><tbody>';
+  rows.forEach(function(r) {
+    html += '<tr><td>' + esc(r.work_date) + '</td><td>' + esc(r.operated_at) + '</td>';
+    html += '<td>' + esc(r.worker_name) + '</td><td>' + esc(r.doc_no) + '</td>';
+    html += '<td>' + esc(r.customer) + '</td><td>' + esc(r.sku) + '</td>';
+    html += '<td>' + (r.qty || 0) + '</td><td>' + (r.box_count || 0) + '</td></tr>';
+  });
+  html += '</tbody></table>';
+  body.innerHTML = html;
+}
+
+function closeWmsBatchDetail() {
+  document.getElementById("wmsBatchModal").style.display = 'none';
+}
+
+// =====================================================
+// 管理看板 (management)
+// =====================================================
+async function loadManagement(btn) {
+  setBtnLoading(btn, true);
+  var start = document.getElementById("mgmtFilterStart").value || '';
+  var end = document.getElementById("mgmtFilterEnd").value || '';
+  var res = await api({ action: "v2_dashboard_management_summary", start_date: start, end_date: end });
+  setBtnLoading(btn, false, "查询");
+  if (!res || !res.ok) {
+    document.getElementById("mgmtSummaryRow").innerHTML = '<div class="muted">加载失败</div>';
+    return;
+  }
+  var s = res.summary || {};
+  var cards = [
+    { label: '总工时', value: s.total_hours + ' h', sub: s.total_minutes + ' 分' },
+    { label: 'WMS 总数量', value: fmtNumber(s.total_qty) },
+    { label: 'WMS 总箱数', value: fmtNumber(s.total_boxes) },
+    { label: '综合件/小时', value: s.qty_per_hour },
+    { label: '综合箱/小时', value: s.boxes_per_hour },
+    { label: '活跃员工', value: s.worker_count || 0 },
+    { label: '异常工时段', value: s.anomaly_count || 0 }
+  ];
+  var ch = '';
+  cards.forEach(function(c) {
+    ch += '<div class="stat-card"><div class="stat-label">' + esc(c.label) + '</div>';
+    ch += '<div class="stat-value">' + esc(c.value) + '</div>';
+    if (c.sub) ch += '<div class="stat-sub">' + esc(c.sub) + '</div>';
+    ch += '</div>';
+  });
+  document.getElementById("mgmtSummaryRow").innerHTML = ch;
+
+  var bj = res.by_job_type || [];
+  var tb1 = '';
+  if (bj.length === 0) tb1 = '<tr><td colspan="6" class="muted" style="text-align:center;">暂无数据</td></tr>';
+  else bj.forEach(function(j) {
+    tb1 += '<tr><td><b>' + esc(jobTypeLabel(j.job_type)) + '</b></td>';
+    tb1 += '<td>' + (j.total_hours || 0) + '</td>';
+    tb1 += '<td>' + fmtNumber(j.wms_qty) + '</td>';
+    tb1 += '<td>' + fmtNumber(j.wms_boxes) + '</td>';
+    tb1 += '<td>' + (j.qty_per_hour || 0) + '</td>';
+    tb1 += '<td>' + (j.boxes_per_hour || 0) + '</td></tr>';
+  });
+  document.getElementById("mgmtByJobTypeBody").innerHTML = tb1;
+
+  var bw = res.by_worker || [];
+  var tb2 = '';
+  if (bw.length === 0) tb2 = '<tr><td colspan="6" class="muted" style="text-align:center;">暂无数据</td></tr>';
+  else bw.forEach(function(w) {
+    tb2 += '<tr><td><b>' + esc(w.worker_name) + '</b></td>';
+    tb2 += '<td>' + (w.total_hours || 0) + '</td>';
+    tb2 += '<td>' + fmtNumber(w.wms_qty) + '</td>';
+    tb2 += '<td>' + fmtNumber(w.wms_boxes) + '</td>';
+    tb2 += '<td>' + (w.qty_per_hour || 0) + '</td>';
+    tb2 += '<td>' + (w.boxes_per_hour || 0) + '</td></tr>';
+  });
+  document.getElementById("mgmtByWorkerBody").innerHTML = tb2;
+}
+
+// ===== Init =====
+checkAuth();
+window.addEventListener("DOMContentLoaded", function() {
+  var keyEl = document.getElementById("loginKey");
+  if (keyEl) keyEl.addEventListener("keydown", function(e) {
+    if (e.key === "Enter") doLogin();
+  });
+});

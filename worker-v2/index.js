@@ -690,10 +690,50 @@ const MIGRATIONS = [
   `CREATE INDEX IF NOT EXISTS idx_v2_outbound_accounted_date ON v2_outbound_orders(accounted, order_date, created_at)`,
   `CREATE INDEX IF NOT EXISTS idx_v2_inbound_accounted_status_date ON v2_inbound_plans(accounted, status, plan_date, created_at)`,
   `CREATE INDEX IF NOT EXISTS idx_v2_outbound_accounted_status_date ON v2_outbound_orders(accounted, status, order_date, created_at)`,
+
+  // ===== 数据看板 — WMS 导入（独立数据源，不污染 v2_ops_jobs 等现场工时表）=====
+  `CREATE TABLE IF NOT EXISTS v2_wms_import_batches (
+    id TEXT PRIMARY KEY,
+    import_type TEXT DEFAULT '',
+    file_name TEXT DEFAULT '',
+    row_count INTEGER DEFAULT 0,
+    date_from TEXT DEFAULT '',
+    date_to TEXT DEFAULT '',
+    uploaded_by TEXT DEFAULT '',
+    status TEXT DEFAULT 'imported',
+    raw_headers_json TEXT DEFAULT '[]',
+    created_at TEXT DEFAULT ''
+  )`,
+  `CREATE TABLE IF NOT EXISTS v2_wms_import_rows (
+    id TEXT PRIMARY KEY,
+    batch_id TEXT DEFAULT '',
+    import_type TEXT DEFAULT '',
+    work_date TEXT DEFAULT '',
+    operated_at TEXT DEFAULT '',
+    worker_name TEXT DEFAULT '',
+    worker_id TEXT DEFAULT '',
+    customer TEXT DEFAULT '',
+    doc_no TEXT DEFAULT '',
+    order_no TEXT DEFAULT '',
+    sku TEXT DEFAULT '',
+    qty REAL DEFAULT 0,
+    box_count REAL DEFAULT 0,
+    operation_type TEXT DEFAULT '',
+    raw_json TEXT DEFAULT '{}',
+    matched_job_id TEXT DEFAULT '',
+    matched_worker_id TEXT DEFAULT '',
+    match_confidence REAL DEFAULT 0,
+    created_at TEXT DEFAULT ''
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_wms_rows_batch ON v2_wms_import_rows(batch_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_wms_rows_type_date ON v2_wms_import_rows(import_type, work_date)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_wms_rows_worker_date ON v2_wms_import_rows(worker_name, work_date)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_wms_rows_doc ON v2_wms_import_rows(doc_no)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_wms_batches_created ON v2_wms_import_batches(created_at)`,
 ];
 
 // 每次发布迁移变化时手动 +1（patch 段），冷启动只比对一次字符串即可跳过整段 MIGRATIONS
-const CURRENT_SCHEMA_VERSION = 'v2.20260427e';
+const CURRENT_SCHEMA_VERSION = 'v2.20260427g';
 
 let _migrated = false;
 async function ensureMigrated(db) {
@@ -5124,6 +5164,437 @@ route("v2_verify_job_finish", async (body, env) => {
     }
 
     return { ok: true, job_id, completed: complete_job, batch_completed: complete_job && complete_batch };
+  });
+});
+
+// =====================================================
+// 数据看板 V1 — 单子数据 / 工时分析 / WMS 导入 / 管理看板
+// 全部只读为主；WMS 导入写入独立 v2_wms_import_* 表，不触碰现场工时
+// =====================================================
+
+// 1) 单子数据 — 列表（按筛选 + 聚合 worker count / total minutes / start / end）
+route("v2_dashboard_order_list", async (body, env) => {
+  if (!isAuth(body, env)) return err("unauthorized", 401);
+  const start_date = String(body.start_date || "").trim();
+  const end_date = String(body.end_date || "").trim();
+  const flow_stage = String(body.flow_stage || "").trim();
+  const job_type = String(body.job_type || "").trim();
+  const worker_name = String(body.worker_name || "").trim();
+  const doc_no = String(body.doc_no || "").trim();
+
+  let limit = parseInt(body.limit, 10);
+  if (!Number.isFinite(limit) || limit <= 0) limit = 100;
+  if (limit > 500) limit = 500;
+  let offset = parseInt(body.offset, 10);
+  if (!Number.isFinite(offset) || offset < 0) offset = 0;
+
+  let where = "WHERE 1=1";
+  const binds = [];
+  if (start_date) { where += " AND DATE(j.created_at)>=?"; binds.push(start_date); }
+  if (end_date)   { where += " AND DATE(j.created_at)<=?"; binds.push(end_date); }
+  if (flow_stage) { where += " AND j.flow_stage=?"; binds.push(flow_stage); }
+  if (job_type)   { where += " AND j.job_type=?"; binds.push(job_type); }
+  if (doc_no) {
+    where += " AND (j.display_no LIKE ? OR j.related_doc_id LIKE ? OR j.linked_outbound_order_id LIKE ?)";
+    const pat = "%" + doc_no + "%";
+    binds.push(pat, pat, pat);
+  }
+  if (worker_name) {
+    where += " AND EXISTS (SELECT 1 FROM v2_ops_job_workers w WHERE w.job_id=j.id AND w.worker_name LIKE ?)";
+    binds.push("%" + worker_name + "%");
+  }
+
+  const totalRs = await env.DB.prepare(
+    `SELECT COUNT(*) as c FROM v2_ops_jobs j ${where}`
+  ).bind(...binds).first();
+  const total = (totalRs && totalRs.c) || 0;
+
+  const sql = `
+    SELECT
+      j.id, j.display_no, j.related_doc_type, j.related_doc_id, j.linked_outbound_order_id,
+      j.flow_stage, j.biz_class, j.job_type, j.status, j.created_at, j.updated_at,
+      (SELECT COUNT(DISTINCT w2.worker_id) FROM v2_ops_job_workers w2 WHERE w2.job_id=j.id) AS worker_count,
+      (SELECT COALESCE(SUM(w2.minutes_worked),0) FROM v2_ops_job_workers w2 WHERE w2.job_id=j.id) AS total_minutes,
+      (SELECT MIN(w2.joined_at) FROM v2_ops_job_workers w2 WHERE w2.job_id=j.id) AS started_at,
+      (SELECT MAX(w2.left_at) FROM v2_ops_job_workers w2 WHERE w2.job_id=j.id AND w2.left_at!='') AS ended_at
+    FROM v2_ops_jobs j ${where}
+    ORDER BY j.created_at DESC LIMIT ? OFFSET ?`;
+  const rs = await env.DB.prepare(sql).bind(...binds, limit, offset).all();
+  return json({ ok: true, items: rs.results || [], total, limit, offset });
+});
+
+// 2) 单子数据 — 详情
+route("v2_dashboard_order_detail", async (body, env) => {
+  if (!isAuth(body, env)) return err("unauthorized", 401);
+  const job_id = String(body.job_id || "").trim();
+  if (!job_id) return err("missing job_id");
+
+  const job = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
+  if (!job) return err("not found", 404);
+
+  const [workersRs, resultsRs, pickDocsRs] = await Promise.all([
+    env.DB.prepare(
+      "SELECT id, worker_id, worker_name, joined_at, left_at, minutes_worked, leave_reason FROM v2_ops_job_workers WHERE job_id=? ORDER BY joined_at ASC LIMIT 200"
+    ).bind(job_id).all(),
+    env.DB.prepare(
+      "SELECT * FROM v2_ops_job_results WHERE job_id=? ORDER BY created_at ASC LIMIT 200"
+    ).bind(job_id).all(),
+    env.DB.prepare(
+      "SELECT id, segment_id, worker_id, worker_name, pick_doc_no, status, started_at AS joined_at, finished_at AS left_at, minutes_worked FROM v2_pick_worker_docs WHERE job_id=? ORDER BY started_at ASC LIMIT 500"
+    ).bind(job_id).all()
+  ]);
+
+  return json({
+    ok: true,
+    job,
+    workers: workersRs.results || [],
+    results: resultsRs.results || [],
+    pick_worker_docs: pickDocsRs.results || []
+  });
+});
+
+// 3) 工时分析 — 汇总（summary + by_worker + by_job_type + segments）
+route("v2_dashboard_workhour_summary", async (body, env) => {
+  if (!isAuth(body, env)) return err("unauthorized", 401);
+  const start_date = String(body.start_date || "").trim();
+  const end_date = String(body.end_date || "").trim();
+  const worker_name = String(body.worker_name || "").trim();
+  const flow_stage = String(body.flow_stage || "").trim();
+  const job_type = String(body.job_type || "").trim();
+
+  let where = "WHERE 1=1";
+  const binds = [];
+  if (start_date) { where += " AND DATE(w.joined_at)>=?"; binds.push(start_date); }
+  if (end_date)   { where += " AND DATE(w.joined_at)<=?"; binds.push(end_date); }
+  if (flow_stage) { where += " AND j.flow_stage=?"; binds.push(flow_stage); }
+  if (job_type)   { where += " AND j.job_type=?"; binds.push(job_type); }
+  if (worker_name) { where += " AND w.worker_name LIKE ?"; binds.push("%" + worker_name + "%"); }
+
+  // segments: 限 1000 条，避免一次拉太大
+  const segSql = `
+    SELECT w.worker_id, w.worker_name, w.joined_at, w.left_at, w.minutes_worked, w.leave_reason,
+           j.id AS job_id, j.display_no, j.flow_stage, j.biz_class, j.job_type, j.status
+    FROM v2_ops_job_workers w
+    JOIN v2_ops_jobs j ON j.id = w.job_id
+    ${where}
+    ORDER BY w.joined_at DESC LIMIT 1000`;
+  const rs = await env.DB.prepare(segSql).bind(...binds).all();
+  const rows = rs.results || [];
+
+  const nowMs = Date.now();
+  const segments = rows.map(r => {
+    const closed = !!r.left_at;
+    let minutes = Number(r.minutes_worked) || 0;
+    if (!closed && r.joined_at) {
+      // 仍在岗：用当前时间临时计算 elapsed
+      const t = new Date(r.joined_at).getTime();
+      if (!isNaN(t)) minutes = Math.max(0, Math.round((nowMs - t) / 60000));
+    }
+    return {
+      worker_id: r.worker_id, worker_name: r.worker_name,
+      joined_at: r.joined_at, left_at: r.left_at,
+      minutes: minutes,
+      leave_reason: r.leave_reason || '',
+      active: closed ? 0 : 1,
+      job_id: r.job_id, display_no: r.display_no,
+      flow_stage: r.flow_stage, biz_class: r.biz_class,
+      job_type: r.job_type, status: r.status,
+      anomaly: (minutes > 240) || (closed && minutes <= 0)
+    };
+  });
+
+  // 按员工 / 按任务类型 聚合
+  const byWorkerMap = {}, byJobTypeMap = {}, jobIdSet = {};
+  let total_minutes = 0, max_segment_minutes = 0, anomaly_count = 0;
+  segments.forEach(s => {
+    total_minutes += s.minutes;
+    if (s.minutes > max_segment_minutes) max_segment_minutes = s.minutes;
+    if (s.anomaly) anomaly_count++;
+    jobIdSet[s.job_id] = 1;
+    const wk = s.worker_name || s.worker_id || '--';
+    if (!byWorkerMap[wk]) byWorkerMap[wk] = { worker_name: wk, total_minutes: 0, job_ids: {}, max_segment_minutes: 0 };
+    byWorkerMap[wk].total_minutes += s.minutes;
+    byWorkerMap[wk].job_ids[s.job_id] = 1;
+    if (s.minutes > byWorkerMap[wk].max_segment_minutes) byWorkerMap[wk].max_segment_minutes = s.minutes;
+    const jt = s.job_type || '--';
+    if (!byJobTypeMap[jt]) byJobTypeMap[jt] = { job_type: jt, total_minutes: 0, worker_ids: {}, job_ids: {} };
+    byJobTypeMap[jt].total_minutes += s.minutes;
+    byJobTypeMap[jt].worker_ids[s.worker_id || s.worker_name] = 1;
+    byJobTypeMap[jt].job_ids[s.job_id] = 1;
+  });
+
+  const by_worker = Object.values(byWorkerMap).map(v => {
+    const job_count = Object.keys(v.job_ids).length;
+    return {
+      worker_name: v.worker_name,
+      total_minutes: v.total_minutes,
+      total_hours: Math.round(v.total_minutes / 6) / 10,
+      job_count,
+      avg_minutes_per_job: job_count > 0 ? Math.round(v.total_minutes / job_count) : 0,
+      max_segment_minutes: v.max_segment_minutes
+    };
+  }).sort((a, b) => b.total_minutes - a.total_minutes);
+
+  const by_job_type = Object.values(byJobTypeMap).map(v => {
+    const job_count = Object.keys(v.job_ids).length;
+    const worker_count = Object.keys(v.worker_ids).length;
+    return {
+      job_type: v.job_type,
+      total_minutes: v.total_minutes,
+      worker_count,
+      job_count,
+      avg_minutes_per_worker: worker_count > 0 ? Math.round(v.total_minutes / worker_count) : 0
+    };
+  }).sort((a, b) => b.total_minutes - a.total_minutes);
+
+  const worker_count = Object.keys(byWorkerMap).length;
+  const job_count = Object.keys(jobIdSet).length;
+
+  return json({
+    ok: true,
+    summary: {
+      total_minutes,
+      total_hours: Math.round(total_minutes / 6) / 10,
+      worker_count,
+      job_count,
+      avg_minutes_per_worker: worker_count > 0 ? Math.round(total_minutes / worker_count) : 0,
+      max_segment_minutes,
+      anomaly_count
+    },
+    by_worker,
+    by_job_type,
+    segments,
+    truncated: rows.length >= 1000
+  });
+});
+
+// 4) WMS 导入 — 写入批次 + 行
+route("v2_dashboard_wms_import", async (body, env) => {
+  if (!isAuth(body, env)) return err("unauthorized", 401);
+  const import_type = String(body.import_type || "generic").trim();
+  const file_name = String(body.file_name || "").trim();
+  const uploaded_by = String(body.uploaded_by || "").trim();
+  const headers = Array.isArray(body.headers) ? body.headers : [];
+  const rows = Array.isArray(body.rows) ? body.rows : [];
+  if (rows.length === 0) return err("empty rows");
+  if (rows.length > 5000) return err("too many rows; max 5000 per batch");
+
+  return withIdem(env, body, "v2_dashboard_wms_import", async () => {
+    const batch_id = "WMS-" + uid();
+    const t = now();
+
+    // 计算 date_from / date_to
+    let date_from = '', date_to = '';
+    rows.forEach(r => {
+      const d = String(r.work_date || '').slice(0, 10);
+      if (d) {
+        if (!date_from || d < date_from) date_from = d;
+        if (!date_to || d > date_to) date_to = d;
+      }
+    });
+
+    await env.DB.prepare(`
+      INSERT INTO v2_wms_import_batches(id, import_type, file_name, row_count, date_from, date_to,
+        uploaded_by, status, raw_headers_json, created_at)
+      VALUES(?,?,?,?,?,?,?, 'imported', ?, ?)
+    `).bind(batch_id, import_type, file_name, rows.length, date_from, date_to,
+            uploaded_by, JSON.stringify(headers), t).run();
+
+    // 分批 insert（每批 50 行，避免单条 SQL 过长）
+    const CHUNK = 50;
+    for (let i = 0; i < rows.length; i += CHUNK) {
+      const slice = rows.slice(i, i + CHUNK);
+      const stmts = slice.map(r => {
+        const id = "WR-" + uid();
+        return env.DB.prepare(`
+          INSERT INTO v2_wms_import_rows(id, batch_id, import_type, work_date, operated_at,
+            worker_name, worker_id, customer, doc_no, order_no, sku, qty, box_count,
+            operation_type, raw_json, matched_job_id, matched_worker_id, match_confidence, created_at)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'','',0,?)
+        `).bind(
+          id, batch_id, import_type,
+          String(r.work_date || '').slice(0, 10),
+          String(r.operated_at || ''),
+          String(r.worker_name || ''),
+          String(r.worker_id || ''),
+          String(r.customer || ''),
+          String(r.doc_no || ''),
+          String(r.order_no || ''),
+          String(r.sku || ''),
+          Number(r.qty) || 0,
+          Number(r.box_count) || 0,
+          String(r.operation_type || ''),
+          JSON.stringify(r.raw || {}),
+          t
+        );
+      });
+      await env.DB.batch(stmts);
+    }
+
+    return { ok: true, batch_id, row_count: rows.length, date_from, date_to };
+  });
+});
+
+// 5) WMS 导入 — 最近批次列表
+route("v2_dashboard_wms_batches", async (body, env) => {
+  if (!isAuth(body, env)) return err("unauthorized", 401);
+  const { limit, offset } = pageParams(body);
+  const rs = await env.DB.prepare(
+    "SELECT id, import_type, file_name, row_count, date_from, date_to, uploaded_by, status, created_at FROM v2_wms_import_batches ORDER BY created_at DESC LIMIT ? OFFSET ?"
+  ).bind(limit, offset).all();
+  return json({ ok: true, items: rs.results || [], limit, offset });
+});
+
+// 6) WMS 导入 — 批次明细
+route("v2_dashboard_wms_batch_detail", async (body, env) => {
+  if (!isAuth(body, env)) return err("unauthorized", 401);
+  const batch_id = String(body.batch_id || "").trim();
+  if (!batch_id) return err("missing batch_id");
+  const { limit, offset } = pageParams(body);
+  const batch = await env.DB.prepare("SELECT * FROM v2_wms_import_batches WHERE id=?").bind(batch_id).first();
+  if (!batch) return err("not found", 404);
+  const rows = await env.DB.prepare(
+    "SELECT * FROM v2_wms_import_rows WHERE batch_id=? ORDER BY work_date ASC, operated_at ASC LIMIT ? OFFSET ?"
+  ).bind(batch_id, limit, offset).all();
+  return json({ ok: true, batch, rows: rows.results || [], limit, offset });
+});
+
+// 7) 管理看板 — 工时 × WMS 复合人效（V1 简化匹配）
+route("v2_dashboard_management_summary", async (body, env) => {
+  if (!isAuth(body, env)) return err("unauthorized", 401);
+  const start_date = String(body.start_date || "").trim();
+  const end_date = String(body.end_date || "").trim();
+
+  // import_type → job_type 候选集
+  const TYPE_MAP = {
+    change_order: ['change_order'],
+    pack_direct: ['pack_direct'],
+    pick_direct: ['pick_direct'],
+    inbound: ['inbound_direct', 'inbound_bulk', 'inbound_return'],
+    outbound: ['load_outbound', 'verify_scan', 'bulk_op'],
+  };
+
+  // ---- 工时段（与 workhour_summary 同口径，但聚合到 by_job_type / by_worker）----
+  let where = "WHERE 1=1";
+  const binds = [];
+  if (start_date) { where += " AND DATE(w.joined_at)>=?"; binds.push(start_date); }
+  if (end_date)   { where += " AND DATE(w.joined_at)<=?"; binds.push(end_date); }
+
+  const segRs = await env.DB.prepare(`
+    SELECT w.worker_id, w.worker_name, w.joined_at, w.left_at, w.minutes_worked,
+           j.flow_stage, j.biz_class, j.job_type
+    FROM v2_ops_job_workers w
+    JOIN v2_ops_jobs j ON j.id = w.job_id
+    ${where}
+    ORDER BY w.joined_at DESC LIMIT 5000`).bind(...binds).all();
+  const segs = segRs.results || [];
+
+  // ---- WMS 行（按 work_date 在范围内）----
+  let wmsWhere = "WHERE 1=1";
+  const wmsBinds = [];
+  if (start_date) { wmsWhere += " AND work_date>=?"; wmsBinds.push(start_date); }
+  if (end_date)   { wmsWhere += " AND work_date<=?"; wmsBinds.push(end_date); }
+  const wmsRs = await env.DB.prepare(
+    `SELECT import_type, worker_name, qty, box_count FROM v2_wms_import_rows ${wmsWhere} LIMIT 20000`
+  ).bind(...wmsBinds).all();
+  const wmsRows = wmsRs.results || [];
+
+  // ---- 工时聚合 ----
+  const nowMs = Date.now();
+  let total_minutes = 0, anomaly_count = 0;
+  const workerMins = {}, jobTypeMins = {}, workerJobTypeMins = {};
+  segs.forEach(r => {
+    const closed = !!r.left_at;
+    let m = Number(r.minutes_worked) || 0;
+    if (!closed && r.joined_at) {
+      const t = new Date(r.joined_at).getTime();
+      if (!isNaN(t)) m = Math.max(0, Math.round((nowMs - t) / 60000));
+    }
+    if (m > 240 || (closed && m <= 0)) anomaly_count++;
+    total_minutes += m;
+    const wk = r.worker_name || r.worker_id || '--';
+    workerMins[wk] = (workerMins[wk] || 0) + m;
+    const jt = r.job_type || '--';
+    jobTypeMins[jt] = (jobTypeMins[jt] || 0) + m;
+    const k = wk + '||' + jt;
+    workerJobTypeMins[k] = (workerJobTypeMins[k] || 0) + m;
+  });
+
+  // ---- WMS 聚合（按 import_type 反查 job_type 候选；按 worker_name）----
+  let total_qty = 0, total_boxes = 0;
+  const jobTypeWms = {}; // job_type -> { qty, boxes }
+  const workerWms = {};  // worker_name -> { qty, boxes }
+  wmsRows.forEach(r => {
+    const q = Number(r.qty) || 0, b = Number(r.box_count) || 0;
+    total_qty += q;
+    total_boxes += b;
+    const cands = TYPE_MAP[r.import_type] || [];
+    cands.forEach(jt => {
+      if (!jobTypeWms[jt]) jobTypeWms[jt] = { qty: 0, boxes: 0 };
+      // 平均分摊到候选集，避免重复计入
+      jobTypeWms[jt].qty += q / cands.length;
+      jobTypeWms[jt].boxes += b / cands.length;
+    });
+    if (r.worker_name) {
+      if (!workerWms[r.worker_name]) workerWms[r.worker_name] = { qty: 0, boxes: 0 };
+      workerWms[r.worker_name].qty += q;
+      workerWms[r.worker_name].boxes += b;
+    }
+  });
+
+  // ---- by_job_type ----
+  const jtSet = new Set([...Object.keys(jobTypeMins), ...Object.keys(jobTypeWms)]);
+  const by_job_type = [...jtSet].map(jt => {
+    const mins = jobTypeMins[jt] || 0;
+    const hours = Math.round(mins / 6) / 10;
+    const w = jobTypeWms[jt] || { qty: 0, boxes: 0 };
+    const qty = Math.round(w.qty * 10) / 10;
+    const boxes = Math.round(w.boxes * 10) / 10;
+    return {
+      job_type: jt,
+      total_minutes: mins,
+      total_hours: hours,
+      wms_qty: qty,
+      wms_boxes: boxes,
+      qty_per_hour: hours > 0 ? Math.round((qty / hours) * 10) / 10 : 0,
+      boxes_per_hour: hours > 0 ? Math.round((boxes / hours) * 10) / 10 : 0
+    };
+  }).sort((a, b) => b.total_minutes - a.total_minutes);
+
+  // ---- by_worker ----
+  const wkSet = new Set([...Object.keys(workerMins), ...Object.keys(workerWms)]);
+  const by_worker = [...wkSet].map(wk => {
+    const mins = workerMins[wk] || 0;
+    const hours = Math.round(mins / 6) / 10;
+    const w = workerWms[wk] || { qty: 0, boxes: 0 };
+    const qty = Math.round(w.qty * 10) / 10;
+    const boxes = Math.round(w.boxes * 10) / 10;
+    return {
+      worker_name: wk,
+      total_minutes: mins,
+      total_hours: hours,
+      wms_qty: qty,
+      wms_boxes: boxes,
+      qty_per_hour: hours > 0 ? Math.round((qty / hours) * 10) / 10 : 0,
+      boxes_per_hour: hours > 0 ? Math.round((boxes / hours) * 10) / 10 : 0
+    };
+  }).sort((a, b) => b.total_minutes - a.total_minutes);
+
+  const total_hours = Math.round(total_minutes / 6) / 10;
+  return json({
+    ok: true,
+    summary: {
+      total_minutes,
+      total_hours,
+      total_qty: Math.round(total_qty * 10) / 10,
+      total_boxes: Math.round(total_boxes * 10) / 10,
+      qty_per_hour: total_hours > 0 ? Math.round((total_qty / total_hours) * 10) / 10 : 0,
+      boxes_per_hour: total_hours > 0 ? Math.round((total_boxes / total_hours) * 10) / 10 : 0,
+      worker_count: Object.keys(workerMins).length,
+      anomaly_count
+    },
+    by_job_type,
+    by_worker
   });
 });
 
