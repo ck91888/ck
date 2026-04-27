@@ -688,10 +688,12 @@ const MIGRATIONS = [
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_pwd_seg_doc ON v2_pick_worker_docs(segment_id, pick_doc_no)`,
   `CREATE INDEX IF NOT EXISTS idx_v2_inbound_accounted_date ON v2_inbound_plans(accounted, plan_date, created_at)`,
   `CREATE INDEX IF NOT EXISTS idx_v2_outbound_accounted_date ON v2_outbound_orders(accounted, order_date, created_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_inbound_accounted_status_date ON v2_inbound_plans(accounted, status, plan_date, created_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_outbound_accounted_status_date ON v2_outbound_orders(accounted, status, order_date, created_at)`,
 ];
 
 // 每次发布迁移变化时手动 +1（patch 段），冷启动只比对一次字符串即可跳过整段 MIGRATIONS
-const CURRENT_SCHEMA_VERSION = 'v2.20260427d';
+const CURRENT_SCHEMA_VERSION = 'v2.20260427e';
 
 let _migrated = false;
 async function ensureMigrated(db) {

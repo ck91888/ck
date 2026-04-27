@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>协同中心 V2 / 협업센터</title>
-  <link rel="stylesheet" href="style.css?v=20260427d">
+  <link rel="stylesheet" href="style.css?v=20260427e">
 </head>
 <body>
 
@@ -133,6 +133,7 @@
         <option value="shipped">已出库</option>
         <option value="reopen_pending">待再操作</option>
       </select>
+      <span class="filter-label" data-i18n="account_filter">是否记帐</span>
       <select id="outboundFilterAccounted" onchange="loadOutboundList()">
         <option value="" data-i18n="account_all">全部记帐状态</option>
         <option value="0" data-i18n="accounted_no">未记帐</option>
@@ -224,6 +225,7 @@
         <option value="processing">处理中</option>
         <option value="completed">已完成</option>
       </select>
+      <span class="filter-label" data-i18n="account_filter">是否记帐</span>
       <select id="inboundFilterAccounted" onchange="loadInboundList()">
         <option value="" data-i18n="account_all">全部记帐状态</option>
         <option value="0" data-i18n="accounted_no">未记帐</option>
@@ -453,9 +455,9 @@
 
 <input type="file" id="fileInput" accept="image/*" style="display:none;" onchange="handleFileUpload(this)">
 
-<script src="config.js?v=20260427d"></script>
+<script src="config.js?v=20260427e"></script>
 <script src="../shared/qrcode.min.js"></script>
-<script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
-<script src="app.js?v=20260427d"></script>
+<script src="../shared/xlsx.full.min.js"></script>
+<script src="app.js?v=20260427e"></script>
 </body>
 </html>

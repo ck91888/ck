@@ -416,13 +416,23 @@ async function loadDashboard() {
   var activeFb = (summary.feedbacks && summary.feedbacks.items) || [];
   var upcoming = summary.upcoming || { items: [], dates: [] };
 
+  // 优先用后端 count（items 仅是前 3 条预览，length ≠ 实际总数）
+  function pickCount(section, fallback) {
+    if (section && section.count != null) return Number(section.count);
+    return fallback.length;
+  }
+  var issuesCount  = pickCount(summary.issues,    pendingIssues);
+  var obCount      = pickCount(summary.outbounds, pendingOb);
+  var ibCount      = pickCount(summary.inbounds,  pendingIb);
+  var fbCount      = pickCount(summary.feedbacks, activeFb);
+
   var html = '';
 
   // Issue card
   html += '<div class="dash-card" onclick="goTab(\'issue\')">';
   html += '<div class="d-title">⚠️ ' + L("today_issues") + '</div>';
-  if (pendingIssues.length > 0) {
-    html += '<div class="d-count">' + pendingIssues.length + '</div>';
+  if (issuesCount > 0) {
+    html += '<div class="d-count">' + issuesCount + '</div>';
     pendingIssues.slice(0, 3).forEach(function(i) {
       html += '<div style="font-size:12px;padding:2px 0;">' +
         '<span class="st st-' + esc(i.status) + '">' + esc(stLabel(i.status)) + '</span> ' +
@@ -436,11 +446,12 @@ async function loadDashboard() {
   // Outbound card
   html += '<div class="dash-card" onclick="goTab(\'outbound\')">';
   html += '<div class="d-title">🚚 ' + L("today_outbound") + '</div>';
-  if (pendingOb.length > 0) {
-    html += '<div class="d-count">' + pendingOb.length + '</div>';
+  if (obCount > 0) {
+    html += '<div class="d-count">' + obCount + '</div>';
     pendingOb.slice(0, 3).forEach(function(o) {
       html += '<div style="font-size:12px;padding:2px 0;">' +
         '<span class="st st-' + esc(o.status) + '">' + esc(stLabel(o.status)) + '</span> ' +
+        accountTag(o) +
         esc(o.customer || "--") + ' ' + esc(o.order_date || "") + '</div>';
     });
   } else {
@@ -451,11 +462,12 @@ async function loadDashboard() {
   // Inbound card
   html += '<div class="dash-card" onclick="goTab(\'inbound\')">';
   html += '<div class="d-title">📦 ' + L("today_inbound") + '</div>';
-  if (pendingIb.length > 0) {
-    html += '<div class="d-count">' + pendingIb.length + '</div>';
+  if (ibCount > 0) {
+    html += '<div class="d-count">' + ibCount + '</div>';
     pendingIb.slice(0, 3).forEach(function(p) {
       html += '<div style="font-size:12px;padding:2px 0;">' +
         '<span class="st st-' + esc(p.status) + '">' + esc(inboundStatusLabel(p.status)) + '</span> ' +
+        accountTag(p) +
         esc(p.customer || "--") + ' ' + esc(p.cargo_summary || "") + '</div>';
     });
   } else {
@@ -467,8 +479,8 @@ async function loadDashboard() {
   var fbStMap = {field_working:'现场卸货中',unloaded_pending_info:'已卸货待补充信息',converted:'已转正'};
   html += '<div class="dash-card" onclick="goTab(\'feedback\')">';
   html += '<div class="d-title">💬 ' + L("today_feedback") + '</div>';
-  if (activeFb.length > 0) {
-    html += '<div class="d-count">' + activeFb.length + '</div>';
+  if (fbCount > 0) {
+    html += '<div class="d-count">' + fbCount + '</div>';
     activeFb.slice(0, 3).forEach(function(f) {
       html += '<div style="font-size:12px;padding:2px 0;">' +
         '<span class="st st-' + esc(f.status) + '">' + esc(fbStMap[f.status] || stLabel(f.status)) + '</span> ' +
@@ -482,10 +494,12 @@ async function loadDashboard() {
   // Upcoming inbound card (next 3 working days)
   var upcomingItems = (upcoming.items || []).filter(function(p) { return p.source_type !== 'return_session'; });
   var upcomingDates = upcoming.dates || [];
+  // 后端 upcoming.count 已基于 source_type != 'return_session' 过滤口径；优先使用，回退到客户端 length
+  var upcomingCount = (upcoming && upcoming.count != null) ? Number(upcoming.count) : upcomingItems.length;
   html += '<div class="dash-card" onclick="goTab(\'inbound\')">';
   html += '<div class="d-title">📅 ' + L("upcoming_inbound") + '</div>';
-  if (upcomingItems.length > 0) {
-    html += '<div class="d-count">' + upcomingItems.length + '</div>';
+  if (upcomingCount > 0) {
+    html += '<div class="d-count">' + upcomingCount + '</div>';
     // Group by date
     var byDate = {};
     upcomingItems.forEach(function(p) {
@@ -499,6 +513,7 @@ async function loadDashboard() {
       byDate[d].forEach(function(p) {
         html += '<div style="font-size:12px;padding:2px 0;">' +
           '<span class="st st-' + esc(p.status) + '">' + esc(inboundStatusLabel(p.status)) + '</span> ' +
+          accountTag(p) +
           esc(p.customer || "--") + ' ' + esc(p.cargo_summary || "") + '</div>';
       });
     });
