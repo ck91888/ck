@@ -353,11 +353,7 @@ async function loadOrders(btn) {
   }
   var html = '';
   _ordersItems.forEach(function(j) {
-    var resultSummary = '';
-    var bx = Number(j.box_count_sum) || 0, pl = Number(j.pallet_count_sum) || 0;
-    if (bx) resultSummary += '箱 ' + bx;
-    if (pl) resultSummary += (resultSummary ? ' / ' : '') + '板 ' + pl;
-    if (j.result_remarks_short) resultSummary += (resultSummary ? ' / ' : '') + '备注 ' + j.result_remarks_short;
+    var resultSummary = j.result_summary || '';
     if (!resultSummary) resultSummary = '<span class="muted">--</span>';
     html += '<tr>';
     html += '<td>' + esc((j.created_at || '').slice(0, 10)) + '</td>';
@@ -414,14 +410,25 @@ async function exportOrders(btn) {
       总小时: r.total_hours || 0,
       开始时间: r.started_at || '',
       结束时间: r.ended_at || '',
+      作业结果摘要: r.result_summary || '',
+      作业备注: r.result_notes || '',
+      差异说明: r.diff_notes || '',
       箱数合计: r.box_count_sum || 0,
       板数合计: r.pallet_count_sum || 0,
-      作业备注: r.result_remarks || '',
-      差异说明: r.diff_notes || '',
-      作业结果明细: r.result_lines_json_all || '',
-      result_json: r.result_json_all || '',
+      打包SKU数: r.packed_sku_count_sum || 0,
+      打包箱数: r.packed_box_count_sum || 0,
+      总操作箱数: r.total_operated_box_count_sum || 0,
+      贴标数: r.label_count_sum || 0,
+      修箱数: r.repaired_box_count_sum || 0,
+      换箱数: r.reboxed_count_sum || 0,
+      使用大纸箱数: r.used_carton_large_count_sum || 0,
+      使用小纸箱数: r.used_carton_small_count_sum || 0,
+      核对OK数: r.verify_ok_count_sum || 0,
+      核对NG数: r.verify_ng_count_sum || 0,
       拣货单号: r.pick_doc_nos || '',
       拣货人员明细: r.pick_worker_summary || '',
+      结果提交人: r.result_submitters || '',
+      结果提交时间: r.result_submitted_at || '',
       出库单号: r.outbound_display_no || '',
       入库单号: r.inbound_display_no || '',
       WMS工单号: r.wms_work_order_no || '',
@@ -431,7 +438,8 @@ async function exportOrders(btn) {
       计划板数: r.planned_pallet_count || 0,
       实际箱数: r.actual_box_count || 0,
       实际板数: r.actual_pallet_count || 0,
-      job_id: r.job_id
+      job_id: r.job_id,
+      原始结果JSON: r.raw_result_json_compact || ''
     };
   });
     var startD = (params.start_date || '').replace(/-/g, '');

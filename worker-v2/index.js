@@ -49,6 +49,152 @@ function kstDateOf(iso) {
   return new Date(t + 9 * 3600 * 1000).toISOString().slice(0, 10);
 }
 
+// 输出可读 KST 时间（YYYY-MM-DD HH:mm:ss），用于导出 CSV
+function fmtKst(iso) {
+  if (!iso) return '';
+  const t = new Date(iso).getTime();
+  if (isNaN(t)) return String(iso);
+  const s = new Date(t + 9 * 3600 * 1000).toISOString();
+  return s.slice(0, 10) + ' ' + s.slice(11, 19);
+}
+
+// D1 prepared statement 单条最多约 100 bind 参数 → CHUNK=80
+async function batchSelectInGlobal(env, sqlTemplate, ids) {
+  const out = [];
+  if (!ids || ids.length === 0) return out;
+  const CHUNK = 80;
+  for (let i = 0; i < ids.length; i += CHUNK) {
+    const chunk = ids.slice(i, i + CHUNK);
+    const placeholders = chunk.map(() => '?').join(',');
+    const sql = sqlTemplate.replace('PLACEHOLDER', placeholders);
+    const rs = await env.DB.prepare(sql).bind(...chunk).all();
+    if (rs.results) out.push(...rs.results);
+  }
+  return out;
+}
+
+// 解析 v2_ops_job_results → 业务可读摘要 + 各项数量累加
+// 输入：job_type, results rows
+// 输出：result_summary / 累加字段 / raw_result_json_compact
+function parseOpsResultForExport(job_type, resultRows) {
+  const out = {
+    result_summary: '',
+    result_notes: '',
+    diff_notes: '',
+    box_count_sum: 0,
+    pallet_count_sum: 0,
+    packed_sku_count_sum: 0,
+    packed_box_count_sum: 0,
+    total_operated_box_count_sum: 0,
+    label_count_sum: 0,
+    repaired_box_count_sum: 0,
+    reboxed_count_sum: 0,
+    used_carton_large_count_sum: 0,
+    used_carton_small_count_sum: 0,
+    verify_ok_count_sum: 0,
+    verify_ng_count_sum: 0,
+    result_submitters: '',
+    result_submitted_at: '',
+    raw_result_json_compact: ''
+  };
+  const rows = resultRows || [];
+  const remarks = [], diffs = [], rawObjs = [], submitters = new Set();
+  let lastCreatedAt = '';
+
+  rows.forEach(r => {
+    out.box_count_sum += Number(r.box_count) || 0;
+    out.pallet_count_sum += Number(r.pallet_count) || 0;
+    if (r.remark) remarks.push(String(r.remark));
+    if (r.created_by) submitters.add(String(r.created_by));
+    if (r.created_at && r.created_at > lastCreatedAt) lastCreatedAt = r.created_at;
+
+    let rj = null;
+    if (r.result_json) {
+      try { rj = JSON.parse(r.result_json); } catch (e) { rj = null; }
+    }
+    if (rj && typeof rj === 'object' && !Array.isArray(rj)) {
+      const addNum = (k, target) => {
+        const v = Number(rj[k]);
+        if (Number.isFinite(v)) out[target] += v;
+      };
+      addNum('packed_sku_count', 'packed_sku_count_sum');
+      addNum('packed_box_count', 'packed_box_count_sum');
+      addNum('total_operated_box_count', 'total_operated_box_count_sum');
+      addNum('label_count', 'label_count_sum');
+      addNum('repaired_box_count', 'repaired_box_count_sum');
+      addNum('reboxed_count', 'reboxed_count_sum');
+      addNum('used_carton_large_count', 'used_carton_large_count_sum');
+      addNum('used_carton_small_count', 'used_carton_small_count_sum');
+      addNum('verify_ok_count', 'verify_ok_count_sum');
+      addNum('verify_ng_count', 'verify_ng_count_sum');
+      // pallet 在 result_json 里且行内 pallet_count 为 0 时补充
+      if (!r.pallet_count && Number(rj.pallet_count) > 0) {
+        out.pallet_count_sum += Number(rj.pallet_count);
+      }
+      const diffVal = rj.diff_note || rj.diff_notes || rj.diff || rj['差异'] || rj['差异说明'] || '';
+      if (diffVal) diffs.push(String(diffVal));
+      rawObjs.push(rj);
+    } else if (r.result_json) {
+      rawObjs.push(r.result_json);
+    }
+  });
+
+  out.result_notes = remarks.join(' | ');
+  out.diff_notes = diffs.join(' | ');
+  out.result_submitters = [...submitters].join('、');
+  out.result_submitted_at = fmtKst(lastCreatedAt);
+
+  let rawStr = '';
+  try { rawStr = JSON.stringify(rawObjs); } catch (e) { rawStr = ''; }
+  if (rawStr.length > 1000) rawStr = rawStr.slice(0, 1000) + '...已截断';
+  out.raw_result_json_compact = rawStr;
+
+  // 生成业务摘要
+  const parts = [];
+  if (job_type === 'pack_direct') {
+    if (out.packed_sku_count_sum > 0) parts.push('打包SKU ' + out.packed_sku_count_sum);
+    if (out.packed_box_count_sum > 0) parts.push('打包箱 ' + out.packed_box_count_sum);
+    if (out.label_count_sum > 0) parts.push('贴标 ' + out.label_count_sum);
+    if (out.total_operated_box_count_sum > 0) parts.push('总操作箱 ' + out.total_operated_box_count_sum);
+    if (out.pallet_count_sum > 0) parts.push('托盘 ' + out.pallet_count_sum);
+    if (out.repaired_box_count_sum > 0) parts.push('修箱 ' + out.repaired_box_count_sum);
+    if (out.reboxed_count_sum > 0) parts.push('换箱 ' + out.reboxed_count_sum);
+    if (out.used_carton_large_count_sum > 0) parts.push('大纸箱 ' + out.used_carton_large_count_sum);
+    if (out.used_carton_small_count_sum > 0) parts.push('小纸箱 ' + out.used_carton_small_count_sum);
+  } else if (job_type === 'change_order') {
+    parts.push('仅计时，无数量结果');
+  } else if (job_type === 'verify_scan') {
+    if (out.verify_ok_count_sum > 0) parts.push('核对OK ' + out.verify_ok_count_sum);
+    if (out.verify_ng_count_sum > 0) parts.push('核对NG ' + out.verify_ng_count_sum);
+    if (out.box_count_sum > 0) parts.push('箱 ' + out.box_count_sum);
+    if (out.pallet_count_sum > 0) parts.push('板 ' + out.pallet_count_sum);
+  } else {
+    // 默认：装卸/入库/出库/库内/拣货 等
+    if (out.box_count_sum > 0) parts.push('箱 ' + out.box_count_sum);
+    if (out.pallet_count_sum > 0) parts.push('板 ' + out.pallet_count_sum);
+  }
+
+  if (parts.length === 0) {
+    if (out.result_notes && job_type !== 'change_order') {
+      out.result_summary = '备注：' + out.result_notes;
+    } else if (job_type === 'change_order') {
+      out.result_summary = '仅计时，无数量结果';
+    } else {
+      out.result_summary = '仅记录工时，无数量结果';
+    }
+  } else {
+    out.result_summary = parts.join('，');
+    if (out.result_notes && job_type !== 'change_order') {
+      out.result_summary += '；备注：' + out.result_notes;
+    }
+  }
+
+  if (out.result_summary.length > 500) {
+    out.result_summary = out.result_summary.slice(0, 500) + '...';
+  }
+  return out;
+}
+
 function isAuth(body, env) {
   const k = String(body.k || "").trim();
   const secret = String(env.ADMINKEY || "").trim();
@@ -5229,16 +5375,34 @@ route("v2_dashboard_order_list", async (body, env) => {
       (SELECT COUNT(DISTINCT w2.worker_id) FROM v2_ops_job_workers w2 WHERE w2.job_id=j.id) AS worker_count,
       (SELECT COALESCE(SUM(w2.minutes_worked),0) FROM v2_ops_job_workers w2 WHERE w2.job_id=j.id) AS total_minutes,
       (SELECT MIN(w2.joined_at) FROM v2_ops_job_workers w2 WHERE w2.job_id=j.id) AS started_at,
-      (SELECT MAX(w2.left_at) FROM v2_ops_job_workers w2 WHERE w2.job_id=j.id AND w2.left_at!='') AS ended_at,
-      (SELECT COALESCE(SUM(box_count),0) FROM v2_ops_job_results WHERE job_id=j.id) AS box_count_sum,
-      (SELECT COALESCE(SUM(pallet_count),0) FROM v2_ops_job_results WHERE job_id=j.id) AS pallet_count_sum,
-      (SELECT SUBSTR(COALESCE(GROUP_CONCAT(remark, ' | '), ''), 1, 100) FROM v2_ops_job_results WHERE job_id=j.id AND remark!='') AS result_remarks_short
+      (SELECT MAX(w2.left_at) FROM v2_ops_job_workers w2 WHERE w2.job_id=j.id AND w2.left_at!='') AS ended_at
     FROM v2_ops_jobs j ${where}
     ORDER BY j.created_at DESC LIMIT ? OFFSET ?`;
   const rs = await env.DB.prepare(sql).bind(...binds, limit, offset).all();
-  const items = (rs.results || []).map(r => Object.assign({}, r, {
-    total_minutes: round1(r.total_minutes),
-  }));
+  const baseItems = rs.results || [];
+  if (baseItems.length === 0) return json({ ok: true, items: [], total, limit, offset });
+
+  // 批量取 results → 调 parseOpsResultForExport 生成业务摘要
+  const jobIds = baseItems.map(j => j.id);
+  const resultsAll = await batchSelectInGlobal(env,
+    `SELECT job_id, box_count, pallet_count, remark, result_json, created_by, created_at FROM v2_ops_job_results WHERE job_id IN (PLACEHOLDER)`,
+    jobIds);
+  const resultsByJob = {};
+  resultsAll.forEach(r => { (resultsByJob[r.job_id] = resultsByJob[r.job_id] || []).push(r); });
+
+  const items = baseItems.map(j => {
+    const parsed = parseOpsResultForExport(j.job_type, resultsByJob[j.id] || []);
+    return Object.assign({}, j, {
+      total_minutes: round1(j.total_minutes),
+      box_count_sum: parsed.box_count_sum,
+      pallet_count_sum: parsed.pallet_count_sum,
+      packed_box_count_sum: parsed.packed_box_count_sum,
+      total_operated_box_count_sum: parsed.total_operated_box_count_sum,
+      label_count_sum: parsed.label_count_sum,
+      result_summary: parsed.result_summary,
+      result_remarks_short: (parsed.result_notes || '').slice(0, 100)
+    });
+  });
   return json({ ok: true, items, total, limit, offset });
 });
 
@@ -5321,51 +5485,31 @@ route("v2_dashboard_order_export", async (body, env) => {
   }))];
   const pickJobIds = jobs.filter(j => j.job_type === 'pick_direct').map(j => j.id);
 
-  // ---- 批量 IN 查询 helper（D1 prepared statement 单条最多 100 bind 参数，CHUNK 取 80 留余量）----
-  async function batchSelectIn(sqlTemplate, ids) {
-    const out = [];
-    const CHUNK = 80;
-    for (let i = 0; i < ids.length; i += CHUNK) {
-      const chunk = ids.slice(i, i + CHUNK);
-      const placeholders = chunk.map(() => '?').join(',');
-      const sql = sqlTemplate.replace('PLACEHOLDER', placeholders);
-      const rs = await env.DB.prepare(sql).bind(...chunk).all();
-      if (rs.results) out.push(...rs.results);
-    }
-    return out;
-  }
-
   const [workersAll, resultsAll, pickAll, inboundAll, outboundAll] = await Promise.all([
-    batchSelectIn(
+    batchSelectInGlobal(env,
       `SELECT id, job_id, worker_id, worker_name, joined_at, left_at, minutes_worked, leave_reason
        FROM v2_ops_job_workers WHERE job_id IN (PLACEHOLDER) ORDER BY joined_at ASC`,
-      jobIds
-    ),
-    batchSelectIn(
+      jobIds),
+    batchSelectInGlobal(env,
       `SELECT id, job_id, box_count, pallet_count, remark, result_json, created_by, created_at
        FROM v2_ops_job_results WHERE job_id IN (PLACEHOLDER) ORDER BY created_at ASC`,
-      jobIds
-    ),
-    pickJobIds.length > 0 ? batchSelectIn(
+      jobIds),
+    batchSelectInGlobal(env,
       `SELECT id, job_id, worker_id, worker_name, pick_doc_no, status, started_at, finished_at, minutes_worked
        FROM v2_pick_worker_docs WHERE job_id IN (PLACEHOLDER) ORDER BY started_at ASC`,
-      pickJobIds
-    ) : Promise.resolve([]),
-    inboundIds.length > 0 ? batchSelectIn(
+      pickJobIds),
+    batchSelectInGlobal(env,
       `SELECT id, customer, display_no, external_inbound_no, accounted, accounted_by, accounted_at
        FROM v2_inbound_plans WHERE id IN (PLACEHOLDER)`,
-      inboundIds
-    ) : Promise.resolve([]),
-    outboundIds.length > 0 ? batchSelectIn(
+      inboundIds),
+    batchSelectInGlobal(env,
       `SELECT id, customer, display_no, destination, po_no, wms_work_order_no,
               planned_box_count, planned_pallet_count, actual_box_count, actual_pallet_count,
               accounted, accounted_by, accounted_at
        FROM v2_outbound_orders WHERE id IN (PLACEHOLDER)`,
-      outboundIds
-    ) : Promise.resolve([])
+      outboundIds)
   ]);
 
-  // ---- group by job_id ----
   const workersByJob = {}, resultsByJob = {}, pickByJob = {};
   workersAll.forEach(w => { (workersByJob[w.job_id] = workersByJob[w.job_id] || []).push(w); });
   resultsAll.forEach(r => { (resultsByJob[r.job_id] = resultsByJob[r.job_id] || []).push(r); });
@@ -5374,15 +5518,6 @@ route("v2_dashboard_order_export", async (body, env) => {
   inboundAll.forEach(d => { inboundById[d.id] = d; });
   outboundAll.forEach(d => { outboundById[d.id] = d; });
 
-  function tryParseDiff(rj) {
-    if (!rj) return '';
-    try {
-      const o = JSON.parse(rj);
-      const v = o.diff_note || o.diff_notes || o.diff || o['差异'] || o['差异说明'] || '';
-      return v ? String(v) : '';
-    } catch (e) { return ''; }
-  }
-
   const out = jobs.map(j => {
     const ws = workersByJob[j.id] || [];
     const rs = resultsByJob[j.id] || [];
@@ -5390,24 +5525,30 @@ route("v2_dashboard_order_export", async (body, env) => {
 
     const workerNames = [...new Set(ws.map(w => w.worker_name).filter(Boolean))].join('、');
     const total_minutes = round1(ws.reduce((s, w) => s + (Number(w.minutes_worked) || 0), 0));
-    const started_at = ws.reduce((m, w) => (!m || (w.joined_at && w.joined_at < m)) ? w.joined_at : m, '');
-    const ended_at = ws.reduce((m, w) => (w.left_at && w.left_at > m) ? w.left_at : m, '');
+    const started_at_iso = ws.reduce((m, w) => (!m || (w.joined_at && w.joined_at < m)) ? w.joined_at : m, '');
+    const ended_at_iso = ws.reduce((m, w) => (w.left_at && w.left_at > m) ? w.left_at : m, '');
 
-    const box_sum = rs.reduce((s, r) => s + (Number(r.box_count) || 0), 0);
-    const pallet_sum = rs.reduce((s, r) => s + (Number(r.pallet_count) || 0), 0);
-    const remarks = rs.map(r => r.remark || '').filter(Boolean).join(' | ');
-    const diffs = rs.map(r => tryParseDiff(r.result_json)).filter(Boolean).join(' | ');
-    const resultLines = rs.map(r =>
-      `[#${r.id || ''}] 箱${r.box_count||0}/板${r.pallet_count||0} ` +
-      (r.remark ? `备注:${r.remark} ` : '') +
-      (r.created_by ? `by ${r.created_by} ` : '') +
-      (r.created_at ? `@${r.created_at}` : '')
-    ).join(' || ');
-    const result_json_all = JSON.stringify(rs.map(r => {
-      try { return JSON.parse(r.result_json || '{}'); } catch (e) { return r.result_json || ''; }
-    }));
-    const result_created_by = [...new Set(rs.map(r => r.created_by).filter(Boolean))].join('、');
-    const result_created_at = rs.length > 0 ? rs[rs.length - 1].created_at : '';
+    // 解析 result_json → 业务可读摘要 + 各项累加
+    const parsed = parseOpsResultForExport(j.job_type, rs);
+
+    // 代发拣货：拣货单号 + 拣货人员明细 + 摘要补充
+    let pick_doc_nos = '', pick_worker_summary = '';
+    if (j.job_type === 'pick_direct' && ps.length > 0) {
+      const docs = [...new Set(ps.map(p => p.pick_doc_no).filter(Boolean))];
+      pick_doc_nos = docs.join('、');
+      pick_worker_summary = docs.map(d => {
+        const inDoc = ps.filter(p => p.pick_doc_no === d);
+        const parts = inDoc.map(p => `${p.worker_name || p.worker_id}${p.minutes_worked ? ' ' + round1(p.minutes_worked) + '分' : ''}`);
+        return `${d}: ${parts.join(' / ')}`;
+      }).join('；');
+      // pick_direct 摘要：拣货单 X 张 + 工时为主
+      const pickSummary = '拣货单 ' + docs.length + ' 张';
+      if (parsed.result_summary && parsed.result_summary.indexOf('仅记录工时') < 0 && parsed.result_summary.indexOf('仅计时') < 0) {
+        parsed.result_summary = pickSummary + '；' + parsed.result_summary;
+      } else {
+        parsed.result_summary = pickSummary;
+      }
+    }
 
     // 业务关联
     let related = null;
@@ -5417,7 +5558,7 @@ route("v2_dashboard_order_export", async (body, env) => {
     const customer = (related && related.customer) || (linked_ob && linked_ob.customer) || '';
     const accounted = (related && related.accounted) ?? (linked_ob && linked_ob.accounted) ?? '';
     const accounted_by = (related && related.accounted_by) || (linked_ob && linked_ob.accounted_by) || '';
-    const accounted_at = (related && related.accounted_at) || (linked_ob && linked_ob.accounted_at) || '';
+    const accounted_at_iso = (related && related.accounted_at) || (linked_ob && linked_ob.accounted_at) || '';
     const inbound_display_no = (j.related_doc_type === 'inbound' && related) ? (related.display_no || related.external_inbound_no || '') : '';
     const outbound_display_no = (j.related_doc_type === 'outbound' && related) ? (related.display_no || '') : (linked_ob ? linked_ob.display_no || '' : '');
     const ob_for_fields = (j.related_doc_type === 'outbound' && related) ? related : linked_ob;
@@ -5428,18 +5569,6 @@ route("v2_dashboard_order_export", async (body, env) => {
     const planned_pallet_count = (ob_for_fields && ob_for_fields.planned_pallet_count) || 0;
     const actual_box_count = (ob_for_fields && ob_for_fields.actual_box_count) || 0;
     const actual_pallet_count = (ob_for_fields && ob_for_fields.actual_pallet_count) || 0;
-
-    // 代发拣货
-    let pick_doc_nos = '', pick_worker_summary = '';
-    if (j.job_type === 'pick_direct' && ps.length > 0) {
-      const docs = [...new Set(ps.map(p => p.pick_doc_no).filter(Boolean))];
-      pick_doc_nos = docs.join('、');
-      pick_worker_summary = docs.map(d => {
-        const inDoc = ps.filter(p => p.pick_doc_no === d);
-        const parts = inDoc.map(p => `${p.worker_name || p.worker_id}${p.minutes_worked ? ' ' + round1(p.minutes_worked) + '分' : ''}`);
-        return `${d}: ${parts.join(' / ')}`;
-      }).join('；');
-    }
 
     return {
       job_id: j.id,
@@ -5452,27 +5581,38 @@ route("v2_dashboard_order_export", async (body, env) => {
       job_type: j.job_type || '',
       biz_class: j.biz_class || '',
       status: j.status || '',
-      created_at: j.created_at || '',
-      started_at: started_at || '',
-      ended_at: ended_at || '',
+      created_at: fmtKst(j.created_at),
+      started_at: fmtKst(started_at_iso),
+      ended_at: fmtKst(ended_at_iso),
       worker_count: new Set(ws.map(w => w.worker_id).filter(Boolean)).size,
       worker_names: workerNames,
       total_minutes,
       total_hours: round1(total_minutes / 60),
-      // 作业结果
+      // 作业结果（业务可读摘要 + 解析后的各项累加）
       result_count: rs.length,
-      box_count_sum: box_sum,
-      pallet_count_sum: pallet_sum,
-      result_remarks: remarks,
-      diff_notes: diffs,
-      result_lines_json_all: resultLines,
-      result_json_all,
-      result_created_by,
-      result_created_at: result_created_at || '',
+      result_summary: parsed.result_summary,
+      result_notes: parsed.result_notes,
+      diff_notes: parsed.diff_notes,
+      box_count_sum: parsed.box_count_sum,
+      pallet_count_sum: parsed.pallet_count_sum,
+      packed_sku_count_sum: parsed.packed_sku_count_sum,
+      packed_box_count_sum: parsed.packed_box_count_sum,
+      total_operated_box_count_sum: parsed.total_operated_box_count_sum,
+      label_count_sum: parsed.label_count_sum,
+      repaired_box_count_sum: parsed.repaired_box_count_sum,
+      reboxed_count_sum: parsed.reboxed_count_sum,
+      used_carton_large_count_sum: parsed.used_carton_large_count_sum,
+      used_carton_small_count_sum: parsed.used_carton_small_count_sum,
+      verify_ok_count_sum: parsed.verify_ok_count_sum,
+      verify_ng_count_sum: parsed.verify_ng_count_sum,
+      result_submitters: parsed.result_submitters,
+      result_submitted_at: parsed.result_submitted_at,
+      raw_result_json_compact: parsed.raw_result_json_compact,
       // 业务关联
       customer,
       accounted: accounted === '' ? '' : (accounted ? 1 : 0),
-      accounted_by, accounted_at,
+      accounted_by,
+      accounted_at: fmtKst(accounted_at_iso),
       outbound_display_no, inbound_display_no,
       wms_work_order_no, destination, po_no,
       planned_box_count, planned_pallet_count, actual_box_count, actual_pallet_count,
