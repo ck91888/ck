@@ -322,7 +322,8 @@ function priLabel(pri) { return pri; }
 
 // 列表外层是否记帐 tag（入库计划/出库作业单共用）
 function accountTag(o) {
-  if (!o) return '';
+  // 字段未下发（旧接口/旧缓存）→ 不显示，避免把未知态误标为"未记帐"
+  if (!o || o.accounted == null) return '';
   if (Number(o.accounted) === 1) {
     return '<span class="account-tag accounted">' + esc(L("accounted_yes")) + '</span> ';
   }
@@ -417,8 +418,14 @@ async function loadDashboard() {
   var upcoming = summary.upcoming || { items: [], dates: [] };
 
   // 优先用后端 count（items 仅是前 3 条预览，length ≠ 实际总数）
+  // TODO(分页): 主要 list 接口（v2_inbound_plan_list / v2_outbound_order_list /
+  //   v2_issue_list / v2_field_feedback_list）已支持 limit/offset，
+  //   后续可在列表底部加"加载更多"按钮，本期先保持单页渲染。
   function pickCount(section, fallback) {
-    if (section && section.count != null) return Number(section.count);
+    if (section && section.count != null) {
+      var n = Number(section.count);
+      if (Number.isFinite(n)) return n;
+    }
     return fallback.length;
   }
   var issuesCount  = pickCount(summary.issues,    pendingIssues);
@@ -495,7 +502,11 @@ async function loadDashboard() {
   var upcomingItems = (upcoming.items || []).filter(function(p) { return p.source_type !== 'return_session'; });
   var upcomingDates = upcoming.dates || [];
   // 后端 upcoming.count 已基于 source_type != 'return_session' 过滤口径；优先使用，回退到客户端 length
-  var upcomingCount = (upcoming && upcoming.count != null) ? Number(upcoming.count) : upcomingItems.length;
+  var upcomingCount = upcomingItems.length;
+  if (upcoming && upcoming.count != null) {
+    var _uc = Number(upcoming.count);
+    if (Number.isFinite(_uc)) upcomingCount = _uc;
+  }
   html += '<div class="dash-card" onclick="goTab(\'inbound\')">';
   html += '<div class="d-title">📅 ' + L("upcoming_inbound") + '</div>';
   if (upcomingCount > 0) {
