@@ -58,6 +58,16 @@ function fmtKst(iso) {
   return s.slice(0, 10) + ' ' + s.slice(11, 19);
 }
 
+// KST 日期 → UTC 范围 [startUtc, endUtc)
+// 输入 "2026-04-27" → { startUtc: "2026-04-26T15:00:00.000Z", endUtc: "2026-04-27T15:00:00.000Z" }
+function kstDayRangeUtc(dateStr) {
+  if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return null;
+  const startKst = new Date(dateStr + 'T00:00:00.000+09:00');
+  if (isNaN(startKst.getTime())) return null;
+  const endKst = new Date(startKst.getTime() + 24 * 3600 * 1000);
+  return { startUtc: startKst.toISOString(), endUtc: endKst.toISOString() };
+}
+
 // D1 prepared statement 单条最多约 100 bind 参数 → CHUNK=80
 async function batchSelectInGlobal(env, sqlTemplate, ids) {
   const out = [];
@@ -95,16 +105,42 @@ function parseOpsResultForExport(job_type, resultRows) {
     verify_ng_count_sum: 0,
     result_submitters: '',
     result_submitted_at: '',
+    readable_result_lines: '',
+    result_lines_count: 0,
     raw_result_json_compact: ''
   };
   const rows = resultRows || [];
-  const remarks = [], diffs = [], rawObjs = [], submitters = new Set();
+  const remarks = [], diffs = [], rawObjs = [], readableLines = [], submitters = new Set();
   let lastCreatedAt = '';
+
+  // result_lines_json 单行 → 可读文本
+  const renderLine = (item) => {
+    if (item == null) return '';
+    if (typeof item !== 'object') return String(item);
+    if (Array.isArray(item)) return item.join(' / ');
+    const id = item.sku || item.barcode || item.item || item.product_name || item.name || '';
+    const parts = [];
+    if (id) parts.push('SKU ' + id);
+    const planned = item.planned_qty ?? item.plan_qty ?? item['计划'] ?? null;
+    const actual = item.actual_qty ?? item.qty ?? item['实际'] ?? null;
+    const diff = item.diff_qty ?? item.diff ?? null;
+    if (planned != null && planned !== '') parts.push('计划 ' + planned);
+    if (actual != null && actual !== '') parts.push('实际 ' + actual);
+    if (diff != null && diff !== '') parts.push('差异 ' + diff);
+    if (item.box_count != null && item.box_count !== '') parts.push('箱 ' + item.box_count);
+    if (item.pallet_count != null && item.pallet_count !== '') parts.push('板 ' + item.pallet_count);
+    if (item.remark) parts.push('备注 ' + item.remark);
+    if (parts.length === 0) {
+      try { return JSON.stringify(item); } catch (e) { return ''; }
+    }
+    return parts.join(' / ');
+  };
 
   rows.forEach(r => {
     out.box_count_sum += Number(r.box_count) || 0;
     out.pallet_count_sum += Number(r.pallet_count) || 0;
     if (r.remark) remarks.push(String(r.remark));
+    if (r.diff_note) diffs.push(String(r.diff_note));
     if (r.created_by) submitters.add(String(r.created_by));
     if (r.created_at && r.created_at > lastCreatedAt) lastCreatedAt = r.created_at;
 
@@ -127,7 +163,6 @@ function parseOpsResultForExport(job_type, resultRows) {
       addNum('used_carton_small_count', 'used_carton_small_count_sum');
       addNum('verify_ok_count', 'verify_ok_count_sum');
       addNum('verify_ng_count', 'verify_ng_count_sum');
-      // pallet 在 result_json 里且行内 pallet_count 为 0 时补充
       if (!r.pallet_count && Number(rj.pallet_count) > 0) {
         out.pallet_count_sum += Number(rj.pallet_count);
       }
@@ -137,12 +172,33 @@ function parseOpsResultForExport(job_type, resultRows) {
     } else if (r.result_json) {
       rawObjs.push(r.result_json);
     }
+
+    // 解析 result_lines_json
+    if (r.result_lines_json) {
+      let lines = null;
+      try { lines = JSON.parse(r.result_lines_json); } catch (e) { lines = null; }
+      if (Array.isArray(lines)) {
+        out.result_lines_count += lines.length;
+        lines.forEach(item => {
+          const txt = renderLine(item);
+          if (txt) readableLines.push(txt);
+        });
+      } else if (lines) {
+        const txt = renderLine(lines);
+        if (txt) { readableLines.push(txt); out.result_lines_count += 1; }
+      }
+    }
   });
 
   out.result_notes = remarks.join(' | ');
-  out.diff_notes = diffs.join(' | ');
+  // 去重 diff_notes
+  out.diff_notes = [...new Set(diffs.filter(Boolean))].join(' | ');
   out.result_submitters = [...submitters].join('、');
   out.result_submitted_at = fmtKst(lastCreatedAt);
+
+  let linesStr = readableLines.join(' || ');
+  if (linesStr.length > 2000) linesStr = linesStr.slice(0, 2000) + '...已截断';
+  out.readable_result_lines = linesStr;
 
   let rawStr = '';
   try { rawStr = JSON.stringify(rawObjs); } catch (e) { rawStr = ''; }
@@ -5349,8 +5405,10 @@ route("v2_dashboard_order_list", async (body, env) => {
 
   let where = "WHERE 1=1";
   const binds = [];
-  if (start_date) { where += " AND DATE(j.created_at)>=?"; binds.push(start_date); }
-  if (end_date)   { where += " AND DATE(j.created_at)<=?"; binds.push(end_date); }
+  const startRange = kstDayRangeUtc(start_date);
+  const endRange = kstDayRangeUtc(end_date);
+  if (startRange) { where += " AND j.created_at >= ?"; binds.push(startRange.startUtc); }
+  if (endRange)   { where += " AND j.created_at < ?"; binds.push(endRange.endUtc); }
   if (flow_stage) { where += " AND j.flow_stage=?"; binds.push(flow_stage); }
   if (job_type)   { where += " AND j.job_type=?"; binds.push(job_type); }
   if (doc_no) {
@@ -5385,7 +5443,7 @@ route("v2_dashboard_order_list", async (body, env) => {
   // 批量取 results → 调 parseOpsResultForExport 生成业务摘要
   const jobIds = baseItems.map(j => j.id);
   const resultsAll = await batchSelectInGlobal(env,
-    `SELECT job_id, box_count, pallet_count, remark, result_json, created_by, created_at FROM v2_ops_job_results WHERE job_id IN (PLACEHOLDER)`,
+    `SELECT job_id, box_count, pallet_count, remark, diff_note, result_json, result_lines_json, created_by, created_at FROM v2_ops_job_results WHERE job_id IN (PLACEHOLDER)`,
     jobIds);
   const resultsByJob = {};
   resultsAll.forEach(r => { (resultsByJob[r.job_id] = resultsByJob[r.job_id] || []).push(r); });
@@ -5427,12 +5485,16 @@ route("v2_dashboard_order_detail", async (body, env) => {
     ).bind(job_id).all()
   ]);
 
+  const results = resultsRs.results || [];
+  const parsed = parseOpsResultForExport(job.job_type, results);
+
   return json({
     ok: true,
     job,
     workers: workersRs.results || [],
-    results: resultsRs.results || [],
-    pick_worker_docs: pickDocsRs.results || []
+    results,
+    pick_worker_docs: pickDocsRs.results || [],
+    parsed
   });
 });
 
@@ -5452,8 +5514,10 @@ route("v2_dashboard_order_export", async (body, env) => {
 
   let where = "WHERE 1=1";
   const binds = [];
-  if (start_date) { where += " AND DATE(j.created_at)>=?"; binds.push(start_date); }
-  if (end_date)   { where += " AND DATE(j.created_at)<=?"; binds.push(end_date); }
+  const startRange = kstDayRangeUtc(start_date);
+  const endRange = kstDayRangeUtc(end_date);
+  if (startRange) { where += " AND j.created_at >= ?"; binds.push(startRange.startUtc); }
+  if (endRange)   { where += " AND j.created_at < ?"; binds.push(endRange.endUtc); }
   if (flow_stage) { where += " AND j.flow_stage=?"; binds.push(flow_stage); }
   if (job_type)   { where += " AND j.job_type=?"; binds.push(job_type); }
   if (doc_no) {
@@ -5491,7 +5555,7 @@ route("v2_dashboard_order_export", async (body, env) => {
        FROM v2_ops_job_workers WHERE job_id IN (PLACEHOLDER) ORDER BY joined_at ASC`,
       jobIds),
     batchSelectInGlobal(env,
-      `SELECT id, job_id, box_count, pallet_count, remark, result_json, created_by, created_at
+      `SELECT id, job_id, box_count, pallet_count, remark, diff_note, result_json, result_lines_json, created_by, created_at
        FROM v2_ops_job_results WHERE job_id IN (PLACEHOLDER) ORDER BY created_at ASC`,
       jobIds),
     batchSelectInGlobal(env,
@@ -5607,6 +5671,8 @@ route("v2_dashboard_order_export", async (body, env) => {
       verify_ng_count_sum: parsed.verify_ng_count_sum,
       result_submitters: parsed.result_submitters,
       result_submitted_at: parsed.result_submitted_at,
+      readable_result_lines: parsed.readable_result_lines,
+      result_lines_count: parsed.result_lines_count,
       raw_result_json_compact: parsed.raw_result_json_compact,
       // 业务关联
       customer,
@@ -5635,8 +5701,10 @@ route("v2_dashboard_workhour_summary", async (body, env) => {
 
   let where = "WHERE 1=1";
   const binds = [];
-  if (start_date) { where += " AND DATE(w.joined_at)>=?"; binds.push(start_date); }
-  if (end_date)   { where += " AND DATE(w.joined_at)<=?"; binds.push(end_date); }
+  const startRange = kstDayRangeUtc(start_date);
+  const endRange = kstDayRangeUtc(end_date);
+  if (startRange) { where += " AND w.joined_at >= ?"; binds.push(startRange.startUtc); }
+  if (endRange)   { where += " AND w.joined_at < ?"; binds.push(endRange.endUtc); }
   if (flow_stage) { where += " AND j.flow_stage=?"; binds.push(flow_stage); }
   if (job_type)   { where += " AND j.job_type=?"; binds.push(job_type); }
   if (worker_name) { where += " AND w.worker_name LIKE ?"; binds.push("%" + worker_name + "%"); }
@@ -5858,8 +5926,10 @@ route("v2_dashboard_management_summary", async (body, env) => {
   // ---- 工时段（与 workhour_summary 同口径，但聚合到 by_job_type / by_worker）----
   let where = "WHERE 1=1";
   const binds = [];
-  if (start_date) { where += " AND DATE(w.joined_at)>=?"; binds.push(start_date); }
-  if (end_date)   { where += " AND DATE(w.joined_at)<=?"; binds.push(end_date); }
+  const startRange = kstDayRangeUtc(start_date);
+  const endRange = kstDayRangeUtc(end_date);
+  if (startRange) { where += " AND w.joined_at >= ?"; binds.push(startRange.startUtc); }
+  if (endRange)   { where += " AND w.joined_at < ?"; binds.push(endRange.endUtc); }
 
   const segRs = await env.DB.prepare(`
     SELECT w.worker_id, w.worker_name, w.joined_at, w.left_at, w.minutes_worked,

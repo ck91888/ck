@@ -413,6 +413,8 @@ async function exportOrders(btn) {
       作业结果摘要: r.result_summary || '',
       作业备注: r.result_notes || '',
       差异说明: r.diff_notes || '',
+      作业明细行数: r.result_lines_count || 0,
+      作业明细说明: r.readable_result_lines || '',
       箱数合计: r.box_count_sum || 0,
       板数合计: r.pallet_count_sum || 0,
       打包SKU数: r.packed_sku_count_sum || 0,
@@ -495,22 +497,51 @@ async function openOrderDetail(jobId) {
     html += '</tbody></table>';
   }
 
-  // result
+  // 作业结果 — 业务可读
   var results = res.results || [];
-  if (results.length > 0) {
-    html += '<h3 style="margin-top:14px;">作业结果 (' + results.length + ')</h3>';
-    html += '<table class="data-table"><thead><tr><th>箱数</th><th>板数</th><th>备注</th><th>result_json</th><th>created_by</th><th>created_at</th></tr></thead><tbody>';
+  var p = res.parsed || {};
+  if (results.length > 0 || p.result_summary) {
+    html += '<h3 style="margin-top:14px;">作业结果（业务摘要）</h3>';
+    html += '<table class="data-table">';
+    html += '<tr><th>作业结果摘要</th><td colspan="3">' + esc(p.result_summary || '--') + '</td></tr>';
+    html += '<tr><th>箱数合计</th><td>' + (p.box_count_sum || 0) + '</td>';
+    html += '<th>板数合计</th><td>' + (p.pallet_count_sum || 0) + '</td></tr>';
+    html += '<tr><th>打包SKU数</th><td>' + (p.packed_sku_count_sum || 0) + '</td>';
+    html += '<th>打包箱数</th><td>' + (p.packed_box_count_sum || 0) + '</td></tr>';
+    html += '<tr><th>贴标数</th><td>' + (p.label_count_sum || 0) + '</td>';
+    html += '<th>总操作箱数</th><td>' + (p.total_operated_box_count_sum || 0) + '</td></tr>';
+    html += '<tr><th>修箱数</th><td>' + (p.repaired_box_count_sum || 0) + '</td>';
+    html += '<th>换箱数</th><td>' + (p.reboxed_count_sum || 0) + '</td></tr>';
+    html += '<tr><th>使用大纸箱</th><td>' + (p.used_carton_large_count_sum || 0) + '</td>';
+    html += '<th>使用小纸箱</th><td>' + (p.used_carton_small_count_sum || 0) + '</td></tr>';
+    if ((p.verify_ok_count_sum || 0) + (p.verify_ng_count_sum || 0) > 0) {
+      html += '<tr><th>核对OK</th><td>' + (p.verify_ok_count_sum || 0) + '</td>';
+      html += '<th>核对NG</th><td>' + (p.verify_ng_count_sum || 0) + '</td></tr>';
+    }
+    html += '<tr><th>作业备注</th><td colspan="3">' + esc(p.result_notes || '--') + '</td></tr>';
+    html += '<tr><th>差异说明</th><td colspan="3">' + esc(p.diff_notes || '--') + '</td></tr>';
+    html += '<tr><th>作业明细 (' + (p.result_lines_count || 0) + ' 行)</th><td colspan="3" style="white-space:pre-wrap;">' + esc(p.readable_result_lines || '--') + '</td></tr>';
+    html += '<tr><th>结果提交人</th><td>' + esc(p.result_submitters || '--') + '</td>';
+    html += '<th>结果提交时间</th><td>' + esc(p.result_submitted_at || '--') + '</td></tr>';
+    html += '</table>';
+
+    html += '<details style="margin-top:8px;"><summary class="muted" style="cursor:pointer;">原始JSON（排查用）— ' + results.length + ' 条</summary>';
+    html += '<table class="data-table" style="margin-top:6px;"><thead><tr><th>箱</th><th>板</th><th>备注</th><th>diff_note</th><th>result_json</th><th>result_lines_json</th><th>提交人</th><th>提交时间</th></tr></thead><tbody>';
     results.forEach(function(r) {
       var rj = r.result_json == null ? '' : String(r.result_json);
       if (rj.length > 200) rj = rj.slice(0, 200) + '...';
+      var rl = r.result_lines_json == null ? '' : String(r.result_lines_json);
+      if (rl.length > 200) rl = rl.slice(0, 200) + '...';
       html += '<tr><td>' + (r.box_count || 0) + '</td>';
       html += '<td>' + (r.pallet_count || 0) + '</td>';
       html += '<td>' + esc(r.remark || '--') + '</td>';
+      html += '<td>' + esc(r.diff_note || '--') + '</td>';
       html += '<td><code style="font-size:11px;">' + esc(rj) + '</code></td>';
+      html += '<td><code style="font-size:11px;">' + esc(rl) + '</code></td>';
       html += '<td>' + esc(r.created_by || '--') + '</td>';
       html += '<td>' + esc(fmtTime(r.created_at)) + '</td></tr>';
     });
-    html += '</tbody></table>';
+    html += '</tbody></table></details>';
   }
 
   // pick_worker_docs (代发拣货特有)
