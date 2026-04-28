@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>仓库数据看板 — CK Warehouse</title>
-  <link rel="stylesheet" href="style.css?v=20260428d">
+  <link rel="stylesheet" href="style.css?v=20260430b">
 </head>
 <body>
 
@@ -69,6 +69,7 @@
         <span>当前谁在干什么</span>
         <button class="refresh-btn" onclick="loadRealtime()">刷新</button>
       </div>
+      <div id="workerLiveFilterHint" class="muted" style="font-size:12px;padding:4px 8px;display:none;"></div>
       <div style="overflow-x:auto;">
         <table class="data-table">
           <thead>
@@ -122,6 +123,7 @@
         <input type="date" id="ordersFilterEnd">
         <select id="ordersFilterFlow"></select>
         <select id="ordersFilterJobType"></select>
+        <select id="ordersFilterStatus"></select>
         <input type="text" id="ordersFilterWorker" placeholder="员工姓名（模糊）">
         <input type="text" id="ordersFilterDoc" placeholder="单号 / display_no">
         <button class="btn-primary" onclick="loadOrders(this)">查询</button>
@@ -359,7 +361,7 @@
 </div>
 
 <script src="../shared/xlsx.full.min.js"></script>
-<script src="config.js?v=20260428d"></script>
-<script src="app.js?v=20260428d"></script>
+<script src="config.js?v=20260430b"></script>
+<script src="app.js?v=20260430b"></script>
 </body>
 </html>

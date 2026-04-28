@@ -566,7 +566,13 @@ async function loadIssueList() {
 
   var status = document.getElementById("issueFilterStatus").value;
   var biz = document.getElementById("issueFilterBiz").value;
-  var res = await api({ action: "v2_issue_list", status: status, biz_class: biz });
+  var acctSel = document.getElementById("issueFilterAccounting");
+  var acct = acctSel ? acctSel.value : "";
+  var apiParams = { action: "v2_issue_list", status: status, biz_class: biz };
+  if (acct === 'required') apiParams.accounting_required = 1;
+  else if (acct === 'unpaid') { apiParams.accounting_required = 1; apiParams.accounted = 0; }
+  else if (acct === 'paid') apiParams.accounted = 1;
+  var res = await api(apiParams);
 
   if (!res || !res.ok) {
     body.innerHTML = '<div class="card muted">加载失败</div>';
@@ -585,6 +591,11 @@ async function loadIssueList() {
     html += '<div class="item-title">';
     html += '<span class="st st-' + esc(it.status) + '">' + esc(stLabel(it.status)) + '</span> ';
     html += '<span class="biz-tag biz-' + esc(it.biz_class) + '">' + esc(bizLabel(it.biz_class)) + '</span> ';
+    if (Number(it.accounted) === 1) {
+      html += '<span class="biz-tag" style="background:#c8e6c9;color:#1b5e20;">已记帐</span> ';
+    } else if (Number(it.accounting_required) === 1) {
+      html += '<span class="biz-tag" style="background:#ffe0b2;color:#bf360c;">需记帐</span> ';
+    }
     html += esc(issueTitleText(it));
     html += '</div>';
     html += '<div class="item-meta">';
@@ -662,7 +673,13 @@ async function loadIssueDetail() {
 
   var html = '<div class="card">';
   html += '<div style="font-size:18px;font-weight:700;margin-bottom:8px;">' + esc(issueTitleText(it)) + '</div>';
-  html += '<div class="detail-field"><b>' + L("status") + ':</b> <span class="st st-' + esc(it.status) + '">' + esc(stLabel(it.status)) + '</span></div>';
+  html += '<div class="detail-field"><b>' + L("status") + ':</b> <span class="st st-' + esc(it.status) + '">' + esc(stLabel(it.status)) + '</span>';
+  if (Number(it.accounted) === 1) {
+    html += ' <span class="biz-tag" style="background:#c8e6c9;color:#1b5e20;">已记帐</span>';
+  } else if (Number(it.accounting_required) === 1) {
+    html += ' <span class="biz-tag" style="background:#ffe0b2;color:#bf360c;">需记帐</span>';
+  }
+  html += '</div>';
   html += '<div class="detail-field"><b>' + L("biz_class") + ':</b> <span class="biz-tag biz-' + esc(it.biz_class) + '">' + esc(bizLabel(it.biz_class)) + '</span></div>';
   html += '<div class="detail-field"><b>' + L("customer") + ':</b> ' + esc(it.customer) + '</div>';
   html += '<div class="detail-field"><b>' + L("related_doc_no") + ':</b> ' + esc(it.related_doc_no) + '</div>';
@@ -683,15 +700,27 @@ async function loadIssueDetail() {
   }
   html += '</div>';
 
-  // Attachments
+  // P1-5: 处理图片/附件（含 issue_handle_photo / feedback_photo / issue_photo / issue_attachment 等所有 issue_ticket 下附件）
   if (atts.length > 0) {
-    html += '<div class="card"><div class="card-title">' + L("attachments") + ' (' + atts.length + ')</div>';
+    html += '<div class="card"><div class="card-title">处理图片/附件 / 처리 사진·첨부 (' + atts.length + ')</div>';
     html += '<div class="att-grid">';
     atts.forEach(function(att) {
-      if (att.content_type && att.content_type.startsWith("image/")) {
-        html += '<img class="att-thumb" src="' + esc(fileUrl(att.file_key)) + '" onclick="showLightbox(\'' + esc(fileUrl(att.file_key)) + '\')">';
+      var ct = att.content_type || '';
+      var url = fileUrl(att.file_key);
+      var who = (att.uploaded_by ? esc(att.uploaded_by) : '') + (att.created_at ? ' · ' + esc(fmtTime(att.created_at)) : '');
+      if (ct.indexOf('image/') === 0) {
+        html += '<div class="att-cell" style="text-align:center;">';
+        html += '<img class="att-thumb" src="' + esc(url) + '" onclick="showLightbox(\'' + esc(url) + '\')" style="cursor:zoom-in;">';
+        if (who) html += '<div class="muted" style="font-size:10px;">' + who + '</div>';
+        html += '</div>';
       } else {
-        html += '<div style="font-size:12px;">' + esc(att.file_name) + '</div>';
+        var isPdf = ct.indexOf('pdf') !== -1 || (att.file_name && /\.pdf$/i.test(att.file_name));
+        var icon = isPdf ? '📄' : '📎';
+        html += '<div class="att-cell" style="display:inline-block;padding:8px 10px;border:1px solid #e0e0e0;border-radius:6px;background:#fafafa;margin:4px;">';
+        html += '<a href="' + esc(url) + '" target="_blank" download="' + esc(att.file_name || '') + '" style="font-size:12px;color:#1565c0;text-decoration:none;">';
+        html += icon + ' ' + esc(att.file_name || '附件') + '</a>';
+        if (who) html += '<div class="muted" style="font-size:10px;margin-top:2px;">' + who + '</div>';
+        html += '</div>';
       }
     });
     html += '</div></div>';
@@ -739,7 +768,64 @@ async function loadIssueDetail() {
     html += '</div>';
   }
 
+  // P1-6：记帐操作（已完成/已关闭后可标记需记帐）
+  var canMarkAcct = (it.status === 'completed' || it.status === 'closed');
+  var hasAcctData = Number(it.accounting_required) === 1 || Number(it.accounted) === 1;
+  if (canMarkAcct || hasAcctData) {
+    html += '<div class="card"><div class="card-title">记帐 / 기장</div>';
+    if (Number(it.accounting_required) === 1) {
+      html += '<div class="detail-field"><b>提示记帐:</b> ' + esc(it.accounting_required_by || '') + ' · ' + esc(fmtTime(it.accounting_required_at)) + '</div>';
+      if (it.accounting_note) {
+        html += '<div class="detail-field"><b>记帐备注:</b> <span style="white-space:pre-wrap;">' + esc(it.accounting_note) + '</span></div>';
+      }
+    }
+    if (Number(it.accounted) === 1) {
+      html += '<div class="detail-field"><b>已记帐:</b> ' + esc(it.accounted_by || '') + ' · ' + esc(fmtTime(it.accounted_at)) + '</div>';
+    }
+    if (canMarkAcct && Number(it.accounted) !== 1) {
+      if (Number(it.accounting_required) !== 1) {
+        html += '<button class="btn btn-warning" onclick="markIssueAccountingRequired(this)">提示记帐 / 기장 알림</button>';
+      } else {
+        html += '<button class="btn btn-success" onclick="markIssueAccounted(this)">标记已记帐 / 기장 완료</button> ';
+        html += '<button class="btn btn-outline" onclick="markIssueAccountingRequired(this)">修改记帐备注</button>';
+      }
+    }
+    html += '</div>';
+  }
+
   body.innerHTML = html;
+}
+
+async function markIssueAccountingRequired(btnEl) {
+  var note = prompt('记帐备注（如：额外贴标 50 箱、换箱 12 个、补操作费等）:');
+  if (note === null) return;
+  withActionLock('markIssueAccountingRequired', btnEl || null, '提交中.../저장중...', async function() {
+    var res = await api({
+      action: "v2_issue_mark_accounting_required",
+      id: _currentIssueId,
+      accounting_note: note,
+      by: getUser()
+    });
+    if (res && res.ok) {
+      alert('已标记需记帐 / 기장 알림 완료');
+      loadIssueDetail();
+    } else {
+      alert('失败: ' + (res ? (res.message || res.error) : 'unknown'));
+    }
+  });
+}
+
+async function markIssueAccounted(btnEl) {
+  if (!confirm('确认已记帐？此操作记录由 ' + getUser() + ' 完成。')) return;
+  withActionLock('markIssueAccounted', btnEl || null, '提交中.../저장중...', async function() {
+    var res = await api({ action: "v2_issue_mark_accounted", id: _currentIssueId, by: getUser() });
+    if (res && res.ok) {
+      alert('已记帐 / 기장 완료');
+      loadIssueDetail();
+    } else {
+      alert('失败: ' + (res ? (res.message || res.error) : 'unknown'));
+    }
+  });
 }
 
 async function completeIssue(btnEl) {
@@ -1675,6 +1761,7 @@ async function loadInboundDetail() {
   // 缓存 plan 给 printIbQr / 二维码 A4 单据使用
   window._currentInboundPlanCache = p;
   window._currentInboundPretty = p.display_no || p.id;
+  window._currentInboundPlan = p; // P1-7 修改弹窗用
 
   // --- Basic info: two-column grid ---
   var isDynamic = (p.source_type === 'field_dynamic');
@@ -1878,6 +1965,10 @@ async function loadInboundDetail() {
   if (p.status === "arrived_pending_putaway" || p.status === "putting_away" || p.status === "partially_completed") {
     html += '<button class="btn btn-success" onclick="markInboundCompleted(this)">文员直接完成入库 / 직접 입고 완료</button> ';
   }
+  // P1-7：未到库（pending）才能修改
+  if (p.status === "pending") {
+    html += '<button class="btn btn-primary" onclick="openInboundEditForm()">修改入库计划 / 입고 계획 수정</button> ';
+  }
   if (p.status === "pending" || p.status === "arrived_pending_putaway") {
     html += '<button class="btn btn-danger btn-sm" onclick="cancelInboundPlan(this)">' + L("status_cancelled") + '</button>';
   }
@@ -1888,6 +1979,78 @@ async function loadInboundDetail() {
   html += '</div>';
 
   body.innerHTML = html;
+}
+
+// P1-7：未到库入库计划 — 修改弹窗
+function openInboundEditForm() {
+  var p = window._currentInboundPlan;
+  if (!p || p.status !== 'pending') {
+    alert('仅未到库（待到库）状态的入库单可以修改');
+    return;
+  }
+  var bizList = [];
+  try { bizList = JSON.parse(p.biz_classes_json || '[]'); } catch(e) {}
+  if (bizList.length === 0 && p.biz_class) bizList = [p.biz_class];
+  var bizCheck = function(v) { return bizList.indexOf(v) !== -1 ? ' checked' : ''; };
+
+  var html = '';
+  html += '<div class="modal-overlay" id="ibEditOverlay" onclick="closeInboundEditForm(event)">';
+  html += '<div class="modal-box" onclick="event.stopPropagation();" style="max-width:560px;">';
+  html += '<div style="font-size:16px;font-weight:700;margin-bottom:12px;">修改入库计划 / 입고 계획 수정</div>';
+  html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:13px;">';
+  html += '<div><label><b>计划日期</b></label><input id="ib-edit-date" class="input" type="date" value="' + esc(p.plan_date || '') + '"></div>';
+  html += '<div><label><b>客户 *</b></label><input id="ib-edit-customer" class="input" value="' + esc(p.customer || '') + '"></div>';
+  html += '<div style="grid-column:1/-1;"><label><b>业务类型（多选） *</b></label><div style="padding:6px 0;">';
+  html += '<label style="margin-right:14px;"><input type="checkbox" class="ib-edit-biz" value="direct_ship"' + bizCheck('direct_ship') + '> 代发</label>';
+  html += '<label style="margin-right:14px;"><input type="checkbox" class="ib-edit-biz" value="bulk"' + bizCheck('bulk') + '> 大货</label>';
+  html += '<label style="margin-right:14px;"><input type="checkbox" class="ib-edit-biz" value="return"' + bizCheck('return') + '> 退件</label>';
+  html += '</div></div>';
+  html += '<div><label><b>预计到达</b></label><input id="ib-edit-arrival" class="input" value="' + esc(p.expected_arrival || '') + '"></div>';
+  html += '<div><label><b>入库目的</b></label><input id="ib-edit-purpose" class="input" value="' + esc(p.purpose || '') + '"></div>';
+  html += '<div style="grid-column:1/-1;"><label><b>货物概要</b></label><input id="ib-edit-cargo" class="input" value="' + esc(p.cargo_summary || '') + '"></div>';
+  html += '<div style="grid-column:1/-1;"><label><b>备注</b></label><textarea id="ib-edit-remark" class="input" rows="2">' + esc(p.remark || '') + '</textarea></div>';
+  html += '</div>';
+  html += '<div style="margin-top:14px;text-align:right;">';
+  html += '<button class="btn btn-outline" onclick="closeInboundEditForm()">取消</button> ';
+  html += '<button class="btn btn-primary" onclick="submitInboundEdit(this)">保存</button>';
+  html += '</div></div></div>';
+  var div = document.createElement('div');
+  div.innerHTML = html;
+  document.body.appendChild(div.firstChild);
+}
+
+function closeInboundEditForm(ev) {
+  if (ev && ev.target && ev.target.id !== 'ibEditOverlay') return;
+  var el = document.getElementById('ibEditOverlay');
+  if (el) el.parentNode.removeChild(el);
+}
+
+async function submitInboundEdit(btnEl) {
+  var customer = (document.getElementById('ib-edit-customer') || {}).value || '';
+  if (!customer.trim()) { alert('请填写客户'); return; }
+  var bizList = [];
+  document.querySelectorAll('.ib-edit-biz:checked').forEach(function(el) { bizList.push(el.value); });
+  if (bizList.length === 0) { alert('请至少选择一个业务类型'); return; }
+  withActionLock('submitInboundEdit', btnEl || null, '保存中.../저장중...', async function() {
+    var res = await api({
+      action: "v2_inbound_plan_update",
+      id: _currentInboundId,
+      plan_date: (document.getElementById('ib-edit-date') || {}).value || '',
+      customer: customer.trim(),
+      biz_classes: bizList,
+      expected_arrival: (document.getElementById('ib-edit-arrival') || {}).value || '',
+      purpose: (document.getElementById('ib-edit-purpose') || {}).value || '',
+      cargo_summary: (document.getElementById('ib-edit-cargo') || {}).value || '',
+      remark: (document.getElementById('ib-edit-remark') || {}).value || ''
+    });
+    if (res && res.ok) {
+      alert('已保存 / 저장됨');
+      closeInboundEditForm();
+      loadInboundDetail();
+    } else {
+      alert('失败/실패: ' + (res ? (res.message || res.error) : 'unknown'));
+    }
+  });
 }
 
 // ===== 删除已取消的入库计划 =====

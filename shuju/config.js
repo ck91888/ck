@@ -40,8 +40,24 @@ var BIZ_LABELS = {
 };
 var STATUS_LABELS = {
   working: "作业中", awaiting_close: "待收尾", pending: "待开始",
-  completed: "已完成", cancelled: "已取消"
+  completed: "已完成", cancelled: "已取消",
+  operation_reserved: "操作预约", stock_operating: "操作中",
+  pending_outbound_update: "待更新出库计划", preparing_outbound: "出库准备中",
+  shipped: "已出库"
 };
+var STATUS_OPTIONS = [
+  { value: '', label: '全部状态' },
+  { value: 'pending', label: '待开始' },
+  { value: 'working', label: '作业中' },
+  { value: 'awaiting_close', label: '待收尾' },
+  { value: 'completed', label: '已完成' },
+  { value: 'cancelled', label: '已取消' },
+  { value: 'operation_reserved', label: '操作预约' },
+  { value: 'stock_operating', label: '操作中' },
+  { value: 'pending_outbound_update', label: '待更新出库计划' },
+  { value: 'preparing_outbound', label: '出库准备中' },
+  { value: 'shipped', label: '已出库' }
+];
 var IMPORT_TYPE_LABELS = {
   change_order: "换单",
   pack_direct: "代发打包",

@@ -112,6 +112,8 @@ body {
 .biz-item .biz-name { font-size: 13px; font-weight: 600; margin-bottom: 4px; }
 .biz-item .biz-nums { font-size: 12px; color: #888; }
 .biz-item .biz-nums b { font-size: 18px; color: #333; }
+.biz-item:hover { background: #f0f7ff; border-color: #cfe2ff; }
+.biz-item-active { background: #e3f2fd !important; border-color: #1976d2 !important; box-shadow: 0 0 0 2px #1976d2 inset; }
 
 /* ===== Placeholder tab ===== */
 .placeholder-tab {

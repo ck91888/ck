@@ -178,6 +178,14 @@ function initFilterSelects() {
       el.dataset._init = '1';
     }
   });
+  // P2-12: 单子数据 状态筛选下拉
+  var statusEl = document.getElementById('ordersFilterStatus');
+  if (statusEl && !statusEl.dataset._init && typeof STATUS_OPTIONS !== 'undefined') {
+    statusEl.innerHTML = STATUS_OPTIONS.map(function(o) {
+      return '<option value="' + esc(o.value) + '">' + esc(o.label) + '</option>';
+    }).join('');
+    statusEl.dataset._init = '1';
+  }
 }
 
 function setDefaultDateInputs() {
@@ -206,6 +214,8 @@ function switchTab(tab, btn) {
 }
 
 // ===== Realtime overview =====
+var _liveWorkersCache = [];
+var _liveBizFilter = '';
 async function loadRealtime() {
   var res = await api({ action: "v2_dashboard_realtime_overview" });
   if (!res || !res.ok) return;
@@ -215,27 +225,8 @@ async function loadRealtime() {
   document.getElementById("statActiveJobs").textContent = res.current_active_jobs || 0;
   document.getElementById("statActiveDocs").textContent = res.current_active_docs || 0;
 
-  var workers = res.worker_live_status || [];
-  var tbody = document.getElementById("workerLiveBody");
-  if (workers.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="9" class="muted" style="text-align:center;">当前没有在岗人员</td></tr>';
-  } else {
-    var html = "";
-    workers.forEach(function(w) {
-      html += "<tr>";
-      html += "<td><b>" + esc(w.worker_name) + "</b></td>";
-      html += "<td>" + esc(bizLabel(w.biz_class)) + "</td>";
-      html += "<td>" + esc(flowLabel(w.flow_stage)) + "</td>";
-      html += "<td>" + esc(jobTypeLabel(w.job_type)) + "</td>";
-      html += "<td>" + esc(w.display_no || w.related_doc_id || "--") + "</td>";
-      html += "<td>" + esc(fmtTime(w.joined_at)) + "</td>";
-      html += "<td>" + minutesSince(w.joined_at) + "</td>";
-      html += "<td>" + statusTag(w.job_status) + "</td>";
-      html += '<td><button class="row-action warn" onclick="markAnomaly(\'worker\',\'' + esc(w.worker_id) + '\')">标记异常</button></td>';
-      html += "</tr>";
-    });
-    tbody.innerHTML = html;
-  }
+  _liveWorkersCache = res.worker_live_status || [];
+  renderLiveWorkers();
 
   var breakdown = res.biz_breakdown || [];
   var grid = document.getElementById("bizBreakdown");
@@ -244,13 +235,72 @@ async function loadRealtime() {
   } else {
     var bhtml = "";
     breakdown.forEach(function(b) {
-      bhtml += '<div class="biz-item">';
-      bhtml += '<div class="biz-name">' + esc(jobTypeLabel(b.job_type) || flowLabel(b.flow_stage)) + '</div>';
+      var jt = b.job_type || '';
+      var label = jobTypeLabel(b.job_type) || flowLabel(b.flow_stage);
+      var sel = (jt === _liveBizFilter) ? ' biz-item-active' : '';
+      bhtml += '<div class="biz-item' + sel + '" style="cursor:pointer;" onclick="filterLiveByJobType(\'' + esc(jt) + '\')">';
+      bhtml += '<div class="biz-name">' + esc(label) + '</div>';
       bhtml += '<div class="biz-nums"><b>' + (b.worker_count || 0) + '</b> 人 / <b>' + (b.job_count || 0) + '</b> 个任务</div>';
+      bhtml += '<div class="muted" style="font-size:11px;margin-top:2px;">点击查看详情</div>';
       bhtml += '</div>';
     });
     grid.innerHTML = bhtml;
   }
+}
+
+function filterLiveByJobType(jt) {
+  _liveBizFilter = (_liveBizFilter === jt) ? '' : jt;
+  renderLiveWorkers();
+  // 同步业务卡片高亮
+  var cards = document.querySelectorAll('#bizBreakdown .biz-item');
+  cards.forEach(function(c) { c.classList.remove('biz-item-active'); });
+  if (_liveBizFilter) {
+    cards.forEach(function(c) {
+      if (c.getAttribute('onclick') && c.getAttribute('onclick').indexOf("'" + _liveBizFilter + "'") !== -1) {
+        c.classList.add('biz-item-active');
+      }
+    });
+  }
+}
+
+function renderLiveWorkers() {
+  var tbody = document.getElementById("workerLiveBody");
+  if (!tbody) return;
+  var rows = _liveWorkersCache;
+  if (_liveBizFilter) {
+    rows = rows.filter(function(w) { return w.job_type === _liveBizFilter; });
+  }
+  // 筛选条 + 重置按钮
+  var hint = document.getElementById('workerLiveFilterHint');
+  if (hint) {
+    if (_liveBizFilter) {
+      hint.innerHTML = '已筛选业务：<b>' + esc(jobTypeLabel(_liveBizFilter)) + '</b>（' + rows.length + ' 人） <a href="#" onclick="filterLiveByJobType(\'\');return false;">清除筛选</a>';
+      hint.style.display = '';
+    } else {
+      hint.innerHTML = '';
+      hint.style.display = 'none';
+    }
+  }
+  if (rows.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="9" class="muted" style="text-align:center;">' +
+      (_liveBizFilter ? '该业务下当前无在岗人员' : '当前没有在岗人员') + '</td></tr>';
+    return;
+  }
+  var html = "";
+  rows.forEach(function(w) {
+    html += "<tr>";
+    html += "<td><b>" + esc(w.worker_name) + "</b></td>";
+    html += "<td>" + esc(bizLabel(w.biz_class)) + "</td>";
+    html += "<td>" + esc(flowLabel(w.flow_stage)) + "</td>";
+    html += "<td>" + esc(jobTypeLabel(w.job_type)) + "</td>";
+    html += "<td>" + esc(w.display_no || w.related_doc_id || "--") + "</td>";
+    html += "<td>" + esc(fmtTime(w.joined_at)) + "</td>";
+    html += "<td>" + minutesSince(w.joined_at) + "</td>";
+    html += "<td>" + statusTag(w.job_status) + "</td>";
+    html += '<td><button class="row-action warn" onclick="markAnomaly(\'worker\',\'' + esc(w.worker_id) + '\')">标记异常</button></td>';
+    html += "</tr>";
+  });
+  tbody.innerHTML = html;
 }
 
 async function loadLiveDocs() {
@@ -327,6 +377,7 @@ function ordersFilterParams() {
     end_date: document.getElementById("ordersFilterEnd").value || '',
     flow_stage: document.getElementById("ordersFilterFlow").value || '',
     job_type: document.getElementById("ordersFilterJobType").value || '',
+    status: (document.getElementById("ordersFilterStatus") || {}).value || '',
     worker_name: document.getElementById("ordersFilterWorker").value.trim(),
     doc_no: document.getElementById("ordersFilterDoc").value.trim(),
     limit: 200, offset: 0

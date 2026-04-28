@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>协同中心 V2 / 협업센터</title>
-  <link rel="stylesheet" href="style.css?v=20260430a">
+  <link rel="stylesheet" href="style.css?v=20260430b">
 </head>
 <body>
 
@@ -77,6 +77,12 @@
         <option value="bulk">大货</option>
         <option value="return">退件</option>
         <option value="import">进口</option>
+      </select>
+      <select id="issueFilterAccounting" onchange="loadIssueList()">
+        <option value="">全部记帐状态</option>
+        <option value="required">需记帐</option>
+        <option value="unpaid">需记帐·未记帐</option>
+        <option value="paid">已记帐</option>
       </select>
       <button class="btn btn-outline btn-sm" onclick="loadIssueList()">刷新</button>
     </div>
@@ -516,7 +522,7 @@
 
 <input type="file" id="fileInput" accept="image/*" style="display:none;" onchange="handleFileUpload(this)">
 
-<script src="config.js?v=20260430a"></script>
+<script src="config.js?v=20260430b"></script>
 <script src="../shared/qrcode.min.js"></script>
 <!--
   TODO(SheetJS 动态加载): xlsx.full.min.js ~923KB，目前同步加载，
@@ -526,6 +532,6 @@
   onVerifyFilePick / 表格导出流程。
 -->
 <script src="../shared/xlsx.full.min.js"></script>
-<script src="app.js?v=20260430a"></script>
+<script src="app.js?v=20260430b"></script>
 </body>
 </html>
