@@ -979,10 +979,45 @@ const MIGRATIONS = [
   `ALTER TABLE v2_outbound_orders ADD COLUMN outbound_docs_required INTEGER DEFAULT 0`,
   `CREATE INDEX IF NOT EXISTS idx_v2_outbound_biz_status_date ON v2_outbound_orders(biz_class, status, order_date, created_at)`,
   `CREATE INDEX IF NOT EXISTS idx_v2_outbound_stock_status_date ON v2_outbound_orders(uses_stock_operation, status, order_date, created_at)`,
+
+  // ---- v2.20260430a：测试反馈批量修复 ----
+  // P1-4：入库计划→关联出库单 反链（source_inbound_plan_id 已在 v2.20260423 加入）
+  `CREATE INDEX IF NOT EXISTS idx_v2_outbound_source_inbound ON v2_outbound_orders(source_inbound_plan_id)`,
+
+  // P1-6：问题点提示记帐
+  `ALTER TABLE v2_issue_tickets ADD COLUMN accounting_required INTEGER DEFAULT 0`,
+  `ALTER TABLE v2_issue_tickets ADD COLUMN accounting_required_by TEXT DEFAULT ''`,
+  `ALTER TABLE v2_issue_tickets ADD COLUMN accounting_required_at TEXT DEFAULT ''`,
+  `ALTER TABLE v2_issue_tickets ADD COLUMN accounting_note TEXT DEFAULT ''`,
+  `ALTER TABLE v2_issue_tickets ADD COLUMN accounted INTEGER DEFAULT 0`,
+  `ALTER TABLE v2_issue_tickets ADD COLUMN accounted_by TEXT DEFAULT ''`,
+  `ALTER TABLE v2_issue_tickets ADD COLUMN accounted_at TEXT DEFAULT ''`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_issue_accounting_required ON v2_issue_tickets(accounting_required, accounted, status, created_at)`,
+
+  // P1-8：出库单修改 + 仓库确认
+  `ALTER TABLE v2_outbound_orders ADD COLUMN revision_no INTEGER DEFAULT 0`,
+  `ALTER TABLE v2_outbound_orders ADD COLUMN last_modified_by TEXT DEFAULT ''`,
+  `ALTER TABLE v2_outbound_orders ADD COLUMN last_modified_at TEXT DEFAULT ''`,
+  `ALTER TABLE v2_outbound_orders ADD COLUMN warehouse_ack_required INTEGER DEFAULT 0`,
+  `ALTER TABLE v2_outbound_orders ADD COLUMN warehouse_ack_by TEXT DEFAULT ''`,
+  `ALTER TABLE v2_outbound_orders ADD COLUMN warehouse_ack_at TEXT DEFAULT ''`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_outbound_warehouse_ack ON v2_outbound_orders(warehouse_ack_required, status)`,
+
+  // P1-9：出库提货信息
+  `ALTER TABLE v2_outbound_orders ADD COLUMN pickup_vehicle_no TEXT DEFAULT ''`,
+  `ALTER TABLE v2_outbound_orders ADD COLUMN pickup_driver_name TEXT DEFAULT ''`,
+  `ALTER TABLE v2_outbound_orders ADD COLUMN pickup_driver_phone TEXT DEFAULT ''`,
+  `ALTER TABLE v2_outbound_orders ADD COLUMN pickup_person_name TEXT DEFAULT ''`,
+  `ALTER TABLE v2_outbound_orders ADD COLUMN pickup_company TEXT DEFAULT ''`,
+  `ALTER TABLE v2_outbound_orders ADD COLUMN pickup_time TEXT DEFAULT ''`,
+  `ALTER TABLE v2_outbound_orders ADD COLUMN pickup_note TEXT DEFAULT ''`,
+  `ALTER TABLE v2_outbound_orders ADD COLUMN pickup_confirm_required INTEGER DEFAULT 0`,
+  `ALTER TABLE v2_outbound_orders ADD COLUMN pickup_confirmed_by TEXT DEFAULT ''`,
+  `ALTER TABLE v2_outbound_orders ADD COLUMN pickup_confirmed_at TEXT DEFAULT ''`,
 ];
 
 // 每次发布迁移变化时手动 +1（patch 段），冷启动只比对一次字符串即可跳过整段 MIGRATIONS
-const CURRENT_SCHEMA_VERSION = 'v2.20260428b';
+const CURRENT_SCHEMA_VERSION = 'v2.20260430a';
 
 let _migrated = false;
 async function ensureMigrated(db) {
@@ -1181,6 +1216,15 @@ route("v2_issue_list", async (body, env) => {
   const binds = [];
   if (status) { sql += " AND status=?"; binds.push(status); }
   if (biz_class) { sql += " AND biz_class=?"; binds.push(biz_class); }
+  // P1-6：记帐筛选
+  if (body.accounting_required === 1 || body.accounting_required === '1') {
+    sql += " AND accounting_required=1";
+  }
+  if (body.accounted === 1 || body.accounted === '1') {
+    sql += " AND accounted=1";
+  } else if (body.accounted === 0 || body.accounted === '0') {
+    sql += " AND accounting_required=1 AND accounted=0";
+  }
   // 默认 newest_first（002 客服侧看最新）；oldest_first 给需要 FIFO 的视角
   sql += sort === "oldest_first" ? " ORDER BY created_at ASC" : " ORDER BY created_at DESC";
   sql += " LIMIT ? OFFSET ?";
@@ -1219,6 +1263,44 @@ route("v2_issue_close", async (body, env) => {
     "UPDATE v2_issue_tickets SET status='completed', updated_at=? WHERE id=?"
   ).bind(now(), id).run();
   return json({ ok: true });
+});
+
+// P1-6：标记需要记帐
+route("v2_issue_mark_accounting_required", async (body, env) => {
+  if (!isAuth(body, env)) return err("unauthorized", 401);
+  const id = String(body.id || "").trim();
+  if (!id) return err("missing id");
+  return withIdem(env, body, "v2_issue_mark_accounting_required", async () => {
+    const row = await env.DB.prepare("SELECT id, status FROM v2_issue_tickets WHERE id=?").bind(id).first();
+    if (!row) return { ok: false, error: "not_found" };
+    const t = now();
+    const by = String(body.by || body.actor || "");
+    const note = String(body.accounting_note || "");
+    await env.DB.prepare(
+      "UPDATE v2_issue_tickets SET accounting_required=1, accounted=0, accounting_required_by=?, accounting_required_at=?, accounting_note=?, updated_at=? WHERE id=?"
+    ).bind(by, t, note, t, id).run();
+    return { ok: true, id };
+  });
+});
+
+// P1-6：标记已记帐
+route("v2_issue_mark_accounted", async (body, env) => {
+  if (!isAuth(body, env)) return err("unauthorized", 401);
+  const id = String(body.id || "").trim();
+  if (!id) return err("missing id");
+  return withIdem(env, body, "v2_issue_mark_accounted", async () => {
+    const row = await env.DB.prepare("SELECT accounting_required FROM v2_issue_tickets WHERE id=?").bind(id).first();
+    if (!row) return { ok: false, error: "not_found" };
+    if (Number(row.accounting_required) !== 1) {
+      return { ok: false, error: "not_marked_required", message: "请先标记需要记帐" };
+    }
+    const t = now();
+    const by = String(body.by || body.actor || "");
+    await env.DB.prepare(
+      "UPDATE v2_issue_tickets SET accounted=1, accounted_by=?, accounted_at=?, updated_at=? WHERE id=?"
+    ).bind(by, t, t, id).run();
+    return { ok: true, id };
+  });
 });
 
 route("v2_issue_rework", async (body, env) => {
@@ -1634,6 +1716,105 @@ route("v2_outbound_order_update_ship_plan", async (body, env) => {
       "UPDATE v2_outbound_orders SET " + sets.join(", ") + " WHERE id=?"
     ).bind(...binds).run();
     return { ok: true, status: nextStatus };
+  });
+});
+
+// P1-8：未出库完成的出库单 — 修改（产生 warehouse_ack 提示）
+route("v2_outbound_order_update", async (body, env) => {
+  if (!isAuth(body, env)) return err("unauthorized", 401);
+  const id = String(body.id || "").trim();
+  if (!id) return err("missing id");
+  return withIdem(env, body, "v2_outbound_order_update", async () => {
+    const order = await env.DB.prepare("SELECT * FROM v2_outbound_orders WHERE id=?").bind(id).first();
+    if (!order) return { ok: false, error: "not_found" };
+    const FROZEN = ['shipped', 'completed', 'cancelled'];
+    if (FROZEN.indexOf(order.status) !== -1) {
+      return { ok: false, error: "frozen_status_cannot_edit", message: "已出库/完成/取消的出库单不能修改：" + order.status };
+    }
+    const t = now();
+    const by = String(body.by || body.actor || body.modified_by || "");
+
+    const editable = [
+      'order_date', 'customer', 'biz_class', 'operation_mode', 'outbound_mode',
+      'destination', 'po_no', 'wms_work_order_no',
+      'expected_ship_at', 'outbound_requirement', 'instruction', 'remark',
+      'planned_box_count', 'planned_pallet_count', 'uses_stock_operation',
+      // 提货信息（P1-9 一并支持）
+      'pickup_vehicle_no','pickup_driver_name','pickup_driver_phone',
+      'pickup_person_name','pickup_company','pickup_time','pickup_note'
+    ];
+    const sets = [];
+    const binds = [];
+    let pickupTouched = false;
+    for (const k of editable) {
+      if (body[k] !== undefined) {
+        sets.push(k + "=?");
+        const v = body[k];
+        if (k.startsWith('planned_') || k === 'uses_stock_operation') {
+          binds.push(Number(v || 0));
+        } else {
+          binds.push(String(v == null ? '' : v));
+        }
+        if (k.indexOf('pickup_') === 0) pickupTouched = true;
+      }
+    }
+    if (sets.length === 0) {
+      return { ok: false, error: "nothing_to_update" };
+    }
+    sets.push("revision_no=COALESCE(revision_no,0)+1");
+    sets.push("last_modified_by=?"); binds.push(by);
+    sets.push("last_modified_at=?"); binds.push(t);
+    sets.push("warehouse_ack_required=1");
+    sets.push("warehouse_ack_by=''");
+    sets.push("warehouse_ack_at=''");
+    if (pickupTouched) {
+      sets.push("pickup_confirm_required=1");
+      sets.push("pickup_confirmed_by=''");
+      sets.push("pickup_confirmed_at=''");
+    }
+    sets.push("updated_at=?"); binds.push(t);
+    binds.push(id);
+    await env.DB.prepare(
+      "UPDATE v2_outbound_orders SET " + sets.join(", ") + " WHERE id=?"
+    ).bind(...binds).run();
+    return { ok: true, id, revision_no: Number(order.revision_no || 0) + 1 };
+  });
+});
+
+// P1-8：仓库确认已查看出库单变更
+route("v2_outbound_order_ack_change", async (body, env) => {
+  if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  const id = String(body.id || "").trim();
+  if (!id) return err("missing id");
+  return withIdem(env, body, "v2_outbound_order_ack_change", async () => {
+    const order = await env.DB.prepare("SELECT id, warehouse_ack_required FROM v2_outbound_orders WHERE id=?").bind(id).first();
+    if (!order) return { ok: false, error: "not_found" };
+    if (Number(order.warehouse_ack_required) !== 1) {
+      return { ok: true, already_acked: true };
+    }
+    const t = now();
+    const worker = String(body.worker_name || body.by || "");
+    await env.DB.prepare(
+      "UPDATE v2_outbound_orders SET warehouse_ack_required=0, warehouse_ack_by=?, warehouse_ack_at=?, updated_at=? WHERE id=?"
+    ).bind(worker, t, t, id).run();
+    return { ok: true, id };
+  });
+});
+
+// P1-9：仓库确认已查看提货信息
+route("v2_outbound_pickup_confirm", async (body, env) => {
+  if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  const id = String(body.id || "").trim();
+  if (!id) return err("missing id");
+  return withIdem(env, body, "v2_outbound_pickup_confirm", async () => {
+    const order = await env.DB.prepare("SELECT id, pickup_confirm_required FROM v2_outbound_orders WHERE id=?").bind(id).first();
+    if (!order) return { ok: false, error: "not_found" };
+    const t = now();
+    const worker = String(body.worker_name || body.by || "");
+    await env.DB.prepare(
+      "UPDATE v2_outbound_orders SET pickup_confirm_required=0, pickup_confirmed_by=?, pickup_confirmed_at=?, updated_at=? WHERE id=?"
+    ).bind(worker, t, t, id).run();
+    return { ok: true, id };
   });
 });
 
@@ -2650,6 +2831,92 @@ route("v2_inbound_plan_update_status", async (body, env) => {
   return json({ ok: true });
 });
 
+// P1-7：未到库入库单 — 修改
+// 仅 status=pending（未到库）允许修改；已开工/完成的拒
+route("v2_inbound_plan_update", async (body, env) => {
+  if (!isAuth(body, env)) return err("unauthorized", 401);
+  const id = String(body.id || "").trim();
+  if (!id) return err("missing id");
+  return withIdem(env, body, "v2_inbound_plan_update", async () => {
+    const plan = await env.DB.prepare("SELECT * FROM v2_inbound_plans WHERE id=?").bind(id).first();
+    if (!plan) return { ok: false, error: "not_found" };
+    if (plan.status !== 'pending') {
+      return { ok: false, error: "cannot_edit_after_started", message: "已开工/完成的入库单不能修改：" + plan.status };
+    }
+    // 关联的已 active/completed inbound job → 拒（兜底）
+    const anyJob = await env.DB.prepare(
+      "SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND status IN ('working','pending','awaiting_close','completed') LIMIT 1"
+    ).bind(id).first();
+    if (anyJob) {
+      return { ok: false, error: "has_jobs_cannot_edit", message: "该入库单已有现场作业关联，不能修改" };
+    }
+
+    const t = now();
+    const bizNorm = normalizeInboundBizClasses(body);
+    if (bizNorm.list.length === 0) {
+      return { ok: false, error: "biz_classes_required", message: "请至少选择一个业务类型" };
+    }
+    const biz_class = bizNorm.primary;
+    const biz_classes_json = JSON.stringify(bizNorm.list);
+
+    await env.DB.prepare(
+      `UPDATE v2_inbound_plans SET plan_date=?, customer=?, biz_class=?, biz_classes_json=?,
+        cargo_summary=?, expected_arrival=?, purpose=?, remark=?, updated_at=? WHERE id=?`
+    ).bind(
+      String(body.plan_date || plan.plan_date),
+      String(body.customer || plan.customer),
+      biz_class, biz_classes_json,
+      String(body.cargo_summary != null ? body.cargo_summary : (plan.cargo_summary || "")),
+      String(body.expected_arrival != null ? body.expected_arrival : (plan.expected_arrival || "")),
+      String(body.purpose != null ? body.purpose : (plan.purpose || "")),
+      String(body.remark != null ? body.remark : (plan.remark || "")),
+      t, id
+    ).run();
+
+    // biz_tasks 同步：pending 可增删；completed 不允许删
+    const existing = await env.DB.prepare(
+      "SELECT id, biz_class, status FROM v2_inbound_plan_biz_tasks WHERE plan_id=?"
+    ).bind(id).all();
+    const existSet = {};
+    for (const r of (existing.results || [])) existSet[r.biz_class] = r;
+    const targetSet = {};
+    for (const b of bizNorm.list) targetSet[b] = true;
+    // 删除：existing 中 target 没有，且 status=pending → 删
+    for (const biz of Object.keys(existSet)) {
+      const er = existSet[biz];
+      if (!targetSet[biz]) {
+        if (er.status === 'completed') {
+          return { ok: false, error: "completed_biz_cannot_remove", message: "业务类型 " + biz + " 已有完成记录，不能移除" };
+        }
+        await env.DB.prepare("DELETE FROM v2_inbound_plan_biz_tasks WHERE id=?").bind(er.id).run();
+      }
+    }
+    // 新增：target 中 existing 没有 → INSERT pending
+    for (const biz of bizNorm.list) {
+      if (!existSet[biz]) {
+        await env.DB.prepare(
+          `INSERT OR IGNORE INTO v2_inbound_plan_biz_tasks (id, plan_id, biz_class, job_type, status, created_at, updated_at)
+           VALUES(?,?,?,?, 'pending', ?, ?)`
+        ).bind("IBT-" + uid(), id, biz, mapInboundBizToJobType(biz), t, t).run();
+      }
+    }
+
+    // lines 全量替换（如果传了）
+    if (Array.isArray(body.lines)) {
+      await env.DB.prepare("DELETE FROM v2_inbound_plan_lines WHERE plan_id=?").bind(id).run();
+      for (let i = 0; i < body.lines.length; i++) {
+        const ln = body.lines[i];
+        await env.DB.prepare(
+          `INSERT INTO v2_inbound_plan_lines(id, plan_id, line_no, unit_type, planned_qty, remark)
+           VALUES(?,?,?,?,?,?)`
+        ).bind("IPL-" + uid(), id, i + 1, String(ln.unit_type || ""), Number(ln.planned_qty || 0), String(ln.remark || "")).run();
+      }
+    }
+
+    return { ok: true, id, biz_classes: bizNorm.list };
+  });
+});
+
 // ===== 入库计划：记账标记 =====
 route("v2_inbound_plan_mark_accounted", async (body, env) => {
   if (!isAuth(body, env)) return err("unauthorized", 401);
@@ -3189,33 +3456,23 @@ route("v2_unload_job_start", async (body, env) => {
   const worker_name = String(body.worker_name || "").trim();
   const biz_class = String(body.biz_class || "").trim();
   if (!worker_id) return err("missing worker_id");
+  if (!plan_id) return err("missing_inbound_plan", 400);
 
   return withIdem(env, body, "v2_unload_job_start", async () => {
     const t = now();
 
-    if (plan_id) {
-      const plan = await env.DB.prepare("SELECT status FROM v2_inbound_plans WHERE id=?").bind(plan_id).first();
-      if (!plan) return { ok: false, error: "plan not found" };
-      const unloadAllowed = ['pending', 'unloading', 'unloading_putting_away'];
-      if (unloadAllowed.indexOf(plan.status) === -1) {
-        return { ok: false, error: "unload_not_allowed_for_status", message: "当前状态不可继续卸货 / 현재 상태에서 하차 불가", current_status: plan.status };
-      }
+    const plan = await env.DB.prepare("SELECT status FROM v2_inbound_plans WHERE id=?").bind(plan_id).first();
+    if (!plan) return { ok: false, error: "plan not found" };
+    const unloadAllowed = ['pending', 'unloading', 'unloading_putting_away'];
+    if (unloadAllowed.indexOf(plan.status) === -1) {
+      return { ok: false, error: "unload_not_allowed_for_status", message: "当前状态不可继续卸货 / 현재 상태에서 하차 불가", current_status: plan.status };
     }
 
     let job = null;
-    if (plan_id) {
-      const existing = await env.DB.prepare(
-        "SELECT * FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type='unload' AND status IN ('pending','working') LIMIT 1"
-      ).bind(plan_id).first();
-      if (existing) job = existing;
-    } else {
-      // 无单卸货模式：全局去重 — 已有 active 无单 unload job → 直接加入
-      // 这是修复多人各自创建独立 job → finish 时各生成一条 unload_no_doc FB 的根因
-      const existingNoDoc = await env.DB.prepare(
-        "SELECT * FROM v2_ops_jobs WHERE job_type='unload' AND (related_doc_id='' OR related_doc_id IS NULL) AND is_temporary_interrupt=0 AND status IN ('pending','working') ORDER BY created_at ASC LIMIT 1"
-      ).first();
-      if (existingNoDoc) job = existingNoDoc;
-    }
+    const existing = await env.DB.prepare(
+      "SELECT * FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type='unload' AND status IN ('pending','working') LIMIT 1"
+    ).bind(plan_id).first();
+    if (existing) job = existing;
 
     const busy = await checkWorkerBusy(env, worker_id, job ? job.id : null);
     if (busy) return { ok: false, error: "worker_has_active_job", active_job_id: busy.job_id, active_job_type: busy.job_type };
@@ -3229,11 +3486,9 @@ route("v2_unload_job_start", async (body, env) => {
         "UPDATE v2_ops_jobs SET active_worker_count=active_worker_count+1, updated_at=?, status='working' WHERE id=?"
       ).bind(t, job_id).run();
     } else {
-      if (plan_id) {
-        const plan2 = await env.DB.prepare("SELECT status FROM v2_inbound_plans WHERE id=?").bind(plan_id).first();
-        if (plan2 && (plan2.status === 'unloading' || plan2.status === 'unloading_putting_away')) {
-          return { ok: false, error: "unload_status_inconsistent", message: "状态为卸货中但无活跃卸货任务，请联系管理员检查" };
-        }
+      const plan2 = await env.DB.prepare("SELECT status FROM v2_inbound_plans WHERE id=?").bind(plan_id).first();
+      if (plan2 && (plan2.status === 'unloading' || plan2.status === 'unloading_putting_away')) {
+        return { ok: false, error: "unload_status_inconsistent", message: "状态为卸货中但无活跃卸货任务，请联系管理员检查" };
       }
       job_id = "JOB-" + uid();
       is_new_job = true;
@@ -3242,11 +3497,9 @@ route("v2_unload_job_start", async (body, env) => {
           status, created_by, created_at, updated_at, active_worker_count)
         VALUES(?, 'unload', ?, 'unload', 'inbound_plan', ?, 'working', ?, ?, ?, 1)
       `).bind(job_id, biz_class, plan_id, worker_id, t, t).run();
-      if (plan_id) {
-        await env.DB.prepare(
-          "UPDATE v2_inbound_plans SET status='unloading', updated_at=? WHERE id=? AND status='pending'"
-        ).bind(t, plan_id).run();
-      }
+      await env.DB.prepare(
+        "UPDATE v2_inbound_plans SET status='unloading', updated_at=? WHERE id=? AND status='pending'"
+      ).bind(t, plan_id).run();
     }
 
     const seg_id = "WS-" + uid();
@@ -4310,6 +4563,54 @@ route("v2_feedback_convert_to_inbound", async (body, env) => {
   ).bind(t, feedback_id).run();
 
   return json({ ok: true, inbound_plan_id: id, display_no });
+});
+
+// ===== 现场反馈：删除（仅误操作脏数据，ADMINKEY only） =====
+route("v2_feedback_delete", async (body, env) => {
+  if (!isAdmin(body, env)) return err("unauthorized", 401);
+  const id = String(body.id || body.feedback_id || "").trim();
+  if (!id) return err("missing id");
+
+  return withIdem(env, body, "v2_feedback_delete", async () => {
+    const fb = await env.DB.prepare("SELECT id, status, feedback_type FROM v2_field_feedbacks WHERE id=?").bind(id).first();
+    if (!fb) return { ok: false, error: "not_found" };
+    if (fb.status === 'converted') {
+      return { ok: false, error: "converted_cannot_delete", message: "已转正的反馈不能删除 / 정식 전환된 피드백은 삭제 불가" };
+    }
+    const allowDelete = ['open', 'field_working', 'unloaded_pending_info', 'cancelled'];
+    if (allowDelete.indexOf(fb.status) === -1) {
+      return { ok: false, error: "status_not_allowed", message: "当前状态不允许删除：" + fb.status };
+    }
+
+    // active job → 拒
+    const activeJob = await env.DB.prepare(
+      "SELECT id FROM v2_ops_jobs WHERE related_doc_type='field_feedback' AND related_doc_id=? AND status IN ('pending','working','awaiting_close') LIMIT 1"
+    ).bind(id).first();
+    if (activeJob) {
+      return { ok: false, error: "active_job_exists", message: "该反馈有关联进行中任务，不能删除 / 진행 중 작업이 있어 삭제 불가" };
+    }
+    // completed job → 拒（避免误删工时数据）
+    const completedJob = await env.DB.prepare(
+      "SELECT id FROM v2_ops_jobs WHERE related_doc_type='field_feedback' AND related_doc_id=? AND status='completed' LIMIT 1"
+    ).bind(id).first();
+    if (completedJob) {
+      return { ok: false, error: "has_ops_history_cannot_delete", message: "该反馈已有完成的作业记录，不能删除（避免误删工时）" };
+    }
+
+    let deleted = { feedback: 0, attachments: 0, cancelled_jobs: 0 };
+    const cancelledJobs = await env.DB.prepare(
+      "DELETE FROM v2_ops_jobs WHERE related_doc_type='field_feedback' AND related_doc_id=? AND status='cancelled'"
+    ).bind(id).run();
+    deleted.cancelled_jobs = (cancelledJobs.meta && cancelledJobs.meta.changes) || 0;
+    const attsRs = await env.DB.prepare(
+      "DELETE FROM v2_attachments WHERE related_doc_type='field_feedback' AND related_doc_id=?"
+    ).bind(id).run();
+    deleted.attachments = (attsRs.meta && attsRs.meta.changes) || 0;
+    const fbRs = await env.DB.prepare("DELETE FROM v2_field_feedbacks WHERE id=?").bind(id).run();
+    deleted.feedback = (fbRs.meta && fbRs.meta.changes) || 0;
+
+    return { ok: true, id, deleted };
+  });
 });
 
 // =====================================================
@@ -5502,7 +5803,7 @@ route("v2_dashboard_realtime_overview", async (body, env) => {
     JOIN v2_ops_jobs j ON w.job_id = j.id
     LEFT JOIN v2_inbound_plans p ON j.related_doc_type='inbound_plan' AND j.related_doc_id = p.id
     WHERE w.left_at=''
-    ORDER BY w.joined_at DESC
+    ORDER BY j.job_type ASC, w.worker_name ASC, w.joined_at ASC
   `).all();
   // Inject unified display_no: priority = plan_display_no > job_display_no > related_doc_id > job_id
   const liveWorkerRows = (liveWorkers.results || []).map(function(r) {
@@ -5545,7 +5846,18 @@ route("v2_dashboard_live_docs", async (body, env) => {
     FROM v2_ops_jobs j
     LEFT JOIN v2_inbound_plans p ON j.related_doc_type='inbound_plan' AND j.related_doc_id = p.id
     WHERE j.status IN ('working','awaiting_close') AND j.active_worker_count > 0
-    ORDER BY j.created_at DESC
+    ORDER BY
+      CASE j.flow_stage
+        WHEN 'unload' THEN 1
+        WHEN 'inbound' THEN 2
+        WHEN 'order_op' THEN 3
+        WHEN 'outbound' THEN 4
+        WHEN 'internal' THEN 5
+        WHEN 'import' THEN 6
+        WHEN 'issue' THEN 7
+        ELSE 99
+      END ASC,
+      j.created_at ASC
     LIMIT 100
   `).all();
 
@@ -5576,6 +5888,82 @@ route("v2_dashboard_live_docs", async (body, env) => {
   }
 
   return json({ ok: true, docs });
+});
+
+// P2-10：执行系统简版实时看板
+// 今日上岗 = 今日 KST 有 joined_at 的 distinct worker
+// 当前在岗 = 有 open segment（left_at=''）且关联 job 在 working/pending/awaiting_close
+// 不在岗 = 今日上岗 - 当前在岗
+route("v2_ops_realtime_board", async (body, env) => {
+  if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  const today = kstToday();
+  const range = kstDayRangeUtc(today);
+
+  // 当前在岗 — open seg + active job
+  const activeRs = await env.DB.prepare(`
+    SELECT w.worker_id, w.worker_name, w.joined_at, w.job_id,
+           j.job_type, j.flow_stage, j.related_doc_id, j.related_doc_type,
+           j.display_no AS job_display_no, j.status AS job_status,
+           p.display_no AS plan_display_no
+    FROM v2_ops_job_workers w
+    JOIN v2_ops_jobs j ON w.job_id = j.id
+    LEFT JOIN v2_inbound_plans p ON j.related_doc_type='inbound_plan' AND j.related_doc_id = p.id
+    WHERE w.left_at='' AND j.status IN ('working','pending','awaiting_close')
+    ORDER BY j.job_type ASC, w.worker_name ASC, w.joined_at ASC
+  `).all();
+  const active_workers = (activeRs.results || []).map(function(r) {
+    return {
+      worker_id: r.worker_id,
+      worker_name: r.worker_name,
+      job_type: r.job_type,
+      flow_stage: r.flow_stage,
+      display_no: r.plan_display_no || r.job_display_no || r.related_doc_id || r.job_id || '',
+      job_id: r.job_id,
+      joined_at: r.joined_at
+    };
+  });
+
+  // 今日上岗 — distinct worker
+  const todayJoinRs = await env.DB.prepare(`
+    SELECT DISTINCT worker_id, worker_name
+    FROM v2_ops_job_workers
+    WHERE joined_at >= ? AND joined_at < ?
+  `).bind(range.startUtc, range.endUtc).all();
+  const todayWorkers = todayJoinRs.results || [];
+  const activeIds = {};
+  active_workers.forEach(function(w) { activeIds[w.worker_id] = true; });
+
+  // 不在岗 = 今日已上岗 - 当前在岗；带最后任务+最后离岗时间
+  const offWorkers = [];
+  for (const tw of todayWorkers) {
+    if (activeIds[tw.worker_id]) continue;
+    const last = await env.DB.prepare(`
+      SELECT w.left_at, w.job_id, j.job_type, j.flow_stage, j.related_doc_id, j.display_no AS job_display_no,
+             p.display_no AS plan_display_no
+      FROM v2_ops_job_workers w
+      JOIN v2_ops_jobs j ON w.job_id = j.id
+      LEFT JOIN v2_inbound_plans p ON j.related_doc_type='inbound_plan' AND j.related_doc_id = p.id
+      WHERE w.worker_id=? AND w.joined_at >= ? AND w.joined_at < ? AND w.left_at != ''
+      ORDER BY w.left_at DESC LIMIT 1
+    `).bind(tw.worker_id, range.startUtc, range.endUtc).first();
+    offWorkers.push({
+      worker_id: tw.worker_id,
+      worker_name: tw.worker_name,
+      last_job_type: (last && last.job_type) || '',
+      last_flow_stage: (last && last.flow_stage) || '',
+      last_display_no: (last && (last.plan_display_no || last.job_display_no || last.related_doc_id)) || '',
+      last_left_at: (last && last.left_at) || ''
+    });
+  }
+
+  return json({
+    ok: true,
+    today_worker_count: todayWorkers.length,
+    active_worker_count: active_workers.length,
+    off_worker_count: offWorkers.length,
+    active_workers: active_workers,
+    off_workers: offWorkers
+  });
 });
 
 // =====================================================
@@ -6272,6 +6660,7 @@ route("v2_dashboard_order_list", async (body, env) => {
   const job_type = String(body.job_type || "").trim();
   const worker_name = String(body.worker_name || "").trim();
   const doc_no = String(body.doc_no || "").trim();
+  const status = String(body.status || "").trim();
 
   let limit = parseInt(body.limit, 10);
   if (!Number.isFinite(limit) || limit <= 0) limit = 100;
@@ -6287,6 +6676,7 @@ route("v2_dashboard_order_list", async (body, env) => {
   if (endRange)   { where += " AND j.created_at < ?"; binds.push(endRange.endUtc); }
   if (flow_stage) { where += " AND j.flow_stage=?"; binds.push(flow_stage); }
   if (job_type)   { where += " AND j.job_type=?"; binds.push(job_type); }
+  if (status)     { where += " AND j.status=?"; binds.push(status); }
   if (doc_no) {
     where += " AND (j.display_no LIKE ? OR j.related_doc_id LIKE ? OR j.linked_outbound_order_id LIKE ?)";
     const pat = "%" + doc_no + "%";
@@ -6383,6 +6773,7 @@ route("v2_dashboard_order_export", async (body, env) => {
   const job_type = String(body.job_type || "").trim();
   const worker_name = String(body.worker_name || "").trim();
   const doc_no = String(body.doc_no || "").trim();
+  const status = String(body.status || "").trim();
 
   let limit = parseInt(body.limit, 10);
   if (!Number.isFinite(limit) || limit <= 0) limit = 5000;
@@ -6396,6 +6787,7 @@ route("v2_dashboard_order_export", async (body, env) => {
   if (endRange)   { where += " AND j.created_at < ?"; binds.push(endRange.endUtc); }
   if (flow_stage) { where += " AND j.flow_stage=?"; binds.push(flow_stage); }
   if (job_type)   { where += " AND j.job_type=?"; binds.push(job_type); }
+  if (status)     { where += " AND j.status=?"; binds.push(status); }
   if (doc_no) {
     where += " AND (j.display_no LIKE ? OR j.related_doc_id LIKE ? OR j.linked_outbound_order_id LIKE ?)";
     const pat = "%" + doc_no + "%";

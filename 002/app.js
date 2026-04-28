@@ -71,7 +71,11 @@ var _WRITE_ACTIONS = [
   'v2_inbound_plan_mark_accounted','v2_outbound_order_mark_accounted',
   'v2_inbound_plan_delete','v2_outbound_order_delete',
   'v2_outbound_order_update_ship_plan',
-  'v2_outbound_stock_op_start','v2_outbound_stock_op_finish'
+  'v2_outbound_stock_op_start','v2_outbound_stock_op_finish',
+  'v2_feedback_delete',
+  'v2_issue_mark_accounting_required','v2_issue_mark_accounted',
+  'v2_inbound_plan_update','v2_outbound_order_update','v2_outbound_order_ack_change',
+  'v2_outbound_pickup_confirm'
 ];
 function _genReqId(action) {
   return action + '_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
@@ -1038,8 +1042,24 @@ async function loadOutboundDetail() {
     var stockResult = null;
     try { stockResult = JSON.parse(o.stock_operation_result_json || "null"); } catch(e) {}
     if (stockOpStatus === 'completed' || stockResult) {
+      var stockOpHeadline;
+      if (o.status === 'pending_outbound_update') {
+        stockOpHeadline = (getLang() === 'ko'
+          ? '창고 재고 작업 완료, 고객센터의 출고 계획 업데이트 대기중'
+          : '库内操作已完成，等待客服更新出库计划');
+      } else if (o.status === 'preparing_outbound') {
+        stockOpHeadline = (getLang() === 'ko'
+          ? '창고 재고 작업 완료, 출고 준비중'
+          : '库内操作已完成，出库准备中');
+      } else if (o.status === 'shipped') {
+        stockOpHeadline = (getLang() === 'ko'
+          ? '창고 재고 작업 완료, 출고완료'
+          : '库内操作已完成，已出库');
+      } else {
+        stockOpHeadline = (getLang() === 'ko' ? '창고 재고 작업 완료' : '库内操作已完成');
+      }
       html += '<div class="card" style="border-left:4px solid #ef6c00;">';
-      html += '<div class="card-title" style="color:#ef6c00;">' + esc(L("uses_stock_operation")) + ' — ' + esc(L("status_completed")) + '</div>';
+      html += '<div class="card-title" style="color:#ef6c00;">' + esc(stockOpHeadline) + '</div>';
       if (o.stock_operation_completed_by) {
         html += '<div class="detail-field"><b>' + esc(L("submitted_by")) + ':</b> ' + esc(o.stock_operation_completed_by) + ' · ' + esc(fmtTime(o.stock_operation_completed_at)) + '</div>';
       }
@@ -2244,7 +2264,31 @@ async function loadFeedbackDetail() {
     html += '</div>';
   }
 
+  // 删除现场反馈（仅误操作脏数据；converted 不能删）
+  if (fb.status !== 'converted') {
+    html += '<div class="card"><div class="card-title" style="color:#c0392b;">删除反馈 / 현장피드백 삭제</div>';
+    html += '<div class="muted" style="font-size:12px;margin-bottom:8px;">仅用于删除误操作产生的脏数据；如已有完成的作业记录或转正，将无法删除。</div>';
+    html += '<button class="btn btn-danger" onclick="deleteFeedback(this)">删除此反馈 / 삭제</button>';
+    html += '</div>';
+  }
+
   body.innerHTML = html;
+}
+
+async function deleteFeedback(btnEl) {
+  if (!_currentFeedbackId) return;
+  if (!confirm("确认删除此现场反馈？此操作不可撤销。\n정말 삭제하시겠습니까?")) return;
+  if (!confirm("再次确认：删除后不可恢复，是否继续？\n다시 확인: 삭제 후 복구 불가, 계속하시겠습니까?")) return;
+  withActionLock('deleteFeedback', btnEl || null, '删除中.../삭제중...', async function() {
+    var res = await api({ action: "v2_feedback_delete", id: _currentFeedbackId });
+    if (res && res.ok) {
+      alert("已删除 / 삭제됨");
+      goView("feedback_list");
+      if (typeof loadFeedbackList === 'function') loadFeedbackList();
+    } else {
+      alert("删除失败/실패: " + (res ? (res.message || res.error) : "unknown"));
+    }
+  });
 }
 
 async function convertFeedbackToInbound(btnEl) {

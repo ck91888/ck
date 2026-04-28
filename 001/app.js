@@ -125,7 +125,8 @@ var _WRITE_ACTIONS = [
   'v2_bulk_op_job_start','v2_bulk_op_job_finish',
   'v2_correction_request_create','v2_admin_dirty_data_cleanup',
   'v2_verify_batch_upload','v2_verify_batch_update_status',
-  'v2_verify_job_start','v2_verify_job_finish','v2_verify_scan_submit'
+  'v2_verify_job_start','v2_verify_job_finish','v2_verify_scan_submit',
+  'v2_outbound_order_ack_change','v2_outbound_pickup_confirm'
 ];
 function _genReqId(action) {
   return action + '_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
@@ -1063,8 +1064,12 @@ function stopInboundScan() {
 
 async function startUnload(btnEl) {
   if (hasOtherActiveJob()) return warnActiveJob();
+  var planId = document.getElementById("unloadPlanSelect").value;
+  if (!planId) {
+    alert("请先选择入库计划单 / 입고 계획을 먼저 선택하세요");
+    return;
+  }
   withActionLock('startUnload', btnEl || null, '提交中.../저장중...', async function() {
-    var planId = document.getElementById("unloadPlanSelect").value;
     var res = await api({
       action: "v2_unload_job_start",
       plan_id: planId,
