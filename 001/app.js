@@ -216,6 +216,7 @@ function showPage(name) {
   if (name === "bulk_op") initBulkOp();
   if (name === "import_delivery") initImportDelivery();
   if (name === "verify_scan") initVerifyScan();
+  if (name === "realtime_board") loadRealtimeBoard();
 }
 
 // ===== Badge Entry (replaces old login) =====
@@ -1926,6 +1927,7 @@ async function resolveOutboundCode(btnEl) {
       _obResolvedOrderId = o.id;
       document.getElementById("loadOrderSelect").value = o.id;
       _refreshOutboundLoadMaterial();
+      _refreshOutboundLoadOrderState();
       var modeMap = {warehouse_dispatch:'仓库代发',customer_pickup:'客户自提',milk_express:'牛奶速递',milk_pallet:'牛奶托盘',container_pickup:'整柜提货'};
       if (resultEl) resultEl.innerHTML = '<div style="background:#e8f5e9;border-radius:6px;padding:8px;">' +
         '<b>✓ </b>' + esc(o.display_no || o.id) + '<br>' +
@@ -1952,6 +1954,10 @@ function clearOutboundResolve() {
   if (resultEl) resultEl.innerHTML = "";
   var matEl = document.getElementById("obLoadMaterialBox");
   if (matEl) matEl.innerHTML = "";
+  var ackEl = document.getElementById("obAckBox");
+  if (ackEl) ackEl.innerHTML = "";
+  var pkEl = document.getElementById("obPickupBox");
+  if (pkEl) pkEl.innerHTML = "";
   document.getElementById("loadOrderSelect").value = "";
 }
 
@@ -2005,6 +2011,7 @@ function onOutboundCandidateSelect() {
   var opt = sel.options[sel.selectedIndex];
   if (resultEl && opt) resultEl.innerHTML = '<div style="background:#e8f5e9;border-radius:6px;padding:8px;"><b>✓ </b>' + esc(opt.textContent) + '</div>';
   _refreshOutboundLoadMaterial();
+  _refreshOutboundLoadOrderState();
 }
 
 async function startOutboundLoad(btnEl) {
@@ -2134,6 +2141,106 @@ async function _refreshOutboundLoadMaterial() {
   var holder = document.getElementById("obLoadMaterialBox");
   if (!holder) return;
   await renderOutboundMaterials(_obResolvedOrderId, "obLoadMaterialBox");
+}
+
+// ===== P1-8/P1-9 出库装货：变更确认 + 提货信息 =====
+async function _refreshOutboundLoadOrderState() {
+  var ackBox = document.getElementById("obAckBox");
+  var pickupBox = document.getElementById("obPickupBox");
+  if (!ackBox && !pickupBox) return;
+  if (!_obResolvedOrderId) {
+    if (ackBox) ackBox.innerHTML = '';
+    if (pickupBox) pickupBox.innerHTML = '';
+    return;
+  }
+  var res = await api({ action: 'v2_outbound_order_detail', id: _obResolvedOrderId });
+  if (!res || !res.ok || !res.order) {
+    if (ackBox) ackBox.innerHTML = '';
+    if (pickupBox) pickupBox.innerHTML = '';
+    return;
+  }
+  var o = res.order;
+  // 变更确认红牌
+  if (ackBox) {
+    if (Number(o.warehouse_ack_required) === 1) {
+      var html = '';
+      html += '<div style="border:2px solid #c62828;background:#fff5f5;border-radius:6px;padding:10px;">';
+      html += '<div style="font-weight:700;color:#c62828;font-size:14px;">⚠ 出库单已变更，需仓库确认 / 출고단 변경됨, 창고 확인 필요</div>';
+      if (Number(o.revision_no || 0) > 0) {
+        html += '<div style="font-size:12px;color:#666;margin-top:4px;">版本 / 버전: #' + Number(o.revision_no) + (o.last_modified_by ? ' · 修改人: ' + esc(o.last_modified_by) : '') + '</div>';
+      }
+      html += '<button class="btn btn-primary mt-10" onclick="ackOutboundChange(this)">确认已查看变更 / 변경 확인 완료</button>';
+      html += '</div>';
+      ackBox.innerHTML = html;
+    } else {
+      ackBox.innerHTML = '';
+    }
+  }
+  // 提货信息卡片（P1-9）
+  if (pickupBox) {
+    var hasPickup = o.pickup_vehicle_no || o.pickup_driver_name || o.pickup_driver_phone ||
+                    o.pickup_person_name || o.pickup_company || o.pickup_time || o.pickup_note;
+    if (hasPickup) {
+      var ph = '';
+      ph += '<div style="border:1px solid #1565c0;background:#e3f2fd;border-radius:6px;padding:10px;">';
+      ph += '<div style="font-weight:700;color:#0d47a1;font-size:13px;margin-bottom:6px;">📋 提货信息 / 픽업 정보</div>';
+      ph += '<div style="font-size:12px;line-height:1.7;">';
+      if (o.pickup_vehicle_no) ph += '<div><b>车牌 / 차번:</b> ' + esc(o.pickup_vehicle_no) + '</div>';
+      if (o.pickup_driver_name) ph += '<div><b>司机 / 기사:</b> ' + esc(o.pickup_driver_name) + (o.pickup_driver_phone ? ' · ' + esc(o.pickup_driver_phone) : '') + '</div>';
+      else if (o.pickup_driver_phone) ph += '<div><b>司机电话 / 기사 전화:</b> ' + esc(o.pickup_driver_phone) + '</div>';
+      if (o.pickup_person_name) ph += '<div><b>提货人 / 픽업 담당자:</b> ' + esc(o.pickup_person_name) + (o.pickup_company ? ' (' + esc(o.pickup_company) + ')' : '') + '</div>';
+      else if (o.pickup_company) ph += '<div><b>公司 / 회사:</b> ' + esc(o.pickup_company) + '</div>';
+      if (o.pickup_time) ph += '<div><b>提货时间 / 픽업 시간:</b> ' + esc(o.pickup_time) + '</div>';
+      if (o.pickup_note) ph += '<div><b>备注 / 비고:</b> ' + esc(o.pickup_note) + '</div>';
+      ph += '</div>';
+      if (Number(o.pickup_confirm_required) === 1) {
+        ph += '<div style="margin-top:8px;background:#fff3e0;padding:6px;border-radius:4px;color:#e65100;font-weight:700;font-size:12px;">⚠ 提货信息已更新，请确认已查看 / 픽업 정보 업데이트, 확인 필요</div>';
+        ph += '<button class="btn btn-primary mt-10" onclick="confirmOutboundPickup(this)">确认已查看提货信息 / 픽업 정보 확인</button>';
+      } else if (o.pickup_confirmed_by) {
+        ph += '<div style="margin-top:6px;font-size:11px;color:#2e7d32;">✓ 已确认 / 확인됨: ' + esc(o.pickup_confirmed_by) + '</div>';
+      }
+      ph += '</div>';
+      pickupBox.innerHTML = ph;
+    } else {
+      pickupBox.innerHTML = '';
+    }
+  }
+}
+
+async function ackOutboundChange(btnEl) {
+  if (!_obResolvedOrderId) return;
+  withActionLock('ackOutboundChange', btnEl || null, '提交中.../저장중...', async function() {
+    var res = await api({
+      action: 'v2_outbound_order_ack_change',
+      id: _obResolvedOrderId,
+      worker_name: getWorkerName(),
+      worker_id: getWorkerId()
+    });
+    if (res && res.ok) {
+      alert(res.already_acked ? '已确认过 / 이미 확인됨' : '确认成功 / 확인 완료');
+      _refreshOutboundLoadOrderState();
+    } else {
+      alert('失败/실패: ' + (res ? (res.message || res.error) : 'unknown'));
+    }
+  });
+}
+
+async function confirmOutboundPickup(btnEl) {
+  if (!_obResolvedOrderId) return;
+  withActionLock('confirmOutboundPickup', btnEl || null, '提交中.../저장중...', async function() {
+    var res = await api({
+      action: 'v2_outbound_pickup_confirm',
+      id: _obResolvedOrderId,
+      worker_name: getWorkerName(),
+      worker_id: getWorkerId()
+    });
+    if (res && res.ok) {
+      alert(res.already_confirmed ? '已确认过 / 이미 확인됨' : '确认成功 / 확인 완료');
+      _refreshOutboundLoadOrderState();
+    } else {
+      alert('失败/실패: ' + (res ? (res.message || res.error) : 'unknown'));
+    }
+  });
 }
 
 // ===== 库内操作页面 =====
@@ -4122,6 +4229,90 @@ async function finishVerifyScan(btnEl) {
     _vsLastPallet = "";
     goPage("home");
   });
+}
+
+// ===== P2-10 实时看板（001 简版）=====
+function _rtbDuration(joinedAt) {
+  if (!joinedAt) return '';
+  try {
+    var t = new Date(joinedAt).getTime();
+    var ms = Date.now() - t;
+    if (ms < 0 || !isFinite(ms)) return '';
+    var min = Math.floor(ms / 60000);
+    if (min < 60) return min + 'm';
+    var h = Math.floor(min / 60);
+    var r = min % 60;
+    return h + 'h' + (r ? r + 'm' : '');
+  } catch(e) { return ''; }
+}
+
+function _rtbFmt(iso) {
+  if (!iso) return '--';
+  try {
+    var d = new Date(iso);
+    var h = d.getHours();
+    var m = d.getMinutes();
+    return (h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m;
+  } catch(e) { return iso; }
+}
+
+async function loadRealtimeBoard(btnEl) {
+  var counts = document.getElementById('rtbCounts');
+  var actBody = document.getElementById('rtbActiveBody');
+  var offBody = document.getElementById('rtbOffBody');
+  if (!counts) return;
+  if (btnEl) { btnEl.disabled = true; }
+  counts.innerHTML = '<span class="muted">加载中... / 로딩...</span>';
+  try {
+    var res = await api({ action: 'v2_ops_realtime_board' });
+    if (!res || !res.ok) {
+      counts.innerHTML = '<div style="color:#c62828;">加载失败 / 로딩 실패: ' + esc((res && (res.message || res.error)) || 'unknown') + '</div>';
+      return;
+    }
+    counts.innerHTML =
+      '<div style="display:flex;gap:12px;justify-content:space-around;text-align:center;">' +
+      '<div><div style="font-size:11px;color:#666;">今日上岗 / 오늘 출근</div><div style="font-size:22px;font-weight:700;color:#0d47a1;">' + Number(res.today_worker_count || 0) + '</div></div>' +
+      '<div><div style="font-size:11px;color:#666;">当前在岗 / 현재 근무</div><div style="font-size:22px;font-weight:700;color:#2e7d32;">' + Number(res.active_worker_count || 0) + '</div></div>' +
+      '<div><div style="font-size:11px;color:#666;">已离岗 / 퇴근</div><div style="font-size:22px;font-weight:700;color:#888;">' + Number(res.off_worker_count || 0) + '</div></div>' +
+      '</div>';
+
+    var actHtml = '';
+    var actList = res.active_workers || [];
+    if (actList.length === 0) {
+      actHtml = '<div class="muted">当前无在岗人员 / 근무중 없음</div>';
+    } else {
+      actList.forEach(function(w) {
+        var jobLbl = JOB_TYPE_LABEL[w.job_type] || w.job_type || '--';
+        var dur = _rtbDuration(w.joined_at);
+        actHtml += '<div style="border-bottom:1px solid #f0f0f0;padding:6px 0;font-size:13px;">';
+        actHtml += '<div><b>' + esc(w.worker_name || w.worker_id || '--') + '</b> · <span style="color:#1565c0;">' + esc(jobLbl) + '</span>';
+        if (w.display_no) actHtml += ' · <span class="muted">' + esc(w.display_no) + '</span>';
+        actHtml += '</div>';
+        actHtml += '<div class="muted" style="font-size:11px;">开始 / 시작: ' + _rtbFmt(w.joined_at) + (dur ? ' · 已 ' + dur : '') + '</div>';
+        actHtml += '</div>';
+      });
+    }
+    if (actBody) actBody.innerHTML = actHtml;
+
+    var offHtml = '';
+    var offList = res.off_workers || [];
+    if (offList.length === 0) {
+      offHtml = '<div class="muted">今日无人离岗 / 퇴근 없음</div>';
+    } else {
+      offList.forEach(function(w) {
+        var jobLbl = JOB_TYPE_LABEL[w.last_job_type] || w.last_job_type || '--';
+        offHtml += '<div style="border-bottom:1px solid #f0f0f0;padding:6px 0;font-size:13px;">';
+        offHtml += '<div><b>' + esc(w.worker_name || w.worker_id || '--') + '</b> · <span class="muted">' + esc(jobLbl) + '</span>';
+        if (w.last_display_no) offHtml += ' · <span class="muted">' + esc(w.last_display_no) + '</span>';
+        offHtml += '</div>';
+        offHtml += '<div class="muted" style="font-size:11px;">最后离岗 / 마지막 퇴근: ' + _rtbFmt(w.last_left_at) + '</div>';
+        offHtml += '</div>';
+      });
+    }
+    if (offBody) offBody.innerHTML = offHtml;
+  } finally {
+    if (btnEl) { btnEl.disabled = false; }
+  }
 }
 
 // ===== Init =====

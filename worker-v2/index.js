@@ -1459,13 +1459,14 @@ route("v2_outbound_order_create", async (body, env) => {
     const initStockOpStatus = uses_stock_operation === 1 ? 'reserved' : '';
     const expected_ship_at = String(body.expected_ship_at || "").trim();
     const outbound_requirement = String(body.outbound_requirement || "").trim();
+    const source_inbound_plan_id = String(body.source_inbound_plan_id || "").trim();
     await env.DB.prepare(`
       INSERT INTO v2_outbound_orders(id, order_date, customer, biz_class, operation_mode,
-        outbound_mode, instruction, remark, status, created_by, created_at, updated_at,
+        outbound_mode, instruction, remark, status, source_inbound_plan_id, created_by, created_at, updated_at,
         destination, po_no, wms_work_order_no,
         planned_box_count, planned_pallet_count, actual_box_count, actual_pallet_count, display_no,
         uses_stock_operation, stock_operation_status, expected_ship_at, outbound_requirement)
-      VALUES(?,?,?,?,'',?,?,'',?,?,?,?,?,?,?,?,?,0,0,?,?,?,?,?)
+      VALUES(?,?,?,?,'',?,?,'',?,?,?,?,?,?,?,?,?,?,0,0,?,?,?,?,?)
     `).bind(
       id,
       order_date,
@@ -1474,6 +1475,7 @@ route("v2_outbound_order_create", async (body, env) => {
       outbound_mode,
       String(body.instruction || ""),
       initStatus,
+      source_inbound_plan_id,
       String(body.created_by || ""),
       t, t,
       String(body.destination || ""),
@@ -2631,6 +2633,11 @@ route("v2_inbound_plan_detail", async (body, env) => {
   const completed_biz_classes = biz_tasks.filter(x => x.status === 'completed').map(x => x.biz_class);
   const pending_biz_classes = biz_tasks.filter(x => x.status !== 'completed').map(x => x.biz_class);
 
+  // P1-4：关联出库单（source_inbound_plan_id 反查）
+  const linkedObRs = await env.DB.prepare(
+    "SELECT id, display_no, status, customer, biz_class, outbound_mode, expected_ship_at, planned_box_count, planned_pallet_count, order_date, uses_stock_operation FROM v2_outbound_orders WHERE source_inbound_plan_id=? ORDER BY created_at ASC"
+  ).bind(id).all();
+
   return json({
     ok: true,
     plan: { ...row, biz_classes },
@@ -2641,7 +2648,8 @@ route("v2_inbound_plan_detail", async (body, env) => {
     missing_biz_classes: pending_biz_classes,
     lines: planLines.results || [],
     jobs: enrichedJobs,
-    attachments: atts.results || []
+    attachments: atts.results || [],
+    linked_outbound_orders: linkedObRs.results || []
   });
 });
 

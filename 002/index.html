@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>协同中心 V2 / 협업센터</title>
-  <link rel="stylesheet" href="style.css?v=20260430b">
+  <link rel="stylesheet" href="style.css?v=20260430c">
 </head>
 <body>
 
@@ -348,48 +348,14 @@
         <tbody id="ibcLinesBody"></tbody>
       </table>
       <button class="btn btn-outline btn-sm mt-10" onclick="addIbcLine()">+ 添加明细</button>
-      <!-- Auto outbound -->
+      <!-- P1-4 关联出库计划（可创建 0..N 条，每条独立配置）-->
       <div class="form-group mt-10">
-        <label><input type="checkbox" id="ibc-auto-ob" onchange="toggleIbcAutoOb()"> 同时创建出库单</label>
+        <label><input type="checkbox" id="ibc-link-ob" onchange="toggleIbcLinkOb()"> 关联出库计划（创建一个或多个）/ 출고 계획 연결</label>
       </div>
-      <div id="ibcAutoObFields" style="display:none;">
-        <div class="form-group">
-          <label>目的地 / 목적지</label>
-          <input id="ibc-ob-destination" type="text" placeholder="如：美国FBA仓、客户门店">
-        </div>
-        <div class="form-group">
-          <label>PO号 / 발주번호</label>
-          <input id="ibc-ob-po" type="text" placeholder="客户PO编号">
-        </div>
-        <div class="form-group">
-          <label>WMS工单号 / 작업지시번호</label>
-          <input id="ibc-ob-wms-wo" type="text" placeholder="WMS系统工单号">
-        </div>
-        <div class="form-group">
-          <label>出库模式 / 출고 모드</label>
-          <select id="ibc-ob-outmode">
-            <option value="">-- 请选择 / 선택 --</option>
-            <option value="warehouse_dispatch">仓库叫车 / 창고 차량 배차</option>
-            <option value="customer_pickup">客户自提 / 고객 자가 픽업</option>
-            <option value="milk_express">牛奶快递 / 밀크런 택배</option>
-            <option value="milk_pallet">牛奶托盘 / 밀크런 팔레트</option>
-            <option value="container_pickup">柜子提货 / 컨테이너 픽업</option>
-          </select>
-        </div>
-        <div class="form-group">
-          <label>作业说明</label>
-          <textarea id="ibc-ob-instruction" rows="2"></textarea>
-        </div>
-        <div style="display:flex;gap:12px;">
-          <div class="form-group" style="flex:1">
-            <label>计划箱数 / 계획 박스</label>
-            <input id="ibc-ob-planned-box" type="number" value="0" min="0">
-          </div>
-          <div class="form-group" style="flex:1">
-            <label>计划托数 / 계획 팔레트</label>
-            <input id="ibc-ob-planned-pallet" type="number" value="0" min="0">
-          </div>
-        </div>
+      <div id="ibcLinkObPanel" style="display:none;border:1px solid #e0e0e0;border-radius:6px;padding:10px;margin-bottom:10px;background:#fafafa;">
+        <div style="font-size:12px;color:#666;margin-bottom:8px;">入库完成后，每条出库计划都会以本次入库为来源 / 입고 완료 시 본 입고를 출처로 출고단 자동 생성</div>
+        <div id="ibcLinkObRows"></div>
+        <button class="btn btn-outline btn-sm" type="button" onclick="addIbcLinkObRow()">+ 添加出库计划 / 출고 계획 추가</button>
       </div>
       <button class="btn btn-primary btn-full mt-10" onclick="submitInbound(this)">提交</button>
     </div>
@@ -522,7 +488,7 @@
 
 <input type="file" id="fileInput" accept="image/*" style="display:none;" onchange="handleFileUpload(this)">
 
-<script src="config.js?v=20260430b"></script>
+<script src="config.js?v=20260430c"></script>
 <script src="../shared/qrcode.min.js"></script>
 <!--
   TODO(SheetJS 动态加载): xlsx.full.min.js ~923KB，目前同步加载，
@@ -532,6 +498,6 @@
   onVerifyFilePick / 表格导出流程。
 -->
 <script src="../shared/xlsx.full.min.js"></script>
-<script src="app.js?v=20260430b"></script>
+<script src="app.js?v=20260430c"></script>
 </body>
 </html>

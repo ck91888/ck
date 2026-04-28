@@ -2,10 +2,10 @@
 <html lang="zh">
 <head>
   <meta charset="utf-8">
-  <!-- cache-bust: 20260430b -->
+  <!-- cache-bust: 20260430c -->
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
   <title>现场执行系统 V2 / 현장 실행 시스템</title>
-  <link rel="stylesheet" href="style.css?v=20260430b">
+  <link rel="stylesheet" href="style.css?v=20260430c">
   <script src="../shared/html5-qrcode.min.js"></script>
 </head>
 <body>
@@ -85,11 +85,30 @@
       <div class="label">进口专区</div>
       <div class="label-ko">수입 전용</div>
     </div>
+    <div class="home-btn" onclick="goPage('realtime_board')">
+      <div class="icon">📊</div>
+      <div class="label">实时看板</div>
+      <div class="label-ko">실시간 현황</div>
+    </div>
     <div class="home-btn" onclick="window.open('../002/','_blank')">
       <div class="icon">🔗</div>
       <div class="label">去协同中心</div>
       <div class="label-ko">협업센터</div>
     </div>
+  </div>
+</div>
+
+<!-- Realtime Board (P2-10) -->
+<div id="page-realtime_board" class="page">
+  <div class="topbar">
+    <button class="back-btn" onclick="goPage('home')">← 返回/뒤로</button>
+    <div class="page-title">实时看板 / 실시간 현황</div>
+  </div>
+  <div style="padding:12px;">
+    <div id="rtbCounts" class="card"><span class="muted">加载中... / 로딩...</span></div>
+    <div id="rtbActiveCard" class="card"><div class="card-title">当前在岗 / 현재 근무중</div><div id="rtbActiveBody" class="muted">--</div></div>
+    <div id="rtbOffCard" class="card"><div class="card-title">已离岗 / 퇴근/이탈</div><div id="rtbOffBody" class="muted">--</div></div>
+    <button class="btn btn-outline btn-sm" onclick="loadRealtimeBoard(this)">🔄 刷新 / 새로고침</button>
   </div>
 </div>
 
@@ -621,6 +640,8 @@
       <button class="btn btn-outline btn-sm" onclick="clearOutboundResolve()" style="flex:1;">清空重选 / 초기화</button>
     </div>
     <div id="obResolveResult" style="margin-bottom:8px;font-size:13px;"></div>
+    <div id="obAckBox" style="margin-bottom:8px;"></div>
+    <div id="obPickupBox" style="margin-bottom:8px;"></div>
     <div id="obLoadMaterialBox" style="margin-bottom:8px;font-size:13px;"></div>
     <div style="margin-top:8px;">
       <label style="font-size:12px;color:#888;">或从系统候选单选择 / 또는 시스템 후보 선택:</label>
@@ -847,7 +868,7 @@
 
 <input type="file" id="photoInput" accept="image/*" capture="environment" style="display:none;" onchange="handlePhotoUpload(this)">
 
-<script src="config.js?v=20260430b"></script>
-<script src="app.js?v=20260430b"></script>
+<script src="config.js?v=20260430c"></script>
+<script src="app.js?v=20260430c"></script>
 </body>
 </html>

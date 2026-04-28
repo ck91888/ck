@@ -473,13 +473,18 @@ async function loadDashboard() {
   html += '</div>';
 
   // Outbound card
+  var ackPendingObs = pendingOb.filter(function(o) { return Number(o.warehouse_ack_required) === 1; });
   html += '<div class="dash-card" onclick="goTab(\'outbound\')">';
   html += '<div class="d-title">🚚 ' + L("today_outbound") + '</div>';
   if (obCount > 0) {
     html += '<div class="d-count">' + obCount + '</div>';
+    if (ackPendingObs.length > 0) {
+      html += '<div style="background:#ffebee;border-left:3px solid #c62828;padding:4px 6px;font-size:12px;color:#c62828;font-weight:700;margin-bottom:4px;">⚠ 已变更待仓库确认 (' + ackPendingObs.length + (ackPendingObs.length >= 3 ? '+' : '') + ')</div>';
+    }
     pendingOb.slice(0, 3).forEach(function(o) {
       html += '<div style="font-size:12px;padding:2px 0;">' +
         '<span class="st st-' + esc(o.status) + '">' + esc(stLabel(o.status)) + '</span> ' +
+        (Number(o.warehouse_ack_required) === 1 ? '<span class="st" style="background:#ffebee;color:#c62828;">⚠待确认</span> ' : '') +
         accountTag(o) +
         esc(o.customer || "--") + ' ' + esc(o.order_date || "") + '</div>';
     });
@@ -915,6 +920,9 @@ async function loadOutboundList() {
     if (Number(o.uses_stock_operation) === 1) {
       html += '<span class="st" style="background:#fff3e0;color:#e65100;">[' + esc(L("uses_stock_operation")) + ']</span> ';
     }
+    if (Number(o.warehouse_ack_required) === 1) {
+      html += '<span class="st" style="background:#ffebee;color:#c62828;">⚠ 已变更待确认</span> ';
+    }
     var matCount = Number(o.material_count || 0);
     if (matCount > 0) {
       html += '<span class="st" style="background:#e8f5e9;color:#2e7d32;">[' + esc(L("outbound_material_uploaded")) + ' ' + matCount + ']</span> ';
@@ -1107,7 +1115,19 @@ async function loadOutboundDetail() {
   if (usesStockOp) {
     html += ' <span class="st" style="background:#fff3e0;color:#e65100;">[' + esc(L("uses_stock_operation")) + ']</span>';
   }
+  if (Number(o.revision_no || 0) > 0) {
+    html += ' <span class="st" style="background:#fff3e0;color:#ef6c00;">已修改 #' + Number(o.revision_no) + '</span>';
+  }
+  if (Number(o.warehouse_ack_required) === 1) {
+    html += ' <span class="st" style="background:#ffebee;color:#c62828;">⚠ 待仓库确认变更 / 창고 확인 대기</span>';
+  }
   html += '</div>';
+  if (Number(o.revision_no || 0) > 0 && o.last_modified_by) {
+    html += '<div class="detail-field muted" style="font-size:12px;"><b>最近修改 / 최근 수정:</b> ' + esc(o.last_modified_by) + (o.last_modified_at ? ' · ' + esc(fmtTime(o.last_modified_at)) : '') + '</div>';
+  }
+  if (Number(o.warehouse_ack_required) === 0 && o.warehouse_ack_by) {
+    html += '<div class="detail-field muted" style="font-size:12px;"><b>仓库已确认 / 창고 확인됨:</b> ' + esc(o.warehouse_ack_by) + (o.warehouse_ack_at ? ' · ' + esc(fmtTime(o.warehouse_ack_at)) : '') + '</div>';
+  }
   html += '<div class="detail-field"><b>' + L("order_date") + ':</b> ' + esc(o.order_date) + '</div>';
   html += '<div class="detail-field"><b>' + L("customer") + ':</b> ' + esc(o.customer) + '</div>';
   if (o.destination) html += '<div class="detail-field"><b>' + L("destination") + ':</b> ' + esc(o.destination) + '</div>';
@@ -1120,6 +1140,9 @@ async function loadOutboundDetail() {
   html += '<div class="detail-field"><b>' + L("planned_box_pallet") + ':</b> ' + (o.planned_box_count || 0) + L("unit_box") + ' / ' + (o.planned_pallet_count || 0) + L("unit_pallet") + '</div>';
   html += '<div class="detail-field"><b>' + L("actual_box_pallet") + ':</b> ' + (o.actual_box_count || 0) + L("unit_box") + ' / ' + (o.actual_pallet_count || 0) + L("unit_pallet") + '</div>';
   html += '<div class="detail-field"><b>' + L("submitted_by") + ':</b> ' + esc(o.created_by) + ' · ' + esc(fmtTime(o.created_at)) + '</div>';
+  if (o.source_inbound_plan_id) {
+    html += '<div class="detail-field"><b>来源入库计划 / 출처 입고:</b> <a href="javascript:void(0);" onclick="openInboundDetail(\'' + esc(o.source_inbound_plan_id) + '\')">查看入库单 / 입고단 보기</a></div>';
+  }
   html += '</div>';
 
   // 库内操作型：pending_outbound_update 提示 + 仓库反馈结果 + 更新出库计划按钮
@@ -1261,6 +1284,46 @@ async function loadOutboundDetail() {
     html += '</div></div>';
   }
 
+  // P1-9 提货信息卡片（仅未冻结状态可编辑；已冻结仅展示）
+  var FROZEN_OB2 = ['shipped', 'completed', 'cancelled'];
+  var pickupCanEdit = FROZEN_OB2.indexOf(o.status) === -1;
+  var hasPickupAny = o.pickup_vehicle_no || o.pickup_driver_name || o.pickup_driver_phone ||
+                     o.pickup_person_name || o.pickup_company || o.pickup_time || o.pickup_note;
+  html += '<div class="card">';
+  html += '<div class="card-title">📋 提货信息 / 픽업 정보';
+  if (Number(o.pickup_confirm_required) === 1) {
+    html += ' <span class="st" style="background:#fff3e0;color:#e65100;">⚠ 待仓库确认 / 창고 확인 대기</span>';
+  } else if (o.pickup_confirmed_by) {
+    html += ' <span class="st" style="background:#e8f5e9;color:#2e7d32;">✓ 仓库已确认 / 창고 확인됨</span>';
+  }
+  html += '</div>';
+  if (hasPickupAny) {
+    html += '<div style="font-size:13px;line-height:1.7;">';
+    if (o.pickup_vehicle_no) html += '<div><b>车牌 / 차번:</b> ' + esc(o.pickup_vehicle_no) + '</div>';
+    if (o.pickup_driver_name || o.pickup_driver_phone) {
+      html += '<div><b>司机 / 기사:</b> ' + esc(o.pickup_driver_name || '--');
+      if (o.pickup_driver_phone) html += ' · ' + esc(o.pickup_driver_phone);
+      html += '</div>';
+    }
+    if (o.pickup_person_name || o.pickup_company) {
+      html += '<div><b>提货人 / 픽업 담당자:</b> ' + esc(o.pickup_person_name || '--');
+      if (o.pickup_company) html += ' (' + esc(o.pickup_company) + ')';
+      html += '</div>';
+    }
+    if (o.pickup_time) html += '<div><b>提货时间 / 픽업 시간:</b> ' + esc(o.pickup_time) + '</div>';
+    if (o.pickup_note) html += '<div><b>备注 / 비고:</b> ' + esc(o.pickup_note) + '</div>';
+    html += '</div>';
+    if (Number(o.pickup_confirm_required) === 0 && o.pickup_confirmed_by) {
+      html += '<div class="muted" style="font-size:11px;margin-top:6px;">已确认: ' + esc(o.pickup_confirmed_by) + (o.pickup_confirmed_at ? ' · ' + esc(fmtTime(o.pickup_confirmed_at)) : '') + '</div>';
+    }
+  } else {
+    html += '<div class="muted">暂无提货信息 / 픽업 정보 없음</div>';
+  }
+  if (pickupCanEdit) {
+    html += '<div style="margin-top:10px;"><button class="btn btn-outline btn-sm" onclick="openPickupEditForm()">编辑提货信息 / 픽업 정보 편집</button></div>';
+  }
+  html += '</div>';
+
   // 记账标记
   html += renderAccountedCard({
     accounted: Number(o.accounted || 0),
@@ -1273,6 +1336,11 @@ async function loadOutboundDetail() {
   // Print + Status actions
   html += '<div class="card">';
   html += '<button class="btn btn-outline btn-sm" onclick="printOutboundOrder()">' + L("print") + '</button> ';
+  // P1-8：未冻结状态下允许修改
+  var FROZEN_OB = ['shipped', 'completed', 'cancelled'];
+  if (FROZEN_OB.indexOf(o.status) === -1) {
+    html += '<button class="btn btn-primary" onclick="openOutboundEditForm()">修改出库单 / 출고단 수정</button> ';
+  }
   if (o.status !== "shipped" && o.status !== "cancelled") {
     html += '<button class="btn btn-danger" onclick="updateObStatus(\'cancelled\', this)">' + L("status_cancelled") + '</button>';
   }
@@ -1628,9 +1696,88 @@ function getIbcLines() {
   return lines;
 }
 
-function toggleIbcAutoOb() {
-  var checked = document.getElementById("ibc-auto-ob").checked;
-  document.getElementById("ibcAutoObFields").style.display = checked ? "" : "none";
+// P1-4 关联出库计划（多行）
+var _ibcLinkObSeq = 0;
+
+function toggleIbcLinkOb() {
+  var checked = document.getElementById("ibc-link-ob").checked;
+  var panel = document.getElementById("ibcLinkObPanel");
+  if (panel) panel.style.display = checked ? "" : "none";
+  // 第一次打开：自动加一行
+  if (checked) {
+    var rows = document.getElementById("ibcLinkObRows");
+    if (rows && !rows.children.length) addIbcLinkObRow();
+  }
+}
+
+function addIbcLinkObRow() {
+  _ibcLinkObSeq++;
+  var seq = _ibcLinkObSeq;
+  var rows = document.getElementById("ibcLinkObRows");
+  if (!rows) return;
+  // 默认带过来：客户用入库的客户（提交时再读取，无需此处填）
+  var div = document.createElement("div");
+  div.id = "ibcLinkOb-row-" + seq;
+  div.style.cssText = "border:1px solid #d0d0d0;border-radius:6px;padding:8px;margin-bottom:8px;background:#fff;";
+  var html = '';
+  html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">';
+  html += '<div style="font-weight:700;font-size:13px;color:#1565c0;">出库计划 #' + seq + '</div>';
+  html += '<button type="button" class="btn btn-outline btn-sm" onclick="removeIbcLinkObRow(' + seq + ')" style="color:#c62828;">移除</button>';
+  html += '</div>';
+  html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:13px;">';
+  html += '<div><label><b>客户</b><span style="color:#888;font-weight:normal;font-size:11px;"> (留空=入库客户)</span></label><input id="lob-customer-' + seq + '" class="input" placeholder="留空则使用入库的客户"></div>';
+  html += '<div><label><b>业务分类 *</b></label><select id="lob-biz-' + seq + '" class="input">';
+  html += '<option value="">--</option>';
+  html += '<option value="direct_ship">代发 / 직배송</option>';
+  html += '<option value="bulk" selected>大货 / 대량화물</option>';
+  html += '<option value="return">退件 / 반품</option>';
+  html += '</select></div>';
+  html += '<div><label><b>出库模式 *</b></label><select id="lob-mode-' + seq + '" class="input">';
+  html += '<option value="">--</option>';
+  html += '<option value="warehouse_dispatch">仓库叫车 / 창고 차량 배차</option>';
+  html += '<option value="customer_pickup">客户自提 / 고객 자가 픽업</option>';
+  html += '<option value="milk_express">牛奶快递 / 밀크런 택배</option>';
+  html += '<option value="milk_pallet">牛奶托盘 / 밀크런 팔레트</option>';
+  html += '<option value="container_pickup">柜子提货 / 컨테이너 픽업</option>';
+  html += '</select></div>';
+  html += '<div><label><b>是否库内操作</b></label><select id="lob-uses-' + seq + '" class="input">';
+  html += '<option value="0">否：普通出库</option>';
+  html += '<option value="1">是：先库内操作</option>';
+  html += '</select></div>';
+  html += '<div><label><b>预计出库时间</b></label><input id="lob-expected-' + seq + '" class="input" type="datetime-local"></div>';
+  html += '<div><label><b>计划箱数</b></label><input id="lob-box-' + seq + '" class="input" type="number" min="0" value="0"></div>';
+  html += '<div><label><b>计划托数</b></label><input id="lob-pallet-' + seq + '" class="input" type="number" min="0" value="0"></div>';
+  html += '<div style="grid-column:1/-1;"><label><b>出库要求</b></label><textarea id="lob-req-' + seq + '" class="input" rows="2"></textarea></div>';
+  html += '<div style="grid-column:1/-1;"><label><b>备注</b></label><textarea id="lob-remark-' + seq + '" class="input" rows="1"></textarea></div>';
+  html += '</div>';
+  div.innerHTML = html;
+  rows.appendChild(div);
+}
+
+function removeIbcLinkObRow(seq) {
+  var el = document.getElementById("ibcLinkOb-row-" + seq);
+  if (el) el.parentNode.removeChild(el);
+}
+
+function getIbcLinkObRows() {
+  var rows = document.querySelectorAll("#ibcLinkObRows > div[id^='ibcLinkOb-row-']");
+  var out = [];
+  for (var i = 0; i < rows.length; i++) {
+    var seq = rows[i].id.replace("ibcLinkOb-row-", "");
+    out.push({
+      seq: seq,
+      customer: ((document.getElementById("lob-customer-" + seq) || {}).value || "").trim(),
+      biz_class: ((document.getElementById("lob-biz-" + seq) || {}).value || "").trim(),
+      outbound_mode: ((document.getElementById("lob-mode-" + seq) || {}).value || "").trim(),
+      uses_stock_operation: Number((document.getElementById("lob-uses-" + seq) || {}).value || 0),
+      expected_ship_at: ((document.getElementById("lob-expected-" + seq) || {}).value || "").trim(),
+      planned_box_count: Number((document.getElementById("lob-box-" + seq) || {}).value || 0),
+      planned_pallet_count: Number((document.getElementById("lob-pallet-" + seq) || {}).value || 0),
+      outbound_requirement: ((document.getElementById("lob-req-" + seq) || {}).value || "").trim(),
+      remark: ((document.getElementById("lob-remark-" + seq) || {}).value || "").trim()
+    });
+  }
+  return out;
 }
 
 function getIbcBizClasses() {
@@ -1651,6 +1798,20 @@ async function submitInbound(btnEl) {
   // 严格校验：必须至少有一行 planned_qty>0 的明细
   var linesPre = getIbcLines();
   if (linesPre.length === 0) { alert("请至少填写一行货物明细 / 화물 명세를 1건 이상 입력하세요"); return; }
+
+  // P1-4 关联出库计划行 — 校验
+  var linkOb = document.getElementById("ibc-link-ob");
+  var linkObOn = !!(linkOb && linkOb.checked);
+  var linkObRows = linkObOn ? getIbcLinkObRows() : [];
+  if (linkObOn) {
+    if (linkObRows.length === 0) { alert("已勾选'关联出库计划'但未添加任何行 / 출고 계획이 없습니다"); return; }
+    for (var li = 0; li < linkObRows.length; li++) {
+      var r = linkObRows[li];
+      if (!r.biz_class) { alert("出库计划 #" + r.seq + " 缺少业务分类 / 업무 분류 필수"); return; }
+      if (!r.outbound_mode) { alert("出库计划 #" + r.seq + " 缺少出库模式 / 출고 모드 필수"); return; }
+    }
+  }
+
   withActionLock('submitInbound', btnEl || null, '提交中.../저장중...', async function() {
     var date = document.getElementById("ibc-date").value || kstToday();
     var biz_classes = bizArr;
@@ -1660,13 +1821,13 @@ async function submitInbound(btnEl) {
     var purpose = document.getElementById("ibc-purpose").value.trim();
     var remark = document.getElementById("ibc-remark").value.trim();
     var lines = linesPre;
-    var autoOb = document.getElementById("ibc-auto-ob").checked;
     // 货物摘要为空时，自动用明细生成
     if (!cargo) {
       cargo = lines.map(function(ln) { return unitTypeLabel(ln.unit_type) + ' ' + ln.planned_qty; }).join(' / ');
     }
 
-    var payload = {
+    // 第一步：创建入库计划（不再用 auto_create_outbound 单条）
+    var ibRes = await api({
       action: "v2_inbound_plan_create",
       plan_date: date,
       customer: customer,
@@ -1678,43 +1839,63 @@ async function submitInbound(btnEl) {
       remark: remark,
       lines: lines,
       created_by: getUser()
-    };
+    });
 
-    if (autoOb) {
-      var _obMode = (document.getElementById("ibc-ob-outmode") || {}).value || "";
-      if (!_obMode) { alert(L("select_outbound_mode")); return; }
-      payload.auto_create_outbound = true;
-      payload.ob_destination = (document.getElementById("ibc-ob-destination") || {}).value || "";
-      payload.ob_po_no = (document.getElementById("ibc-ob-po") || {}).value || "";
-      payload.ob_wms_work_order_no = (document.getElementById("ibc-ob-wms-wo") || {}).value || "";
-      payload.ob_outbound_mode = _obMode;
-      payload.ob_instruction = (document.getElementById("ibc-ob-instruction") || {}).value || "";
-      payload.ob_planned_box_count = parseInt((document.getElementById("ibc-ob-planned-box") || {}).value) || 0;
-      payload.ob_planned_pallet_count = parseInt((document.getElementById("ibc-ob-planned-pallet") || {}).value) || 0;
+    if (!ibRes || !ibRes.ok) {
+      alert("失败 / 실패: " + (ibRes ? (ibRes.message || ibRes.error) : "unknown"));
+      return;
+    }
+    var planId = ibRes.id;
+    var planDispNo = ibRes.display_no || planId;
+
+    // 第二步：循环创建关联出库单
+    var createdObs = [];
+    var failedObs = [];
+    for (var i = 0; i < linkObRows.length; i++) {
+      var row = linkObRows[i];
+      var obRes = await api({
+        action: "v2_outbound_order_create",
+        order_date: date,
+        customer: row.customer || customer,
+        biz_class: row.biz_class,
+        outbound_mode: row.outbound_mode,
+        uses_stock_operation: row.uses_stock_operation,
+        expected_ship_at: row.expected_ship_at,
+        planned_box_count: row.planned_box_count,
+        planned_pallet_count: row.planned_pallet_count,
+        outbound_requirement: row.outbound_requirement,
+        remark: row.remark,
+        source_inbound_plan_id: planId,
+        created_by: getUser()
+      });
+      if (obRes && obRes.ok) {
+        createdObs.push(obRes.display_no || obRes.id);
+      } else {
+        failedObs.push("#" + row.seq + ": " + ((obRes && (obRes.message || obRes.error)) || 'unknown'));
+      }
     }
 
-    var res = await api(payload);
+    var msg = "已创建入库计划 / 입고 계획 생성: " + planDispNo;
+    if (createdObs.length > 0) msg += "\n关联出库 / 연결된 출고 (" + createdObs.length + "): " + createdObs.join(", ");
+    if (failedObs.length > 0) msg += "\n出库创建失败 / 출고 생성 실패:\n" + failedObs.join("\n");
+    alert(msg);
 
-    if (res && res.ok) {
-      var msg = "已创建 / 생성됨: " + (res.display_no || res.id);
-      if (res.outbound_id) msg += "\n" + L("auto_create_outbound") + ": " + (res.outbound_display_no || res.outbound_id);
-      alert(msg);
-      document.getElementById("ibc-customer").value = "";
-      document.getElementById("ibc-cargo").value = "";
-      document.getElementById("ibc-arrival").value = "";
-      document.getElementById("ibc-purpose").value = "";
-      document.getElementById("ibc-remark").value = "";
-      document.getElementById("ibcLinesBody").innerHTML = "";
-      document.getElementById("ibc-auto-ob").checked = false;
-      document.getElementById("ibcAutoObFields").style.display = "none";
-      // 重置业务类型多选
-      var chks = document.querySelectorAll('#ibc-biz-classes .ibc-biz-chk');
-      for (var i = 0; i < chks.length; i++) chks[i].checked = false;
-      ensureFirstIbcLine();
-      goTab("inbound");
-    } else {
-      alert("失败 / 실패: " + (res ? (res.message || res.error) : "unknown"));
-    }
+    // 重置表单
+    document.getElementById("ibc-customer").value = "";
+    document.getElementById("ibc-cargo").value = "";
+    document.getElementById("ibc-arrival").value = "";
+    document.getElementById("ibc-purpose").value = "";
+    document.getElementById("ibc-remark").value = "";
+    document.getElementById("ibcLinesBody").innerHTML = "";
+    if (linkOb) linkOb.checked = false;
+    var panel = document.getElementById("ibcLinkObPanel");
+    if (panel) panel.style.display = "none";
+    var rowsHolder = document.getElementById("ibcLinkObRows");
+    if (rowsHolder) rowsHolder.innerHTML = "";
+    var chks = document.querySelectorAll('#ibc-biz-classes .ibc-biz-chk');
+    for (var ci = 0; ci < chks.length; ci++) chks[ci].checked = false;
+    ensureFirstIbcLine();
+    goTab("inbound");
   });
 }
 
@@ -1802,6 +1983,29 @@ async function loadInboundDetail() {
     html += '<div style="grid-column:1/-1;"><b>直接完结人:</b> ' + esc(p.manual_completed_by) + ' · ' + esc(fmtTime(p.manual_completed_at)) + '</div>';
   }
   html += '</div></div>';
+
+  // --- P1-4 关联出库单（按 source_inbound_plan_id 反查）---
+  var linkedObs = res.linked_outbound_orders || [];
+  if (linkedObs.length > 0) {
+    html += '<div class="card">';
+    html += '<div class="card-title">关联出库单 / 연결된 출고단 (' + linkedObs.length + ')</div>';
+    html += '<table class="line-table"><thead><tr><th>单号</th><th>状态</th><th>客户</th><th>业务</th><th>出库模式</th><th>预计出库</th><th>箱/托</th></tr></thead><tbody>';
+    linkedObs.forEach(function(ob) {
+      html += '<tr style="cursor:pointer;" onclick="openOutboundDetail(\'' + esc(ob.id) + '\')">';
+      html += '<td><a href="javascript:void(0);" onclick="event.stopPropagation();openOutboundDetail(\'' + esc(ob.id) + '\')">' + esc(ob.display_no || ob.id) + '</a></td>';
+      html += '<td><span class="st st-' + esc(ob.status) + '">' + esc(stLabel(ob.status)) + '</span>';
+      if (Number(ob.uses_stock_operation) === 1) html += ' <span class="st" style="background:#fff3e0;color:#e65100;font-size:10px;">[库内操作]</span>';
+      html += '</td>';
+      html += '<td>' + esc(ob.customer || '--') + '</td>';
+      html += '<td>' + (ob.biz_class ? '<span class="biz-tag biz-' + esc(ob.biz_class) + '">' + esc(bizLabel(ob.biz_class)) + '</span>' : '--') + '</td>';
+      html += '<td>' + esc(outModeLabel(ob.outbound_mode) || '--') + '</td>';
+      html += '<td>' + esc(ob.expected_ship_at || '--') + '</td>';
+      html += '<td>' + Number(ob.planned_box_count || 0) + '/' + Number(ob.planned_pallet_count || 0) + '</td>';
+      html += '</tr>';
+    });
+    html += '</tbody></table>';
+    html += '</div>';
+  }
 
   // --- 入库类型执行状态卡片 ---
   var bizTasks = res.biz_tasks || [];
@@ -2047,6 +2251,171 @@ async function submitInboundEdit(btnEl) {
       alert('已保存 / 저장됨');
       closeInboundEditForm();
       loadInboundDetail();
+    } else {
+      alert('失败/실패: ' + (res ? (res.message || res.error) : 'unknown'));
+    }
+  });
+}
+
+// ===== P1-8 出库单修改（非冻结状态）=====
+function openOutboundEditForm() {
+  var o = window._currentOutboundOrderCache;
+  if (!o) { alert('订单未加载 / 주문 미로드'); return; }
+  var FROZEN = ['shipped', 'completed', 'cancelled'];
+  if (FROZEN.indexOf(o.status) !== -1) {
+    alert('已出库/完成/取消的出库单不能修改 / 출고완료/완료/취소된 단은 수정 불가');
+    return;
+  }
+  var bizSel = function(v) { return o.biz_class === v ? ' selected' : ''; };
+  var modeSel = function(v) { return o.outbound_mode === v ? ' selected' : ''; };
+  var usesSel = function(v) { return Number(o.uses_stock_operation || 0) === v ? ' selected' : ''; };
+
+  var html = '';
+  html += '<div class="modal-overlay" id="obEditOverlay" onclick="closeOutboundEditForm(event)">';
+  html += '<div class="modal-box" onclick="event.stopPropagation();" style="max-width:640px;">';
+  html += '<div style="font-size:16px;font-weight:700;margin-bottom:12px;">修改出库单 / 출고단 수정';
+  if (Number(o.revision_no || 0) > 0) html += ' <span class="muted" style="font-size:12px;font-weight:400;">(当前版本 #' + Number(o.revision_no) + ')</span>';
+  html += '</div>';
+  html += '<div style="background:#fff8e1;border-left:3px solid #ef6c00;padding:8px;margin-bottom:10px;font-size:12px;color:#6d4c00;">⚠ 保存后会通知仓库重新确认 / 저장 후 창고 재확인 필요</div>';
+  html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:13px;">';
+  html += '<div><label><b>单据日期</b></label><input id="ob-edit-date" class="input" type="date" value="' + esc(o.order_date || '') + '"></div>';
+  html += '<div><label><b>客户 *</b></label><input id="ob-edit-customer" class="input" value="' + esc(o.customer || '') + '"></div>';
+  html += '<div><label><b>业务分类 *</b></label><select id="ob-edit-biz" class="input">';
+  html += '<option value=""' + (o.biz_class ? '' : ' selected') + '>--</option>';
+  html += '<option value="direct_ship"' + bizSel('direct_ship') + '>代发 / 직배송</option>';
+  html += '<option value="bulk"' + bizSel('bulk') + '>大货 / 대량화물</option>';
+  html += '<option value="return"' + bizSel('return') + '>退件 / 반품</option>';
+  html += '</select></div>';
+  html += '<div><label><b>出库模式</b></label><select id="ob-edit-outmode" class="input">';
+  html += '<option value="">--</option>';
+  ['warehouse_dispatch','customer_pickup','milk_express','milk_pallet','container_pickup'].forEach(function(m) {
+    html += '<option value="' + m + '"' + modeSel(m) + '>' + esc(outModeLabel(m)) + '</option>';
+  });
+  html += '</select></div>';
+  html += '<div><label><b>是否使用现货</b></label><select id="ob-edit-uses-stock" class="input">';
+  html += '<option value="0"' + usesSel(0) + '>否：普通出库</option>';
+  html += '<option value="1"' + usesSel(1) + '>是：先库内操作</option>';
+  html += '</select></div>';
+  html += '<div><label><b>预计出库时间</b></label><input id="ob-edit-expected" class="input" type="datetime-local" value="' + esc(o.expected_ship_at || '') + '"></div>';
+  html += '<div><label><b>目的地</b></label><input id="ob-edit-destination" class="input" value="' + esc(o.destination || '') + '"></div>';
+  html += '<div><label><b>PO号</b></label><input id="ob-edit-po" class="input" value="' + esc(o.po_no || '') + '"></div>';
+  html += '<div><label><b>WMS工单号</b></label><input id="ob-edit-wms" class="input" value="' + esc(o.wms_work_order_no || '') + '"></div>';
+  html += '<div><label><b>计划箱数</b></label><input id="ob-edit-box" class="input" type="number" min="0" value="' + Number(o.planned_box_count || 0) + '"></div>';
+  html += '<div><label><b>计划托数</b></label><input id="ob-edit-pallet" class="input" type="number" min="0" value="' + Number(o.planned_pallet_count || 0) + '"></div>';
+  html += '<div style="grid-column:1/-1;"><label><b>出库要求</b></label><textarea id="ob-edit-req" class="input" rows="2">' + esc(o.outbound_requirement || '') + '</textarea></div>';
+  html += '<div style="grid-column:1/-1;"><label><b>作业说明</b></label><textarea id="ob-edit-instruction" class="input" rows="2">' + esc(o.instruction || '') + '</textarea></div>';
+  html += '<div style="grid-column:1/-1;"><label><b>备注</b></label><textarea id="ob-edit-remark" class="input" rows="2">' + esc(o.remark || '') + '</textarea></div>';
+  html += '</div>';
+  html += '<div style="margin-top:14px;text-align:right;">';
+  html += '<button class="btn btn-outline" onclick="closeOutboundEditForm()">取消 / 취소</button> ';
+  html += '<button class="btn btn-primary" onclick="submitOutboundEdit(this)">保存 / 저장</button>';
+  html += '</div></div></div>';
+  var div = document.createElement('div');
+  div.innerHTML = html;
+  document.body.appendChild(div.firstChild);
+}
+
+function closeOutboundEditForm(ev) {
+  if (ev && ev.target && ev.target.id !== 'obEditOverlay') return;
+  var el = document.getElementById('obEditOverlay');
+  if (el) el.parentNode.removeChild(el);
+}
+
+async function submitOutboundEdit(btnEl) {
+  var customer = (document.getElementById('ob-edit-customer') || {}).value || '';
+  if (!customer.trim()) { alert('请填写客户 / 고객을 입력하세요'); return; }
+  var biz = (document.getElementById('ob-edit-biz') || {}).value || '';
+  if (!biz) { alert('请选择业务分类 / 업무 분류를 선택하세요'); return; }
+  var by = getUser();
+  if (!by) { alert('请先在右上角设置你的显示名 / 사용자명을 먼저 설정하세요'); return; }
+  withActionLock('submitOutboundEdit', btnEl || null, '保存中.../저장중...', async function() {
+    var res = await api({
+      action: "v2_outbound_order_update",
+      id: _currentOutboundId,
+      by: by,
+      order_date: (document.getElementById('ob-edit-date') || {}).value || '',
+      customer: customer.trim(),
+      biz_class: biz,
+      outbound_mode: (document.getElementById('ob-edit-outmode') || {}).value || '',
+      uses_stock_operation: Number((document.getElementById('ob-edit-uses-stock') || {}).value || 0),
+      expected_ship_at: (document.getElementById('ob-edit-expected') || {}).value || '',
+      destination: (document.getElementById('ob-edit-destination') || {}).value || '',
+      po_no: (document.getElementById('ob-edit-po') || {}).value || '',
+      wms_work_order_no: (document.getElementById('ob-edit-wms') || {}).value || '',
+      planned_box_count: Number((document.getElementById('ob-edit-box') || {}).value || 0),
+      planned_pallet_count: Number((document.getElementById('ob-edit-pallet') || {}).value || 0),
+      outbound_requirement: (document.getElementById('ob-edit-req') || {}).value || '',
+      instruction: (document.getElementById('ob-edit-instruction') || {}).value || '',
+      remark: (document.getElementById('ob-edit-remark') || {}).value || ''
+    });
+    if (res && res.ok) {
+      alert('已保存（版本 #' + Number(res.revision_no || 0) + '），等待仓库确认 / 저장됨, 창고 확인 대기');
+      closeOutboundEditForm();
+      loadOutboundDetail();
+    } else {
+      alert('失败/실패: ' + (res ? (res.message || res.error) : 'unknown'));
+    }
+  });
+}
+
+// ===== P1-9 提货信息编辑（独立模态，触发 pickup_confirm_required）=====
+function openPickupEditForm() {
+  var o = window._currentOutboundOrderCache;
+  if (!o) { alert('订单未加载 / 주문 미로드'); return; }
+  var FROZEN = ['shipped', 'completed', 'cancelled'];
+  if (FROZEN.indexOf(o.status) !== -1) {
+    alert('已出库/完成/取消的出库单不能编辑提货信息');
+    return;
+  }
+  var html = '';
+  html += '<div class="modal-overlay" id="pkEditOverlay" onclick="closePickupEditForm(event)">';
+  html += '<div class="modal-box" onclick="event.stopPropagation();" style="max-width:560px;">';
+  html += '<div style="font-size:16px;font-weight:700;margin-bottom:12px;">编辑提货信息 / 픽업 정보 편집</div>';
+  html += '<div style="background:#fff8e1;border-left:3px solid #ef6c00;padding:8px;margin-bottom:10px;font-size:12px;color:#6d4c00;">⚠ 保存后需仓库现场再次确认 / 저장 후 창고 재확인 필요</div>';
+  html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:13px;">';
+  html += '<div><label><b>车牌 / 차번</b></label><input id="pk-vehicle" class="input" value="' + esc(o.pickup_vehicle_no || '') + '"></div>';
+  html += '<div><label><b>司机姓名 / 기사명</b></label><input id="pk-driver-name" class="input" value="' + esc(o.pickup_driver_name || '') + '"></div>';
+  html += '<div><label><b>司机电话 / 기사 전화</b></label><input id="pk-driver-phone" class="input" value="' + esc(o.pickup_driver_phone || '') + '"></div>';
+  html += '<div><label><b>提货人 / 픽업 담당자</b></label><input id="pk-person" class="input" value="' + esc(o.pickup_person_name || '') + '"></div>';
+  html += '<div><label><b>所属公司 / 회사</b></label><input id="pk-company" class="input" value="' + esc(o.pickup_company || '') + '"></div>';
+  html += '<div><label><b>提货时间 / 픽업 시간</b></label><input id="pk-time" class="input" type="datetime-local" value="' + esc(o.pickup_time || '') + '"></div>';
+  html += '<div style="grid-column:1/-1;"><label><b>备注 / 비고</b></label><textarea id="pk-note" class="input" rows="2">' + esc(o.pickup_note || '') + '</textarea></div>';
+  html += '</div>';
+  html += '<div style="margin-top:14px;text-align:right;">';
+  html += '<button class="btn btn-outline" onclick="closePickupEditForm()">取消 / 취소</button> ';
+  html += '<button class="btn btn-primary" onclick="submitPickupEdit(this)">保存 / 저장</button>';
+  html += '</div></div></div>';
+  var div = document.createElement('div');
+  div.innerHTML = html;
+  document.body.appendChild(div.firstChild);
+}
+
+function closePickupEditForm(ev) {
+  if (ev && ev.target && ev.target.id !== 'pkEditOverlay') return;
+  var el = document.getElementById('pkEditOverlay');
+  if (el) el.parentNode.removeChild(el);
+}
+
+async function submitPickupEdit(btnEl) {
+  var by = getUser();
+  if (!by) { alert('请先在右上角设置你的显示名 / 사용자명을 먼저 설정하세요'); return; }
+  withActionLock('submitPickupEdit', btnEl || null, '保存中.../저장중...', async function() {
+    var res = await api({
+      action: "v2_outbound_order_update",
+      id: _currentOutboundId,
+      by: by,
+      pickup_vehicle_no: (document.getElementById('pk-vehicle') || {}).value || '',
+      pickup_driver_name: (document.getElementById('pk-driver-name') || {}).value || '',
+      pickup_driver_phone: (document.getElementById('pk-driver-phone') || {}).value || '',
+      pickup_person_name: (document.getElementById('pk-person') || {}).value || '',
+      pickup_company: (document.getElementById('pk-company') || {}).value || '',
+      pickup_time: (document.getElementById('pk-time') || {}).value || '',
+      pickup_note: (document.getElementById('pk-note') || {}).value || ''
+    });
+    if (res && res.ok) {
+      alert('已保存，等待仓库确认 / 저장됨, 창고 확인 대기');
+      closePickupEditForm();
+      loadOutboundDetail();
     } else {
       alert('失败/실패: ' + (res ? (res.message || res.error) : 'unknown'));
     }
