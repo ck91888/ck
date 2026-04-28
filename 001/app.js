@@ -1087,13 +1087,44 @@ async function startUnloadNoPlan(btnEl) {
     // 从挂起上下文带入 parent_job_id（自 patch.js 合并）
     var interruptInfo = null;
     try { interruptInfo = JSON.parse(localStorage.getItem(V2_INTERRUPT_KEY) || 'null'); } catch (e) {}
+    var parentJobId = (interruptInfo && interruptInfo.parent_job_id) || '';
+
+    // 客户端预检：避免重复创建 FB —— 如已有 active 计划外卸货，引导加入
+    // （后端 existing_active_unplanned_unload 是兜底硬保障）
+    if (!parentJobId) {
+      try {
+        var actRes = await api({ action: "v2_unplanned_unload_active_list" });
+        if (actRes && actRes.ok && actRes.items && actRes.items.length > 0) {
+          var item = actRes.items[0];
+          var msg = "已有进行中的计划外卸货：" + (item.display_no || '') +
+                    "（发起: " + (item.submitted_by || '?') + "，参与 " + (item.active_worker_count || 0) + " 人）\n" +
+                    "请加入此任务而非重复创建。点确定 = 加入；取消 = 放弃。\n" +
+                    "진행 중인 계획외 하차가 있습니다. 참여하세요.";
+          if (confirm(msg)) {
+            joinUnplannedUnload(item.feedback_id, btnEl);
+          }
+          return;
+        }
+      } catch (e) { /* 预检失败不阻塞，由后端兜底 */ }
+    }
+
     var res = await api({
       action: "v2_unplanned_unload_start",
       worker_id: getWorkerId(),
       worker_name: getWorkerName(),
-      parent_job_id: (interruptInfo && interruptInfo.parent_job_id) || '',
-      interrupt_type: (interruptInfo && interruptInfo.parent_job_id) ? 'unload' : ''
+      parent_job_id: parentJobId,
+      interrupt_type: parentJobId ? 'unload' : ''
     });
+
+    // 后端兜底：existing_active 自动转加入
+    if (res && res.error === 'existing_active_unplanned_unload' && res.feedback_id) {
+      var msg2 = (res.message || "已有进行中的计划外卸货任务") + "\n点确定加入此任务";
+      if (confirm(msg2)) {
+        joinUnplannedUnload(res.feedback_id, btnEl);
+      }
+      return;
+    }
+
     if (res && res.ok) {
       saveActiveJob(res.job_id, res.worker_seg_id);
       localStorage.setItem('v2_unplanned_fb_id', res.feedback_id || '');
@@ -1104,7 +1135,7 @@ async function startUnloadNoPlan(btnEl) {
       if (jobRes && jobRes.ok) showUnloadWorking(jobRes.job);
       startJobPoll("unload");
     } else {
-      alert("失败/실패: " + (res ? res.error : "unknown"));
+      alert("失败/실패: " + (res ? (res.message || res.error) : "unknown"));
     }
   });
 }

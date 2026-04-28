@@ -2479,6 +2479,33 @@ route("v2_unplanned_unload_start", async (body, env) => {
       const busy = await checkWorkerBusy(env, worker_id, null);
       if (busy) return { ok: false, error: "worker_has_active_job", active_job_id: busy.job_id, active_job_type: busy.job_type };
     }
+
+    // === 去重硬约束：避免多人同时点"开始"重复创建 FB ===
+    // - 普通模式（无 parent_job_id）：全局只允许一个 active unplanned_unload field_working
+    // - 中断模式（带 parent_job_id）：同一 parent_job_id 下只允许一个
+    // 命中已存在 → 返回 existing_active，前端转为加入（join）流程
+    let existing = null;
+    if (!parent_job_id) {
+      existing = await env.DB.prepare(
+        "SELECT id, display_no, related_doc_id, submitted_by FROM v2_field_feedbacks WHERE feedback_type='unplanned_unload' AND status='field_working' AND (parent_job_id IS NULL OR parent_job_id='') ORDER BY created_at ASC LIMIT 1"
+      ).first();
+    } else {
+      existing = await env.DB.prepare(
+        "SELECT id, display_no, related_doc_id, submitted_by FROM v2_field_feedbacks WHERE feedback_type='unplanned_unload' AND status='field_working' AND parent_job_id=? ORDER BY created_at ASC LIMIT 1"
+      ).bind(parent_job_id).first();
+    }
+    if (existing) {
+      return {
+        ok: false,
+        error: "existing_active_unplanned_unload",
+        message: "已有进行中的计划外卸货任务（" + (existing.display_no || existing.id) + " 由 " + (existing.submitted_by || '?') + " 发起），请加入而非重复创建 / 진행 중인 계획외 하차가 있습니다. 참여하세요",
+        feedback_id: existing.id,
+        display_no: existing.display_no,
+        job_id: existing.related_doc_id,
+        submitted_by: existing.submitted_by
+      };
+    }
+
     const t = now();
     const fb_id = "FB-" + uid();
     const fb_display_no = await nextFeedbackDisplayNo(env, kstToday(), 'XCXH');
@@ -2789,6 +2816,13 @@ route("v2_unload_job_start", async (body, env) => {
         "SELECT * FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type='unload' AND status IN ('pending','working') LIMIT 1"
       ).bind(plan_id).first();
       if (existing) job = existing;
+    } else {
+      // 无单卸货模式：全局去重 — 已有 active 无单 unload job → 直接加入
+      // 这是修复多人各自创建独立 job → finish 时各生成一条 unload_no_doc FB 的根因
+      const existingNoDoc = await env.DB.prepare(
+        "SELECT * FROM v2_ops_jobs WHERE job_type='unload' AND (related_doc_id='' OR related_doc_id IS NULL) AND is_temporary_interrupt=0 AND status IN ('pending','working') ORDER BY created_at ASC LIMIT 1"
+      ).first();
+      if (existingNoDoc) job = existingNoDoc;
     }
 
     const busy = await checkWorkerBusy(env, worker_id, job ? job.id : null);
@@ -2992,6 +3026,13 @@ route("v2_unload_job_finish", async (body, env) => {
     }
 
     if (!plan_id || plan_id === "") {
+      // 兜底：同一个 job 只允许一条 unload_no_doc FB，防止异常路径下重复 INSERT
+      const existingFb = await env.DB.prepare(
+        "SELECT id FROM v2_field_feedbacks WHERE related_doc_type='ops_job' AND related_doc_id=? AND feedback_type='unload_no_doc' LIMIT 1"
+      ).bind(job_id).first();
+      if (existingFb) {
+        return { ok: true, result_id, feedback_id: existingFb.id, no_doc: true, fb_reused: true };
+      }
       const fb_id = "FB-" + uid();
       await env.DB.prepare(`
         INSERT INTO v2_field_feedbacks(id, feedback_type, related_doc_type, related_doc_id,
@@ -5280,6 +5321,7 @@ route("v2_admin_cleanup_log_list", async (body, env) => {
   ).all();
   return json({ ok: true, items: rs.results || [] });
 });
+
 
 
 // =====================================================
