@@ -69,7 +69,9 @@ var _WRITE_ACTIONS = [
   'v2_correction_request_create','v2_admin_dirty_data_cleanup',
   'v2_verify_batch_upload','v2_verify_batch_update_status',
   'v2_inbound_plan_mark_accounted','v2_outbound_order_mark_accounted',
-  'v2_inbound_plan_delete','v2_outbound_order_delete'
+  'v2_inbound_plan_delete','v2_outbound_order_delete',
+  'v2_outbound_order_update_ship_plan',
+  'v2_outbound_stock_op_start','v2_outbound_stock_op_finish'
 ];
 function _genReqId(action) {
   return action + '_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
@@ -787,8 +789,20 @@ async function loadOutboundList() {
   var status = document.getElementById("obFilterStatus").value;
   var accountedSel = document.getElementById("outboundFilterAccounted");
   var accounted = accountedSel ? accountedSel.value : "";
+  var bizSel = document.getElementById("obFilterBizClass");
+  var biz_class = bizSel ? bizSel.value : "";
+  var usesSel = document.getElementById("obFilterUsesStockOp");
+  var uses_stock_operation = usesSel ? usesSel.value : "";
+  var matSel = document.getElementById("obFilterHasMaterial");
+  var has_material = matSel ? matSel.value : "";
 
-  var res = await api({ action: "v2_outbound_order_list", start_date: start, end_date: end, status: status, accounted: accounted });
+  var res = await api({
+    action: "v2_outbound_order_list",
+    start_date: start, end_date: end, status: status, accounted: accounted,
+    biz_class: biz_class,
+    uses_stock_operation: uses_stock_operation,
+    has_material: has_material
+  });
   if (!res || !res.ok) {
     body.innerHTML = '<div class="card muted">加载失败</div>';
     return;
@@ -805,6 +819,18 @@ async function loadOutboundList() {
     html += '<div class="list-item" onclick="openOutboundDetail(\'' + esc(o.id) + '\')">';
     html += '<div class="item-title">';
     html += '<span class="st st-' + esc(o.status) + '">' + esc(stLabel(o.status)) + '</span> ';
+    if (o.biz_class) {
+      html += '<span class="st" style="background:#e3f2fd;color:#1565c0;">[' + esc(bizLabel(o.biz_class)) + ']</span> ';
+    }
+    if (Number(o.uses_stock_operation) === 1) {
+      html += '<span class="st" style="background:#fff3e0;color:#e65100;">[' + esc(L("uses_stock_operation")) + ']</span> ';
+    }
+    var matCount = Number(o.material_count || 0);
+    if (matCount > 0) {
+      html += '<span class="st" style="background:#e8f5e9;color:#2e7d32;">[' + esc(L("outbound_material_uploaded")) + ' ' + matCount + ']</span> ';
+    } else {
+      html += '<span class="st" style="background:#f5f5f5;color:#888;">[' + esc(L("outbound_material_missing")) + ']</span> ';
+    }
     html += accountTag(o);
     html += esc(o.display_no || o.id) + ' · ' + esc(o.customer || "--");
     html += '</div>';
@@ -842,6 +868,9 @@ function addOutboundLine() {
 async function submitOutbound(btnEl) {
   var customer = document.getElementById("oc-customer").value.trim();
   if (!customer) { alert(L("customer") + "!"); return; }
+  var bizSel = document.getElementById("oc-biz-class");
+  var biz_class = bizSel ? bizSel.value.trim() : "";
+  if (!biz_class) { alert(L("biz_class") + "!"); return; }
   var outmodeCheck = document.getElementById("oc-outmode").value.trim();
   if (!outmodeCheck) { alert(L("select_outbound_mode")); return; }
   withActionLock('submitOutbound', btnEl || null, '提交中.../저장중...', async function() {
@@ -853,6 +882,14 @@ async function submitOutbound(btnEl) {
     var instruction = document.getElementById("oc-instruction").value.trim();
     var plannedBox = parseInt(document.getElementById("oc-planned-box").value) || 0;
     var plannedPallet = parseInt(document.getElementById("oc-planned-pallet").value) || 0;
+    var usesEl = document.getElementById("oc-uses-stock-op");
+    var uses_stock_operation = usesEl && usesEl.value === "1" ? 1 : 0;
+    var expEl = document.getElementById("oc-expected-ship-at");
+    var expected_ship_at = expEl ? expEl.value.trim() : "";
+    var reqEl = document.getElementById("oc-outbound-requirement");
+    var outbound_requirement = reqEl ? reqEl.value.trim() : "";
+    var matEl = document.getElementById("oc-materials");
+    var matFiles = (matEl && matEl.files) ? Array.prototype.slice.call(matEl.files) : [];
 
     // Collect lines
     var lines = [];
@@ -868,34 +905,78 @@ async function submitOutbound(btnEl) {
       action: "v2_outbound_order_create",
       order_date: date,
       customer: customer,
+      biz_class: biz_class,
+      uses_stock_operation: uses_stock_operation,
       destination: destination,
       po_no: po_no,
       wms_work_order_no: wms_wo,
       outbound_mode: outmode,
       instruction: instruction,
+      expected_ship_at: expected_ship_at,
+      outbound_requirement: outbound_requirement,
       planned_box_count: plannedBox,
       planned_pallet_count: plannedPallet,
       created_by: getUser(),
       lines: lines
     });
 
-    if (res && res.ok) {
-      alert("已创建: " + (res.display_no || res.id));
-      document.getElementById("oc-customer").value = "";
-      document.getElementById("oc-destination").value = "";
-      document.getElementById("oc-po").value = "";
-      document.getElementById("oc-wms-wo").value = "";
-      document.getElementById("oc-outmode").value = "";
-      document.getElementById("oc-instruction").value = "";
-      document.getElementById("oc-planned-box").value = "0";
-      document.getElementById("oc-planned-pallet").value = "0";
-      document.getElementById("ocLinesBody").innerHTML = "";
-      _obLineCount = 0;
-      goTab("outbound");
-    } else {
-      alert("失败: " + (res ? res.error : "unknown"));
+    if (!res || !res.ok) {
+      alert("失败: " + (res ? (res.message || res.error) : "unknown"));
+      return;
     }
+
+    var newOrderId = res.id;
+    var displayNo = res.display_no || res.id;
+
+    // 上传出库资料（创建成功后再上传，related_doc_id=order_id）
+    var uploadFailed = false;
+    if (matFiles.length > 0 && newOrderId) {
+      for (var i = 0; i < matFiles.length; i++) {
+        try {
+          var ok = await uploadOutboundMaterial(newOrderId, matFiles[i]);
+          if (!ok) uploadFailed = true;
+        } catch (e) {
+          uploadFailed = true;
+        }
+      }
+    }
+
+    if (uploadFailed) {
+      alert(L("upload_failed_after_create") + "\n单号 / 번호: " + displayNo);
+    } else {
+      alert("已创建 / 생성됨: " + displayNo);
+    }
+
+    // 清空表单
+    document.getElementById("oc-customer").value = "";
+    if (bizSel) bizSel.value = "";
+    if (usesEl) usesEl.value = "0";
+    document.getElementById("oc-destination").value = "";
+    document.getElementById("oc-po").value = "";
+    document.getElementById("oc-wms-wo").value = "";
+    document.getElementById("oc-outmode").value = "";
+    document.getElementById("oc-instruction").value = "";
+    if (expEl) expEl.value = "";
+    if (reqEl) reqEl.value = "";
+    if (matEl) matEl.value = "";
+    document.getElementById("oc-planned-box").value = "0";
+    document.getElementById("oc-planned-pallet").value = "0";
+    document.getElementById("ocLinesBody").innerHTML = "";
+    _obLineCount = 0;
+    goTab("outbound");
   });
+}
+
+// 出库资料文件上传 helper（复用 uploadFile）
+async function uploadOutboundMaterial(orderId, file) {
+  var fd = new FormData();
+  fd.append("file", file);
+  fd.append("related_doc_type", "outbound_order");
+  fd.append("related_doc_id", orderId);
+  fd.append("attachment_category", "outbound_material");
+  fd.append("uploaded_by", getUser() || "");
+  var resp = await uploadFile(fd);
+  return resp && resp.ok;
 }
 
 // ===== Outbound Detail =====
@@ -926,20 +1007,69 @@ async function loadOutboundDetail() {
   window._currentOutboundLinesCache = lines;
 
   var obDisplayNo = o.display_no || o.id;
+  var usesStockOp = Number(o.uses_stock_operation) === 1;
   var html = '<div class="card">';
   html += '<div style="font-size:16px;font-weight:700;margin-bottom:8px;">' + esc(obDisplayNo) + '</div>';
-  html += '<div class="detail-field"><b>' + L("status") + ':</b> <span class="st st-' + esc(o.status) + '">' + esc(stLabel(o.status)) + '</span></div>';
+  html += '<div class="detail-field"><b>' + L("status") + ':</b> <span class="st st-' + esc(o.status) + '">' + esc(stLabel(o.status)) + '</span>';
+  if (o.biz_class) {
+    html += ' <span class="st" style="background:#e3f2fd;color:#1565c0;">[' + esc(bizLabel(o.biz_class)) + ']</span>';
+  }
+  if (usesStockOp) {
+    html += ' <span class="st" style="background:#fff3e0;color:#e65100;">[' + esc(L("uses_stock_operation")) + ']</span>';
+  }
+  html += '</div>';
   html += '<div class="detail-field"><b>' + L("order_date") + ':</b> ' + esc(o.order_date) + '</div>';
   html += '<div class="detail-field"><b>' + L("customer") + ':</b> ' + esc(o.customer) + '</div>';
   if (o.destination) html += '<div class="detail-field"><b>' + L("destination") + ':</b> ' + esc(o.destination) + '</div>';
   if (o.po_no) html += '<div class="detail-field"><b>' + L("po_no") + ':</b> ' + esc(o.po_no) + '</div>';
   if (o.wms_work_order_no) html += '<div class="detail-field"><b>' + L("wms_work_order_no") + ':</b> ' + esc(o.wms_work_order_no) + '</div>';
   html += '<div class="detail-field"><b>' + L("outbound_mode") + ':</b> ' + esc(outModeLabel(o.outbound_mode)) + '</div>';
+  if (o.expected_ship_at) html += '<div class="detail-field"><b>' + L("expected_ship_at") + ':</b> ' + esc(o.expected_ship_at) + '</div>';
+  if (o.outbound_requirement) html += '<div class="detail-section"><b>' + L("outbound_requirement") + ':</b><div style="margin-top:4px;white-space:pre-wrap;">' + esc(o.outbound_requirement) + '</div></div>';
   if (o.instruction) html += '<div class="detail-section"><b>' + L("instruction") + ':</b><div style="margin-top:4px;white-space:pre-wrap;">' + esc(o.instruction) + '</div></div>';
   html += '<div class="detail-field"><b>' + L("planned_box_pallet") + ':</b> ' + (o.planned_box_count || 0) + L("unit_box") + ' / ' + (o.planned_pallet_count || 0) + L("unit_pallet") + '</div>';
   html += '<div class="detail-field"><b>' + L("actual_box_pallet") + ':</b> ' + (o.actual_box_count || 0) + L("unit_box") + ' / ' + (o.actual_pallet_count || 0) + L("unit_pallet") + '</div>';
   html += '<div class="detail-field"><b>' + L("submitted_by") + ':</b> ' + esc(o.created_by) + ' · ' + esc(fmtTime(o.created_at)) + '</div>';
   html += '</div>';
+
+  // 库内操作型：pending_outbound_update 提示 + 仓库反馈结果 + 更新出库计划按钮
+  if (usesStockOp) {
+    var stockOpStatus = o.stock_operation_status || '';
+    var stockResult = null;
+    try { stockResult = JSON.parse(o.stock_operation_result_json || "null"); } catch(e) {}
+    if (stockOpStatus === 'completed' || stockResult) {
+      html += '<div class="card" style="border-left:4px solid #ef6c00;">';
+      html += '<div class="card-title" style="color:#ef6c00;">' + esc(L("uses_stock_operation")) + ' — ' + esc(L("status_completed")) + '</div>';
+      if (o.stock_operation_completed_by) {
+        html += '<div class="detail-field"><b>' + esc(L("submitted_by")) + ':</b> ' + esc(o.stock_operation_completed_by) + ' · ' + esc(fmtTime(o.stock_operation_completed_at)) + '</div>';
+      }
+      if (stockResult) {
+        html += '<div class="detail-field"><b>' + esc(L("actual_box_pallet")) + ':</b> ' +
+          Number(stockResult.total_box_count || 0) + esc(L("unit_box")) + ' / ' +
+          Number(stockResult.total_pallet_count || 0) + esc(L("unit_pallet")) + '</div>';
+        if (stockResult.last_remark) {
+          html += '<div class="detail-field"><b>' + esc(L("remark")) + ':</b> ' + esc(stockResult.last_remark) + '</div>';
+        }
+        if (Array.isArray(stockResult.results) && stockResult.results.length > 0) {
+          html += '<details style="margin-top:6px;"><summary style="cursor:pointer;color:#666;">明细 (' + stockResult.results.length + ')</summary>';
+          html += '<table class="line-table"><thead><tr><th>箱</th><th>托</th><th>备注</th><th>提交人</th><th>时间</th></tr></thead><tbody>';
+          stockResult.results.forEach(function(r) {
+            html += '<tr><td>' + Number(r.box_count || 0) + '</td><td>' + Number(r.pallet_count || 0) + '</td><td>' + esc(r.remark || '') + '</td><td>' + esc(r.created_by || '') + '</td><td>' + esc(fmtTime(r.created_at)) + '</td></tr>';
+          });
+          html += '</tbody></table></details>';
+        }
+      }
+      html += '</div>';
+    }
+    if (o.status === 'pending_outbound_update') {
+      html += '<div class="card" style="border-left:4px solid #c62828;background:#fff8f6;">';
+      html += '<div style="font-weight:700;color:#c62828;">' + esc(L("update_ship_plan_hint")) + '</div>';
+      html += '<div style="margin-top:8px;">';
+      html += '<button class="btn btn-primary" onclick="openShipPlanForm()">' + esc(L("update_ship_plan")) + '</button>';
+      html += '</div>';
+      html += '</div>';
+    }
+  }
 
   // Lines
   if (lines.length > 0) {
@@ -968,9 +1098,42 @@ async function loadOutboundDetail() {
     html += '</div>';
   }
 
-  // Attachments — grouped by category
+  // 出库资料（attachment_category = 'outbound_material'）
+  var outboundMaterials = atts.filter(function(a) { return a.attachment_category === 'outbound_material'; });
+  html += '<div class="card"><div class="card-title">' + esc(L("outbound_materials")) + ' (' + outboundMaterials.length + ')</div>';
+  if (outboundMaterials.length === 0) {
+    html += '<div class="muted">' + esc(L("outbound_materials_empty")) + '</div>';
+  } else {
+    html += '<table class="line-table"><thead><tr><th>文件名</th><th>上传人</th><th>时间</th><th>操作</th></tr></thead><tbody>';
+    outboundMaterials.forEach(function(att) {
+      var url = fileUrl(att.file_key);
+      var ct = (att.content_type || '').toLowerCase();
+      var fn = (att.file_name || '').toLowerCase();
+      var isPdf = ct.indexOf('pdf') !== -1 || fn.endsWith('.pdf');
+      var isImg = ct.startsWith('image/');
+      var openLabel = isPdf ? L("open_print") : (isImg ? L("open_print") : L("download_print"));
+      html += '<tr>';
+      html += '<td>' + esc(att.file_name) + '</td>';
+      html += '<td>' + esc(att.uploaded_by || '--') + '</td>';
+      html += '<td>' + esc(fmtTime(att.created_at)) + '</td>';
+      html += '<td>';
+      html += '<a class="btn btn-outline btn-sm" href="' + esc(url) + '" download="' + esc(att.file_name) + '">' + esc(L("download")) + '</a> ';
+      html += '<a class="btn btn-outline btn-sm" href="' + esc(url) + '" target="_blank" rel="noopener">' + esc(openLabel) + '</a>';
+      html += '</td>';
+      html += '</tr>';
+    });
+    html += '</tbody></table>';
+  }
+  // 客服在详情页补传按钮
+  html += '<div style="margin-top:8px;">';
+  html += '<input id="ob-detail-upload-input" type="file" multiple accept=".xlsx,.xls,.csv,.pdf,.jpg,.jpeg,.png" style="display:none;" onchange="uploadOutboundMaterialsFromDetail(this)">';
+  html += '<button class="btn btn-outline btn-sm" onclick="document.getElementById(\'ob-detail-upload-input\').click()">+ ' + esc(L("outbound_materials")) + '</button>';
+  html += '</div>';
+  html += '</div>';
+
+  // Attachments — grouped by category（车辆照片 / 其它非出库资料）
   var vehiclePhotos = atts.filter(function(a) { return a.attachment_category === 'vehicle_photo' || a.attachment_category === 'load_vehicle_photo'; });
-  var otherAtts = atts.filter(function(a) { return a.attachment_category !== 'vehicle_photo' && a.attachment_category !== 'load_vehicle_photo'; });
+  var otherAtts = atts.filter(function(a) { return a.attachment_category !== 'vehicle_photo' && a.attachment_category !== 'load_vehicle_photo' && a.attachment_category !== 'outbound_material'; });
   if (vehiclePhotos.length > 0) {
     html += '<div class="card"><div class="card-title">' + L("vehicle_photos") + ' (' + vehiclePhotos.length + ')</div>';
     html += '<div class="att-grid">';
@@ -1069,6 +1232,93 @@ async function updateObStatus(status, btnEl) {
       alert("失败: " + (res ? (res.message || res.error) : "unknown"));
     }
   });
+}
+
+// ===== 库内操作完成后客服更新出库计划 =====
+function openShipPlanForm() {
+  var o = window._currentOutboundOrderCache || {};
+  var html = '';
+  html += '<div class="card" id="ob-shipplan-card">';
+  html += '<div class="card-title">' + esc(L("update_ship_plan")) + '</div>';
+  html += '<div class="form-group"><label>' + esc(L("expected_ship_at")) + '</label>';
+  html += '<input id="sp-expected-ship-at" type="datetime-local" value="' + esc(o.expected_ship_at || "") + '"></div>';
+  html += '<div class="form-group"><label>' + esc(L("outbound_mode")) + '</label>';
+  html += '<select id="sp-outbound-mode">';
+  html += '<option value="">--</option>';
+  ['warehouse_dispatch','customer_pickup','milk_express','milk_pallet','container_pickup'].forEach(function(m) {
+    var sel = (o.outbound_mode === m) ? ' selected' : '';
+    html += '<option value="' + m + '"' + sel + '>' + esc(outModeLabel(m)) + '</option>';
+  });
+  html += '</select></div>';
+  html += '<div class="form-group"><label>' + esc(L("destination")) + '</label>';
+  html += '<input id="sp-destination" type="text" value="' + esc(o.destination || "") + '"></div>';
+  html += '<div class="form-group"><label>' + esc(L("outbound_requirement")) + '</label>';
+  html += '<textarea id="sp-outbound-requirement" rows="3">' + esc(o.outbound_requirement || "") + '</textarea></div>';
+  html += '<div class="form-group"><label>' + esc(L("remark")) + '</label>';
+  html += '<textarea id="sp-remark" rows="2"></textarea></div>';
+  html += '<button class="btn btn-primary" onclick="submitShipPlanUpdate(this)">' + esc(L("save")) + '</button> ';
+  html += '<button class="btn btn-outline" onclick="document.getElementById(\'ob-shipplan-card\').remove()">' + esc(L("cancel")) + '</button>';
+  html += '</div>';
+  // 注入到详情顶部
+  var body = document.getElementById("outboundDetailBody");
+  if (body) {
+    var wrap = document.createElement("div");
+    wrap.innerHTML = html;
+    body.insertBefore(wrap.firstChild, body.firstChild);
+    wrap.firstChild && window.scrollTo({top: 0, behavior: 'smooth'});
+  }
+}
+
+async function submitShipPlanUpdate(btnEl) {
+  if (!_currentOutboundId) return;
+  if (!confirm(L("confirm_update_ship_plan"))) return;
+  var expEl = document.getElementById("sp-expected-ship-at");
+  var modeEl = document.getElementById("sp-outbound-mode");
+  var destEl = document.getElementById("sp-destination");
+  var reqEl = document.getElementById("sp-outbound-requirement");
+  var remarkEl = document.getElementById("sp-remark");
+  var expected_ship_at = expEl ? expEl.value.trim() : "";
+  var outbound_mode = modeEl ? modeEl.value.trim() : "";
+  var destination = destEl ? destEl.value.trim() : "";
+  var outbound_requirement = reqEl ? reqEl.value.trim() : "";
+  var remark = remarkEl ? remarkEl.value.trim() : "";
+  if (!expected_ship_at && !outbound_requirement) {
+    alert(L("expected_ship_at") + " / " + L("outbound_requirement") + " 至少填一项");
+    return;
+  }
+  withActionLock('submitShipPlanUpdate', btnEl || null, '提交中.../저장중...', async function() {
+    var res = await api({
+      action: "v2_outbound_order_update_ship_plan",
+      id: _currentOutboundId,
+      expected_ship_at: expected_ship_at,
+      outbound_mode: outbound_mode,
+      destination: destination,
+      outbound_requirement: outbound_requirement,
+      remark: remark
+    });
+    if (res && res.ok) {
+      alert("已更新 / 업데이트 완료");
+      loadOutboundDetail();
+    } else {
+      alert("失败: " + (res ? (res.message || res.error) : "unknown"));
+    }
+  });
+}
+
+// 详情页补传出库资料
+async function uploadOutboundMaterialsFromDetail(inputEl) {
+  if (!_currentOutboundId) return;
+  var files = inputEl && inputEl.files ? Array.prototype.slice.call(inputEl.files) : [];
+  if (files.length === 0) return;
+  var failed = 0;
+  for (var i = 0; i < files.length; i++) {
+    var ok = await uploadOutboundMaterial(_currentOutboundId, files[i]);
+    if (!ok) failed++;
+  }
+  inputEl.value = "";
+  if (failed > 0) alert("部分文件上传失败: " + failed + " 个");
+  else alert("上传成功 / 업로드 완료");
+  loadOutboundDetail();
 }
 
 // ===== Outbound Print =====

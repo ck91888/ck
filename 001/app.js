@@ -112,6 +112,7 @@ var _WRITE_ACTIONS = [
   'v2_issue_close','v2_issue_cancel',
   'v2_outbound_order_create','v2_outbound_order_update_status',
   'v2_outbound_load_start','v2_outbound_load_finish',
+  'v2_outbound_stock_op_start','v2_outbound_stock_op_finish',
   'v2_inbound_plan_create','v2_inbound_plan_update_status','v2_inbound_plan_cancel',
   'v2_inbound_dynamic_finalize',
   'v2_unplanned_unload_start','v2_unplanned_unload_join','v2_unplanned_unload_finish',
@@ -206,6 +207,7 @@ function showPage(name) {
   if (name === "inbound") initInbound();
   if (name === "inbound_return") initInboundReturn();
   if (name === "outbound_load") initOutboundLoad();
+  if (name === "outbound_stock_op") initOutboundStockOp();
   if (name === "issue_list") loadIssueList();
   if (name === "issue_detail") loadIssueDetail();
   if (name === "generic_job") initGenericJob();
@@ -239,6 +241,7 @@ function resumeActiveOrHome() {
       else if (jt === "inbound_return") showPage("inbound_return");
       else if (jt === "inbound_direct" || jt === "inbound_bulk") { _pageParams = { job_type: jt, biz_class: res.job.biz_class || "" }; showPage("inbound"); }
       else if (jt === "load_outbound") showPage("outbound_load");
+      else if (jt === "outbound_stock_op") showPage("outbound_stock_op");
       else if (jt === "pick_direct") showPage("pick_direct");
       else if (jt === "bulk_op") showPage("bulk_op");
       else if (jt === "issue_handle") { _currentIssueId = res.job.related_doc_id || null; showPage("issue_detail"); }
@@ -530,6 +533,7 @@ function goMyTask() {
     else if (jt === "inbound_return") goPage("inbound_return");
     else if (jt.indexOf("inbound") === 0) goPage("inbound", { job_type: jt, biz_class: res.job.biz_class || "" });
     else if (jt === "load_outbound") goPage("outbound_load");
+    else if (jt === "outbound_stock_op") goPage("outbound_stock_op");
     else if (jt === "pick_direct") goPage("pick_direct");
     else if (jt === "bulk_op") goPage("bulk_op");
     else if (jt === "issue_handle") goPage("issue_detail");
@@ -554,6 +558,7 @@ var JOB_TYPE_LABEL = {
   pack_direct: "代发打包/직배송 포장",
   change_order: "换单操作/송장 교체",
   load_outbound: "出库装货/출고 상차",
+  outbound_stock_op: "库内操作/창고 재고 작업",
   inventory: "盘点/재고조사",
   disposal: "废弃处理/폐기 처리",
   qc: "质检/품검",
@@ -584,7 +589,17 @@ var STATUS_LABEL = {
   field_working: "现场卸货中/현장하차중",
   unloaded_pending_info: "待补充信息/정보보완대기",
   converted: "已转正/전환완료",
-  verifying: "核对中/검수중"
+  verifying: "核对中/검수중",
+  ready_to_ship: "待出库/출고대기",
+  shipped: "已出库/출고완료",
+  reopen_pending: "待再操作/재작업 대기",
+  pending_issue: "待下发/배정대기",
+  partially_completed: "部分入库完成/부분 입고 완료",
+  // 出库库内操作型 V2
+  operation_reserved: "操作预约/작업 예약",
+  stock_operating: "操作中/작업중",
+  pending_outbound_update: "待更新出库计划/출고 계획 업데이트 대기",
+  preparing_outbound: "出库准备中/출고 준비중"
 };
 
 var ISSUE_STATUS_LABEL = {
@@ -1877,8 +1892,10 @@ async function loadOutboundOrders() {
   var opts = '<option value="">-- 选择出库单/출고단 선택 --</option>';
   if (res && res.ok && res.items) {
     res.items.forEach(function(o) {
-      if (o.status !== "ready_to_ship") return;
-      opts += '<option value="' + esc(o.id) + '">[' + esc(o.status) + '] ' + esc(o.order_date) + ' ' + esc(o.customer) + '</option>';
+      // 装货页只显示可装货状态：ready_to_ship / preparing_outbound（库内操作型已被客服更新）
+      if (o.status !== "ready_to_ship" && o.status !== "preparing_outbound") return;
+      var bizTag = o.biz_class ? '['+ o.biz_class + '] ' : '';
+      opts += '<option value="' + esc(o.id) + '">[' + esc(o.status) + '] ' + bizTag + esc(o.order_date) + ' ' + esc(o.customer) + '</option>';
     });
   }
   sel.innerHTML = opts;
@@ -1903,6 +1920,7 @@ async function resolveOutboundCode(btnEl) {
       var o = res.order;
       _obResolvedOrderId = o.id;
       document.getElementById("loadOrderSelect").value = o.id;
+      _refreshOutboundLoadMaterial();
       var modeMap = {warehouse_dispatch:'仓库代发',customer_pickup:'客户自提',milk_express:'牛奶速递',milk_pallet:'牛奶托盘',container_pickup:'整柜提货'};
       if (resultEl) resultEl.innerHTML = '<div style="background:#e8f5e9;border-radius:6px;padding:8px;">' +
         '<b>✓ </b>' + esc(o.display_no || o.id) + '<br>' +
@@ -1927,6 +1945,8 @@ function clearOutboundResolve() {
   if (inp) inp.value = "";
   var resultEl = document.getElementById("obResolveResult");
   if (resultEl) resultEl.innerHTML = "";
+  var matEl = document.getElementById("obLoadMaterialBox");
+  if (matEl) matEl.innerHTML = "";
   document.getElementById("loadOrderSelect").value = "";
 }
 
@@ -1979,6 +1999,7 @@ function onOutboundCandidateSelect() {
   var resultEl = document.getElementById("obResolveResult");
   var opt = sel.options[sel.selectedIndex];
   if (resultEl && opt) resultEl.innerHTML = '<div style="background:#e8f5e9;border-radius:6px;padding:8px;"><b>✓ </b>' + esc(opt.textContent) + '</div>';
+  _refreshOutboundLoadMaterial();
 }
 
 async function startOutboundLoad(btnEl) {
@@ -2067,6 +2088,189 @@ async function refreshLoadWorkers() {
   if (!_activeJobId) return;
   var res = await api({ action: "v2_ops_job_detail", job_id: _activeJobId });
   if (res && res.ok) renderWorkers("loadWorkers", res.workers);
+}
+
+// ===== 出库资料展示 helper（执行系统通用） =====
+async function renderOutboundMaterials(orderId, containerId) {
+  var box = document.getElementById(containerId);
+  if (!box) return;
+  if (!orderId) { box.innerHTML = ''; return; }
+  box.innerHTML = '<div class="muted" style="font-size:12px;">资料加载中... / 자료 로딩...</div>';
+  try {
+    var res = await api({
+      action: "v2_attachment_list",
+      related_doc_type: "outbound_order",
+      related_doc_id: orderId
+    });
+    if (!res || !res.ok) { box.innerHTML = ''; return; }
+    var atts = (res.items || []).filter(function(a) { return a.attachment_category === 'outbound_material'; });
+    if (atts.length === 0) {
+      box.innerHTML = '<div class="muted" style="font-size:12px;">暂无出库资料 / 출고 자료 없음</div>';
+      return;
+    }
+    var html = '<div style="font-weight:700;margin-bottom:4px;">出库资料 / 출고 자료 (' + atts.length + ')</div>';
+    atts.forEach(function(att) {
+      var url = V2_API + "/file?key=" + encodeURIComponent(att.file_key);
+      html += '<div style="padding:4px 0;border-bottom:1px solid #f0f0f0;">';
+      html += esc(att.file_name) + ' ';
+      html += '<a class="btn btn-outline btn-sm" href="' + esc(url) + '" download="' + esc(att.file_name) + '">下载/다운로드</a> ';
+      html += '<a class="btn btn-outline btn-sm" href="' + esc(url) + '" target="_blank" rel="noopener">打开/打印·열기/인쇄</a>';
+      html += '</div>';
+    });
+    box.innerHTML = html;
+  } catch (e) {
+    box.innerHTML = '<div class="muted" style="color:#c62828;font-size:12px;">资料加载失败</div>';
+  }
+}
+
+// ===== 出库装货：选定单号后展示资料 =====
+async function _refreshOutboundLoadMaterial() {
+  // 装货页可能没有专用容器；如果有则填，没有就跳过
+  var holder = document.getElementById("obLoadMaterialBox");
+  if (!holder) return;
+  await renderOutboundMaterials(_obResolvedOrderId, "obLoadMaterialBox");
+}
+
+// ===== 库内操作页面 =====
+var _osoOrderId = "";
+
+function initOutboundStockOp() {
+  _osoOrderId = "";
+  showStockOpEntry();
+  loadStockOpCandidates();
+  if (_activeJobId) {
+    showStockOpWorking();
+    refreshStockOpWorkers();
+  }
+  startJobPoll("oso");
+}
+
+function showStockOpEntry() {
+  var e1 = document.getElementById("osoEntryCard");
+  if (e1) e1.style.display = "";
+  var e2 = document.getElementById("osoActionCard");
+  if (e2) e2.style.display = "none";
+  var e3 = document.getElementById("osoResultCard");
+  if (e3) e3.style.display = "none";
+}
+
+function showStockOpWorking() {
+  var e1 = document.getElementById("osoEntryCard");
+  if (e1) e1.style.display = "none";
+  var e2 = document.getElementById("osoActionCard");
+  if (e2) e2.style.display = "";
+  var e3 = document.getElementById("osoResultCard");
+  if (e3) e3.style.display = "";
+}
+
+async function loadStockOpCandidates() {
+  var sel = document.getElementById("osoOrderSelect");
+  if (!sel) return;
+  var res = await api({ action: "v2_outbound_stock_op_list" });
+  var opts = '<option value="">-- 选择/선택 --</option>';
+  if (res && res.ok && res.items) {
+    res.items.forEach(function(o) {
+      var biz = o.biz_class ? '[' + o.biz_class + '] ' : '';
+      var st = o.status === 'stock_operating' ? '[操作中] ' : '[预约] ';
+      opts += '<option value="' + esc(o.id) + '" data-customer="' + esc(o.customer || '') + '" data-instruction="' + esc(o.instruction || '') + '">' + st + biz + esc(o.display_no || o.id) + ' · ' + esc(o.customer || '--') + '</option>';
+    });
+  }
+  sel.innerHTML = opts;
+}
+
+async function onStockOpOrderSelect() {
+  var sel = document.getElementById("osoOrderSelect");
+  var info = document.getElementById("osoOrderInfo");
+  var matBox = document.getElementById("osoMaterialBox");
+  _osoOrderId = sel ? sel.value : "";
+  if (!_osoOrderId) {
+    if (info) info.innerHTML = '--';
+    if (matBox) matBox.innerHTML = '';
+    return;
+  }
+  var opt = sel.options[sel.selectedIndex];
+  var customer = opt ? opt.getAttribute('data-customer') : '';
+  var instruction = opt ? opt.getAttribute('data-instruction') : '';
+  if (info) {
+    info.innerHTML = '<b>客户/고객:</b> ' + esc(customer || '--') +
+      (instruction ? '<br><b>说明/설명:</b> ' + esc(instruction) : '');
+  }
+  await renderOutboundMaterials(_osoOrderId, "osoMaterialBox");
+}
+
+async function startOutboundStockOp(btnEl) {
+  if (hasOtherActiveJob()) return warnActiveJob();
+  if (!_osoOrderId) { alert("请先选择出库单 / 출고단을 선택하세요"); return; }
+  withActionLock('startOutboundStockOp', btnEl || null, '提交中.../저장중...', async function() {
+    var res = await api({
+      action: "v2_outbound_stock_op_start",
+      outbound_order_id: _osoOrderId,
+      worker_id: getWorkerId(),
+      worker_name: getWorkerName()
+    });
+    if (res && res.ok) {
+      saveActiveJob(res.job_id, res.worker_seg_id);
+      if (!res.already_joined) {
+        alert(res.is_new_job ? "已创建库内操作任务 / 작업 생성됨" : "已加入库内操作任务 / 작업 참여됨");
+      }
+      showStockOpWorking();
+      refreshStockOpWorkers();
+    } else {
+      alert("失败/실패: " + (res ? (res.message || res.error) : "unknown"));
+    }
+  });
+}
+
+async function refreshStockOpWorkers() {
+  if (!_activeJobId) return;
+  var res = await api({ action: "v2_ops_job_detail", job_id: _activeJobId });
+  if (res && res.ok) renderWorkers("osoWorkers", res.workers);
+}
+
+async function finishOutboundStockOp(btnEl) {
+  if (!_activeJobId) { alert("没有进行中的任务 / 진행 중인 작업 없음"); return; }
+  withActionLock('finishOutboundStockOp', btnEl || null, '提交中.../저장중...', async function() {
+    var box = parseInt(document.getElementById("osoBoxCount").value) || 0;
+    var pallet = parseInt(document.getElementById("osoPalletCount").value) || 0;
+    var remark = document.getElementById("osoRemark").value.trim();
+
+    var res = await api({
+      action: "v2_outbound_stock_op_finish",
+      job_id: _activeJobId,
+      worker_id: getWorkerId(),
+      worker_name: getWorkerName(),
+      box_count: box,
+      pallet_count: pallet,
+      remark: remark,
+      complete_job: true
+    });
+    if (res && res.ok) {
+      alert("库内操作已完成 / 작업 완료\n出库计划等待客服更新 / 출고 계획은 고객지원팀이 업데이트 예정");
+      var resumed = await checkAndResumeParent();
+      if (!resumed) {
+        clearActiveJob();
+        goPage("home");
+      }
+    } else if (res && res.error === "already_completed") {
+      alert("任务已完成，请勿重复提交\n작업이 이미 완료되었습니다");
+      clearActiveJob();
+      goPage("home");
+    } else {
+      alert("失败/실패: " + (res ? (res.message || res.error) : "unknown"));
+    }
+  });
+}
+
+async function saveOutboundStockOpResult(btnEl) {
+  await finishOutboundStockOp(btnEl);
+}
+
+function outboundStockOpGoBack() {
+  if (_activeJobId) {
+    alert("库内操作进行中，请先完成 / 진행 중입니다. 먼저 완료하세요");
+    return;
+  }
+  goPage("outbound_menu");
 }
 
 // ===== Issue List =====
@@ -3084,8 +3288,10 @@ async function startBulkJob(btnEl) {
         if (ob.planned_box_count) h += '<div><b>计划箱数/계획 박스:</b> ' + ob.planned_box_count + '</div>';
         if (ob.planned_pallet_count) h += '<div><b>计划托数/계획 팔레트:</b> ' + ob.planned_pallet_count + '</div>';
         if (ob.instruction) h += '<div><b>作业说明/작업 설명:</b> ' + esc(ob.instruction) + '</div>';
+        h += '<div id="bulkLinkedObMaterial" style="margin-top:6px;"></div>';
         obBody.innerHTML = h || '<span class="muted">无关联出库单</span>';
         obCard.style.display = "";
+        if (ob.id) renderOutboundMaterials(ob.id, "bulkLinkedObMaterial");
       } else if (obCard) {
         obCard.style.display = "none";
       }

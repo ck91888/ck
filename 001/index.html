@@ -2,10 +2,10 @@
 <html lang="zh">
 <head>
   <meta charset="utf-8">
-  <!-- cache-bust: 20260428b -->
+  <!-- cache-bust: 20260428d -->
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
   <title>现场执行系统 V2 / 현장 실행 시스템</title>
-  <link rel="stylesheet" href="style.css?v=20260428b">
+  <link rel="stylesheet" href="style.css?v=20260428d">
   <script src="../shared/html5-qrcode.min.js"></script>
 </head>
 <body>
@@ -509,7 +509,43 @@
     <button class="btn btn-primary" onclick="goPage('generic_job',{flow_stage:'outbound',job_type:'pack_direct',title:'代发打包/직배송 포장'})">代发打包 / 직배송 포장</button>
     <button class="btn btn-primary" onclick="goPage('generic_job',{flow_stage:'outbound',biz_class:'direct_ship',job_type:'change_order',title:'换单操作 / 송장 교체'})">换单操作 / 송장 교체</button>
     <button class="btn btn-primary" onclick="goPage('outbound_load')">出库装货 / 출고 상차</button>
+    <button class="btn btn-primary" onclick="goPage('outbound_stock_op')">库内操作 / 창고 재고 작업</button>
     <button class="btn btn-primary" onclick="goPage('verify_scan')">扫码核对 / 스캔 검수</button>
+  </div>
+</div>
+
+<!-- Outbound Stock Operation -->
+<div id="page-outbound_stock_op" class="page">
+  <div class="topbar">
+    <button class="back-btn" onclick="outboundStockOpGoBack()">← 返回/뒤로</button>
+    <div class="page-title">库内操作 / 창고 재고 작업</div>
+  </div>
+  <div id="osoEntryCard" class="card">
+    <div class="muted" style="font-size:12px;margin-bottom:6px;">使用仓库现货的库内操作出库单 / 창고 재고로 작업하는 출고단</div>
+    <label>选择待操作出库单 / 작업할 출고단 선택</label>
+    <select id="osoOrderSelect" onchange="onStockOpOrderSelect()"><option value="">-- 选择/선택 --</option></select>
+    <button class="btn btn-outline btn-sm mt-10" onclick="loadStockOpCandidates()">刷新 / 새로고침</button>
+    <div id="osoOrderInfo" class="muted mt-10" style="font-size:13px;">--</div>
+    <div id="osoMaterialBox" class="mt-10" style="font-size:13px;"></div>
+    <div style="height:8px"></div>
+    <button class="btn btn-success" onclick="startOutboundStockOp(this)">开始库内操作 / 작업 시작</button>
+  </div>
+  <div id="osoActionCard" class="card" style="display:none;">
+    <button class="btn btn-danger" onclick="finishOutboundStockOp(this)">结束库内操作 / 작업 종료</button>
+  </div>
+  <div class="card">
+    <div class="card-title">当前参与人员 / 현재 참여 인원</div>
+    <div id="osoWorkers" class="workers-panel"><span class="muted">--</span></div>
+  </div>
+  <div id="osoResultCard" class="card" style="display:none;">
+    <div class="card-title">操作结果 / 작업 결과</div>
+    <label>箱数 / 박스 수</label>
+    <input type="number" id="osoBoxCount" placeholder="0">
+    <label>托数 / 팔레트 수</label>
+    <input type="number" id="osoPalletCount" placeholder="0">
+    <label>备注 / 비고</label>
+    <textarea id="osoRemark" rows="2"></textarea>
+    <button class="btn btn-primary mt-10" onclick="saveOutboundStockOpResult(this)">保存并完成 / 저장 후 완료</button>
   </div>
 </div>
 
@@ -585,6 +621,7 @@
       <button class="btn btn-outline btn-sm" onclick="clearOutboundResolve()" style="flex:1;">清空重选 / 초기화</button>
     </div>
     <div id="obResolveResult" style="margin-bottom:8px;font-size:13px;"></div>
+    <div id="obLoadMaterialBox" style="margin-bottom:8px;font-size:13px;"></div>
     <div style="margin-top:8px;">
       <label style="font-size:12px;color:#888;">或从系统候选单选择 / 또는 시스템 후보 선택:</label>
       <select id="loadOrderSelect" onchange="onOutboundCandidateSelect()"><option value="">-- 选择/선택 --</option></select>
@@ -810,7 +847,7 @@
 
 <input type="file" id="photoInput" accept="image/*" capture="environment" style="display:none;" onchange="handlePhotoUpload(this)">
 
-<script src="config.js?v=20260428b"></script>
-<script src="app.js?v=20260428b"></script>
+<script src="config.js?v=20260428d"></script>
+<script src="app.js?v=20260428d"></script>
 </body>
 </html>

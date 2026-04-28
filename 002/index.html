@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>协同中心 V2 / 협업센터</title>
-  <link rel="stylesheet" href="style.css?v=20260428c">
+  <link rel="stylesheet" href="style.css?v=20260428d">
 </head>
 <body>
 
@@ -130,9 +130,29 @@
         <option value="issued">已下发</option>
         <option value="working">操作中</option>
         <option value="ready_to_ship">待出库</option>
+        <option value="operation_reserved" data-i18n="status_operation_reserved">操作预约</option>
+        <option value="stock_operating" data-i18n="status_stock_operating">操作中(库内)</option>
+        <option value="pending_outbound_update" data-i18n="status_pending_outbound_update">待更新出库计划</option>
+        <option value="preparing_outbound" data-i18n="status_preparing_outbound">出库准备中</option>
         <option value="shipped">已出库</option>
         <option value="reopen_pending">待再操作</option>
         <option value="cancelled">已取消 / 취소됨</option>
+      </select>
+      <select id="obFilterBizClass" onchange="loadOutboundList()">
+        <option value="" data-i18n="filter_biz_class">业务分类(全部)</option>
+        <option value="direct_ship" data-i18n="biz_direct_ship">代发</option>
+        <option value="bulk" data-i18n="biz_bulk">大货</option>
+        <option value="return" data-i18n="biz_return">退件</option>
+      </select>
+      <select id="obFilterUsesStockOp" onchange="loadOutboundList()">
+        <option value="" data-i18n="filter_uses_stock_op">是否库内操作(全部)</option>
+        <option value="1" data-i18n="uses_stock_operation_yes">是</option>
+        <option value="0" data-i18n="uses_stock_operation_no">否</option>
+      </select>
+      <select id="obFilterHasMaterial" onchange="loadOutboundList()">
+        <option value="" data-i18n="filter_has_material">资料状态(全部)</option>
+        <option value="1" data-i18n="outbound_material_uploaded">资料已上传</option>
+        <option value="0" data-i18n="outbound_material_missing">无资料</option>
       </select>
       <span class="filter-label" data-i18n="account_filter">是否记帐</span>
       <select id="outboundFilterAccounted" onchange="loadOutboundList()">
@@ -157,6 +177,22 @@
       <div class="form-group">
         <label>客户</label>
         <input id="oc-customer" type="text">
+      </div>
+      <div class="form-group">
+        <label data-i18n="biz_class">业务分类 <span style="color:#c62828;">*</span></label>
+        <select id="oc-biz-class">
+          <option value="" data-i18n="filter_all">-- 请选择 / 선택 --</option>
+          <option value="direct_ship" data-i18n="biz_direct_ship">代发 / 직배송</option>
+          <option value="bulk" data-i18n="biz_bulk">大货 / 대량화물</option>
+          <option value="return" data-i18n="biz_return">退件 / 반품</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label data-i18n="uses_stock_operation_label">是否使用仓库现货进行库内操作</label>
+        <select id="oc-uses-stock-op">
+          <option value="0" data-i18n="uses_stock_operation_no">否：普通出库</option>
+          <option value="1" data-i18n="uses_stock_operation_yes">是：先库内操作，后更新出库计划</option>
+        </select>
       </div>
       <div class="form-group">
         <label>目的地 / 목적지</label>
@@ -184,6 +220,19 @@
       <div class="form-group">
         <label>作业说明</label>
         <textarea id="oc-instruction" rows="3"></textarea>
+      </div>
+      <div class="form-group">
+        <label data-i18n="expected_ship_at">预计出库时间 / 예상 출고 시간</label>
+        <input id="oc-expected-ship-at" type="datetime-local">
+      </div>
+      <div class="form-group">
+        <label data-i18n="outbound_requirement">出库要求 / 출고 요구사항</label>
+        <textarea id="oc-outbound-requirement" rows="2" placeholder="如：温度要求、装载方式、单据要求等"></textarea>
+      </div>
+      <div class="form-group">
+        <label data-i18n="outbound_materials">出库资料 / 출고 자료</label>
+        <input id="oc-materials" type="file" multiple accept=".xlsx,.xls,.csv,.pdf,.jpg,.jpeg,.png">
+        <div class="muted" style="font-size:12px;margin-top:4px;" data-i18n="outbound_materials_upload_hint">支持 Excel / PDF / 图片（可选）</div>
       </div>
       <div class="form-row" style="display:flex;gap:12px;">
         <div class="form-group" style="flex:1">
@@ -467,7 +516,7 @@
 
 <input type="file" id="fileInput" accept="image/*" style="display:none;" onchange="handleFileUpload(this)">
 
-<script src="config.js?v=20260428c"></script>
+<script src="config.js?v=20260428d"></script>
 <script src="../shared/qrcode.min.js"></script>
 <!--
   TODO(SheetJS 动态加载): xlsx.full.min.js ~923KB，目前同步加载，
@@ -477,6 +526,6 @@
   onVerifyFilePick / 表格导出流程。
 -->
 <script src="../shared/xlsx.full.min.js"></script>
-<script src="app.js?v=20260428c"></script>
+<script src="app.js?v=20260428d"></script>
 </body>
 </html>

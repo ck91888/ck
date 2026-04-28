@@ -440,6 +440,14 @@ async function exportOrders(btn) {
       计划板数: r.planned_pallet_count || 0,
       实际箱数: r.actual_box_count || 0,
       实际板数: r.actual_pallet_count || 0,
+      是否库内操作: (r.uses_stock_operation === 1 || r.uses_stock_operation === '1') ? '是' : '否',
+      出库单状态: r.outbound_status || '',
+      预计出库时间: r.expected_ship_at || '',
+      出库要求: r.outbound_requirement || '',
+      库内操作子状态: r.stock_op_status || '',
+      库内操作完成时间: r.stock_op_completed_at || '',
+      库内操作完成人: r.stock_op_completed_by || '',
+      出库资料数: r.material_count || 0,
       job_id: r.job_id,
       原始结果JSON: r.raw_result_json_compact || ''
     };

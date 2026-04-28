@@ -11,6 +11,7 @@ var JOB_TYPE_LABELS = {
   inbound_bulk: "大货入库",
   inbound_return: "退件入库",
   load_outbound: "出库装货",
+  outbound_stock_op: "库内操作",
   pick_direct: "代发拣货",
   bulk_op: "大货操作",
   pack_direct: "代发打包",
@@ -78,6 +79,7 @@ var JOB_TYPE_OPTIONS = [
   { value: 'pack_direct', label: '代发打包' },
   { value: 'change_order', label: '换单操作' },
   { value: 'load_outbound', label: '出库装货' },
+  { value: 'outbound_stock_op', label: '库内操作' },
   { value: 'verify_scan', label: '扫码核对' },
   { value: 'inventory', label: '盘点' },
   { value: 'disposal', label: '废弃处理' },
@@ -111,5 +113,5 @@ var WMS_TYPE_TO_JOB_TYPES = {
   pack_direct: ['pack_direct'],
   pick_direct: ['pick_direct'],
   inbound: ['inbound_direct', 'inbound_bulk', 'inbound_return'],
-  outbound: ['load_outbound', 'verify_scan', 'bulk_op']
+  outbound: ['load_outbound', 'verify_scan', 'bulk_op', 'outbound_stock_op']
 };

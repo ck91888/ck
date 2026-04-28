@@ -966,10 +966,23 @@ const MIGRATIONS = [
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_inbound_biz_task_unique ON v2_inbound_plan_biz_tasks(plan_id, biz_class)`,
   `CREATE INDEX IF NOT EXISTS idx_v2_inbound_biz_task_plan ON v2_inbound_plan_biz_tasks(plan_id)`,
   `CREATE INDEX IF NOT EXISTS idx_v2_inbound_biz_task_biz_status ON v2_inbound_plan_biz_tasks(biz_class, status)`,
+
+  // ---- v2.20260428b：出库作业单业务分类 + 库内操作型 + 出库资料 ----
+  `ALTER TABLE v2_outbound_orders ADD COLUMN uses_stock_operation INTEGER DEFAULT 0`,
+  `ALTER TABLE v2_outbound_orders ADD COLUMN stock_operation_status TEXT DEFAULT ''`,
+  `ALTER TABLE v2_outbound_orders ADD COLUMN stock_operation_job_id TEXT DEFAULT ''`,
+  `ALTER TABLE v2_outbound_orders ADD COLUMN stock_operation_completed_at TEXT DEFAULT ''`,
+  `ALTER TABLE v2_outbound_orders ADD COLUMN stock_operation_completed_by TEXT DEFAULT ''`,
+  `ALTER TABLE v2_outbound_orders ADD COLUMN stock_operation_result_json TEXT DEFAULT '{}'`,
+  `ALTER TABLE v2_outbound_orders ADD COLUMN expected_ship_at TEXT DEFAULT ''`,
+  `ALTER TABLE v2_outbound_orders ADD COLUMN outbound_requirement TEXT DEFAULT ''`,
+  `ALTER TABLE v2_outbound_orders ADD COLUMN outbound_docs_required INTEGER DEFAULT 0`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_outbound_biz_status_date ON v2_outbound_orders(biz_class, status, order_date, created_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_outbound_stock_status_date ON v2_outbound_orders(uses_stock_operation, status, order_date, created_at)`,
 ];
 
 // 每次发布迁移变化时手动 +1（patch 段），冷启动只比对一次字符串即可跳过整段 MIGRATIONS
-const CURRENT_SCHEMA_VERSION = 'v2.20260428a';
+const CURRENT_SCHEMA_VERSION = 'v2.20260428b';
 
 let _migrated = false;
 async function ensureMigrated(db) {
@@ -1075,11 +1088,11 @@ route("v2_dashboard_summary", async (body, env) => {
     // ---- outbounds：按 order_date / created_at 顺序 ----
     env.DB.prepare(
       `SELECT COUNT(*) AS c FROM v2_outbound_orders
-        WHERE status IN ('pending_issue','issued','working','ready_to_ship')`
+        WHERE status IN ('pending_issue','issued','working','ready_to_ship','preparing_outbound','operation_reserved','stock_operating','pending_outbound_update')`
     ).first(),
     env.DB.prepare(
       `SELECT * FROM v2_outbound_orders
-        WHERE status IN ('pending_issue','issued','working','ready_to_ship')
+        WHERE status IN ('pending_issue','issued','working','ready_to_ship','preparing_outbound','operation_reserved','stock_operating','pending_outbound_update')
         ORDER BY order_date ASC, created_at ASC LIMIT 3`
     ).all(),
 
@@ -1344,28 +1357,41 @@ route("v2_issue_handle_finish", async (body, env) => {
 // =====================================================
 route("v2_outbound_order_create", async (body, env) => {
   if (!isAuth(body, env)) return err("unauthorized", 401);
+  // 业务分类必填（direct_ship/bulk/return）
+  const VALID_BIZ = ['direct_ship','bulk','return'];
+  const biz_class = String(body.biz_class || "").trim();
+  if (!biz_class || VALID_BIZ.indexOf(biz_class) === -1) {
+    return err("biz_class 必须是 direct_ship/bulk/return / 업무 분류는 direct_ship/bulk/return 중 하나여야 합니다");
+  }
+  const uses_stock_operation = (Number(body.uses_stock_operation) === 1) ? 1 : 0;
   return withIdem(env, body, "v2_outbound_order_create", async () => {
     const outbound_mode = String(body.outbound_mode || "").trim();
     const VALID_MODES = ['warehouse_dispatch','customer_pickup','milk_express','milk_pallet','container_pickup'];
-    if (!outbound_mode || !VALID_MODES.includes(outbound_mode)) return err("invalid outbound_mode");
+    if (!outbound_mode || !VALID_MODES.includes(outbound_mode)) return { ok: false, error: "invalid outbound_mode" };
     const id = "OB-" + uid();
     const t = now();
     const order_date = String(body.order_date || kstToday());
     const display_no = await nextOutboundDisplayNo(env, order_date);
-    // 口径调整：所有出库单均联动大货操作，biz_class 固定 'bulk'；
-    // 不再从前端接收 biz_class / operation_mode / remark
+    // 库内操作型：初始状态 operation_reserved；普通：pending_issue
+    const initStatus = uses_stock_operation === 1 ? 'operation_reserved' : 'pending_issue';
+    const initStockOpStatus = uses_stock_operation === 1 ? 'reserved' : '';
+    const expected_ship_at = String(body.expected_ship_at || "").trim();
+    const outbound_requirement = String(body.outbound_requirement || "").trim();
     await env.DB.prepare(`
       INSERT INTO v2_outbound_orders(id, order_date, customer, biz_class, operation_mode,
         outbound_mode, instruction, remark, status, created_by, created_at, updated_at,
         destination, po_no, wms_work_order_no,
-        planned_box_count, planned_pallet_count, actual_box_count, actual_pallet_count, display_no)
-      VALUES(?,?,?,'bulk','',?,?,'','pending_issue',?,?,?,?,?,?,?,?,0,0,?)
+        planned_box_count, planned_pallet_count, actual_box_count, actual_pallet_count, display_no,
+        uses_stock_operation, stock_operation_status, expected_ship_at, outbound_requirement)
+      VALUES(?,?,?,?,'',?,?,'',?,?,?,?,?,?,?,?,?,0,0,?,?,?,?,?)
     `).bind(
       id,
       order_date,
       String(body.customer || ""),
+      biz_class,
       outbound_mode,
       String(body.instruction || ""),
+      initStatus,
       String(body.created_by || ""),
       t, t,
       String(body.destination || ""),
@@ -1373,7 +1399,11 @@ route("v2_outbound_order_create", async (body, env) => {
       String(body.wms_work_order_no || ""),
       Number(body.planned_box_count || 0),
       Number(body.planned_pallet_count || 0),
-      display_no
+      display_no,
+      uses_stock_operation,
+      initStockOpStatus,
+      expected_ship_at,
+      outbound_requirement
     ).run();
 
     const lines = body.lines || [];
@@ -1396,6 +1426,9 @@ route("v2_outbound_order_list", async (body, env) => {
   const end = String(body.end_date || "").trim();
   const status = String(body.status || "").trim();
   const accounted = String(body.accounted == null ? "" : body.accounted).trim();
+  const biz_class = String(body.biz_class || "").trim();
+  const usesStockRaw = String(body.uses_stock_operation == null ? "" : body.uses_stock_operation).trim();
+  const hasMaterialRaw = String(body.has_material == null ? "" : body.has_material).trim();
   const { limit, offset } = pageParams(body);
   let sql = "SELECT * FROM v2_outbound_orders WHERE 1=1";
   const binds = [];
@@ -1405,10 +1438,31 @@ route("v2_outbound_order_list", async (body, env) => {
   else { sql += " AND status != 'cancelled'"; } // 默认"全部状态"排除已取消，仅当显式筛 cancelled 才返回
   if (accounted === "1") { sql += " AND accounted=1"; }
   else if (accounted === "0") { sql += " AND (accounted IS NULL OR accounted=0)"; }
+  if (biz_class) { sql += " AND biz_class=?"; binds.push(biz_class); }
+  if (usesStockRaw === "1") { sql += " AND uses_stock_operation=1"; }
+  else if (usesStockRaw === "0") { sql += " AND (uses_stock_operation IS NULL OR uses_stock_operation=0)"; }
+  if (hasMaterialRaw === "1") {
+    sql += " AND EXISTS (SELECT 1 FROM v2_attachments a WHERE a.related_doc_type='outbound_order' AND a.related_doc_id=v2_outbound_orders.id AND a.attachment_category='outbound_material')";
+  } else if (hasMaterialRaw === "0") {
+    sql += " AND NOT EXISTS (SELECT 1 FROM v2_attachments a WHERE a.related_doc_type='outbound_order' AND a.related_doc_id=v2_outbound_orders.id AND a.attachment_category='outbound_material')";
+  }
   sql += " ORDER BY order_date DESC, created_at DESC LIMIT ? OFFSET ?";
   binds.push(limit, offset);
   const rs = await env.DB.prepare(sql).bind(...binds).all();
-  return json({ ok: true, items: rs.results || [], limit, offset });
+  const items = rs.results || [];
+  // 注入 material_count（CHUNK=80 防 D1 too many SQL variables）
+  if (items.length > 0) {
+    const ids = items.map(o => o.id);
+    const matRows = await batchSelectInGlobal(env,
+      `SELECT related_doc_id AS id, COUNT(*) AS c FROM v2_attachments
+        WHERE related_doc_type='outbound_order' AND attachment_category='outbound_material'
+          AND related_doc_id IN (PLACEHOLDER) GROUP BY related_doc_id`,
+      ids);
+    const map = {};
+    for (const r of matRows) map[r.id] = Number(r.c || 0);
+    for (const it of items) it.material_count = Number(map[it.id] || 0);
+  }
+  return json({ ok: true, items, limit, offset });
 });
 
 route("v2_outbound_order_detail", async (body, env) => {
@@ -1436,6 +1490,9 @@ route("v2_outbound_order_detail", async (body, env) => {
     ).bind(jid).all();
     allAtts = allAtts.concat(jAtts.results || []);
   }
+  // 注入 material_count
+  const materialCount = (orderAtts.results || []).filter(a => a.attachment_category === 'outbound_material').length;
+  row.material_count = materialCount;
   return json({
     ok: true,
     order: row,
@@ -1463,6 +1520,11 @@ route("v2_outbound_order_update_status", async (body, env) => {
     "ready_to_ship": ["reopen_pending", "cancelled"],
     "shipped":       [],
     "reopen_pending": ["cancelled"],
+    // 库内操作型出库单状态
+    "operation_reserved":      ["cancelled"],
+    "stock_operating":         ["cancelled"],
+    "pending_outbound_update": ["cancelled"],
+    "preparing_outbound":      ["reopen_pending", "cancelled"],
   };
   const validTargets = allowed[cur] || [];
   if (!validTargets.includes(newStatus)) {
@@ -1528,6 +1590,53 @@ route("v2_outbound_order_mark_accounted", async (body, env) => {
   return json({ ok: true, accounted, accounted_by: accounted ? operator : '', accounted_at: accounted ? t : '' });
 });
 
+// ===== 出库作业单：客服更新预计出库计划（库内操作完成后） =====
+route("v2_outbound_order_update_ship_plan", async (body, env) => {
+  if (!isAuth(body, env)) return err("unauthorized", 401);
+  const id = String(body.id || "").trim();
+  if (!id) return err("missing id");
+  return withIdem(env, body, "v2_outbound_order_update_ship_plan", async () => {
+    const order = await env.DB.prepare("SELECT * FROM v2_outbound_orders WHERE id=?").bind(id).first();
+    if (!order) return { ok: false, error: "not_found", message: "出库单不存在" };
+    const cur = String(order.status || "");
+    const ALLOWED_FROM = ['pending_outbound_update', 'operation_reserved', 'issued', 'preparing_outbound'];
+    if (ALLOWED_FROM.indexOf(cur) === -1) {
+      return { ok: false, error: "invalid_status",
+        message: "当前状态（" + cur + "）不允许更新出库计划 / 현재 상태에서는 출고 계획을 업데이트할 수 없습니다" };
+    }
+    const VALID_MODES = ['warehouse_dispatch','customer_pickup','milk_express','milk_pallet','container_pickup'];
+    const expected_ship_at = String(body.expected_ship_at || "").trim();
+    const outbound_mode = String(body.outbound_mode || "").trim();
+    const destination = String(body.destination || "").trim();
+    const outbound_requirement = String(body.outbound_requirement || "").trim();
+    const remark = String(body.remark || "").trim();
+    if (outbound_mode && VALID_MODES.indexOf(outbound_mode) === -1) {
+      return { ok: false, error: "invalid_outbound_mode" };
+    }
+    const t = now();
+    // 仅更新提供的字段；空串保留原值
+    const sets = ["updated_at=?"];
+    const binds = [t];
+    if (expected_ship_at) { sets.push("expected_ship_at=?"); binds.push(expected_ship_at); }
+    if (outbound_mode)    { sets.push("outbound_mode=?");    binds.push(outbound_mode); }
+    if (destination)      { sets.push("destination=?");      binds.push(destination); }
+    if (outbound_requirement) { sets.push("outbound_requirement=?"); binds.push(outbound_requirement); }
+    if (remark)           { sets.push("remark=?");           binds.push(remark); }
+    // 库内操作型 + pending_outbound_update → preparing_outbound
+    let nextStatus = cur;
+    if (Number(order.uses_stock_operation) === 1 && cur === 'pending_outbound_update') {
+      nextStatus = 'preparing_outbound';
+      sets.push("status=?");
+      binds.push(nextStatus);
+    }
+    binds.push(id);
+    await env.DB.prepare(
+      "UPDATE v2_outbound_orders SET " + sets.join(", ") + " WHERE id=?"
+    ).bind(...binds).run();
+    return { ok: true, status: nextStatus };
+  });
+});
+
 // =====================================================
 // OUTBOUND LOAD — Ops side
 // =====================================================
@@ -1555,7 +1664,7 @@ route("v2_outbound_order_resolve_code", async (body, env) => {
     return json({ ok: true, kind: 'not_found', message: "未找到匹配的出库作业单 / 일치하는 출고작업단을 찾을 수 없습니다" });
   }
 
-  const loadableStatuses = ['issued', 'working', 'ready_to_ship'];
+  const loadableStatuses = ['issued', 'working', 'ready_to_ship', 'preparing_outbound'];
   if (order.status === 'shipped') {
     return json({ ok: true, kind: 'status_not_allowed', order, message: "该出库单已出库，不能再装货 / 이미 출고 완료되어 상차할 수 없습니다" });
   }
@@ -1564,6 +1673,12 @@ route("v2_outbound_order_resolve_code", async (body, env) => {
   }
   if (order.status === 'pending_issue') {
     return json({ ok: true, kind: 'status_not_allowed', order, message: "该出库单尚未下发，请先打印下发 / 아직 배정되지 않았습니다. 먼저 인쇄하세요" });
+  }
+  if (order.status === 'operation_reserved' || order.status === 'stock_operating') {
+    return json({ ok: true, kind: 'status_not_allowed', order, message: "该出库单为库内操作型，仓库操作中尚不能正式装货 / 창고 재고 작업 중이라 상차할 수 없습니다" });
+  }
+  if (order.status === 'pending_outbound_update') {
+    return json({ ok: true, kind: 'status_not_allowed', order, message: "库内操作已完成，待客服更新出库计划 / 창고 작업 완료, 출고 계획 업데이트 대기" });
   }
   if (loadableStatuses.indexOf(order.status) === -1) {
     return json({ ok: true, kind: 'status_not_allowed', order, message: "当前状态（" + order.status + "）不允许装货" });
@@ -1610,8 +1725,9 @@ route("v2_outbound_load_start", async (body, env) => {
       `).bind(job_id, String(body.biz_class || ""), order_id, worker_id, t, t).run();
 
       if (order_id) {
+        // 装货开始时把 order 推到 ready_to_ship（兼容 ready_to_ship/preparing_outbound/issued/working）
         await env.DB.prepare(
-          "UPDATE v2_outbound_orders SET status='ready_to_ship', updated_at=? WHERE id=? AND status IN ('ready_to_ship')"
+          "UPDATE v2_outbound_orders SET status='ready_to_ship', updated_at=? WHERE id=? AND status IN ('ready_to_ship','preparing_outbound','issued','working')"
         ).bind(t, order_id).run();
       }
     }
@@ -1684,6 +1800,196 @@ route("v2_outbound_load_finish", async (body, env) => {
   }
 
   return json({ ok: true, result_id });
+});
+
+// =====================================================
+// OUTBOUND STOCK OPERATION — 库内操作型出库单（仓库现货 → 库内操作 → 客服更新出库计划）
+// =====================================================
+// 列出待执行库内操作的出库单（仓库现场入口用）
+route("v2_outbound_stock_op_list", async (body, env) => {
+  if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  const status = String(body.status || "").trim();
+  let sql = "SELECT * FROM v2_outbound_orders WHERE uses_stock_operation=1";
+  const binds = [];
+  if (status) {
+    sql += " AND status=?";
+    binds.push(status);
+  } else {
+    sql += " AND status IN ('operation_reserved','stock_operating')";
+  }
+  sql += " ORDER BY order_date ASC, created_at ASC LIMIT 200";
+  const rs = await env.DB.prepare(sql).bind(...binds).all();
+  return json({ ok: true, items: rs.results || [] });
+});
+
+// 仓库开始库内操作（创建/复用 ops_jobs，绑定 worker，推 order.status）
+route("v2_outbound_stock_op_start", async (body, env) => {
+  if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  const order_id = String(body.outbound_order_id || body.order_id || "").trim();
+  const worker_id = String(body.worker_id || "").trim();
+  const worker_name = String(body.worker_name || "").trim();
+  if (!order_id) return err("missing outbound_order_id");
+  if (!worker_id) return err("missing worker_id");
+
+  return withIdem(env, body, "v2_outbound_stock_op_start", async () => {
+    const order = await env.DB.prepare("SELECT * FROM v2_outbound_orders WHERE id=?").bind(order_id).first();
+    if (!order) return { ok: false, error: "not_found", message: "出库单不存在" };
+    if (Number(order.uses_stock_operation) !== 1) {
+      return { ok: false, error: "not_stock_op_order", message: "该出库单不是库内操作型" };
+    }
+    const cur = String(order.status || "");
+    if (cur !== 'operation_reserved' && cur !== 'stock_operating') {
+      return { ok: false, error: "invalid_status",
+        message: "当前状态（" + cur + "）不允许开始库内操作" };
+    }
+
+    const t = now();
+    // 复用已存在的 working job
+    let job = await env.DB.prepare(
+      "SELECT * FROM v2_ops_jobs WHERE job_type='outbound_stock_op' AND related_doc_type='outbound_order' AND related_doc_id=? AND status IN ('pending','working') LIMIT 1"
+    ).bind(order_id).first();
+
+    const busy = await checkWorkerBusy(env, worker_id, job ? job.id : null);
+    if (busy) return { ok: false, error: "worker_has_active_job",
+      active_job_id: busy.job_id, active_job_type: busy.job_type };
+
+    let job_id, is_new_job = false;
+    if (job) {
+      job_id = job.id;
+      const dup = await findOpenSeg(env, job_id, worker_id);
+      if (dup) return { ok: true, job_id, worker_seg_id: dup.id, is_new_job: false, already_joined: true };
+      await env.DB.prepare(
+        "UPDATE v2_ops_jobs SET active_worker_count=active_worker_count+1, updated_at=?, status='working' WHERE id=?"
+      ).bind(t, job_id).run();
+    } else {
+      job_id = "JOB-" + uid();
+      is_new_job = true;
+      await env.DB.prepare(`
+        INSERT INTO v2_ops_jobs(id, flow_stage, biz_class, job_type, related_doc_type, related_doc_id,
+          status, created_by, created_at, updated_at, active_worker_count)
+        VALUES(?, 'outbound', ?, 'outbound_stock_op', 'outbound_order', ?, 'working', ?, ?, ?, 1)
+      `).bind(job_id, String(order.biz_class || ""), order_id, worker_id, t, t).run();
+    }
+
+    const seg_id = "WS-" + uid();
+    await env.DB.prepare(`
+      INSERT INTO v2_ops_job_workers(id, job_id, worker_id, worker_name, joined_at)
+      VALUES(?,?,?,?,?)
+    `).bind(seg_id, job_id, worker_id, worker_name, t).run();
+
+    // 同步 order：status=stock_operating, stock_operation_status=working, stock_operation_job_id
+    await env.DB.prepare(
+      "UPDATE v2_outbound_orders SET status='stock_operating', stock_operation_status='working', stock_operation_job_id=?, updated_at=? WHERE id=?"
+    ).bind(job_id, t, order_id).run();
+
+    return { ok: true, job_id, worker_seg_id: seg_id, is_new_job };
+  });
+});
+
+// 仓库完成库内操作（写 result，关闭 segs，推 order.status='pending_outbound_update'）
+route("v2_outbound_stock_op_finish", async (body, env) => {
+  if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  const job_id = String(body.job_id || "").trim();
+  const worker_id = String(body.worker_id || "").trim();
+  const worker_name = String(body.worker_name || "").trim();
+  if (!job_id) return err("missing job_id");
+
+  return withIdem(env, body, "v2_outbound_stock_op_finish", async () => {
+    const t = now();
+    const box_count = Number(body.box_count || 0);
+    const pallet_count = Number(body.pallet_count || 0);
+    const remark = String(body.remark || "");
+    const result_lines_json = String(body.result_lines_json || "");
+    const extraResultJson = String(body.result_json || "");
+
+    // 终态幂等保护
+    const jobCheck = await env.DB.prepare("SELECT status, related_doc_id FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
+    if (!jobCheck) return { ok: false, error: "job_not_found" };
+    if (jobCheck.status === 'completed') {
+      return { ok: false, error: "already_completed", message: "任务已完成，请勿重复提交" };
+    }
+    const order_id = jobCheck.related_doc_id || "";
+
+    // 关闭该 worker 全部 open segs
+    if (worker_id) await closeAllOpenSegs(env, job_id, worker_id, t, 'finished');
+    const realCount = await recalcActiveCount(env, job_id, t);
+
+    // 写 ops_job_results（库内操作明细）
+    const result_id = "RES-" + uid();
+    let resultJsonStr = '';
+    if (extraResultJson) {
+      resultJsonStr = extraResultJson;
+    } else {
+      const resultObj = { box_count, pallet_count, remark };
+      if (result_lines_json) {
+        try { resultObj.result_lines = JSON.parse(result_lines_json); } catch (e) { /* ignore parse */ }
+      }
+      resultJsonStr = JSON.stringify(resultObj);
+    }
+    await env.DB.prepare(`
+      INSERT INTO v2_ops_job_results(id, job_id, box_count, pallet_count, remark, result_json, created_by, created_at)
+      VALUES(?,?,?,?,?,?,?,?)
+    `).bind(result_id, job_id, box_count, pallet_count, remark, resultJsonStr, worker_id, t).run();
+
+    const complete_job = body.complete_job !== false; // 默认完成
+
+    if (complete_job && realCount <= 0) {
+      // 关闭 job
+      await env.DB.prepare(
+        "UPDATE v2_ops_jobs SET status='completed', shared_result_json=?, updated_at=? WHERE id=?"
+      ).bind(resultJsonStr, t, job_id).run();
+
+      // 汇总该 job 全部 results 到 order.stock_operation_result_json
+      const allRes = await env.DB.prepare(
+        "SELECT box_count, pallet_count, remark, result_json, created_by, created_at FROM v2_ops_job_results WHERE job_id=? ORDER BY created_at ASC"
+      ).bind(job_id).all();
+      let sumBox = 0, sumPallet = 0;
+      const lines = [];
+      for (const r of (allRes.results || [])) {
+        sumBox += Number(r.box_count || 0);
+        sumPallet += Number(r.pallet_count || 0);
+        lines.push({
+          box_count: Number(r.box_count || 0),
+          pallet_count: Number(r.pallet_count || 0),
+          remark: r.remark || "",
+          created_by: r.created_by || "",
+          created_at: r.created_at || ""
+        });
+      }
+      const summary = {
+        total_box_count: sumBox,
+        total_pallet_count: sumPallet,
+        last_box_count: box_count,
+        last_pallet_count: pallet_count,
+        last_remark: remark,
+        results: lines
+      };
+
+      // 推 order.status = pending_outbound_update + 写完成时间/人
+      if (order_id) {
+        await env.DB.prepare(
+          `UPDATE v2_outbound_orders
+           SET status='pending_outbound_update',
+               stock_operation_status='completed',
+               stock_operation_completed_at=?,
+               stock_operation_completed_by=?,
+               stock_operation_result_json=?,
+               updated_at=?
+           WHERE id=?`
+        ).bind(t, (worker_name || worker_id || ''), JSON.stringify(summary), t, order_id).run();
+      }
+
+      return { ok: true, result_id, status: 'completed' };
+    }
+
+    // 还有人在做
+    if (complete_job) {
+      await env.DB.prepare(
+        "UPDATE v2_ops_jobs SET status='awaiting_close', updated_at=? WHERE id=?"
+      ).bind(t, job_id).run();
+    }
+    return { ok: true, result_id, status: 'pending' };
+  });
 });
 
 // =====================================================
@@ -6115,7 +6421,8 @@ route("v2_dashboard_order_export", async (body, env) => {
   const inboundIds = [...new Set(jobs.filter(j => isInboundLink(j.related_doc_type) && j.related_doc_id).map(j => j.related_doc_id))];
   const outboundIds = [...new Set(jobs.flatMap(j => {
     const ids = [];
-    if (j.related_doc_type === 'outbound' && j.related_doc_id) ids.push(j.related_doc_id);
+    // 兼容 'outbound' 和 'outbound_order' 两种 related_doc_type 写法
+    if ((j.related_doc_type === 'outbound' || j.related_doc_type === 'outbound_order') && j.related_doc_id) ids.push(j.related_doc_id);
     if (j.linked_outbound_order_id) ids.push(j.linked_outbound_order_id);
     return ids;
   }))];
@@ -6141,7 +6448,9 @@ route("v2_dashboard_order_export", async (body, env) => {
     batchSelectInGlobal(env,
       `SELECT id, customer, display_no, destination, po_no, wms_work_order_no,
               planned_box_count, planned_pallet_count, actual_box_count, actual_pallet_count,
-              accounted, accounted_by, accounted_at
+              accounted, accounted_by, accounted_at,
+              biz_class, status, uses_stock_operation, expected_ship_at, outbound_requirement,
+              stock_operation_status, stock_operation_completed_at, stock_operation_completed_by
        FROM v2_outbound_orders WHERE id IN (PLACEHOLDER)`,
       outboundIds)
   ]);
@@ -6160,6 +6469,17 @@ route("v2_dashboard_order_export", async (body, env) => {
     inboundIds) : [];
   const inboundBizTasksByPlan = {};
   inboundBizTasksAll.forEach(t => { (inboundBizTasksByPlan[t.plan_id] = inboundBizTasksByPlan[t.plan_id] || []).push(t); });
+
+  // 出库资料份数（attachment_category='outbound_material'）
+  const outboundMaterialCntMap = {};
+  if (outboundIds.length > 0) {
+    const matRows = await batchSelectInGlobal(env,
+      `SELECT related_doc_id AS id, COUNT(*) AS c FROM v2_attachments
+        WHERE related_doc_type='outbound_order' AND attachment_category='outbound_material'
+          AND related_doc_id IN (PLACEHOLDER) GROUP BY related_doc_id`,
+      outboundIds);
+    matRows.forEach(r => { outboundMaterialCntMap[r.id] = Number(r.c || 0); });
+  }
 
   const out = jobs.map(j => {
     const ws = workersByJob[j.id] || [];
@@ -6194,16 +6514,17 @@ route("v2_dashboard_order_export", async (body, env) => {
     }
 
     // 业务关联
+    const isOutboundRelType = (t) => (t === 'outbound' || t === 'outbound_order');
     let related = null;
     if (isInboundLink(j.related_doc_type)) related = inboundById[j.related_doc_id] || null;
-    else if (j.related_doc_type === 'outbound') related = outboundById[j.related_doc_id] || null;
+    else if (isOutboundRelType(j.related_doc_type)) related = outboundById[j.related_doc_id] || null;
     const linked_ob = j.linked_outbound_order_id ? outboundById[j.linked_outbound_order_id] : null;
     const customer = (related && related.customer) || (linked_ob && linked_ob.customer) || '';
     const accounted = (related && related.accounted) ?? (linked_ob && linked_ob.accounted) ?? '';
     const accounted_by = (related && related.accounted_by) || (linked_ob && linked_ob.accounted_by) || '';
     const accounted_at_iso = (related && related.accounted_at) || (linked_ob && linked_ob.accounted_at) || '';
     const inbound_display_no = (isInboundLink(j.related_doc_type) && related) ? (related.display_no || related.external_inbound_no || '') : '';
-    const outbound_display_no = (j.related_doc_type === 'outbound' && related) ? (related.display_no || '') : (linked_ob ? linked_ob.display_no || '' : '');
+    const outbound_display_no = (isOutboundRelType(j.related_doc_type) && related) ? (related.display_no || '') : (linked_ob ? linked_ob.display_no || '' : '');
 
     // 入库计划业务类型 / 完成 / 未完成
     let inbound_biz_classes = '', inbound_completed_biz = '', inbound_pending_biz = '';
@@ -6224,7 +6545,9 @@ route("v2_dashboard_order_export", async (body, env) => {
         inbound_pending_biz = pendArr.join('+');
       }
     }
-    const ob_for_fields = (j.related_doc_type === 'outbound' && related) ? related : linked_ob;
+    // 出库作业单（含 related_doc_type='outbound_order'）
+    const outboundRelated = (isOutboundRelType(j.related_doc_type) && j.related_doc_id) ? outboundById[j.related_doc_id] : null;
+    const ob_for_fields = outboundRelated || linked_ob;
     // ob_for_fields 仅可用于 outbound 路径，避免 isInboundLink 时把 inbound_plan 当 outbound 取字段
     const wms_work_order_no = (ob_for_fields && ob_for_fields.wms_work_order_no) || '';
     const destination = (ob_for_fields && ob_for_fields.destination) || '';
@@ -6233,6 +6556,15 @@ route("v2_dashboard_order_export", async (body, env) => {
     const planned_pallet_count = (ob_for_fields && ob_for_fields.planned_pallet_count) || 0;
     const actual_box_count = (ob_for_fields && ob_for_fields.actual_box_count) || 0;
     const actual_pallet_count = (ob_for_fields && ob_for_fields.actual_pallet_count) || 0;
+    // 出库扩展字段（库内操作型 + 资料）
+    const ob_uses_stock_operation = (ob_for_fields && Number(ob_for_fields.uses_stock_operation) === 1) ? 1 : 0;
+    const ob_outbound_status = (ob_for_fields && ob_for_fields.status) || '';
+    const ob_expected_ship_at = (ob_for_fields && ob_for_fields.expected_ship_at) ? fmtKst(ob_for_fields.expected_ship_at) : '';
+    const ob_outbound_requirement = (ob_for_fields && ob_for_fields.outbound_requirement) || '';
+    const ob_stock_op_status = (ob_for_fields && ob_for_fields.stock_operation_status) || '';
+    const ob_stock_op_completed_at = (ob_for_fields && ob_for_fields.stock_operation_completed_at) ? fmtKst(ob_for_fields.stock_operation_completed_at) : '';
+    const ob_stock_op_completed_by = (ob_for_fields && ob_for_fields.stock_operation_completed_by) || '';
+    const ob_material_count = ob_for_fields ? Number(outboundMaterialCntMap[ob_for_fields.id] || 0) : 0;
 
     return {
       job_id: j.id,
@@ -6282,6 +6614,15 @@ route("v2_dashboard_order_export", async (body, env) => {
       outbound_display_no, inbound_display_no,
       wms_work_order_no, destination, po_no,
       planned_box_count, planned_pallet_count, actual_box_count, actual_pallet_count,
+      // 出库扩展（库内操作 / 资料）
+      uses_stock_operation: ob_uses_stock_operation,
+      outbound_status: ob_outbound_status,
+      expected_ship_at: ob_expected_ship_at,
+      outbound_requirement: ob_outbound_requirement,
+      stock_op_status: ob_stock_op_status,
+      stock_op_completed_at: ob_stock_op_completed_at,
+      stock_op_completed_by: ob_stock_op_completed_by,
+      material_count: ob_material_count,
       // 入库计划业务类型 / 完成 / 未完成（多业务类型 V1.2）
       inbound_biz_classes,
       inbound_completed_biz,
