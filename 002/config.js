@@ -232,6 +232,12 @@ var LANG = {
     accounted_yes: "已记帐",
     accounted_no: "未记帐",
     accounted_by_short: "记帐",
+    // 删除已取消单据
+    delete_outbound: "删除该出库单",
+    delete_inbound: "删除该入库计划",
+    confirm_delete_outbound: "确认删除该已取消出库单？删除后不可恢复。",
+    confirm_delete_inbound: "确认删除该已取消入库计划？删除后不可恢复。",
+    delete_success: "删除成功",
   },
   ko: {
     app_title: "협업센터",
@@ -441,6 +447,12 @@ var LANG = {
     accounted_yes: "기장완료",
     accounted_no: "미기장",
     accounted_by_short: "기장",
+    // 取소된 단 삭제
+    delete_outbound: "출고 작업단 삭제",
+    delete_inbound: "입고 계획 삭제",
+    confirm_delete_outbound: "취소된 출고 작업단을 삭제하시겠습니까? 삭제 후 복구할 수 없습니다.",
+    confirm_delete_inbound: "취소된 입고 계획을 삭제하시겠습니까? 삭제 후 복구할 수 없습니다.",
+    delete_success: "삭제 완료",
   }
 };
 

@@ -68,7 +68,8 @@ var _WRITE_ACTIONS = [
   'v2_bulk_op_job_start','v2_bulk_op_job_finish',
   'v2_correction_request_create','v2_admin_dirty_data_cleanup',
   'v2_verify_batch_upload','v2_verify_batch_update_status',
-  'v2_inbound_plan_mark_accounted','v2_outbound_order_mark_accounted'
+  'v2_inbound_plan_mark_accounted','v2_outbound_order_mark_accounted',
+  'v2_inbound_plan_delete','v2_outbound_order_delete'
 ];
 function _genReqId(action) {
   return action + '_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
@@ -1012,6 +1013,10 @@ async function loadOutboundDetail() {
   if (o.status === "reopen_pending") {
     html += '<button class="btn btn-danger" onclick="updateObStatus(\'cancelled\', this)">' + L("status_cancelled") + '</button>';
   }
+  // 已取消单 → 显示删除
+  if (o.status === "cancelled") {
+    html += '<button class="btn btn-danger" style="background:#c62828;border-color:#c62828;" onclick="deleteOutboundOrder(this)">🗑 ' + L("delete_outbound") + '</button>';
+  }
   html += '</div>';
 
   body.innerHTML = html;
@@ -1606,9 +1611,59 @@ async function loadInboundDetail() {
   if (p.status === "pending" || p.status === "arrived_pending_putaway") {
     html += '<button class="btn btn-danger btn-sm" onclick="cancelInboundPlan(this)">' + L("status_cancelled") + '</button>';
   }
+  // 已取消计划 → 显示删除
+  if (p.status === "cancelled") {
+    html += '<button class="btn btn-danger" style="background:#c62828;border-color:#c62828;" onclick="deleteInboundPlan(this)">🗑 ' + L("delete_inbound") + '</button>';
+  }
   html += '</div>';
 
   body.innerHTML = html;
+}
+
+// ===== 删除已取消的入库计划 =====
+async function deleteInboundPlan(btnEl) {
+  if (!_currentInboundId) return;
+  if (!confirm(L("confirm_delete_inbound"))) return;
+  withActionLock('deleteInboundPlan', btnEl || null, '删除中.../삭제 중...', async function() {
+    var res = await api({ action: "v2_inbound_plan_delete", id: _currentInboundId });
+    if (res && res.ok) {
+      alert(L("delete_success"));
+      _currentInboundId = null;
+      goTab("inbound");
+      loadInboundList();
+    } else if (res && res.error === "only_cancelled_can_delete") {
+      alert(res.message || "只能删除已取消的入库计划");
+    } else if (res && res.error === "active_job_exists") {
+      alert(res.message || "仍有进行中的现场任务，不能删除");
+    } else if (res && res.error === "has_ops_history_cannot_delete") {
+      alert(res.message || "该入库计划存在已完成作业历史，不允许删除");
+    } else {
+      alert(L("error") + ": " + (res ? (res.message || res.error) : "unknown"));
+    }
+  });
+}
+
+// ===== 删除已取消的出库作业单 =====
+async function deleteOutboundOrder(btnEl) {
+  if (!_currentOutboundId) return;
+  if (!confirm(L("confirm_delete_outbound"))) return;
+  withActionLock('deleteOutboundOrder', btnEl || null, '删除中.../삭제 중...', async function() {
+    var res = await api({ action: "v2_outbound_order_delete", id: _currentOutboundId });
+    if (res && res.ok) {
+      alert(L("delete_success"));
+      _currentOutboundId = null;
+      goTab("outbound");
+      loadOutboundList();
+    } else if (res && res.error === "only_cancelled_can_delete") {
+      alert(res.message || "只能删除已取消的出库作业单");
+    } else if (res && res.error === "active_job_exists") {
+      alert(res.message || "仍有进行中的现场任务，不能删除");
+    } else if (res && res.error === "has_ops_history_cannot_delete") {
+      alert(res.message || "该出库作业单存在已完成作业历史，不允许删除");
+    } else {
+      alert(L("error") + ": " + (res ? (res.message || res.error) : "unknown"));
+    }
+  });
 }
 
 async function markInboundAccounted(accounted, btnEl) {

@@ -1402,6 +1402,7 @@ route("v2_outbound_order_list", async (body, env) => {
   if (start) { sql += " AND order_date>=?"; binds.push(start); }
   if (end) { sql += " AND order_date<=?"; binds.push(end); }
   if (status) { sql += " AND status=?"; binds.push(status); }
+  else { sql += " AND status != 'cancelled'"; } // 默认"全部状态"排除已取消，仅当显式筛 cancelled 才返回
   if (accounted === "1") { sql += " AND accounted=1"; }
   else if (accounted === "0") { sql += " AND (accounted IS NULL OR accounted=0)"; }
   sql += " ORDER BY order_date DESC, created_at DESC LIMIT ? OFFSET ?";
@@ -2039,6 +2040,7 @@ route("v2_inbound_plan_list", async (body, env) => {
   if (start) { sql += " AND plan_date>=?"; binds.push(start); }
   if (end) { sql += " AND plan_date<=?"; binds.push(end); }
   if (status) { sql += " AND status=?"; binds.push(status); }
+  else { sql += " AND status != 'cancelled'"; } // 默认"全部状态"排除已取消，仅当显式筛 cancelled 才返回
   if (accounted === "1") { sql += " AND accounted=1"; }
   else if (accounted === "0") { sql += " AND (accounted IS NULL OR accounted=0)"; }
   sql += " ORDER BY plan_date DESC, created_at DESC LIMIT ? OFFSET ?";
@@ -2402,6 +2404,90 @@ route("v2_inbound_plan_cancel", async (body, env) => {
   await env.DB.prepare(updateSql).bind(...binds).run();
 
   return json({ ok: true, operator, cancelled_at: t });
+});
+
+// ===== 入库计划：删除（仅 cancelled，且无任何 ops 历史） =====
+route("v2_inbound_plan_delete", async (body, env) => {
+  if (!isAuth(body, env)) return err("unauthorized", 401);
+  const id = String(body.id || body.inbound_plan_id || "").trim();
+  if (!id) return err("missing id");
+
+  return withIdem(env, body, "v2_inbound_plan_delete", async () => {
+    const plan = await env.DB.prepare("SELECT id, status FROM v2_inbound_plans WHERE id=?").bind(id).first();
+    if (!plan) return { ok: false, error: "not_found" };
+    if (plan.status !== 'cancelled') {
+      return { ok: false, error: "only_cancelled_can_delete", message: "只能删除已取消的入库计划，请先取消" };
+    }
+    // 在制 / 待续作业 → 拒（按规范要求二次校验）
+    const activeJob = await env.DB.prepare(
+      "SELECT id, job_type FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND status IN ('pending','working','awaiting_close') LIMIT 1"
+    ).bind(id).first();
+    if (activeJob) {
+      return { ok: false, error: "active_job_exists", message: "仍有进行中的现场任务，不能删除" };
+    }
+    // 已存在 completed ops 历史 → 拒，避免误删正式数据
+    const histJob = await env.DB.prepare(
+      "SELECT id, job_type FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND status='completed' LIMIT 1"
+    ).bind(id).first();
+    if (histJob) {
+      return { ok: false, error: "has_ops_history_cannot_delete", message: "该入库计划存在已完成作业历史，不允许删除" };
+    }
+
+    let deleted = { lines: 0, biz_tasks: 0, attachments: 0, plan: 0 };
+    const linesRs = await env.DB.prepare("DELETE FROM v2_inbound_plan_lines WHERE plan_id=?").bind(id).run();
+    deleted.lines = (linesRs.meta && linesRs.meta.changes) || 0;
+    const tasksRs = await env.DB.prepare("DELETE FROM v2_inbound_plan_biz_tasks WHERE plan_id=?").bind(id).run();
+    deleted.biz_tasks = (tasksRs.meta && tasksRs.meta.changes) || 0;
+    const attsRs = await env.DB.prepare(
+      "DELETE FROM v2_attachments WHERE related_doc_type='inbound_plan' AND related_doc_id=?"
+    ).bind(id).run();
+    deleted.attachments = (attsRs.meta && attsRs.meta.changes) || 0;
+    const planRs = await env.DB.prepare("DELETE FROM v2_inbound_plans WHERE id=?").bind(id).run();
+    deleted.plan = (planRs.meta && planRs.meta.changes) || 0;
+
+    return { ok: true, id, deleted };
+  });
+});
+
+// ===== 出库作业单：删除（仅 cancelled，且无任何 ops 历史） =====
+route("v2_outbound_order_delete", async (body, env) => {
+  if (!isAuth(body, env)) return err("unauthorized", 401);
+  const id = String(body.id || body.outbound_order_id || "").trim();
+  if (!id) return err("missing id");
+
+  return withIdem(env, body, "v2_outbound_order_delete", async () => {
+    const ord = await env.DB.prepare("SELECT id, status FROM v2_outbound_orders WHERE id=?").bind(id).first();
+    if (!ord) return { ok: false, error: "not_found" };
+    if (ord.status !== 'cancelled') {
+      return { ok: false, error: "only_cancelled_can_delete", message: "只能删除已取消的出库作业单，请先取消" };
+    }
+    // 在制 → 拒
+    const activeJob = await env.DB.prepare(
+      "SELECT id, job_type FROM v2_ops_jobs WHERE (related_doc_type='outbound_order' AND related_doc_id=?) OR linked_outbound_order_id=? AND status IN ('pending','working','awaiting_close') LIMIT 1"
+    ).bind(id, id).first();
+    if (activeJob) {
+      return { ok: false, error: "active_job_exists", message: "仍有进行中的现场任务，不能删除" };
+    }
+    // 已 completed 的 ops 历史 → 拒
+    const histJob = await env.DB.prepare(
+      "SELECT id, job_type FROM v2_ops_jobs WHERE ((related_doc_type='outbound_order' AND related_doc_id=?) OR linked_outbound_order_id=?) AND status='completed' LIMIT 1"
+    ).bind(id, id).first();
+    if (histJob) {
+      return { ok: false, error: "has_ops_history_cannot_delete", message: "该出库作业单存在已完成作业历史，不允许删除" };
+    }
+
+    let deleted = { lines: 0, attachments: 0, order: 0 };
+    const linesRs = await env.DB.prepare("DELETE FROM v2_outbound_order_lines WHERE order_id=?").bind(id).run();
+    deleted.lines = (linesRs.meta && linesRs.meta.changes) || 0;
+    const attsRs = await env.DB.prepare(
+      "DELETE FROM v2_attachments WHERE related_doc_type='outbound_order' AND related_doc_id=?"
+    ).bind(id).run();
+    deleted.attachments = (attsRs.meta && attsRs.meta.changes) || 0;
+    const ordRs = await env.DB.prepare("DELETE FROM v2_outbound_orders WHERE id=?").bind(id).run();
+    deleted.order = (ordRs.meta && ordRs.meta.changes) || 0;
+
+    return { ok: true, id, deleted };
+  });
 });
 
 // ===== [DEPRECATED] Dynamic plan finalize: fill info and convert to formal inbound =====
@@ -5321,6 +5407,7 @@ route("v2_admin_cleanup_log_list", async (body, env) => {
   ).all();
   return json({ ok: true, items: rs.results || [] });
 });
+
 
 
 
