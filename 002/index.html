@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>协同中心 V2 / 협업센터</title>
-  <link rel="stylesheet" href="style.css?v=20260430g">
+  <link rel="stylesheet" href="style.css?v=20260430h">
 </head>
 <body>
 
@@ -168,6 +168,7 @@
         <option value="1" data-i18n="accounted_yes">已记帐</option>
       </select>
       <button class="btn btn-outline btn-sm" id="obQueryBtn" onclick="loadOutboundList()">查询</button>
+      <button class="btn btn-outline btn-sm" id="obExportBtn" onclick="exportOutboundOrders(this)">导出出库单 CSV / 출고 작업단 CSV 내보내기</button>
     </div>
     <div id="outboundListBody"></div>
   </div>
@@ -299,6 +300,7 @@
         <option value="1" data-i18n="accounted_yes">已记帐</option>
       </select>
       <button class="btn btn-outline btn-sm" id="ibQueryBtn" onclick="loadInboundList()">查询</button>
+      <button class="btn btn-outline btn-sm" id="ibExportBtn" onclick="exportInboundPlans(this)">导出入库计划 CSV / 입고 계획 CSV 내보내기</button>
     </div>
     <div id="inboundListBody"></div>
   </div>
@@ -501,7 +503,7 @@
 
 <input type="file" id="fileInput" accept="image/*" style="display:none;" onchange="handleFileUpload(this)">
 
-<script src="config.js?v=20260430g"></script>
+<script src="config.js?v=20260430h"></script>
 <script src="../shared/qrcode.min.js"></script>
 <!--
   TODO(SheetJS 动态加载): xlsx.full.min.js ~923KB，目前同步加载，
@@ -511,6 +513,6 @@
   onVerifyFilePick / 表格导出流程。
 -->
 <script src="../shared/xlsx.full.min.js"></script>
-<script src="app.js?v=20260430g"></script>
+<script src="app.js?v=20260430h"></script>
 </body>
 </html>

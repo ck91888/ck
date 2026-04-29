@@ -1027,10 +1027,18 @@ const MIGRATIONS = [
   `CREATE INDEX IF NOT EXISTS idx_v2_outbound_biz_status ON v2_outbound_orders(biz_class, status, order_date)`,
   // 附件
   `CREATE INDEX IF NOT EXISTS idx_v2_attachments_doc_cat ON v2_attachments(related_doc_type, related_doc_id, attachment_category)`,
+
+  // ---- v2.20260430f：入库计划手动强制完成（force complete，区分现场完成 vs 文员强制完成） ----
+  `ALTER TABLE v2_inbound_plans ADD COLUMN force_completed INTEGER DEFAULT 0`,
+  `ALTER TABLE v2_inbound_plans ADD COLUMN force_completed_by TEXT DEFAULT ''`,
+  `ALTER TABLE v2_inbound_plans ADD COLUMN force_completed_at TEXT DEFAULT ''`,
+  `ALTER TABLE v2_inbound_plans ADD COLUMN force_complete_reason TEXT DEFAULT ''`,
+  `ALTER TABLE v2_inbound_plan_biz_tasks ADD COLUMN completion_source TEXT DEFAULT ''`,
+  `ALTER TABLE v2_inbound_plan_biz_tasks ADD COLUMN completion_note TEXT DEFAULT ''`,
 ];
 
 // 每次发布迁移变化时手动 +1（patch 段），冷启动只比对一次字符串即可跳过整段 MIGRATIONS
-const CURRENT_SCHEMA_VERSION = 'v2.20260430e';
+const CURRENT_SCHEMA_VERSION = 'v2.20260430f';
 
 let _migrated = false;
 async function ensureMigrated(db) {
@@ -4258,6 +4266,349 @@ route("v2_inbound_mark_completed", async (body, env) => {
 });
 
 // =====================================================
+// 入库计划：手动强制完成（外部 WMS 已完结 / 仅登记单据；不生成现场工时）
+//   - 允许：pending / arrived_pending_putaway / putting_away / partially_completed
+//   - 禁止：completed / cancelled / 任意 active inbound job 存在的计划
+//   - 自动把所有未完成 biz_task 标 completed（completion_source='manual_force'）
+// =====================================================
+route("v2_inbound_plan_force_complete", async (body, env) => {
+  if (!isAuth(body, env)) return err("unauthorized", 401);
+  const id = String(body.id || "").trim();
+  if (!id) return err("missing id");
+  const reason = String(body.reason || "").trim();
+  if (!reason) return err("reason_required");
+  const operator = String(body.operator_name || body.created_by || "").trim() || '(unknown)';
+  const actual_box_count = body.actual_box_count == null ? null : Number(body.actual_box_count);
+  const actual_pallet_count = body.actual_pallet_count == null ? null : Number(body.actual_pallet_count);
+
+  return withIdem(env, body, "v2_inbound_plan_force_complete", async () => {
+    const plan = await env.DB.prepare("SELECT * FROM v2_inbound_plans WHERE id=?").bind(id).first();
+    if (!plan) return { ok: false, error: "not_found" };
+    if (plan.status === 'completed') return { ok: false, error: "already_completed" };
+    if (plan.status === 'cancelled') return { ok: false, error: "cancelled_cannot_complete" };
+
+    const ALLOWED = ['pending', 'arrived_pending_putaway', 'putting_away', 'partially_completed'];
+    if (ALLOWED.indexOf(plan.status) === -1) {
+      return { ok: false, error: "status_invalid", message: "current status: " + plan.status };
+    }
+
+    // active job 存在 → 不允许（避免和现场作业冲突）
+    const activeJob = await env.DB.prepare(
+      "SELECT id, job_type FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND status IN ('pending','working','awaiting_close') LIMIT 1"
+    ).bind(id).first();
+    if (activeJob) {
+      return { ok: false, error: "active_job_cannot_force_complete", active_job_id: activeJob.id, active_job_type: activeJob.job_type };
+    }
+
+    const t = now();
+    // 确保 biz_tasks 行齐全
+    await ensureInboundPlanBizTasks(env, plan);
+    // 把所有未完成 biz_task 标 completed（manual_force 来源）
+    await env.DB.prepare(`
+      UPDATE v2_inbound_plan_biz_tasks
+        SET status='completed', completed_at=?, completed_by=?, worker_names=?,
+            total_minutes=COALESCE(total_minutes,0),
+            completion_source='manual_force', completion_note=?, updated_at=?
+        WHERE plan_id=? AND status!='completed'
+    `).bind(t, operator, operator, reason, t, id).run();
+
+    // 更新入库计划：force_completed=1 + status=completed + 可选 actual 数量
+    let upd = "UPDATE v2_inbound_plans SET status='completed', updated_at=?, force_completed=1, force_completed_by=?, force_completed_at=?, force_complete_reason=?, manual_completed_by=?, manual_completed_at=?";
+    const binds = [t, operator, t, reason, operator, t];
+    if (actual_box_count != null && Number.isFinite(actual_box_count)) {
+      upd += ", actual_box_count=?";
+      binds.push(actual_box_count);
+    }
+    if (actual_pallet_count != null && Number.isFinite(actual_pallet_count)) {
+      upd += ", actual_pallet_count=?";
+      binds.push(actual_pallet_count);
+    }
+    upd += " WHERE id=?";
+    binds.push(id);
+    await env.DB.prepare(upd).bind(...binds).run();
+
+    return { ok: true, status: 'completed', force_completed: 1, completed_at: t, completed_by: operator };
+  });
+});
+
+// =====================================================
+// 入库计划/出库作业单：协同中心导出 CSV（最大 10000 行）
+// =====================================================
+const _STATUS_LABEL_ZH = {
+  // inbound
+  pending: '未到货', unloading: '卸货中', unloading_putting_away: '卸货中+理货中',
+  arrived_pending_putaway: '已到库待理货', putting_away: '理货中',
+  partially_completed: '部分入库完成', processing: '处理中', completed: '已完成',
+  unloaded_pending_info: '已卸货·待补充信息',
+  // outbound
+  pending_issue: '待下发', issued: '已下发', working: '操作中', ready_to_ship: '待出库',
+  operation_reserved: '操作预约', stock_operating: '操作中(库内)',
+  pending_outbound_update: '待更新出库计划', preparing_outbound: '出库准备中',
+  shipped: '已出库', reopen_pending: '待再操作', cancelled: '已取消'
+};
+const _BIZ_LABEL_ZH = {
+  direct_ship: '代发', bulk: '大货', return: '退件', change_order: '换单', import: '进口'
+};
+const _INBOUND_BIZ_LABEL_ZH = {
+  direct_ship: '代发入库', bulk: '大货入库', return: '退件入库', change_order: '换单入库'
+};
+function _statusLabelZh(s) { return _STATUS_LABEL_ZH[s] || (s || ''); }
+function _bizListLabelZh(arr) {
+  return (arr || []).map(b => _BIZ_LABEL_ZH[b] || b).join('+');
+}
+
+route("v2_inbound_plan_export", async (body, env) => {
+  if (!isAuth(body, env)) return err("unauthorized", 401);
+  const start = String(body.start_date || "").trim();
+  const end = String(body.end_date || "").trim();
+  const status = String(body.status || "").trim();
+  const accounted = String(body.accounted == null ? "" : body.accounted).trim();
+  const biz_class_filter = String(body.biz_class || "").trim();
+  const customer_keyword = String(body.customer_keyword || "").trim();
+  const VALID_BIZ = ['direct_ship','bulk','return','change_order'];
+  let limit = parseInt(body.limit, 10);
+  if (!Number.isFinite(limit) || limit <= 0) limit = 5000;
+  if (limit > 10000) limit = 10000;
+
+  let sql = "SELECT * FROM v2_inbound_plans WHERE source_type != 'return_session'";
+  const binds = [];
+  if (start) { sql += " AND plan_date>=?"; binds.push(start); }
+  if (end) { sql += " AND plan_date<=?"; binds.push(end); }
+  if (status) { sql += " AND status=?"; binds.push(status); }
+  else { sql += " AND status != 'cancelled'"; }
+  if (accounted === "1") { sql += " AND accounted=1"; }
+  else if (accounted === "0") { sql += " AND (accounted IS NULL OR accounted=0)"; }
+  if (biz_class_filter && VALID_BIZ.indexOf(biz_class_filter) !== -1) {
+    sql += " AND ("
+        +    "biz_class=?"
+        +    " OR biz_classes_json LIKE ?"
+        +    " OR EXISTS (SELECT 1 FROM v2_inbound_plan_biz_tasks t WHERE t.plan_id=v2_inbound_plans.id AND t.biz_class=?)"
+        +  ")";
+    binds.push(biz_class_filter, '%"' + biz_class_filter + '"%', biz_class_filter);
+  }
+  if (customer_keyword) {
+    sql += " AND customer LIKE ?";
+    binds.push('%' + customer_keyword + '%');
+  }
+  sql += " ORDER BY plan_date DESC, created_at DESC LIMIT ?";
+  binds.push(limit);
+  const rs = await env.DB.prepare(sql).bind(...binds).all();
+  const rows = rs.results || [];
+  if (rows.length === 0) return json({ ok: true, rows: [], truncated: false });
+
+  const planIds = rows.map(p => p.id);
+
+  const taskRows = await batchSelectInGlobal(env,
+    `SELECT plan_id, biz_class, status, completed_by, worker_names, completed_at, total_minutes, completion_source
+     FROM v2_inbound_plan_biz_tasks WHERE plan_id IN (PLACEHOLDER) ORDER BY biz_class`,
+    planIds);
+  const tasksByPlan = {};
+  for (const r of taskRows) {
+    if (!tasksByPlan[r.plan_id]) tasksByPlan[r.plan_id] = [];
+    tasksByPlan[r.plan_id].push(r);
+  }
+  const linkRows = await batchSelectInGlobal(env,
+    `SELECT id, source_inbound_plan_id, display_no FROM v2_outbound_orders WHERE source_inbound_plan_id IN (PLACEHOLDER)`,
+    planIds);
+  const linkByPlan = {};
+  for (const r of linkRows) {
+    if (!linkByPlan[r.source_inbound_plan_id]) linkByPlan[r.source_inbound_plan_id] = [];
+    linkByPlan[r.source_inbound_plan_id].push(r.display_no || r.id);
+  }
+  const attRows = await batchSelectInGlobal(env,
+    `SELECT related_doc_id AS plan_id, COUNT(*) AS c FROM v2_attachments
+       WHERE related_doc_type='inbound_plan' AND related_doc_id IN (PLACEHOLDER) GROUP BY related_doc_id`,
+    planIds);
+  const attByPlan = {};
+  for (const r of attRows) attByPlan[r.plan_id] = Number(r.c || 0);
+  const planLineRows = await batchSelectInGlobal(env,
+    `SELECT plan_id, SUM(planned_qty) AS pq, SUM(actual_qty) AS aq, SUM(putaway_qty) AS pu
+       FROM v2_inbound_plan_lines WHERE plan_id IN (PLACEHOLDER) GROUP BY plan_id`,
+    planIds);
+
+  const out = rows.map(p => {
+    const bizArr = extractPlanBizClasses(p);
+    const tasks = tasksByPlan[p.id] || [];
+    const completedBiz = tasks.filter(t => t.status === 'completed').map(t => t.biz_class);
+    const pendingBiz = tasks.filter(t => t.status !== 'completed').map(t => t.biz_class);
+    // 入库类型执行状态明细：代发入库=已完成/EMP-xxx/2026-04-30 10:20；大货入库=未完成
+    const taskDetail = tasks.map(t => {
+      const lbl = _INBOUND_BIZ_LABEL_ZH[t.biz_class] || t.biz_class;
+      if (t.status === 'completed') {
+        const who = t.worker_names || t.completed_by || '';
+        const at = t.completed_at ? fmtKst(t.completed_at) : '';
+        const src = t.completion_source === 'manual_force' ? '(手动)' : '';
+        return `${lbl}=已完成${src}/${who}/${at}`;
+      } else {
+        return `${lbl}=未完成`;
+      }
+    }).join('；');
+    const linkedNos = linkByPlan[p.id] || [];
+
+    return {
+      入库单号: p.display_no || p.id,
+      外部WMS单号: p.external_inbound_no || '',
+      计划日期: p.plan_date || '',
+      客户: p.customer || '',
+      状态: _statusLabelZh(p.status),
+      业务分类: _bizListLabelZh(bizArr),
+      已完成入库类型: completedBiz.map(b => _BIZ_LABEL_ZH[b] || b).join('+'),
+      未完成入库类型: pendingBiz.map(b => _BIZ_LABEL_ZH[b] || b).join('+'),
+      入库类型执行状态明细: taskDetail,
+      货物摘要: p.cargo_summary || '',
+      用途: p.purpose || '',
+      预计到达: p.expected_arrival || '',
+      备注: p.remark || '',
+      创建人: p.created_by || '',
+      创建时间: fmtKst(p.created_at),
+      计划箱数: Number(p.planned_box_count || 0),
+      计划托数: Number(p.planned_pallet_count || 0),
+      实际箱数: Number(p.actual_box_count || 0),
+      实际托数: Number(p.actual_pallet_count || 0),
+      是否记账: p.accounted == 1 ? '已记账' : '未记账',
+      记账人: p.accounted_by || '',
+      记账时间: p.accounted_at ? fmtKst(p.accounted_at) : '',
+      关联出库单数量: linkedNos.length,
+      关联出库单号: linkedNos.join('；'),
+      附件数量: attByPlan[p.id] || 0,
+      是否手动完成: Number(p.force_completed || 0) === 1 ? '是' : '否',
+      手动完成人: p.force_completed_by || '',
+      手动完成时间: p.force_completed_at ? fmtKst(p.force_completed_at) : '',
+      手动完成原因: p.force_complete_reason || '',
+      文员直接完结人: p.manual_completed_by || '',
+      文员直接完结时间: p.manual_completed_at ? fmtKst(p.manual_completed_at) : '',
+      来源类型: p.source_type || '',
+      plan_id: p.id
+    };
+  });
+  return json({ ok: true, rows: out, truncated: rows.length >= limit });
+});
+
+route("v2_outbound_order_export", async (body, env) => {
+  if (!isAuth(body, env)) return err("unauthorized", 401);
+  const start = String(body.start_date || "").trim();
+  const end = String(body.end_date || "").trim();
+  const status = String(body.status || "").trim();
+  const accounted = String(body.accounted == null ? "" : body.accounted).trim();
+  const biz_class = String(body.biz_class || "").trim();
+  const customer_keyword = String(body.customer_keyword || "").trim();
+  const usesStockRaw = String(body.uses_stock_operation == null ? "" : body.uses_stock_operation).trim();
+  const hasMaterialRaw = String(body.has_material == null ? "" : body.has_material).trim();
+  let limit = parseInt(body.limit, 10);
+  if (!Number.isFinite(limit) || limit <= 0) limit = 5000;
+  if (limit > 10000) limit = 10000;
+
+  let sql = "SELECT * FROM v2_outbound_orders WHERE 1=1";
+  const binds = [];
+  if (start) { sql += " AND order_date>=?"; binds.push(start); }
+  if (end) { sql += " AND order_date<=?"; binds.push(end); }
+  if (status) { sql += " AND status=?"; binds.push(status); }
+  else { sql += " AND status != 'cancelled'"; }
+  if (accounted === "1") { sql += " AND accounted=1"; }
+  else if (accounted === "0") { sql += " AND (accounted IS NULL OR accounted=0)"; }
+  if (biz_class) { sql += " AND biz_class=?"; binds.push(biz_class); }
+  if (customer_keyword) { sql += " AND customer LIKE ?"; binds.push('%' + customer_keyword + '%'); }
+  if (usesStockRaw === "1") { sql += " AND uses_stock_operation=1"; }
+  else if (usesStockRaw === "0") { sql += " AND (uses_stock_operation IS NULL OR uses_stock_operation=0)"; }
+  if (hasMaterialRaw === "1") {
+    sql += " AND EXISTS (SELECT 1 FROM v2_attachments a WHERE a.related_doc_type='outbound_order' AND a.related_doc_id=v2_outbound_orders.id AND a.attachment_category='outbound_material')";
+  } else if (hasMaterialRaw === "0") {
+    sql += " AND NOT EXISTS (SELECT 1 FROM v2_attachments a WHERE a.related_doc_type='outbound_order' AND a.related_doc_id=v2_outbound_orders.id AND a.attachment_category='outbound_material')";
+  }
+  sql += " ORDER BY order_date DESC, created_at DESC LIMIT ?";
+  binds.push(limit);
+  const rs = await env.DB.prepare(sql).bind(...binds).all();
+  const rows = rs.results || [];
+  if (rows.length === 0) return json({ ok: true, rows: [], truncated: false });
+
+  const ids = rows.map(o => o.id);
+  // 资料：count + 文件名串
+  const matRows = await batchSelectInGlobal(env,
+    `SELECT related_doc_id AS id, file_name FROM v2_attachments
+       WHERE related_doc_type='outbound_order' AND attachment_category='outbound_material'
+         AND related_doc_id IN (PLACEHOLDER)
+       ORDER BY created_at ASC`,
+    ids);
+  const matNamesByOb = {}, matCountByOb = {};
+  for (const r of matRows) {
+    matCountByOb[r.id] = (matCountByOb[r.id] || 0) + 1;
+    if (!matNamesByOb[r.id]) matNamesByOb[r.id] = [];
+    matNamesByOb[r.id].push(r.file_name || '');
+  }
+  // 来源入库计划 display_no
+  const inboundIds = [...new Set(rows.map(r => r.source_inbound_plan_id).filter(Boolean))];
+  const inboundDispNoById = {};
+  if (inboundIds.length > 0) {
+    const ibRows = await batchSelectInGlobal(env,
+      `SELECT id, display_no FROM v2_inbound_plans WHERE id IN (PLACEHOLDER)`,
+      inboundIds);
+    for (const r of ibRows) inboundDispNoById[r.id] = r.display_no || r.id;
+  }
+
+  const _OUTMODE_ZH = {
+    warehouse_dispatch: '仓库叫车', customer_pickup: '客户自提',
+    milk_express: '牛奶快递', milk_pallet: '牛奶托盘', container_pickup: '柜子提货'
+  };
+
+  const out = rows.map(o => {
+    let stockResult = null;
+    try { stockResult = JSON.parse(o.stock_operation_result_json || 'null'); } catch (e) {}
+    const stockResultSummary = stockResult
+      ? '箱:' + Number(stockResult.total_box_count || 0) + ' / 托:' + Number(stockResult.total_pallet_count || 0) + (stockResult.last_remark ? ' / ' + stockResult.last_remark : '')
+      : '';
+    return {
+      出库单号: o.display_no || o.id,
+      作业单日期: o.order_date || '',
+      预计出库时间: o.expected_ship_at || '',
+      客户: o.customer || '',
+      状态: _statusLabelZh(o.status),
+      业务分类: _BIZ_LABEL_ZH[o.biz_class] || o.biz_class || '',
+      是否库内操作: Number(o.uses_stock_operation || 0) === 1 ? '是' : '否',
+      出库模式: _OUTMODE_ZH[o.outbound_mode] || o.outbound_mode || '',
+      目的地: o.destination || '',
+      PO号: o.po_no || '',
+      WMS工单号: o.wms_work_order_no || '',
+      作业说明: o.instruction || '',
+      出库要求: o.outbound_requirement || '',
+      备注: o.remark || '',
+      计划箱数: Number(o.planned_box_count || 0),
+      计划托数: Number(o.planned_pallet_count || 0),
+      实际箱数: Number(o.actual_box_count || 0),
+      实际托数: Number(o.actual_pallet_count || 0),
+      库内操作状态: o.stock_operation_status || '',
+      库内操作完成人: o.stock_operation_completed_by || '',
+      库内操作完成时间: o.stock_operation_completed_at ? fmtKst(o.stock_operation_completed_at) : '',
+      库内操作结果: stockResultSummary,
+      提货车辆: o.pickup_vehicle_no || '',
+      司机姓名: o.pickup_driver_name || '',
+      司机电话: o.pickup_driver_phone || '',
+      提货人: o.pickup_person_name || '',
+      提货公司: o.pickup_company || '',
+      预计提货时间: o.pickup_time || '',
+      提货备注: o.pickup_note || '',
+      提货信息确认人: o.pickup_confirmed_by || '',
+      提货信息确认时间: o.pickup_confirmed_at ? fmtKst(o.pickup_confirmed_at) : '',
+      是否待仓库确认: Number(o.warehouse_ack_required || 0) === 1 ? '是' : '否',
+      变更确认人: o.warehouse_ack_by || '',
+      变更确认时间: o.warehouse_ack_at ? fmtKst(o.warehouse_ack_at) : '',
+      最后修改人: o.last_modified_by || '',
+      最后修改时间: o.last_modified_at ? fmtKst(o.last_modified_at) : '',
+      版本号: Number(o.revision_no || 0),
+      是否记账: o.accounted == 1 ? '已记账' : '未记账',
+      记账人: o.accounted_by || '',
+      记账时间: o.accounted_at ? fmtKst(o.accounted_at) : '',
+      出库资料数量: matCountByOb[o.id] || 0,
+      出库资料文件名: (matNamesByOb[o.id] || []).join('；'),
+      来源入库计划: inboundDispNoById[o.source_inbound_plan_id] || '',
+      创建人: o.created_by || '',
+      创建时间: fmtKst(o.created_at),
+      order_id: o.id
+    };
+  });
+  return json({ ok: true, rows: out, truncated: rows.length >= limit });
+});
+
+// =====================================================
 // GENERIC OPS JOB — for flexible use
 // =====================================================
 route("v2_ops_job_start", async (body, env) => {
@@ -6874,12 +7225,21 @@ route("v2_dashboard_order_detail", async (body, env) => {
 
   // 关联单据的备注（让单子详情能直接看到客服备注 / 出库要求 等）
   let inbound_remark = '';
+  let inbound_force_completed = 0, inbound_force_completed_by = '', inbound_force_completed_at = '', inbound_force_complete_reason = '';
   let outbound_requirement = '', ob_instruction = '', ob_remark = '', ob_pickup_note = '';
   const isInboundLink = (t) => (t === 'inbound_plan' || t === 'inbound');
   const isOutboundRelType = (t) => (t === 'outbound' || t === 'outbound_order');
   if (isInboundLink(job.related_doc_type) && job.related_doc_id) {
-    const ib = await env.DB.prepare("SELECT remark FROM v2_inbound_plans WHERE id=?").bind(job.related_doc_id).first();
-    if (ib) inbound_remark = ib.remark || '';
+    const ib = await env.DB.prepare(
+      "SELECT remark, force_completed, force_completed_by, force_completed_at, force_complete_reason FROM v2_inbound_plans WHERE id=?"
+    ).bind(job.related_doc_id).first();
+    if (ib) {
+      inbound_remark = ib.remark || '';
+      inbound_force_completed = Number(ib.force_completed) === 1 ? 1 : 0;
+      inbound_force_completed_by = ib.force_completed_by || '';
+      inbound_force_completed_at = ib.force_completed_at ? fmtKst(ib.force_completed_at) : '';
+      inbound_force_complete_reason = ib.force_complete_reason || '';
+    }
   }
   const obId = (isOutboundRelType(job.related_doc_type) && job.related_doc_id) ? job.related_doc_id : (job.linked_outbound_order_id || '');
   if (obId) {
@@ -6902,6 +7262,10 @@ route("v2_dashboard_order_detail", async (body, env) => {
     pick_worker_docs: pickDocsRs.results || [],
     parsed,
     inbound_remark,
+    inbound_force_completed,
+    inbound_force_completed_by,
+    inbound_force_completed_at,
+    inbound_force_complete_reason,
     outbound_requirement,
     ob_instruction,
     ob_remark,
@@ -6980,7 +7344,7 @@ route("v2_dashboard_order_export", async (body, env) => {
       pickJobIds),
     batchSelectInGlobal(env,
       `SELECT id, customer, display_no, external_inbound_no, biz_class, biz_classes_json, accounted, accounted_by, accounted_at,
-              remark
+              remark, force_completed, force_completed_by, force_completed_at, force_complete_reason
        FROM v2_inbound_plans WHERE id IN (PLACEHOLDER)`,
       inboundIds),
     batchSelectInGlobal(env,
@@ -7104,6 +7468,10 @@ route("v2_dashboard_order_export", async (body, env) => {
     const ob_remark = (ob_for_fields && ob_for_fields.remark) || '';
     const ob_pickup_note = (ob_for_fields && ob_for_fields.pickup_note) || '';
     const inbound_remark = (isInboundLink(j.related_doc_type) && related && related.remark) ? related.remark : '';
+    const inbound_force_completed = (isInboundLink(j.related_doc_type) && related && Number(related.force_completed) === 1) ? 1 : 0;
+    const inbound_force_completed_by = (isInboundLink(j.related_doc_type) && related) ? (related.force_completed_by || '') : '';
+    const inbound_force_completed_at = (isInboundLink(j.related_doc_type) && related && related.force_completed_at) ? fmtKst(related.force_completed_at) : '';
+    const inbound_force_complete_reason = (isInboundLink(j.related_doc_type) && related) ? (related.force_complete_reason || '') : '';
     const ob_stock_op_status = (ob_for_fields && ob_for_fields.stock_operation_status) || '';
     const ob_stock_op_completed_at = (ob_for_fields && ob_for_fields.stock_operation_completed_at) ? fmtKst(ob_for_fields.stock_operation_completed_at) : '';
     const ob_stock_op_completed_by = (ob_for_fields && ob_for_fields.stock_operation_completed_by) || '';
@@ -7166,6 +7534,10 @@ route("v2_dashboard_order_export", async (body, env) => {
       ob_remark,
       ob_pickup_note,
       inbound_remark,
+      inbound_force_completed,
+      inbound_force_completed_by,
+      inbound_force_completed_at,
+      inbound_force_complete_reason,
       stock_op_status: ob_stock_op_status,
       stock_op_completed_at: ob_stock_op_completed_at,
       stock_op_completed_by: ob_stock_op_completed_by,

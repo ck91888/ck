@@ -63,6 +63,7 @@ var _WRITE_ACTIONS = [
   'v2_unload_job_start','v2_unload_job_finish',
   'v2_inbound_job_start','v2_inbound_job_finish',
   'v2_inbound_mark_completed',
+  'v2_inbound_plan_force_complete',
   'v2_ops_job_start','v2_ops_job_leave','v2_ops_job_finish','v2_ops_job_resume',
   'v2_pick_job_start','v2_pick_job_join','v2_pick_job_add_docs','v2_pick_job_finish',
   'v2_bulk_op_job_start','v2_bulk_op_job_finish',
@@ -341,6 +342,30 @@ function remarkPreview(text, n) {
   if (s.length > max) s = s.substring(0, max) + '…';
   return s;
 }
+
+// CSV 导出（带 BOM；逗号/引号/换行自动转义）
+function exportCsv(filename, rows) {
+  if (!rows || rows.length === 0) { alert('无数据可导出 / 내보낼 데이터 없음'); return; }
+  var keys = Object.keys(rows[0]);
+  var lines = [keys.join(',')];
+  rows.forEach(function(r) {
+    lines.push(keys.map(function(k) {
+      var v = r[k] == null ? '' : String(r[k]);
+      if (v.indexOf(',') >= 0 || v.indexOf('"') >= 0 || v.indexOf('\n') >= 0 || v.indexOf('\r') >= 0) {
+        v = '"' + v.replace(/"/g, '""') + '"';
+      }
+      return v;
+    }).join(','));
+  });
+  var bom = '﻿';
+  var blob = new Blob([bom + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click();
+  setTimeout(function() { URL.revokeObjectURL(url); a.remove(); }, 200);
+}
+function _csvStamp(s) { return String(s || '').replace(/-/g, '') || 'all'; }
 
 function outModeLabel(mode) {
   return L("outmode_" + mode) || mode;
@@ -999,6 +1024,45 @@ async function loadOutboundList() {
   });
   html += '</div>';
   body.innerHTML = html;
+}
+
+// ===== Outbound Export =====
+async function exportOutboundOrders(btnEl) {
+  var start = (document.getElementById('obFilterStart') || {}).value || '';
+  var end = (document.getElementById('obFilterEnd') || {}).value || '';
+  var status = (document.getElementById('obFilterStatus') || {}).value || '';
+  var accountedSel = document.getElementById('outboundFilterAccounted');
+  var accounted = accountedSel ? accountedSel.value : '';
+  var bizSel = document.getElementById('obFilterBizClass');
+  var biz_class = bizSel ? bizSel.value : '';
+  var custEl = document.getElementById('obFilterCustomer');
+  var customer_keyword = custEl ? (custEl.value || '').trim() : '';
+  var usesSel = document.getElementById('obFilterUsesStockOp');
+  var uses_stock_operation = usesSel ? usesSel.value : '';
+  var matSel = document.getElementById('obFilterHasMaterial');
+  var has_material = matSel ? matSel.value : '';
+  var origText = btnEl ? btnEl.textContent : '';
+  if (btnEl) { btnEl.disabled = true; btnEl.textContent = '导出中... / 내보내는 중...'; }
+  try {
+    var res = await api({
+      action: 'v2_outbound_order_export',
+      start_date: start, end_date: end, status: status, accounted: accounted,
+      biz_class: biz_class, customer_keyword: customer_keyword,
+      uses_stock_operation: uses_stock_operation, has_material: has_material,
+      limit: 10000
+    });
+    if (!res || !res.ok) {
+      alert('导出失败 / 내보내기 실패: ' + (res ? (res.message || res.error) : 'unknown'));
+      return;
+    }
+    var rows = res.rows || [];
+    if (rows.length === 0) { alert('无数据可导出 / 내보낼 데이터 없음'); return; }
+    var fname = 'outbound_orders_' + _csvStamp(start) + '_' + _csvStamp(end) + '.csv';
+    exportCsv(fname, rows);
+    if (res.truncated) alert('已达单次导出上限 10000 行，可能被截断，请缩小日期/筛选范围。');
+  } finally {
+    if (btnEl) { btnEl.disabled = false; btnEl.textContent = origText; }
+  }
 }
 
 // ===== Outbound Create =====
@@ -1780,6 +1844,9 @@ async function loadInboundList() {
     html += '<div class="list-item" onclick="openInboundDetail(\'' + esc(p.id) + '\')">';
     html += '<div class="item-title">';
     html += '<span class="st st-' + esc(p.status) + '">' + esc(inboundStatusLabel(p.status)) + '</span> ';
+    if (Number(p.force_completed || 0) === 1) {
+      html += '<span class="st" style="background:#f3e5f5;color:#6a1b9a;border:1px solid #ce93d8;">手动完成 / 수동 완료</span> ';
+    }
     html += accountTag(p);
     html += dynTag;
     // 多业务类型 tag（兼容老数据：列表后端注入 biz_classes，缺则回退 biz_class 单值）
@@ -1822,6 +1889,40 @@ async function loadInboundList() {
   });
   html += '</div>';
   body.innerHTML = html;
+}
+
+// ===== Inbound Export =====
+async function exportInboundPlans(btnEl) {
+  var start = (document.getElementById('ibFilterStart') || {}).value || '';
+  var end = (document.getElementById('ibFilterEnd') || {}).value || '';
+  var status = (document.getElementById('ibFilterStatus') || {}).value || '';
+  var accountedSel = document.getElementById('inboundFilterAccounted');
+  var accounted = accountedSel ? accountedSel.value : '';
+  var bizSel = document.getElementById('ibFilterBizClass');
+  var biz_class = bizSel ? bizSel.value : '';
+  var custEl = document.getElementById('ibFilterCustomer');
+  var customer_keyword = custEl ? (custEl.value || '').trim() : '';
+  var origText = btnEl ? btnEl.textContent : '';
+  if (btnEl) { btnEl.disabled = true; btnEl.textContent = '导出中... / 내보내는 중...'; }
+  try {
+    var res = await api({
+      action: 'v2_inbound_plan_export',
+      start_date: start, end_date: end, status: status, accounted: accounted,
+      biz_class: biz_class, customer_keyword: customer_keyword,
+      limit: 10000
+    });
+    if (!res || !res.ok) {
+      alert('导出失败 / 내보내기 실패: ' + (res ? (res.message || res.error) : 'unknown'));
+      return;
+    }
+    var rows = res.rows || [];
+    if (rows.length === 0) { alert('无数据可导出 / 내보낼 데이터 없음'); return; }
+    var fname = 'inbound_plans_' + _csvStamp(start) + '_' + _csvStamp(end) + '.csv';
+    exportCsv(fname, rows);
+    if (res.truncated) alert('已达单次导出上限 10000 行，可能被截断，请缩小日期/筛选范围。');
+  } finally {
+    if (btnEl) { btnEl.disabled = false; btnEl.textContent = origText; }
+  }
 }
 
 // ===== Inbound Create =====
@@ -2141,7 +2242,14 @@ async function loadInboundDetail() {
        + (pRemarkFull ? '<div class="remark-block">' + esc(pRemarkFull) + '</div>' : ' --')
        + '</div>';
   html += '<div style="grid-column:1/-1;"><b>' + L("submitted_by") + ':</b> ' + esc(p.created_by) + ' · ' + esc(fmtTime(p.created_at)) + '</div>';
-  if (p.manual_completed_by) {
+  if (Number(p.force_completed || 0) === 1) {
+    html += '<div style="grid-column:1/-1;background:#f3e5f5;border-left:3px solid #8e24aa;padding:6px 10px;margin-top:6px;">';
+    html += '<div><b>手动完成 / 수동 완료:</b> 是 · ' + esc(p.force_completed_by || '--') + ' · ' + esc(p.force_completed_at ? fmtTime(p.force_completed_at) : '--') + '</div>';
+    if (p.force_complete_reason) {
+      html += '<div style="margin-top:4px;"><b>原因 / 사유:</b> ' + esc(p.force_complete_reason) + '</div>';
+    }
+    html += '</div>';
+  } else if (p.manual_completed_by) {
     html += '<div style="grid-column:1/-1;"><b>直接完结人:</b> ' + esc(p.manual_completed_by) + ' · ' + esc(fmtTime(p.manual_completed_at)) + '</div>';
   }
   html += '</div></div>';
@@ -2330,6 +2438,11 @@ async function loadInboundDetail() {
   html += '<button class="btn btn-outline btn-sm" onclick="printIbQr()">' + L("print") + '</button> ';
   if (p.status === "arrived_pending_putaway" || p.status === "putting_away" || p.status === "partially_completed") {
     html += '<button class="btn btn-success" onclick="markInboundCompleted(this)">文员直接完成入库 / 직접 입고 완료</button> ';
+  }
+  // 手动设为已入库（外部 WMS 已完成 / 仅登记单）— pending 也允许
+  var FORCE_OK = ['pending','arrived_pending_putaway','putting_away','partially_completed'];
+  if (FORCE_OK.indexOf(p.status) !== -1 && Number(p.force_completed || 0) !== 1) {
+    html += '<button class="btn" style="background:#8e24aa;color:#fff;" onclick="openForceCompleteForm()">手动设为已入库 / 수동 입고완료 처리</button> ';
   }
   // P1-7：未到库（pending）才能修改
   if (p.status === "pending") {
@@ -2749,6 +2862,78 @@ async function cancelInboundPlan(btnEl) {
       alert(res.message || "当前状态不允许取消");
     } else {
       alert("失败: " + (res ? res.error : "unknown"));
+    }
+  });
+}
+
+// ===== 手动设为已入库（外部 WMS / 仅登记单据；不生成现场工时）=====
+function openForceCompleteForm() {
+  var p = window._currentInboundPlan;
+  if (!p) { alert('入库计划未加载 / 입고 계획 미로드'); return; }
+  var FORCE_OK = ['pending','arrived_pending_putaway','putting_away','partially_completed'];
+  if (FORCE_OK.indexOf(p.status) === -1) {
+    alert('当前状态不允许手动完成 / 현재 상태로 수동 완료 불가: ' + p.status);
+    return;
+  }
+  var html = '';
+  html += '<div class="modal-overlay" id="fcOverlay" onclick="closeForceCompleteForm(event)">';
+  html += '<div class="modal-box" onclick="event.stopPropagation();" style="max-width:520px;">';
+  html += '<div style="font-size:16px;font-weight:700;margin-bottom:10px;">手动设为已入库 / 수동 입고완료 처리</div>';
+  html += '<div style="background:#fff3e0;border-left:3px solid #ef6c00;padding:8px;margin-bottom:10px;font-size:12px;color:#6d4c00;line-height:1.7;">';
+  html += '此操作不会生成现场工时记录，适用于外部 WMS 已完成、协同中心仅登记的单据。';
+  html += '<br>이 작업은 현장 작업시간을 생성하지 않으며, 외부 WMS에서 이미 완료된 기록용 입고건에 사용됩니다.';
+  html += '</div>';
+  html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:13px;">';
+  html += '<div style="grid-column:1/-1;"><label><b>原因 / 사유 *</b></label><textarea id="fc-reason" class="input" rows="2" placeholder="例如：外部 WMS 已完成；客户已自行入库"></textarea></div>';
+  html += '<div><label><b>实际箱数 / 실제 박스</b></label><input id="fc-box" class="input" type="number" min="0" value="' + Number(p.actual_box_count || p.planned_box_count || 0) + '"></div>';
+  html += '<div><label><b>实际托数 / 실제 팔레트</b></label><input id="fc-pallet" class="input" type="number" min="0" value="' + Number(p.actual_pallet_count || p.planned_pallet_count || 0) + '"></div>';
+  html += '</div>';
+  html += '<div style="margin-top:14px;text-align:right;">';
+  html += '<button class="btn btn-outline" onclick="closeForceCompleteForm()">取消 / 취소</button> ';
+  html += '<button class="btn" style="background:#8e24aa;color:#fff;" onclick="submitForceComplete(this)">确认设为已入库 / 입고완료</button>';
+  html += '</div></div></div>';
+  var div = document.createElement('div');
+  div.innerHTML = html;
+  document.body.appendChild(div.firstChild);
+}
+
+function closeForceCompleteForm(ev) {
+  if (ev && ev.target && ev.target.id !== 'fcOverlay') return;
+  var el = document.getElementById('fcOverlay');
+  if (el) el.parentNode.removeChild(el);
+}
+
+async function submitForceComplete(btnEl) {
+  var reason = ((document.getElementById('fc-reason') || {}).value || '').trim();
+  if (!reason) { alert('请填写原因 / 사유를 입력하세요'); return; }
+  var box = (document.getElementById('fc-box') || {}).value;
+  var pallet = (document.getElementById('fc-pallet') || {}).value;
+  if (!confirm('确认将该入库计划直接设为已入库？\n해당 입고 계획을 수동으로 입고완료 처리하시겠습니까?')) return;
+  withActionLock('submitForceComplete', btnEl || null, '提交中.../저장중...', async function() {
+    var res = await api({
+      action: 'v2_inbound_plan_force_complete',
+      id: _currentInboundId,
+      reason: reason,
+      operator_name: getUser(),
+      actual_box_count: box === '' ? null : Number(box),
+      actual_pallet_count: pallet === '' ? null : Number(pallet)
+    });
+    if (res && res.ok) {
+      alert('已设为已入库 / 입고완료 처리됨');
+      closeForceCompleteForm();
+      loadInboundDetail();
+    } else if (res && res.error === 'active_job_cannot_force_complete') {
+      alert('该入库计划存在进行中的现场作业，不能手动完成。请先结束现场作业。\n현재 진행 중인 현장 작업이 있어 수동 완료할 수 없습니다.');
+    } else if (res && res.error === 'already_completed') {
+      alert('该入库计划已完成 / 이미 입고완료 상태입니다');
+      closeForceCompleteForm();
+      loadInboundDetail();
+    } else if (res && res.error === 'cancelled_cannot_complete') {
+      alert('已取消的入库计划不能完成 / 취소된 입고는 완료 불가');
+    } else if (res && res.error === 'reason_required') {
+      alert('请填写原因 / 사유를 입력하세요');
+    } else {
+      alert('失败/실패: ' + (res ? (res.message || res.error) : 'unknown'));
     }
   });
 }
