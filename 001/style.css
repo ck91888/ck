@@ -459,3 +459,23 @@ label {
 .scan-log-row .tag.ok { background: #e8f5e9; color: #2e7d32; }
 .scan-log-row .tag.warn { background: #fff3e0; color: #e65100; }
 .scan-log-row .tag.err { background: #fdecea; color: #c62828; }
+
+/* 备注行 — 现场仓库可读但不抢眼 */
+.remark-line {
+  color: #555;
+  font-size: 13px;
+  margin-top: 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.remark-line b { color: #333; }
+.remark-block {
+  background: #fff8e1;
+  border-left: 3px solid #f9a825;
+  padding: 6px 10px;
+  margin-top: 6px;
+  font-size: 13px;
+  color: #444;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

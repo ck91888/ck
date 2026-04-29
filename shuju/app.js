@@ -495,6 +495,10 @@ async function exportOrders(btn) {
       出库单状态: r.outbound_status || '',
       预计出库时间: r.expected_ship_at || '',
       出库要求: r.outbound_requirement || '',
+      出库作业说明: r.ob_instruction || '',
+      出库备注: r.ob_remark || '',
+      提货备注: r.ob_pickup_note || '',
+      入库备注: r.inbound_remark || '',
       库内操作子状态: r.stock_op_status || '',
       库内操作完成时间: r.stock_op_completed_at || '',
       库内操作完成人: r.stock_op_completed_by || '',
@@ -539,6 +543,19 @@ async function openOrderDetail(jobId) {
   html += '<tr><th>created_at</th><td>' + esc(fmtTime(j.created_at)) + '</td>';
   html += '<th>updated_at</th><td>' + esc(fmtTime(j.updated_at)) + '</td></tr>';
   html += '</table>';
+
+  // 关联单据备注（入库备注 / 出库要求 / 出库作业说明 / 出库备注 / 提货备注）
+  var hasAnyRemark = res.inbound_remark || res.outbound_requirement || res.ob_instruction || res.ob_remark || res.ob_pickup_note;
+  if (hasAnyRemark) {
+    html += '<h3 style="margin-top:14px;">关联单据备注</h3>';
+    html += '<table class="data-table">';
+    if (res.inbound_remark) html += '<tr><th>入库备注</th><td colspan="3" style="white-space:pre-wrap;">' + esc(res.inbound_remark) + '</td></tr>';
+    if (res.outbound_requirement) html += '<tr><th>出库要求</th><td colspan="3" style="white-space:pre-wrap;">' + esc(res.outbound_requirement) + '</td></tr>';
+    if (res.ob_instruction) html += '<tr><th>出库作业说明</th><td colspan="3" style="white-space:pre-wrap;">' + esc(res.ob_instruction) + '</td></tr>';
+    if (res.ob_remark) html += '<tr><th>出库备注</th><td colspan="3" style="white-space:pre-wrap;">' + esc(res.ob_remark) + '</td></tr>';
+    if (res.ob_pickup_note) html += '<tr><th>提货备注</th><td colspan="3" style="white-space:pre-wrap;">' + esc(res.ob_pickup_note) + '</td></tr>';
+    html += '</table>';
+  }
 
   // 参与人员
   var workers = res.workers || [];

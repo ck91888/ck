@@ -328,6 +328,20 @@ function bizLabel(biz) {
   return L("biz_" + biz) || biz;
 }
 
+// 取记录中可显示为"备注"的字段（兼容 remark/note/memo/description）
+function pickRemarkText(o) {
+  if (!o) return '';
+  var v = o.remark || o.note || o.memo || o.description || '';
+  return String(v == null ? '' : v).trim();
+}
+// 列表用：截断 80 字
+function remarkPreview(text, n) {
+  var s = String(text == null ? '' : text).replace(/\s+/g, ' ').trim();
+  var max = n || 80;
+  if (s.length > max) s = s.substring(0, max) + '…';
+  return s;
+}
+
 function outModeLabel(mode) {
   return L("outmode_" + mode) || mode;
 }
@@ -962,6 +976,25 @@ async function loadOutboundList() {
       meta += ' · ' + L("accounted_by_short") + ': ' + esc(o.accounted_by || "") + (o.accounted_at ? ' ' + esc(fmtTime(o.accounted_at)) : '');
     }
     html += '<div class="item-meta">' + meta + '</div>';
+    // 出库要求 / 作业说明 / 备注 / 提货备注 摘要（按优先级展示，每条 80 字内）
+    var lblBiKo = (getLang() === 'ko');
+    var obReq = remarkPreview(o.outbound_requirement || '', 80);
+    if (obReq) {
+      html += '<div class="remark-line"><b>' + (lblBiKo ? '출고 요구' : '出库要求') + '：</b>' + esc(obReq) + '</div>';
+    }
+    var obRemark = remarkPreview(o.remark || '', 80);
+    if (obRemark) {
+      html += '<div class="remark-line"><b>' + (lblBiKo ? '비고' : '备注') + '：</b>' + esc(obRemark) + '</div>';
+    }
+    var obInstr = remarkPreview(o.instruction || '', 80);
+    if (obInstr && !obReq && !obRemark) {
+      // 仅当无更高优先级备注时再展示作业说明，避免列表过长
+      html += '<div class="remark-line"><b>' + (lblBiKo ? '작업 설명' : '作业说明') + '：</b>' + esc(obInstr) + '</div>';
+    }
+    var obPickup = remarkPreview(o.pickup_note || '', 80);
+    if (obPickup) {
+      html += '<div class="remark-line"><b>' + (lblBiKo ? '픽업 비고' : '提货备注') + '：</b>' + esc(obPickup) + '</div>';
+    }
     html += '</div>';
   });
   html += '</div>';
@@ -1216,8 +1249,16 @@ async function loadOutboundDetail() {
   if (o.wms_work_order_no) html += '<div class="detail-field"><b>' + L("wms_work_order_no") + ':</b> ' + esc(o.wms_work_order_no) + '</div>';
   html += '<div class="detail-field"><b>' + L("outbound_mode") + ':</b> ' + esc(outModeLabel(o.outbound_mode)) + '</div>';
   if (o.expected_ship_at) html += '<div class="detail-field"><b>' + L("expected_ship_at") + ':</b> ' + esc(o.expected_ship_at) + '</div>';
-  if (o.outbound_requirement) html += '<div class="detail-section"><b>' + L("outbound_requirement") + ':</b><div style="margin-top:4px;white-space:pre-wrap;">' + esc(o.outbound_requirement) + '</div></div>';
-  if (o.instruction) html += '<div class="detail-section"><b>' + L("instruction") + ':</b><div style="margin-top:4px;white-space:pre-wrap;">' + esc(o.instruction) + '</div></div>';
+  // 出库要求 / 作业说明 / 备注 — 始终显示（无则 --，库内操作型尤其依赖这三项）
+  html += '<div class="detail-section"><b>' + L("outbound_requirement") + ':</b>'
+       + (o.outbound_requirement ? '<div class="remark-block">' + esc(o.outbound_requirement) + '</div>' : ' --')
+       + '</div>';
+  html += '<div class="detail-section"><b>' + L("instruction") + ':</b>'
+       + (o.instruction ? '<div class="remark-block">' + esc(o.instruction) + '</div>' : ' --')
+       + '</div>';
+  html += '<div class="detail-section"><b>' + L("remark") + ':</b>'
+       + (o.remark ? '<div class="remark-block">' + esc(o.remark) + '</div>' : ' --')
+       + '</div>';
   html += '<div class="detail-field"><b>' + L("planned_box_pallet") + ':</b> ' + (o.planned_box_count || 0) + L("unit_box") + ' / ' + (o.planned_pallet_count || 0) + L("unit_pallet") + '</div>';
   html += '<div class="detail-field"><b>' + L("actual_box_pallet") + ':</b> ' + (o.actual_box_count || 0) + L("unit_box") + ' / ' + (o.actual_pallet_count || 0) + L("unit_pallet") + '</div>';
   html += '<div class="detail-field"><b>' + L("submitted_by") + ':</b> ' + esc(o.created_by) + ' · ' + esc(fmtTime(o.created_at)) + '</div>';
@@ -1392,7 +1433,7 @@ async function loadOutboundDetail() {
       html += '</div>';
     }
     if (o.pickup_time) html += '<div><b>提货时间 / 픽업 시간:</b> ' + esc(o.pickup_time) + '</div>';
-    if (o.pickup_note) html += '<div><b>备注 / 비고:</b> ' + esc(o.pickup_note) + '</div>';
+    html += '<div><b>提货备注 / 픽업 비고:</b> ' + (o.pickup_note ? esc(o.pickup_note) : ' --') + '</div>';
     html += '</div>';
     if (Number(o.pickup_confirm_required) === 0 && o.pickup_confirmed_by) {
       html += '<div class="muted" style="font-size:11px;margin-top:6px;">已确认: ' + esc(o.pickup_confirmed_by) + (o.pickup_confirmed_at ? ' · ' + esc(fmtTime(o.pickup_confirmed_at)) : '') + '</div>';
@@ -1766,6 +1807,11 @@ async function loadInboundList() {
       ibMeta += ' · ' + L("accounted_by_short") + ': ' + esc(p.accounted_by || "") + (p.accounted_at ? ' ' + esc(fmtTime(p.accounted_at)) : '');
     }
     html += '<div class="item-meta">' + ibMeta + '</div>';
+    // 备注摘要 / 비고 요약（前 80 字）
+    var ibRemark = pickRemarkText(p);
+    if (ibRemark) {
+      html += '<div class="remark-line"><b>' + (getLang() === 'ko' ? '비고' : '备注') + '：</b>' + esc(remarkPreview(ibRemark, 80)) + '</div>';
+    }
     // 未完成入库类型醒目提示（仅当多业务类型 + 至少一个 pending 时显示）
     var missing = p.missing_biz_classes || p.pending_biz_classes || [];
     if (bizArr.length > 1 && missing.length > 0 && p.status !== 'completed' && p.status !== 'cancelled') {
@@ -2089,7 +2135,11 @@ async function loadInboundDetail() {
   html += '<div><b>' + L("cargo_summary") + ':</b> ' + esc(p.cargo_summary) + '</div>';
   html += '<div><b>' + L("expected_arrival") + ':</b> ' + esc(p.expected_arrival) + '</div>';
   if (p.purpose) html += '<div style="grid-column:1/-1;"><b>' + L("purpose") + ':</b> ' + esc(p.purpose) + '</div>';
-  if (p.remark) html += '<div style="grid-column:1/-1;"><b>' + L("remark") + ':</b> ' + esc(p.remark) + '</div>';
+  // 备注 — 始终显示（保留换行；无则 --）
+  var pRemarkFull = pickRemarkText(p);
+  html += '<div style="grid-column:1/-1;"><b>' + L("remark") + ':</b>'
+       + (pRemarkFull ? '<div class="remark-block">' + esc(pRemarkFull) + '</div>' : ' --')
+       + '</div>';
   html += '<div style="grid-column:1/-1;"><b>' + L("submitted_by") + ':</b> ' + esc(p.created_by) + ' · ' + esc(fmtTime(p.created_at)) + '</div>';
   if (p.manual_completed_by) {
     html += '<div style="grid-column:1/-1;"><b>直接完结人:</b> ' + esc(p.manual_completed_by) + ' · ' + esc(fmtTime(p.manual_completed_at)) + '</div>';

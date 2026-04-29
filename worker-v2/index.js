@@ -6872,13 +6872,40 @@ route("v2_dashboard_order_detail", async (body, env) => {
   const results = resultsRs.results || [];
   const parsed = parseOpsResultForExport(job.job_type, results);
 
+  // 关联单据的备注（让单子详情能直接看到客服备注 / 出库要求 等）
+  let inbound_remark = '';
+  let outbound_requirement = '', ob_instruction = '', ob_remark = '', ob_pickup_note = '';
+  const isInboundLink = (t) => (t === 'inbound_plan' || t === 'inbound');
+  const isOutboundRelType = (t) => (t === 'outbound' || t === 'outbound_order');
+  if (isInboundLink(job.related_doc_type) && job.related_doc_id) {
+    const ib = await env.DB.prepare("SELECT remark FROM v2_inbound_plans WHERE id=?").bind(job.related_doc_id).first();
+    if (ib) inbound_remark = ib.remark || '';
+  }
+  const obId = (isOutboundRelType(job.related_doc_type) && job.related_doc_id) ? job.related_doc_id : (job.linked_outbound_order_id || '');
+  if (obId) {
+    const ob = await env.DB.prepare(
+      "SELECT outbound_requirement, instruction, remark, pickup_note FROM v2_outbound_orders WHERE id=?"
+    ).bind(obId).first();
+    if (ob) {
+      outbound_requirement = ob.outbound_requirement || '';
+      ob_instruction = ob.instruction || '';
+      ob_remark = ob.remark || '';
+      ob_pickup_note = ob.pickup_note || '';
+    }
+  }
+
   return json({
     ok: true,
     job,
     workers: workersRs.results || [],
     results,
     pick_worker_docs: pickDocsRs.results || [],
-    parsed
+    parsed,
+    inbound_remark,
+    outbound_requirement,
+    ob_instruction,
+    ob_remark,
+    ob_pickup_note
   });
 });
 
@@ -6952,7 +6979,8 @@ route("v2_dashboard_order_export", async (body, env) => {
        FROM v2_pick_worker_docs WHERE job_id IN (PLACEHOLDER) ORDER BY started_at ASC`,
       pickJobIds),
     batchSelectInGlobal(env,
-      `SELECT id, customer, display_no, external_inbound_no, biz_class, biz_classes_json, accounted, accounted_by, accounted_at
+      `SELECT id, customer, display_no, external_inbound_no, biz_class, biz_classes_json, accounted, accounted_by, accounted_at,
+              remark
        FROM v2_inbound_plans WHERE id IN (PLACEHOLDER)`,
       inboundIds),
     batchSelectInGlobal(env,
@@ -6960,6 +6988,7 @@ route("v2_dashboard_order_export", async (body, env) => {
               planned_box_count, planned_pallet_count, actual_box_count, actual_pallet_count,
               accounted, accounted_by, accounted_at,
               biz_class, status, uses_stock_operation, expected_ship_at, outbound_requirement,
+              instruction, remark, pickup_note,
               stock_operation_status, stock_operation_completed_at, stock_operation_completed_by
        FROM v2_outbound_orders WHERE id IN (PLACEHOLDER)`,
       outboundIds)
@@ -7071,6 +7100,10 @@ route("v2_dashboard_order_export", async (body, env) => {
     const ob_outbound_status = (ob_for_fields && ob_for_fields.status) || '';
     const ob_expected_ship_at = (ob_for_fields && ob_for_fields.expected_ship_at) ? fmtKst(ob_for_fields.expected_ship_at) : '';
     const ob_outbound_requirement = (ob_for_fields && ob_for_fields.outbound_requirement) || '';
+    const ob_instruction = (ob_for_fields && ob_for_fields.instruction) || '';
+    const ob_remark = (ob_for_fields && ob_for_fields.remark) || '';
+    const ob_pickup_note = (ob_for_fields && ob_for_fields.pickup_note) || '';
+    const inbound_remark = (isInboundLink(j.related_doc_type) && related && related.remark) ? related.remark : '';
     const ob_stock_op_status = (ob_for_fields && ob_for_fields.stock_operation_status) || '';
     const ob_stock_op_completed_at = (ob_for_fields && ob_for_fields.stock_operation_completed_at) ? fmtKst(ob_for_fields.stock_operation_completed_at) : '';
     const ob_stock_op_completed_by = (ob_for_fields && ob_for_fields.stock_operation_completed_by) || '';
@@ -7129,6 +7162,10 @@ route("v2_dashboard_order_export", async (body, env) => {
       outbound_status: ob_outbound_status,
       expected_ship_at: ob_expected_ship_at,
       outbound_requirement: ob_outbound_requirement,
+      ob_instruction,
+      ob_remark,
+      ob_pickup_note,
+      inbound_remark,
       stock_op_status: ob_stock_op_status,
       stock_op_completed_at: ob_stock_op_completed_at,
       stock_op_completed_by: ob_stock_op_completed_by,

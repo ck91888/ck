@@ -439,3 +439,23 @@ select { cursor: pointer; }
   color: #d46b08;
   border: 1px solid #ffd591;
 }
+
+/* 备注行（列表/详情通用）— 浅色但可读 */
+.remark-line {
+  color: #666;
+  font-size: 13px;
+  margin-top: 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.remark-line b { color: #444; }
+.remark-block {
+  background: #fafafa;
+  border-left: 3px solid #bbb;
+  padding: 6px 10px;
+  margin-top: 6px;
+  font-size: 13px;
+  color: #444;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

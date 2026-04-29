@@ -640,6 +640,36 @@ function unitLabel(key) {
   return u ? u.zh + "/" + u.ko : key;
 }
 
+// 取记录中可显示为"备注"的字段（兼容 remark/note/memo/description）
+function pickRemarkText(o) {
+  if (!o) return '';
+  var v = o.remark || o.note || o.memo || o.description || '';
+  return String(v == null ? '' : v).trim();
+}
+// 一行文本截断，默认 80 字
+function _short(text, n) {
+  var s = String(text == null ? '' : text).replace(/\s+/g, ' ').trim();
+  var max = n || 80;
+  if (s.length > max) s = s.substring(0, max) + '…';
+  return s;
+}
+// 渲染入库计划备注（现场入库/卸货页）
+function renderInboundPlanRemark(p) {
+  var rk = pickRemarkText(p);
+  if (!rk) return '';
+  return '<div class="remark-line"><b>备注/비고：</b>' + esc(rk) + '</div>';
+}
+// 渲染出库单备注块（出库装货/库内操作页）
+function renderOutboundOrderRemarks(o) {
+  if (!o) return '';
+  var html = '';
+  if (o.outbound_requirement) html += '<div class="remark-line"><b>出库要求/출고 요구：</b>' + esc(o.outbound_requirement) + '</div>';
+  if (o.instruction) html += '<div class="remark-line"><b>作业说明/작업 설명：</b>' + esc(o.instruction) + '</div>';
+  if (o.remark) html += '<div class="remark-line"><b>备注/비고：</b>' + esc(o.remark) + '</div>';
+  if (o.pickup_note) html += '<div class="remark-line"><b>提货备注/픽업 비고：</b>' + esc(o.pickup_note) + '</div>';
+  return html;
+}
+
 // ===== 卸货页辅助（自 001/patch.js 合并） =====
 function planNo(plan) { return (plan && (plan.display_no || plan.id)) || ''; }
 
@@ -661,8 +691,8 @@ function renderUnloadPlanCard(planData, displayNo) {
   if (info) {
     info.innerHTML = '<div><b>' + esc(displayNo || planNo(p)) + '</b> | ' +
       esc(p.plan_date) + ' | ' + esc(p.customer || '') + '</div>' +
-      '<div class="muted">' + esc(p.cargo_summary || '') +
-      (p.remark ? ' — ' + esc(p.remark) : '') + '</div>';
+      '<div class="muted">' + esc(p.cargo_summary || '') + '</div>' +
+      renderInboundPlanRemark(p);
   }
   if (area) {
     if (lines.length > 0) {
@@ -1501,6 +1531,7 @@ async function loadInboundPlanInfo(planId) {
   if (infoEl) {
     var html = '<div><b>' + esc(p.display_no || p.id) + '</b> · ' + esc(p.customer || '--') + '</div>';
     html += '<div>' + esc(p.cargo_summary || '--') + '</div>';
+    html += renderInboundPlanRemark(p);
     infoEl.innerHTML = html;
   }
   // Build result lines form
@@ -1936,6 +1967,7 @@ async function resolveOutboundCode(btnEl) {
         '<b>✓ </b>' + esc(o.display_no || o.id) + '<br>' +
         esc(o.customer || '--') + ' · ' + (modeMap[o.outbound_mode] || o.outbound_mode || '--') + '<br>' +
         '计划: ' + (o.planned_box_count || 0) + '箱 / ' + (o.planned_pallet_count || 0) + '托' +
+        renderOutboundOrderRemarks(o) +
         '</div>';
     } else if (res.kind === 'not_found') {
       _obResolvedOrderId = "";
@@ -2163,21 +2195,23 @@ async function _refreshOutboundLoadOrderState() {
     return;
   }
   var o = res.order;
-  // 变更确认红牌
+  // 变更确认红牌 + 出库要求/作业说明/备注（让现场不用回协同中心也能看到）
   if (ackBox) {
+    var html = '';
+    var notes = renderOutboundOrderRemarks(o);
+    if (notes) {
+      html += '<div class="remark-block" style="margin-top:0;">' + notes + '</div>';
+    }
     if (Number(o.warehouse_ack_required) === 1) {
-      var html = '';
-      html += '<div style="border:2px solid #c62828;background:#fff5f5;border-radius:6px;padding:10px;">';
+      html += '<div style="border:2px solid #c62828;background:#fff5f5;border-radius:6px;padding:10px;margin-top:6px;">';
       html += '<div style="font-weight:700;color:#c62828;font-size:14px;">⚠ 出库单已变更，需仓库确认 / 출고단 변경됨, 창고 확인 필요</div>';
       if (Number(o.revision_no || 0) > 0) {
         html += '<div style="font-size:12px;color:#666;margin-top:4px;">版本 / 버전: #' + Number(o.revision_no) + (o.last_modified_by ? ' · 修改人: ' + esc(o.last_modified_by) : '') + '</div>';
       }
       html += '<button class="btn btn-primary mt-10" onclick="ackOutboundChange(this)">确认已查看变更 / 변경 확인 완료</button>';
       html += '</div>';
-      ackBox.innerHTML = html;
-    } else {
-      ackBox.innerHTML = '';
     }
+    ackBox.innerHTML = html;
   }
   // 提货信息卡片（P1-9）
   if (pickupBox) {
@@ -2278,16 +2312,20 @@ function showStockOpWorking() {
   if (e3) e3.style.display = "";
 }
 
+var _osoCandidatesById = {};
+
 async function loadStockOpCandidates() {
   var sel = document.getElementById("osoOrderSelect");
   if (!sel) return;
   var res = await api({ action: "v2_outbound_stock_op_list" });
   var opts = '<option value="">-- 选择/선택 --</option>';
+  _osoCandidatesById = {};
   if (res && res.ok && res.items) {
     res.items.forEach(function(o) {
+      _osoCandidatesById[o.id] = o;
       var biz = o.biz_class ? '[' + o.biz_class + '] ' : '';
       var st = o.status === 'stock_operating' ? '[操作中] ' : '[预约] ';
-      opts += '<option value="' + esc(o.id) + '" data-customer="' + esc(o.customer || '') + '" data-instruction="' + esc(o.instruction || '') + '">' + st + biz + esc(o.display_no || o.id) + ' · ' + esc(o.customer || '--') + '</option>';
+      opts += '<option value="' + esc(o.id) + '">' + st + biz + esc(o.display_no || o.id) + ' · ' + esc(o.customer || '--') + '</option>';
     });
   }
   sel.innerHTML = opts;
@@ -2303,12 +2341,11 @@ async function onStockOpOrderSelect() {
     if (matBox) matBox.innerHTML = '';
     return;
   }
-  var opt = sel.options[sel.selectedIndex];
-  var customer = opt ? opt.getAttribute('data-customer') : '';
-  var instruction = opt ? opt.getAttribute('data-instruction') : '';
+  var o = _osoCandidatesById[_osoOrderId] || {};
   if (info) {
-    info.innerHTML = '<b>客户/고객:</b> ' + esc(customer || '--') +
-      (instruction ? '<br><b>说明/설명:</b> ' + esc(instruction) : '');
+    var html = '<b>客户/고객:</b> ' + esc(o.customer || '--');
+    html += renderOutboundOrderRemarks(o);
+    info.innerHTML = html;
   }
   await renderOutboundMaterials(_osoOrderId, "osoMaterialBox");
 }
