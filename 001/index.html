@@ -2,10 +2,10 @@
 <html lang="zh">
 <head>
   <meta charset="utf-8">
-  <!-- cache-bust: 20260430c -->
+  <!-- cache-bust: 20260430e -->
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
   <title>现场执行系统 V2 / 현장 실행 시스템</title>
-  <link rel="stylesheet" href="style.css?v=20260430c">
+  <link rel="stylesheet" href="style.css?v=20260430e">
   <script src="../shared/html5-qrcode.min.js"></script>
 </head>
 <body>
@@ -181,6 +181,7 @@
     <button class="btn btn-primary" onclick="goPage('inbound',{job_type:'inbound_direct',biz_class:'direct_ship'})">代发入库 / 직배송 입고</button>
     <button class="btn btn-primary" onclick="goPage('inbound',{job_type:'inbound_bulk',biz_class:'bulk'})">大货入库 / 대량화물 입고</button>
     <button class="btn btn-primary" onclick="goPage('inbound_return')">退件入库 / 반품 입고</button>
+    <button class="btn btn-primary" onclick="goPage('inbound',{job_type:'inbound_change_order',biz_class:'change_order'})">换单入库 / 송장교체 입고</button>
   </div>
 </div>
 
@@ -868,7 +869,7 @@
 
 <input type="file" id="photoInput" accept="image/*" capture="environment" style="display:none;" onchange="handlePhotoUpload(this)">
 
-<script src="config.js?v=20260430c"></script>
-<script src="app.js?v=20260430c"></script>
+<script src="config.js?v=20260430e"></script>
+<script src="app.js?v=20260430e"></script>
 </body>
 </html>

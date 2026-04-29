@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>协同中心 V2 / 협업센터</title>
-  <link rel="stylesheet" href="style.css?v=20260430d">
+  <link rel="stylesheet" href="style.css?v=20260430e">
 </head>
 <body>
 
@@ -289,6 +289,7 @@
         <option value="direct_ship">代发 / 직배송</option>
         <option value="bulk">大货 / 대량화물</option>
         <option value="return">退件 / 반품</option>
+        <option value="change_order">换单 / 송장교체</option>
       </select>
       <input type="text" id="ibFilterCustomer" placeholder="客户名搜索 / 고객명 검색" style="min-width:160px;" onkeydown="if(event.key==='Enter')loadInboundList()">
       <span class="filter-label" data-i18n="account_filter">是否记帐</span>
@@ -329,6 +330,10 @@
           <label style="display:inline-flex;align-items:center;gap:4px;font-weight:normal;cursor:pointer;">
             <input type="checkbox" class="ibc-biz-chk" value="return">
             <span>退件 / 반품</span>
+          </label>
+          <label style="display:inline-flex;align-items:center;gap:4px;font-weight:normal;cursor:pointer;">
+            <input type="checkbox" class="ibc-biz-chk" value="change_order">
+            <span>换单 / 송장교체</span>
           </label>
         </div>
         <div style="font-size:11px;color:#888;">至少选择一个业务类型；若同时选择多个，全部完成后整单才算入库完成。</div>
@@ -496,7 +501,7 @@
 
 <input type="file" id="fileInput" accept="image/*" style="display:none;" onchange="handleFileUpload(this)">
 
-<script src="config.js?v=20260430d"></script>
+<script src="config.js?v=20260430e"></script>
 <script src="../shared/qrcode.min.js"></script>
 <!--
   TODO(SheetJS 动态加载): xlsx.full.min.js ~923KB，目前同步加载，
@@ -506,6 +511,6 @@
   onVerifyFilePick / 表格导出流程。
 -->
 <script src="../shared/xlsx.full.min.js"></script>
-<script src="app.js?v=20260430d"></script>
+<script src="app.js?v=20260430e"></script>
 </body>
 </html>

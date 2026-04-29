@@ -319,8 +319,8 @@ function inboundStatusLabel(status) {
 // 入库业务类型 → 现场入库操作文案
 function inboundBizTaskLabel(biz) {
   var lang = getLang();
-  var zh = { direct_ship: '代发入库', bulk: '大货入库', return: '退件入库' };
-  var ko = { direct_ship: '직배송 입고', bulk: '대량화물 입고', return: '반품 입고' };
+  var zh = { direct_ship: '代发入库', bulk: '大货入库', return: '退件入库', change_order: '换单入库' };
+  var ko = { direct_ship: '직배송 입고', bulk: '대량화물 입고', return: '반품 입고', change_order: '송장교체 입고' };
   return (lang === 'ko' ? ko : zh)[biz] || biz;
 }
 
@@ -2317,9 +2317,10 @@ function openInboundEditForm() {
   html += '<div><label><b>计划日期</b></label><input id="ib-edit-date" class="input" type="date" value="' + esc(p.plan_date || '') + '"></div>';
   html += '<div><label><b>客户 *</b></label><input id="ib-edit-customer" class="input" value="' + esc(p.customer || '') + '"></div>';
   html += '<div style="grid-column:1/-1;"><label><b>业务类型（多选） *</b></label><div style="padding:6px 0;">';
-  html += '<label style="margin-right:14px;"><input type="checkbox" class="ib-edit-biz" value="direct_ship"' + bizCheck('direct_ship') + '> 代发</label>';
-  html += '<label style="margin-right:14px;"><input type="checkbox" class="ib-edit-biz" value="bulk"' + bizCheck('bulk') + '> 大货</label>';
-  html += '<label style="margin-right:14px;"><input type="checkbox" class="ib-edit-biz" value="return"' + bizCheck('return') + '> 退件</label>';
+  html += '<label style="margin-right:14px;"><input type="checkbox" class="ib-edit-biz" value="direct_ship"' + bizCheck('direct_ship') + '> 代发 / 직배송</label>';
+  html += '<label style="margin-right:14px;"><input type="checkbox" class="ib-edit-biz" value="bulk"' + bizCheck('bulk') + '> 大货 / 대량화물</label>';
+  html += '<label style="margin-right:14px;"><input type="checkbox" class="ib-edit-biz" value="return"' + bizCheck('return') + '> 退件 / 반품</label>';
+  html += '<label style="margin-right:14px;"><input type="checkbox" class="ib-edit-biz" value="change_order"' + bizCheck('change_order') + '> 换单 / 송장교체</label>';
   html += '</div></div>';
   html += '<div><label><b>预计到达</b></label><input id="ib-edit-arrival" class="input" value="' + esc(p.expected_arrival || '') + '"></div>';
   html += '<div><label><b>入库目的</b></label><input id="ib-edit-purpose" class="input" value="' + esc(p.purpose || '') + '"></div>';

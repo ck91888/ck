@@ -128,7 +128,10 @@ var LANG = {
     biz_direct_ship: "代发",
     biz_bulk: "大货",
     biz_return: "退件",
+    biz_change_order: "换单",
     biz_import: "进口",
+    inbound_task_change_order: "换单入库",
+    job_type_inbound_change_order: "换单入库",
     // Priority i18n 已删除：UI 改为 FIFO 模式，不再展示优先级
     // Inbound
     cargo_summary: "货物摘要",
@@ -378,7 +381,10 @@ var LANG = {
     biz_direct_ship: "직배송",
     biz_bulk: "대량화물",
     biz_return: "반품",
+    biz_change_order: "송장교체",
     biz_import: "수입",
+    inbound_task_change_order: "송장교체 입고",
+    job_type_inbound_change_order: "송장교체 입고",
     // priority_* 已删除（FIFO 모드）
     cargo_summary: "화물 요약",
     expected_arrival: "예상 도착",

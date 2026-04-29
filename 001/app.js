@@ -241,7 +241,7 @@ function resumeActiveOrHome() {
       var jt = res.job.job_type || "";
       if (jt === "unload") showPage("unload");
       else if (jt === "inbound_return") showPage("inbound_return");
-      else if (jt === "inbound_direct" || jt === "inbound_bulk") { _pageParams = { job_type: jt, biz_class: res.job.biz_class || "" }; showPage("inbound"); }
+      else if (jt === "inbound_direct" || jt === "inbound_bulk" || jt === "inbound_change_order") { _pageParams = { job_type: jt, biz_class: res.job.biz_class || "" }; showPage("inbound"); }
       else if (jt === "load_outbound") showPage("outbound_load");
       else if (jt === "outbound_stock_op") showPage("outbound_stock_op");
       else if (jt === "pick_direct") showPage("pick_direct");
@@ -555,6 +555,7 @@ var JOB_TYPE_LABEL = {
   inbound_direct: "代发入库/직배송 입고",
   inbound_bulk: "大货入库/대량화물 입고",
   inbound_return: "退件入库/반품 입고",
+  inbound_change_order: "换单入库/송장교체 입고",
   pick_direct: "代发拣货/직배송 피킹",
   bulk_op: "大货操作/대량화물 작업",
   pack_direct: "代发打包/직배송 포장",
@@ -618,6 +619,7 @@ var BIZ_LABEL = {
   direct_ship: "代发/직배송",
   bulk: "大货/대량화물",
   return: "退件/반품",
+  change_order: "换单/송장교체",
   import: "进口/수입"
 };
 
@@ -922,6 +924,7 @@ function _resolveBizClass() {
     var jt = _pageParams.job_type || '';
     if (jt === 'inbound_direct') bc = 'direct_ship';
     else if (jt === 'inbound_bulk') bc = 'bulk';
+    else if (jt === 'inbound_change_order') bc = 'change_order';
   }
   return bc;
 }
@@ -1402,7 +1405,7 @@ async function initInbound() {
   // If already in a putaway job, show working state
   if (_activeJobId) {
     var res = await api({ action: "v2_ops_job_detail", job_id: _activeJobId });
-    if (res && res.ok && res.job && res.job.job_type && (res.job.job_type === 'inbound_direct' || res.job.job_type === 'inbound_bulk') && res.job.status === "working") {
+    if (res && res.ok && res.job && res.job.job_type && (res.job.job_type === 'inbound_direct' || res.job.job_type === 'inbound_bulk' || res.job.job_type === 'inbound_change_order') && res.job.status === "working") {
       document.getElementById("inboundEntryCard").style.display = "none";
       document.getElementById("inboundWorkingCard").style.display = "";
       loadInboundPlanInfo(res.job.related_doc_id);

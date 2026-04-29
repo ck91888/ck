@@ -1030,7 +1030,7 @@ const MIGRATIONS = [
 ];
 
 // 每次发布迁移变化时手动 +1（patch 段），冷启动只比对一次字符串即可跳过整段 MIGRATIONS
-const CURRENT_SCHEMA_VERSION = 'v2.20260430d';
+const CURRENT_SCHEMA_VERSION = 'v2.20260430e';
 
 let _migrated = false;
 async function ensureMigrated(db) {
@@ -2307,16 +2307,21 @@ async function checkPlanFullyCompleted(env, plan_id) {
 // 整张计划只有所有 task 都 completed 才能视为完成；部分完成进入 partially_completed。
 // ===================================================================
 
-const INBOUND_BIZ_VALID = ['direct_ship', 'bulk', 'return'];
+// 入库业务分类 — 注意：本 change_order 是【入库换单】（biz_class=change_order，
+// 对应 job_type=inbound_change_order），与按单/出库已有的 job_type=change_order
+// （换单操作）是不同概念，禁止互相复用。
+const INBOUND_BIZ_VALID = ['direct_ship', 'bulk', 'return', 'change_order'];
 const INBOUND_BIZ_TO_JOB_TYPE = {
   direct_ship: 'inbound_direct',
   bulk: 'inbound_bulk',
-  return: 'inbound_return'
+  return: 'inbound_return',
+  change_order: 'inbound_change_order'
 };
 const INBOUND_JOB_TYPE_TO_BIZ = {
   inbound_direct: 'direct_ship',
   inbound_bulk: 'bulk',
-  inbound_return: 'return'
+  inbound_return: 'return',
+  inbound_change_order: 'change_order'
 };
 function mapInboundBizToJobType(biz) { return INBOUND_BIZ_TO_JOB_TYPE[biz] || ''; }
 function mapInboundJobTypeToBiz(jt) { return INBOUND_JOB_TYPE_TO_BIZ[jt] || ''; }
@@ -2476,7 +2481,7 @@ async function recalcInboundPlanCompletion(env, plan_id, t, opts) {
     "SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type='unload' AND status IN ('pending','working') LIMIT 1"
   ).bind(plan_id).first();
   const otherInbound = await env.DB.prepare(
-    "SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type IN ('inbound_direct','inbound_bulk','inbound_return') AND status IN ('pending','working') LIMIT 1"
+    "SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type IN ('inbound_direct','inbound_bulk','inbound_return','inbound_change_order') AND status IN ('pending','working') LIMIT 1"
   ).bind(plan_id).first();
 
   // 卸货还在 → 不进入完成态。若仍有理货并行 → unloading_putting_away；否则 unloading
@@ -3738,7 +3743,7 @@ route("v2_unload_job_finish", async (body, env) => {
       } else {
         // Check if inbound (putaway) jobs are currently active for this plan
         const activeInboundJob = await env.DB.prepare(
-          "SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type IN ('inbound_direct','inbound_bulk') AND status IN ('pending','working') LIMIT 1"
+          "SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type IN ('inbound_direct','inbound_bulk','inbound_change_order') AND status IN ('pending','working') LIMIT 1"
         ).bind(plan_id).first();
         if (activeInboundJob) {
           // Parallel: inbound still running → putting_away
@@ -3791,16 +3796,20 @@ route("v2_inbound_job_start", async (body, env) => {
   const start_remark = String(body.start_remark || "").trim();
   if (!worker_id) return err("missing worker_id");
 
-  const VALID_JOB_TYPES = ['inbound_direct', 'inbound_bulk', 'inbound_return'];
+  const VALID_JOB_TYPES = ['inbound_direct', 'inbound_bulk', 'inbound_return', 'inbound_change_order'];
   if (VALID_JOB_TYPES.indexOf(job_type) === -1) return err("invalid job_type: " + job_type);
   const isReturn = (job_type === 'inbound_return');
-  const isStandard = (job_type === 'inbound_direct' || job_type === 'inbound_bulk');
+  // 入库换单（biz_class=change_order）走标准计划路径，与代发/大货同流程
+  const isStandard = (job_type === 'inbound_direct' || job_type === 'inbound_bulk' || job_type === 'inbound_change_order');
 
   if (isReturn && biz_class && biz_class !== 'return') {
     return err("biz_class mismatch for inbound_return: " + biz_class);
   }
-  if (isStandard && biz_class !== 'direct_ship' && biz_class !== 'bulk') {
-    return err("biz_class must be direct_ship or bulk for standard inbound, got: " + biz_class);
+  if (isStandard) {
+    const expectedBiz = mapInboundJobTypeToBiz(job_type);
+    if (biz_class !== expectedBiz) {
+      return err("biz_class must be " + expectedBiz + " for " + job_type + ", got: " + biz_class);
+    }
   }
 
   return withIdem(env, body, "v2_inbound_job_start", async () => {
@@ -4224,8 +4233,8 @@ route("v2_inbound_mark_completed", async (body, env) => {
     const tasks = await listInboundPlanBizTasks(env, plan_id);
     const pending = tasks.filter(x => x.status !== 'completed').map(x => x.biz_class);
     if (pending.length > 0) {
-      const biz_label_zh = { direct_ship: '代发入库', bulk: '大货入库', return: '退件入库' };
-      const biz_label_ko = { direct_ship: '직배송 입고', bulk: '대량화물 입고', return: '반품 입고' };
+      const biz_label_zh = { direct_ship: '代发入库', bulk: '大货入库', return: '退件入库', change_order: '换单入库' };
+      const biz_label_ko = { direct_ship: '직배송 입고', bulk: '대량화물 입고', return: '반품 입고', change_order: '송장교체 입고' };
       const zhList = pending.map(b => biz_label_zh[b] || b).join('、');
       const koList = pending.map(b => biz_label_ko[b] || b).join(', ');
       return {
@@ -6073,7 +6082,7 @@ route("v2_admin_dirty_data_diagnose", async (body, env) => {
     FROM v2_ops_job_workers w
     JOIN v2_ops_jobs j ON w.job_id = j.id
     WHERE w.left_at='' AND j.status IN ('working','awaiting_close','pending')
-      AND j.job_type IN ('bulk_op','inbound_direct','inbound_return','unload')
+      AND j.job_type IN ('bulk_op','inbound_direct','inbound_bulk','inbound_change_order','inbound_return','unload')
     GROUP BY w.worker_id, j.job_type
     HAVING job_count > 1
   `).all();
@@ -7339,7 +7348,7 @@ route("v2_dashboard_management_summary", async (body, env) => {
     change_order: ['change_order'],
     pack_direct: ['pack_direct'],
     pick_direct: ['pick_direct'],
-    inbound: ['inbound_direct', 'inbound_bulk', 'inbound_return'],
+    inbound: ['inbound_direct', 'inbound_bulk', 'inbound_return', 'inbound_change_order'],
     outbound: ['load_outbound', 'verify_scan', 'bulk_op'],
   };
 

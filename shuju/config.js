@@ -10,6 +10,7 @@ var JOB_TYPE_LABELS = {
   inbound_direct: "代发入库",
   inbound_bulk: "大货入库",
   inbound_return: "退件入库",
+  inbound_change_order: "换单入库",
   load_outbound: "出库装货",
   outbound_stock_op: "库内操作",
   pick_direct: "代发拣货",
@@ -36,7 +37,7 @@ var FLOW_LABELS = {
   issue: "问题件"
 };
 var BIZ_LABELS = {
-  direct_ship: "代发", bulk: "大货", return: "退件", import: "进口"
+  direct_ship: "代发", bulk: "大货", return: "退件", change_order: "换单", import: "进口"
 };
 var STATUS_LABELS = {
   working: "作业中", awaiting_close: "待收尾", pending: "待开始",
@@ -90,6 +91,7 @@ var JOB_TYPE_OPTIONS = [
   { value: 'inbound_direct', label: '代发入库' },
   { value: 'inbound_bulk', label: '大货入库' },
   { value: 'inbound_return', label: '退件入库' },
+  { value: 'inbound_change_order', label: '换单入库' },
   { value: 'pick_direct', label: '代发拣货' },
   { value: 'bulk_op', label: '大货操作' },
   { value: 'pack_direct', label: '代发打包' },
@@ -128,6 +130,6 @@ var WMS_TYPE_TO_JOB_TYPES = {
   change_order: ['change_order'],
   pack_direct: ['pack_direct'],
   pick_direct: ['pick_direct'],
-  inbound: ['inbound_direct', 'inbound_bulk', 'inbound_return'],
+  inbound: ['inbound_direct', 'inbound_bulk', 'inbound_return', 'inbound_change_order'],
   outbound: ['load_outbound', 'verify_scan', 'bulk_op', 'outbound_stock_op']
 };
