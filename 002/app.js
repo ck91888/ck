@@ -2256,7 +2256,7 @@ async function loadInboundDetail() {
     html += '<div class="card"><div class="card-title">补充信息并转正</div>';
     html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:13px;">';
     html += '<div><label><b>' + L("customer") + '</b></label><input id="dynCustomer" class="input" value="' + esc(p.customer === '待补充' ? '' : p.customer) + '" placeholder="客户名称"></div>';
-    html += '<div><label><b>' + L("biz_class") + '</b></label><select id="dynBiz" class="input"><option value="">--</option><option value="direct_ship"' + (p.biz_class === 'direct_ship' ? ' selected' : '') + '>' + bizLabel('direct_ship') + '</option><option value="bulk"' + (p.biz_class === 'bulk' ? ' selected' : '') + '>' + bizLabel('bulk') + '</option><option value="return"' + (p.biz_class === 'return' ? ' selected' : '') + '>' + bizLabel('return') + '</option><option value="import"' + (p.biz_class === 'import' ? ' selected' : '') + '>' + bizLabel('import') + '</option></select></div>';
+    html += '<div><label><b>' + L("biz_class") + '</b></label><select id="dynBiz" class="input"><option value="">--</option><option value="direct_ship"' + (p.biz_class === 'direct_ship' ? ' selected' : '') + '>' + bizLabel('direct_ship') + '</option><option value="bulk"' + (p.biz_class === 'bulk' ? ' selected' : '') + '>' + bizLabel('bulk') + '</option><option value="return"' + (p.biz_class === 'return' ? ' selected' : '') + '>' + bizLabel('return') + '</option><option value="change_order"' + (p.biz_class === 'change_order' ? ' selected' : '') + '>' + bizLabel('change_order') + '</option><option value="import"' + (p.biz_class === 'import' ? ' selected' : '') + '>' + bizLabel('import') + '</option></select></div>';
     html += '<div style="grid-column:1/-1;"><label><b>' + L("cargo_summary") + '</b></label><input id="dynCargo" class="input" value="' + esc(p.cargo_summary) + '"></div>';
     html += '<div><label><b>' + L("expected_arrival") + '</b></label><input id="dynArrival" class="input" value="' + esc(p.expected_arrival) + '"></div>';
     html += '<div><label><b>' + L("purpose") + '</b></label><input id="dynPurpose" class="input" value="' + esc(p.purpose) + '"></div>';
@@ -2875,7 +2875,7 @@ async function loadFeedbackDetail() {
     html += '<div class="card"><div class="card-title">补充信息并转正为入库计划</div>';
     html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:13px;">';
     html += '<div><label><b>' + L("customer") + ' *</b></label><input id="fb-conv-customer" class="input" placeholder="客户名称"></div>';
-    html += '<div><label><b>' + L("biz_class") + '</b></label><select id="fb-conv-biz" class="input"><option value="">--</option><option value="direct_ship">' + bizLabel("direct_ship") + '</option><option value="bulk">' + bizLabel("bulk") + '</option><option value="return">' + bizLabel("return") + '</option><option value="import">' + bizLabel("import") + '</option></select></div>';
+    html += '<div><label><b>' + L("biz_class") + '</b></label><select id="fb-conv-biz" class="input"><option value="">--</option><option value="direct_ship">' + bizLabel("direct_ship") + '</option><option value="bulk">' + bizLabel("bulk") + '</option><option value="return">' + bizLabel("return") + '</option><option value="change_order">' + bizLabel("change_order") + '</option><option value="import">' + bizLabel("import") + '</option></select></div>';
     var defaultCargo = feedbackResultLines.map(function(r) { return unitTypeLabel(r.unit_type) + ' ' + (r.actual_qty || 0); }).join(' / ');
     html += '<div style="grid-column:1/-1;"><label><b>' + L("cargo_summary") + '</b></label><input id="fb-conv-cargo" class="input" value="' + esc(defaultCargo || fb.title || '') + '"></div>';
     html += '<div><label><b>' + L("expected_arrival") + '</b></label><input id="fb-conv-arrival" class="input" placeholder="预计到达"></div>';
@@ -2903,7 +2903,7 @@ async function loadFeedbackDetail() {
     html += '<div class="card"><div class="card-title">' + L("convert_to_inbound") + '</div>';
     html += '<div class="form-group"><label>' + L("customer") + '</label><input id="fb-conv-customer" type="text"></div>';
     html += '<div class="form-group"><label>' + L("biz_class") + '</label>';
-    html += '<select id="fb-conv-biz"><option value="direct_ship">' + L("biz_direct_ship") + '</option><option value="bulk">' + L("biz_bulk") + '</option><option value="return">' + L("biz_return") + '</option><option value="import">' + L("biz_import") + '</option></select></div>';
+    html += '<select id="fb-conv-biz"><option value="direct_ship">' + L("biz_direct_ship") + '</option><option value="bulk">' + L("biz_bulk") + '</option><option value="return">' + L("biz_return") + '</option><option value="change_order">' + L("biz_change_order") + '</option><option value="import">' + L("biz_import") + '</option></select></div>';
     html += '<div class="form-group"><label>' + L("cargo_summary") + '</label><input id="fb-conv-cargo" type="text" value="' + esc(fb.title || "") + '"></div>';
     html += '<button class="btn btn-primary" onclick="convertFeedbackToInbound(this)">' + L("convert_to_inbound") + '</button>';
     html += '</div>';
