@@ -2909,11 +2909,12 @@ async function loadFeedbackDetail() {
     html += '</div>';
   }
 
-  // 删除现场反馈（仅误操作脏数据；converted 不能删）
-  if (fb.status !== 'converted') {
-    html += '<div class="card"><div class="card-title" style="color:#c0392b;">删除反馈 / 현장피드백 삭제</div>';
-    html += '<div class="muted" style="font-size:12px;margin-bottom:8px;">仅用于删除误操作产生的脏数据；如已有完成的作业记录或转正，将无法删除。</div>';
-    html += '<button class="btn btn-danger" onclick="deleteFeedback(this)">删除此反馈 / 삭제</button>';
+  // 删除现场反馈（未转正即可删；converted / 已生成正式入库计划 / 进行中作业 都会被后端拦截）
+  if (fb.status !== 'converted' && !fb.inbound_plan_id) {
+    html += '<div class="card"><div class="card-title" style="color:#c0392b;">删除反馈 / 피드백 삭제</div>';
+    html += '<div class="muted" style="font-size:12px;margin-bottom:8px;">用于清理误操作 / 测试数据。' +
+            '已转正、已生成正式入库计划、或仍有进行中作业的反馈无法删除。</div>';
+    html += '<button class="btn btn-danger" onclick="deleteFeedback(this)">删除反馈 / 피드백 삭제</button>';
     html += '</div>';
   }
 
@@ -2922,13 +2923,12 @@ async function loadFeedbackDetail() {
 
 async function deleteFeedback(btnEl) {
   if (!_currentFeedbackId) return;
-  if (!confirm("确认删除此现场反馈？此操作不可撤销。\n정말 삭제하시겠습니까?")) return;
-  if (!confirm("再次确认：删除后不可恢复，是否继续？\n다시 확인: 삭제 후 복구 불가, 계속하시겠습니까?")) return;
+  if (!confirm("确认删除该现场反馈？删除后不可恢复。\n해당 현장 피드백을 삭제하시겠습니까? 삭제 후 복구할 수 없습니다.")) return;
   withActionLock('deleteFeedback', btnEl || null, '删除中.../삭제중...', async function() {
     var res = await api({ action: "v2_feedback_delete", id: _currentFeedbackId });
     if (res && res.ok) {
       alert("已删除 / 삭제됨");
-      goView("feedback_list");
+      goTab("feedback");
       if (typeof loadFeedbackList === 'function') loadFeedbackList();
     } else {
       alert("删除失败/실패: " + (res ? (res.message || res.error) : "unknown"));

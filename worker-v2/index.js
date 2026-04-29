@@ -4664,40 +4664,66 @@ route("v2_feedback_delete", async (body, env) => {
   if (!id) return err("missing id");
 
   return withIdem(env, body, "v2_feedback_delete", async () => {
-    const fb = await env.DB.prepare("SELECT id, status, feedback_type FROM v2_field_feedbacks WHERE id=?").bind(id).first();
+    const fb = await env.DB.prepare(
+      "SELECT id, status, feedback_type, inbound_plan_id FROM v2_field_feedbacks WHERE id=?"
+    ).bind(id).first();
     if (!fb) return { ok: false, error: "not_found" };
+
+    // 已转正 → 拒（formal inbound/outbound 数据不能因删反馈而连带丢失）
     if (fb.status === 'converted') {
       return { ok: false, error: "converted_cannot_delete", message: "已转正的反馈不能删除 / 정식 전환된 피드백은 삭제 불가" };
     }
+    if (fb.inbound_plan_id) {
+      return { ok: false, error: "has_converted_doc_cannot_delete", message: "该反馈已生成正式入库计划，不能删除 / 정식 입고 계획이 생성되어 삭제 불가" };
+    }
+
+    // 仅允许这些状态删除（unloaded_pending_info 现已在列）
     const allowDelete = ['open', 'field_working', 'unloaded_pending_info', 'cancelled'];
     if (allowDelete.indexOf(fb.status) === -1) {
       return { ok: false, error: "status_not_allowed", message: "当前状态不允许删除：" + fb.status };
     }
 
-    // active job → 拒
+    // 有进行中的关联 job → 拒（不能在作业中误删）
     const activeJob = await env.DB.prepare(
       "SELECT id FROM v2_ops_jobs WHERE related_doc_type='field_feedback' AND related_doc_id=? AND status IN ('pending','working','awaiting_close') LIMIT 1"
     ).bind(id).first();
     if (activeJob) {
-      return { ok: false, error: "active_job_exists", message: "该反馈有关联进行中任务，不能删除 / 진행 중 작업이 있어 삭제 불가" };
-    }
-    // completed job → 拒（避免误删工时数据）
-    const completedJob = await env.DB.prepare(
-      "SELECT id FROM v2_ops_jobs WHERE related_doc_type='field_feedback' AND related_doc_id=? AND status='completed' LIMIT 1"
-    ).bind(id).first();
-    if (completedJob) {
-      return { ok: false, error: "has_ops_history_cannot_delete", message: "该反馈已有完成的作业记录，不能删除（避免误删工时）" };
+      return { ok: false, error: "active_job_cannot_delete", message: "该反馈有关联进行中任务，不能删除 / 진행 중 작업이 있어 삭제 불가" };
     }
 
-    let deleted = { feedback: 0, attachments: 0, cancelled_jobs: 0 };
-    const cancelledJobs = await env.DB.prepare(
-      "DELETE FROM v2_ops_jobs WHERE related_doc_type='field_feedback' AND related_doc_id=? AND status='cancelled'"
-    ).bind(id).run();
-    deleted.cancelled_jobs = (cancelledJobs.meta && cancelledJobs.meta.changes) || 0;
+    // unloaded_pending_info / open / field_working(无 active) / cancelled：
+    // 反馈未转正，关联的 cancelled / completed unplanned_unload job 仅是反馈生命周期内部数据
+    // → 连同 workers / results / job 一并清理，避免悬挂记录
+    const relatedJobsRs = await env.DB.prepare(
+      "SELECT id FROM v2_ops_jobs WHERE related_doc_type='field_feedback' AND related_doc_id=?"
+    ).bind(id).all();
+    const relatedJobIds = (relatedJobsRs.results || []).map(r => r.id);
+
+    let deleted = { feedback: 0, attachments: 0, jobs: 0, job_workers: 0, job_results: 0 };
+
+    // 反馈关联 job 通常 1 条；逐个清 workers/results 再删 job 主体（小循环不影响性能）
+    for (const jobId of relatedJobIds) {
+      const wRs = await env.DB.prepare(
+        "DELETE FROM v2_ops_job_workers WHERE job_id=?"
+      ).bind(jobId).run();
+      deleted.job_workers += (wRs.meta && wRs.meta.changes) || 0;
+
+      const rRs = await env.DB.prepare(
+        "DELETE FROM v2_ops_job_results WHERE job_id=?"
+      ).bind(jobId).run();
+      deleted.job_results += (rRs.meta && rRs.meta.changes) || 0;
+
+      const jRs = await env.DB.prepare(
+        "DELETE FROM v2_ops_jobs WHERE id=?"
+      ).bind(jobId).run();
+      deleted.jobs += (jRs.meta && jRs.meta.changes) || 0;
+    }
+
     const attsRs = await env.DB.prepare(
       "DELETE FROM v2_attachments WHERE related_doc_type='field_feedback' AND related_doc_id=?"
     ).bind(id).run();
     deleted.attachments = (attsRs.meta && attsRs.meta.changes) || 0;
+
     const fbRs = await env.DB.prepare("DELETE FROM v2_field_feedbacks WHERE id=?").bind(id).run();
     deleted.feedback = (fbRs.meta && fbRs.meta.changes) || 0;
 
