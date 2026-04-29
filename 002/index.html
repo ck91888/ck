@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>协同中心 V2 / 협업센터</title>
-  <link rel="stylesheet" href="style.css?v=20260430c">
+  <link rel="stylesheet" href="style.css?v=20260430d">
 </head>
 <body>
 
@@ -150,6 +150,7 @@
         <option value="bulk" data-i18n="biz_bulk">大货</option>
         <option value="return" data-i18n="biz_return">退件</option>
       </select>
+      <input type="text" id="obFilterCustomer" placeholder="客户名搜索 / 고객명 검색" style="min-width:160px;" onkeydown="if(event.key==='Enter')loadOutboundList()">
       <select id="obFilterUsesStockOp" onchange="loadOutboundList()">
         <option value="" data-i18n="filter_uses_stock_op">是否库内操作(全部)</option>
         <option value="1" data-i18n="uses_stock_operation_yes">是</option>
@@ -166,7 +167,7 @@
         <option value="0" data-i18n="accounted_no">未记帐</option>
         <option value="1" data-i18n="accounted_yes">已记帐</option>
       </select>
-      <button class="btn btn-outline btn-sm" onclick="loadOutboundList()">查询</button>
+      <button class="btn btn-outline btn-sm" id="obQueryBtn" onclick="loadOutboundList()">查询</button>
     </div>
     <div id="outboundListBody"></div>
   </div>
@@ -176,10 +177,8 @@
     <button class="nav-back" onclick="goTab('outbound')">← 返回</button>
     <div class="card">
       <div class="card-title">新建出库作业单</div>
-      <div class="form-group">
-        <label>日期</label>
-        <input id="oc-date" type="date">
-      </div>
+      <!-- 作业单日期：自动取自预计出库时间或今日，不显示给客服 -->
+      <input id="oc-date" type="hidden">
       <div class="form-group">
         <label>客户</label>
         <input id="oc-customer" type="text">
@@ -228,8 +227,9 @@
         <textarea id="oc-instruction" rows="3"></textarea>
       </div>
       <div class="form-group">
-        <label data-i18n="expected_ship_at">预计出库时间 / 예상 출고 시간</label>
+        <label data-i18n="expected_ship_at"><b>预计出库时间 / 예상 출고 시간</b> <span style="color:#c62828;">*</span></label>
         <input id="oc-expected-ship-at" type="datetime-local">
+        <div class="muted" style="font-size:12px;margin-top:4px;">即正式预计出库时间；不填则按今日归档。</div>
       </div>
       <div class="form-group">
         <label data-i18n="outbound_requirement">出库要求 / 출고 요구사항</label>
@@ -237,8 +237,9 @@
       </div>
       <div class="form-group">
         <label data-i18n="outbound_materials">出库资料 / 출고 자료</label>
-        <input id="oc-materials" type="file" multiple accept=".xlsx,.xls,.csv,.pdf,.jpg,.jpeg,.png">
-        <div class="muted" style="font-size:12px;margin-top:4px;" data-i18n="outbound_materials_upload_hint">支持 Excel / PDF / 图片（可选）</div>
+        <input id="oc-materials" type="file" multiple accept=".xlsx,.xls,.csv,.pdf,.jpg,.jpeg,.png" onchange="onOcMaterialsChange(this)">
+        <div class="muted" style="font-size:12px;margin-top:4px;" data-i18n="outbound_materials_upload_hint">支持 Excel / PDF / 图片（可选，可分多次选择，文件会累加而不是覆盖）</div>
+        <div id="ocMaterialsList" style="margin-top:6px;"></div>
       </div>
       <div class="form-row" style="display:flex;gap:12px;">
         <div class="form-group" style="flex:1">
@@ -283,13 +284,20 @@
         <option value="completed">已完成</option>
         <option value="cancelled">已取消 / 취소됨</option>
       </select>
+      <select id="ibFilterBizClass" onchange="loadInboundList()">
+        <option value="">业务分类(全部)</option>
+        <option value="direct_ship">代发 / 직배송</option>
+        <option value="bulk">大货 / 대량화물</option>
+        <option value="return">退件 / 반품</option>
+      </select>
+      <input type="text" id="ibFilterCustomer" placeholder="客户名搜索 / 고객명 검색" style="min-width:160px;" onkeydown="if(event.key==='Enter')loadInboundList()">
       <span class="filter-label" data-i18n="account_filter">是否记帐</span>
       <select id="inboundFilterAccounted" onchange="loadInboundList()">
         <option value="" data-i18n="account_all">全部记帐状态</option>
         <option value="0" data-i18n="accounted_no">未记帐</option>
         <option value="1" data-i18n="accounted_yes">已记帐</option>
       </select>
-      <button class="btn btn-outline btn-sm" onclick="loadInboundList()">查询</button>
+      <button class="btn btn-outline btn-sm" id="ibQueryBtn" onclick="loadInboundList()">查询</button>
     </div>
     <div id="inboundListBody"></div>
   </div>
@@ -488,7 +496,7 @@
 
 <input type="file" id="fileInput" accept="image/*" style="display:none;" onchange="handleFileUpload(this)">
 
-<script src="config.js?v=20260430c"></script>
+<script src="config.js?v=20260430d"></script>
 <script src="../shared/qrcode.min.js"></script>
 <!--
   TODO(SheetJS 动态加载): xlsx.full.min.js ~923KB，目前同步加载，
@@ -498,6 +506,6 @@
   onVerifyFilePick / 表格导出流程。
 -->
 <script src="../shared/xlsx.full.min.js"></script>
-<script src="app.js?v=20260430c"></script>
+<script src="app.js?v=20260430d"></script>
 </body>
 </html>

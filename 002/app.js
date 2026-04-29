@@ -877,6 +877,8 @@ async function cancelIssue(btnEl) {
 async function loadOutboundList() {
   var body = document.getElementById("outboundListBody");
   if (!body) return;
+  var btn = document.getElementById("obQueryBtn");
+  if (btn) btn.disabled = true;
   body.innerHTML = '<div class="card muted">' + L("loading") + '</div>';
 
   var start = document.getElementById("obFilterStart").value;
@@ -890,16 +892,26 @@ async function loadOutboundList() {
   var uses_stock_operation = usesSel ? usesSel.value : "";
   var matSel = document.getElementById("obFilterHasMaterial");
   var has_material = matSel ? matSel.value : "";
+  var custEl = document.getElementById("obFilterCustomer");
+  var customer_keyword = custEl ? (custEl.value || '').trim() : "";
 
-  var res = await api({
-    action: "v2_outbound_order_list",
-    start_date: start, end_date: end, status: status, accounted: accounted,
-    biz_class: biz_class,
-    uses_stock_operation: uses_stock_operation,
-    has_material: has_material
-  });
+  var res;
+  try {
+    res = await api({
+      action: "v2_outbound_order_list",
+      start_date: start, end_date: end, status: status, accounted: accounted,
+      biz_class: biz_class,
+      customer_keyword: customer_keyword,
+      uses_stock_operation: uses_stock_operation,
+      has_material: has_material,
+      limit: 50
+    });
+  } finally {
+    if (btn) btn.disabled = false;
+  }
   if (!res || !res.ok) {
-    body.innerHTML = '<div class="card muted">加载失败</div>';
+    var errMsg = (res && (res.message || res.error)) || '网络异常 / 네트워크 오류';
+    body.innerHTML = '<div class="card muted" style="color:#c62828;">加载失败 / 로딩 실패: ' + esc(String(errMsg)) + '</div>';
     return;
   }
 
@@ -932,7 +944,14 @@ async function loadOutboundList() {
     html += accountTag(o);
     html += esc(o.display_no || o.id) + ' · ' + esc(o.customer || "--");
     html += '</div>';
-    var meta = esc(o.order_date || "");
+    // 优先显示预计出库时间；为空 fallback 到作业单日期
+    var dateLabel = '';
+    if (o.expected_ship_at) {
+      dateLabel = '预计出库 ' + esc(o.expected_ship_at);
+    } else {
+      dateLabel = '作业单日期 ' + esc(o.order_date || '--');
+    }
+    var meta = dateLabel;
     if (o.destination) meta += ' · ' + esc(o.destination);
     if (o.wms_work_order_no) meta += ' · ' + esc(o.wms_work_order_no);
     if (o.outbound_mode) meta += ' · ' + esc(outModeLabel(o.outbound_mode));
@@ -963,6 +982,61 @@ function addOutboundLine() {
   tbody.appendChild(tr);
 }
 
+// 出库新建表单的附件累积（HTML <input multiple> 二次选择会替换上次选择，
+// 因此必须用 JS 数组累积，避免"上传两次只保留一次"的视觉错觉）
+var _obCreateMaterials = [];
+
+function _ocMaterialsKey(f) {
+  return (f && f.name || '') + '|' + (f && f.size || 0) + '|' + (f && f.lastModified || 0);
+}
+
+function _renderOcMaterialsList() {
+  var box = document.getElementById('ocMaterialsList');
+  if (!box) return;
+  if (_obCreateMaterials.length === 0) {
+    box.innerHTML = '<div class="muted" style="font-size:12px;">尚未选择任何文件 / 파일 미선택</div>';
+    return;
+  }
+  var html = '<div style="font-size:12px;margin-top:4px;">已选文件 / 선택된 파일 (' + _obCreateMaterials.length + ')：</div>';
+  html += '<ul style="font-size:12px;margin:4px 0 0 0;padding-left:18px;list-style:disc;">';
+  _obCreateMaterials.forEach(function(f, idx) {
+    var sizeKb = Math.round(((f && f.size) || 0) / 1024);
+    html += '<li style="margin:2px 0;">' + esc(f.name || '?') + ' <span class="muted">(' + sizeKb + ' KB)</span> '
+         + '<a href="javascript:void(0);" onclick="removeOcMaterial(' + idx + ')" style="color:#c62828;">移除 / 제거</a></li>';
+  });
+  html += '</ul>';
+  box.innerHTML = html;
+}
+
+function onOcMaterialsChange(inputEl) {
+  if (!inputEl || !inputEl.files) return;
+  var seen = {};
+  _obCreateMaterials.forEach(function(f) { seen[_ocMaterialsKey(f)] = 1; });
+  var newFiles = Array.prototype.slice.call(inputEl.files);
+  var added = 0;
+  for (var i = 0; i < newFiles.length; i++) {
+    var key = _ocMaterialsKey(newFiles[i]);
+    if (seen[key]) continue;
+    _obCreateMaterials.push(newFiles[i]);
+    seen[key] = 1;
+    added++;
+  }
+  // 立刻清空 input.value，使再次选择"同名文件/同一组文件"也能触发 change
+  inputEl.value = "";
+  _renderOcMaterialsList();
+}
+
+function removeOcMaterial(idx) {
+  if (idx < 0 || idx >= _obCreateMaterials.length) return;
+  _obCreateMaterials.splice(idx, 1);
+  _renderOcMaterialsList();
+}
+
+function clearOcMaterials() {
+  _obCreateMaterials = [];
+  _renderOcMaterialsList();
+}
+
 async function submitOutbound(btnEl) {
   var customer = document.getElementById("oc-customer").value.trim();
   if (!customer) { alert(L("customer") + "!"); return; }
@@ -972,7 +1046,6 @@ async function submitOutbound(btnEl) {
   var outmodeCheck = document.getElementById("oc-outmode").value.trim();
   if (!outmodeCheck) { alert(L("select_outbound_mode")); return; }
   withActionLock('submitOutbound', btnEl || null, '提交中.../저장중...', async function() {
-    var date = document.getElementById("oc-date").value || kstToday();
     var destination = document.getElementById("oc-destination").value.trim();
     var po_no = document.getElementById("oc-po").value.trim();
     var wms_wo = document.getElementById("oc-wms-wo").value.trim();
@@ -986,8 +1059,14 @@ async function submitOutbound(btnEl) {
     var expected_ship_at = expEl ? expEl.value.trim() : "";
     var reqEl = document.getElementById("oc-outbound-requirement");
     var outbound_requirement = reqEl ? reqEl.value.trim() : "";
-    var matEl = document.getElementById("oc-materials");
-    var matFiles = (matEl && matEl.files) ? Array.prototype.slice.call(matEl.files) : [];
+
+    // 作业单日期（order_date）自动取自预计出库时间的日期部分；都没有就用今日
+    // hidden 输入仍保留，用户/调试端可手动覆盖
+    var dateEl = document.getElementById("oc-date");
+    var manualDate = dateEl ? dateEl.value.trim() : "";
+    var date = manualDate || (expected_ship_at ? expected_ship_at.slice(0, 10) : "") || kstToday();
+
+    var matFiles = _obCreateMaterials.slice(0);
 
     // Collect lines
     var lines = [];
@@ -1027,20 +1106,20 @@ async function submitOutbound(btnEl) {
     var displayNo = res.display_no || res.id;
 
     // 上传出库资料（创建成功后再上传，related_doc_id=order_id）
-    var uploadFailed = false;
+    var failedNames = [];
     if (matFiles.length > 0 && newOrderId) {
       for (var i = 0; i < matFiles.length; i++) {
         try {
           var ok = await uploadOutboundMaterial(newOrderId, matFiles[i]);
-          if (!ok) uploadFailed = true;
+          if (!ok) failedNames.push(matFiles[i].name || '?');
         } catch (e) {
-          uploadFailed = true;
+          failedNames.push((matFiles[i] && matFiles[i].name) || '?');
         }
       }
     }
 
-    if (uploadFailed) {
-      alert(L("upload_failed_after_create") + "\n单号 / 번호: " + displayNo);
+    if (failedNames.length > 0) {
+      alert("出库单已创建：" + displayNo + "\n但部分资料上传失败，请进入详情补传 / 출고단 생성됨, 일부 자료 업로드 실패:\n" + failedNames.join("\n"));
     } else {
       alert("已创建 / 생성됨: " + displayNo);
     }
@@ -1056,7 +1135,9 @@ async function submitOutbound(btnEl) {
     document.getElementById("oc-instruction").value = "";
     if (expEl) expEl.value = "";
     if (reqEl) reqEl.value = "";
+    var matEl = document.getElementById("oc-materials");
     if (matEl) matEl.value = "";
+    clearOcMaterials();
     document.getElementById("oc-planned-box").value = "0";
     document.getElementById("oc-planned-pallet").value = "0";
     document.getElementById("ocLinesBody").innerHTML = "";
@@ -1603,6 +1684,8 @@ function printOutboundOrder() {
 async function loadInboundList() {
   var body = document.getElementById("inboundListBody");
   if (!body) return;
+  var btn = document.getElementById("ibQueryBtn");
+  if (btn) btn.disabled = true;
   body.innerHTML = '<div class="card muted">' + L("loading") + '</div>';
 
   var start = document.getElementById("ibFilterStart").value;
@@ -1610,10 +1693,26 @@ async function loadInboundList() {
   var status = document.getElementById("ibFilterStatus").value;
   var accountedSel = document.getElementById("inboundFilterAccounted");
   var accounted = accountedSel ? accountedSel.value : "";
+  var bizSel = document.getElementById("ibFilterBizClass");
+  var biz_class = bizSel ? bizSel.value : "";
+  var custEl = document.getElementById("ibFilterCustomer");
+  var customer_keyword = custEl ? (custEl.value || '').trim() : "";
 
-  var res = await api({ action: "v2_inbound_plan_list", start_date: start, end_date: end, status: status, accounted: accounted });
+  var res;
+  try {
+    res = await api({
+      action: "v2_inbound_plan_list",
+      start_date: start, end_date: end, status: status, accounted: accounted,
+      biz_class: biz_class,
+      customer_keyword: customer_keyword,
+      limit: 50
+    });
+  } finally {
+    if (btn) btn.disabled = false;
+  }
   if (!res || !res.ok) {
-    body.innerHTML = '<div class="card muted">加载失败</div>';
+    var errMsg = (res && (res.message || res.error)) || '网络异常 / 네트워크 오류';
+    body.innerHTML = '<div class="card muted" style="color:#c62828;">加载失败 / 로딩 실패: ' + esc(String(errMsg)) + '</div>';
     return;
   }
 
@@ -1650,6 +1749,19 @@ async function loadInboundList() {
     html += ' ' + esc(p.display_no || p.id) + ' · ' + esc(p.customer || "--") + ' · ' + esc(p.cargo_summary || "");
     html += '</div>';
     var ibMeta = esc(p.plan_date || "") + ' · ' + esc(p.expected_arrival || "") + ' · ' + esc(fmtTime(p.created_at));
+    // line summary：箱/托/件 — 仅显示有数量的项
+    var lineSum = p.line_summary || {};
+    var lineParts = [];
+    var unitOrder = ['carton','pallet','container_large','container_small','cbm'];
+    for (var ui = 0; ui < unitOrder.length; ui++) {
+      var ut = unitOrder[ui];
+      var q = Number(lineSum[ut] || 0);
+      if (q > 0) lineParts.push(unitTypeLabel(ut) + ' ' + (Number.isInteger(q) ? q : q.toFixed(1)));
+    }
+    if (lineParts.length > 0) ibMeta += ' · ' + lineParts.join(' / ');
+    if (Number(p.related_outbound_count || 0) > 0) {
+      ibMeta += ' · 关联出库 ' + Number(p.related_outbound_count) + ' 单';
+    }
     if (p.accounted == 1 && (p.accounted_by || p.accounted_at)) {
       ibMeta += ' · ' + L("accounted_by_short") + ': ' + esc(p.accounted_by || "") + (p.accounted_at ? ' ' + esc(fmtTime(p.accounted_at)) : '');
     }

@@ -136,7 +136,7 @@ var LANG = {
     purpose: "用途",
     plan_date: "计划日期",
     // Outbound
-    order_date: "日期",
+    order_date: "作业单日期",
     outbound_mode: "出库模式",
     instruction: "作业说明",
     destination: "目的地",
@@ -384,7 +384,7 @@ var LANG = {
     expected_arrival: "예상 도착",
     purpose: "용도",
     plan_date: "계획 날짜",
-    order_date: "날짜",
+    order_date: "작업단 날짜",
     outbound_mode: "출고 모드",
     instruction: "작업 설명",
     destination: "목적지",

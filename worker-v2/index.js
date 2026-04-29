@@ -1014,10 +1014,23 @@ const MIGRATIONS = [
   `ALTER TABLE v2_outbound_orders ADD COLUMN pickup_confirm_required INTEGER DEFAULT 0`,
   `ALTER TABLE v2_outbound_orders ADD COLUMN pickup_confirmed_by TEXT DEFAULT ''`,
   `ALTER TABLE v2_outbound_orders ADD COLUMN pickup_confirmed_at TEXT DEFAULT ''`,
+
+  // ---- v2.20260430d：列表查询性能 + 业务/客户筛选索引（2026-04-29） ----
+  // 入库
+  `CREATE INDEX IF NOT EXISTS idx_v2_inbound_status_date ON v2_inbound_plans(status, plan_date, created_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_inbound_customer ON v2_inbound_plans(customer)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_inbound_biz_status ON v2_inbound_plans(biz_class, status, plan_date)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_inbound_biz_task_biz_plan ON v2_inbound_plan_biz_tasks(biz_class, plan_id)`,
+  // 出库
+  `CREATE INDEX IF NOT EXISTS idx_v2_outbound_status_date ON v2_outbound_orders(status, order_date, created_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_outbound_customer ON v2_outbound_orders(customer)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_outbound_biz_status ON v2_outbound_orders(biz_class, status, order_date)`,
+  // 附件
+  `CREATE INDEX IF NOT EXISTS idx_v2_attachments_doc_cat ON v2_attachments(related_doc_type, related_doc_id, attachment_category)`,
 ];
 
 // 每次发布迁移变化时手动 +1（patch 段），冷启动只比对一次字符串即可跳过整段 MIGRATIONS
-const CURRENT_SCHEMA_VERSION = 'v2.20260430a';
+const CURRENT_SCHEMA_VERSION = 'v2.20260430d';
 
 let _migrated = false;
 async function ensureMigrated(db) {
@@ -1511,6 +1524,7 @@ route("v2_outbound_order_list", async (body, env) => {
   const status = String(body.status || "").trim();
   const accounted = String(body.accounted == null ? "" : body.accounted).trim();
   const biz_class = String(body.biz_class || "").trim();
+  const customer_keyword = String(body.customer_keyword || "").trim();
   const usesStockRaw = String(body.uses_stock_operation == null ? "" : body.uses_stock_operation).trim();
   const hasMaterialRaw = String(body.has_material == null ? "" : body.has_material).trim();
   const { limit, offset } = pageParams(body);
@@ -1523,6 +1537,7 @@ route("v2_outbound_order_list", async (body, env) => {
   if (accounted === "1") { sql += " AND accounted=1"; }
   else if (accounted === "0") { sql += " AND (accounted IS NULL OR accounted=0)"; }
   if (biz_class) { sql += " AND biz_class=?"; binds.push(biz_class); }
+  if (customer_keyword) { sql += " AND customer LIKE ?"; binds.push('%' + customer_keyword + '%'); }
   if (usesStockRaw === "1") { sql += " AND uses_stock_operation=1"; }
   else if (usesStockRaw === "0") { sql += " AND (uses_stock_operation IS NULL OR uses_stock_operation=0)"; }
   if (hasMaterialRaw === "1") {
@@ -2522,7 +2537,12 @@ route("v2_inbound_plan_list", async (body, env) => {
   const accounted = String(body.accounted == null ? "" : body.accounted).trim();
   // 执行系统过滤：required_biz_class 限定该业务类型仍未完成的计划（in: direct_ship/bulk/return）
   const required_biz_class = String(body.required_biz_class || "").trim();
+  // 协同中心筛选：biz_class 仅按"包含该业务"过滤（含 legacy + json + biz_task）；customer_keyword 模糊搜索
+  const biz_class_filter = String(body.biz_class || "").trim();
+  const customer_keyword = String(body.customer_keyword || "").trim();
+  const VALID_BIZ = ['direct_ship','bulk','return'];
   const { limit, offset } = pageParams(body);
+
   // 排除退件入库会话：return_session 不属于正式入库计划口径
   let sql = "SELECT * FROM v2_inbound_plans WHERE source_type != 'return_session'";
   const binds = [];
@@ -2532,16 +2552,68 @@ route("v2_inbound_plan_list", async (body, env) => {
   else { sql += " AND status != 'cancelled'"; } // 默认"全部状态"排除已取消，仅当显式筛 cancelled 才返回
   if (accounted === "1") { sql += " AND accounted=1"; }
   else if (accounted === "0") { sql += " AND (accounted IS NULL OR accounted=0)"; }
+  // 业务分类筛选：兼容 (a) biz_classes_json 包含 (b) v2_inbound_plan_biz_tasks 存在 (c) 旧数据 plan.biz_class
+  if (biz_class_filter && VALID_BIZ.indexOf(biz_class_filter) !== -1) {
+    sql += " AND ("
+        +    "biz_class=?"
+        +    " OR biz_classes_json LIKE ?"
+        +    " OR EXISTS (SELECT 1 FROM v2_inbound_plan_biz_tasks t WHERE t.plan_id=v2_inbound_plans.id AND t.biz_class=?)"
+        +  ")";
+    binds.push(biz_class_filter, '%"' + biz_class_filter + '"%', biz_class_filter);
+  }
+  // 客户名模糊搜索
+  if (customer_keyword) {
+    sql += " AND customer LIKE ?";
+    binds.push('%' + customer_keyword + '%');
+  }
   sql += " ORDER BY plan_date DESC, created_at DESC LIMIT ? OFFSET ?";
   binds.push(limit, offset);
   const rs = await env.DB.prepare(sql).bind(...binds).all();
   const rows = rs.results || [];
 
-  // 注入 biz_classes / biz_task_summary / completed_biz_classes / pending_biz_classes / missing_biz_classes
+  if (rows.length === 0) return json({ ok: true, items: [], limit, offset });
+
+  // ===== 批量 enrichment（消除 N+1）=====
+  const planIds = rows.map(p => p.id);
+
+  // 1) biz_tasks（按 plan_id 分组）
+  const taskRows = await batchSelectInGlobal(env,
+    "SELECT plan_id, biz_class, status FROM v2_inbound_plan_biz_tasks WHERE plan_id IN (PLACEHOLDER) ORDER BY biz_class",
+    planIds);
+  const tasksByPlan = {};
+  for (const r of taskRows) {
+    if (!tasksByPlan[r.plan_id]) tasksByPlan[r.plan_id] = [];
+    tasksByPlan[r.plan_id].push({ biz_class: r.biz_class, status: r.status });
+  }
+
+  // 2) lines summary（unit_type 维度合计）
+  const lineRows = await batchSelectInGlobal(env,
+    "SELECT plan_id, unit_type, SUM(planned_qty) AS qty FROM v2_inbound_plan_lines WHERE plan_id IN (PLACEHOLDER) GROUP BY plan_id, unit_type",
+    planIds);
+  const linesByPlan = {};
+  for (const r of lineRows) {
+    if (!linesByPlan[r.plan_id]) linesByPlan[r.plan_id] = {};
+    linesByPlan[r.plan_id][r.unit_type || ''] = Number(r.qty || 0);
+  }
+
+  // 3) 关联出库计数
+  const linkRows = await batchSelectInGlobal(env,
+    "SELECT source_inbound_plan_id AS plan_id, COUNT(*) AS c FROM v2_outbound_orders WHERE source_inbound_plan_id IN (PLACEHOLDER) GROUP BY source_inbound_plan_id",
+    planIds);
+  const linkedObByPlan = {};
+  for (const r of linkRows) linkedObByPlan[r.plan_id] = Number(r.c || 0);
+
+  // 4) 附件计数（仅 inbound_plan）
+  const attRows = await batchSelectInGlobal(env,
+    "SELECT related_doc_id AS plan_id, COUNT(*) AS c FROM v2_attachments WHERE related_doc_type='inbound_plan' AND related_doc_id IN (PLACEHOLDER) GROUP BY related_doc_id",
+    planIds);
+  const attCountByPlan = {};
+  for (const r of attRows) attCountByPlan[r.plan_id] = Number(r.c || 0);
+
+  // ===== 装配 + 后置过滤 =====
   const items = [];
   for (const p of rows) {
-    await ensureInboundPlanBizTasks(env, p);
-    const tasks = await listInboundPlanBizTasks(env, p.id);
+    const tasks = tasksByPlan[p.id] || [];
     const biz_classes = extractPlanBizClasses(p);
     const completed = tasks.filter(x => x.status === 'completed').map(x => x.biz_class);
     const pending = tasks.filter(x => x.status !== 'completed').map(x => x.biz_class);
@@ -2553,10 +2625,13 @@ route("v2_inbound_plan_list", async (body, env) => {
     items.push({
       ...p,
       biz_classes,
-      biz_task_summary: tasks.map(x => ({ biz_class: x.biz_class, status: x.status })),
+      biz_task_summary: tasks,
       completed_biz_classes: completed,
       pending_biz_classes: pending,
-      missing_biz_classes: pending // 与 pending 同义；前端醒目提示用
+      missing_biz_classes: pending,
+      line_summary: linesByPlan[p.id] || {},
+      related_outbound_count: linkedObByPlan[p.id] || 0,
+      attachment_count: attCountByPlan[p.id] || 0
     });
   }
   return json({ ok: true, items, limit, offset });
