@@ -670,8 +670,10 @@
     <label>备注 / 비고</label>
     <textarea id="loadRemark" rows="2"></textarea>
     <label>提货车辆照片 / 차량 사진</label>
-    <div class="photo-upload" id="loadPhotos">
-      <div class="photo-add" onclick="uploadPhoto('outbound_order','vehicle_photo')">+</div>
+    <div class="photo-upload" id="loadPhotos"></div>
+    <div class="photo-source-bar">
+      <button type="button" class="btn btn-outline btn-sm" onclick="uploadPhoto('outbound_order','vehicle_photo','camera')">📷 拍照 / 촬영</button>
+      <button type="button" class="btn btn-outline btn-sm" onclick="uploadPhoto('outbound_order','vehicle_photo','album')">🖼 从相册选择 / 앨범에서 선택</button>
     </div>
     <button class="btn btn-primary mt-10" onclick="saveOutboundLoadResult(this)">保存并完成 / 저장 후 완료</button>
   </div>
@@ -867,7 +869,9 @@
   <img id="lightboxImg" src="">
 </div>
 
-<input type="file" id="photoInput" accept="image/*" capture="environment" style="display:none;" onchange="handlePhotoUpload(this)">
+<!-- 现场端拆分照片来源：拍照（capture=environment）+ 相册（multiple，无 capture）-->
+<input type="file" id="photoInputCamera" accept="image/*" capture="environment" style="display:none;" onchange="handlePhotoUpload(this)">
+<input type="file" id="photoInputAlbum" accept="image/*" multiple style="display:none;" onchange="handlePhotoUpload(this)">
 
 <script src="config.js?v=20260430j"></script>
 <script src="app.js?v=20260430j"></script>

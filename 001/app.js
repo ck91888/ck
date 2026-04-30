@@ -21,6 +21,106 @@ var _badgeScanner = null;  // Html5Qrcode instance for badge scan
 var _badgeModalScanner = null; // Html5Qrcode instance for badge change modal
 var _startInflight = false; // in-flight guard for start actions
 
+// ===== 摄像头选择 helpers — 防止 OPPO/多摄机型默认走长焦 =====
+// 现场偏好持久化：localStorage('ck_v2_preferred_camera_id')
+// 启动顺序：localStorage 命中 → 命中且仍在当前 cameras 列表 → 用之
+//           否则 listVideoCameras → pickBestRearCamera → 写入 → 用之
+//           getCameras 失败/空 → fallback {facingMode:'environment'}
+var _CAM_LS_KEY = 'ck_v2_preferred_camera_id';
+function loadPreferredCameraId() {
+  try { return localStorage.getItem(_CAM_LS_KEY) || ''; } catch(e) { return ''; }
+}
+function savePreferredCameraId(id) {
+  try { localStorage.setItem(_CAM_LS_KEY, id || ''); } catch(e) {}
+}
+async function listVideoCameras() {
+  if (typeof Html5Qrcode === 'undefined' || !Html5Qrcode.getCameras) return [];
+  try {
+    var cams = await Html5Qrcode.getCameras();
+    return Array.isArray(cams) ? cams : [];
+  } catch(e) { return []; }
+}
+function pickBestRearCamera(cameras) {
+  if (!cameras || cameras.length === 0) return '';
+  // 排除：长焦/微距/景深/前置（中英 + 常见英文）
+  var EXCLUDE = /tele|telephoto|zoom|periscope|macro|depth|long|front|user|长焦|微距|景深|超长|前置/i;
+  // 优先：广角/主摄/普通后置（OPPO 常 label "0x", "1x", "wide"）
+  var PREFER  = /\b(back|rear|environment|wide|main|1x|0x)\b|后置|主摄|广角/i;
+  // 排除超广角（很多机型 ultra-wide 也会广角畸变 → 0.5x），但仅在有 wide 选项时
+  var ULTRA_WIDE = /ultra|0\.5x|超广角/i;
+  var nonExcluded = cameras.filter(function(c) { return !EXCLUDE.test(c.label || ''); });
+  if (nonExcluded.length === 0) nonExcluded = cameras.slice();
+  var preferred = nonExcluded.filter(function(c) {
+    return PREFER.test(c.label || '') && !ULTRA_WIDE.test(c.label || '');
+  });
+  if (preferred.length > 0) return preferred[0].id;
+  // 没匹配优先词：在非排除集里跳过 ultra-wide
+  var notUltra = nonExcluded.filter(function(c) { return !ULTRA_WIDE.test(c.label || ''); });
+  if (notUltra.length > 0) return notUltra[0].id;
+  return nonExcluded[0].id;
+}
+async function resolveCameraTarget() {
+  var saved = loadPreferredCameraId();
+  var cams = await listVideoCameras();
+  if (!cams || cams.length === 0) return { facingMode: 'environment' };
+  if (saved && cams.some(function(c) { return c.id === saved; })) return saved;
+  var best = pickBestRearCamera(cams);
+  if (best) { savePreferredCameraId(best); return best; }
+  return { facingMode: 'environment' };
+}
+// 在 reader 容器旁注入"切换摄像头"按钮；点击 → 选下一台 → restartFn
+function ensureCameraSwitchButton(readerId, restartFn) {
+  var reader = document.getElementById(readerId);
+  if (!reader || !reader.parentNode) return;
+  var btnId = readerId + '__camSwitch';
+  if (document.getElementById(btnId)) return;
+  var btn = document.createElement('button');
+  btn.id = btnId;
+  btn.type = 'button';
+  btn.className = 'btn btn-outline btn-sm cam-switch-btn';
+  btn.textContent = '🔄 切换摄像头 / 카메라 전환';
+  btn.onclick = function() { cycleCameraAndRestart(restartFn); };
+  reader.parentNode.insertBefore(btn, reader.nextSibling);
+}
+function removeCameraSwitchButton(readerId) {
+  var btn = document.getElementById(readerId + '__camSwitch');
+  if (btn && btn.parentNode) btn.parentNode.removeChild(btn);
+}
+async function cycleCameraAndRestart(restartFn) {
+  var cams = await listVideoCameras();
+  if (cams.length < 2) {
+    alert('未检测到多个摄像头 / 카메라가 하나뿐입니다');
+    return;
+  }
+  var cur = loadPreferredCameraId();
+  var idx = -1;
+  for (var i = 0; i < cams.length; i++) {
+    if (cams[i].id === cur) { idx = i; break; }
+  }
+  var next = cams[(idx + 1) % cams.length];
+  savePreferredCameraId(next.id);
+  if (typeof restartFn === 'function') {
+    try { await restartFn(); } catch(e) {
+      alert('重启失败 / 재시작 실패: ' + (e && e.message || e));
+    }
+  }
+}
+// 通用启动包装：解析摄像头 → start → 注入切换按钮（restart=stop+本函数再调）
+function startManagedQrScanner(scanner, readerId, scanConfig, onSuccess, onError) {
+  return resolveCameraTarget().then(function(target) {
+    return scanner.start(target, scanConfig, onSuccess, onError || function() {}).then(function() {
+      ensureCameraSwitchButton(readerId, function() {
+        return scanner.stop().then(function() {
+          return startManagedQrScanner(scanner, readerId, scanConfig, onSuccess, onError);
+        }).catch(function() {
+          // stop 可能失败（已停），仍尝试 start
+          return startManagedQrScanner(scanner, readerId, scanConfig, onSuccess, onError);
+        });
+      });
+    });
+  });
+}
+
 // ===== Action Lock — 防连点 =====
 var _actionLocks = {};
 function withActionLock(key, btnEl, pendingText, fn) {
@@ -290,6 +390,7 @@ function startBadgeScan() {
   // If scanner already running, stop it
   if (_badgeScanner) {
     try { _badgeScanner.stop(); } catch(e) {}
+    removeCameraSwitchButton("badgeReader");
     _badgeScanner = null;
     readerEl.innerHTML = "";
     btn.textContent = "开始扫码 / 스캔 시작";
@@ -304,8 +405,9 @@ function startBadgeScan() {
     experimentalFeatures: { useBarCodeDetectorIfSupported: true }
   });
 
-  _badgeScanner.start(
-    { facingMode: "environment" },
+  startManagedQrScanner(
+    _badgeScanner,
+    "badgeReader",
     { fps: 10, qrbox: { width: 250, height: 120 } },
     function(decodedText) {
       var code = decodedText.trim();
@@ -318,6 +420,7 @@ function startBadgeScan() {
       }
       // Valid badge
       try { _badgeScanner.stop(); } catch(e) {}
+      removeCameraSwitchButton("badgeReader");
       _badgeScanner = null;
       readerEl.innerHTML = "";
 
@@ -330,6 +433,7 @@ function startBadgeScan() {
     statusEl.textContent = "摄像头启动失败 / 카메라 시작 실패: " + e;
     statusEl.style.color = "#e74c3c";
     btn.textContent = "开始扫码 / 스캔 시작";
+    removeCameraSwitchButton("badgeReader");
     _badgeScanner = null;
   });
 }
@@ -412,8 +516,9 @@ function startBadgeModalScan() {
     experimentalFeatures: { useBarCodeDetectorIfSupported: true }
   });
 
-  _badgeModalScanner.start(
-    { facingMode: "environment" },
+  startManagedQrScanner(
+    _badgeModalScanner,
+    "badgeModalReader",
     { fps: 10, qrbox: { width: 240, height: 110 } },
     function(decodedText) {
       var code = decodedText.trim();
@@ -425,6 +530,7 @@ function startBadgeModalScan() {
         return;
       }
       try { _badgeModalScanner.stop(); } catch(e) {}
+      removeCameraSwitchButton("badgeModalReader");
       _badgeModalScanner = null;
       readerEl.innerHTML = "";
 
@@ -437,6 +543,7 @@ function startBadgeModalScan() {
   ).catch(function(e) {
     statusEl.textContent = "摄像头启动失败 / 카메라 시작 실패";
     statusEl.style.color = "#e74c3c";
+    removeCameraSwitchButton("badgeModalReader");
     _badgeModalScanner = null;
   });
 }
@@ -1064,8 +1171,9 @@ function startInboundScan() {
   var btn = document.getElementById("ibScanBtn");
   try {
     _inboundScanner = new Html5Qrcode("inboundScanReader");
-    _inboundScanner.start(
-      { facingMode: "environment" },
+    startManagedQrScanner(
+      _inboundScanner,
+      "inboundScanReader",
       { fps: 10, qrbox: { width: 250, height: 150 } },
       function(decoded) {
         stopInboundScan();
@@ -1078,6 +1186,7 @@ function startInboundScan() {
       function() {}
     ).catch(function(e) {
       alert("摄像头启动失败 / 카메라 시작 실패: " + e);
+      removeCameraSwitchButton("inboundScanReader");
       _inboundScanner = null;
     });
     if (btn) btn.textContent = "取消扫码 / 스캔 취소";
@@ -1088,6 +1197,7 @@ function startInboundScan() {
 function stopInboundScan() {
   if (_inboundScanner) {
     try { _inboundScanner.stop(); } catch(e) {}
+    removeCameraSwitchButton("inboundScanReader");
     _inboundScanner = null;
     var el = document.getElementById("inboundScanReader");
     if (el) el.innerHTML = "";
@@ -1200,8 +1310,9 @@ function startUnloadScan() {
   readerEl.innerHTML = "";
   try {
     _unloadScanner = new Html5Qrcode("unloadScanReader");
-    _unloadScanner.start(
-      { facingMode: "environment" },
+    startManagedQrScanner(
+      _unloadScanner,
+      "unloadScanReader",
       { fps: 10, qrbox: { width: 250, height: 150 } },
       async function(decoded) {
         stopUnloadScan();
@@ -1219,6 +1330,7 @@ function startUnloadScan() {
       function() {} // ignore scan errors
     ).catch(function(e) {
       alert("摄像头启动失败 / 카메라 시작 실패: " + e);
+      removeCameraSwitchButton("unloadScanReader");
       _unloadScanner = null;
     });
   } catch(e) {
@@ -1229,6 +1341,7 @@ function startUnloadScan() {
 function stopUnloadScan() {
   if (_unloadScanner) {
     try { _unloadScanner.stop(); } catch(e) {}
+    removeCameraSwitchButton("unloadScanReader");
     _unloadScanner = null;
     var el = document.getElementById("unloadScanReader");
     if (el) el.innerHTML = "";
@@ -2004,8 +2117,9 @@ function startOutboundScan() {
   var btn = document.getElementById("obScanBtn");
   try {
     _obLoadScanner = new Html5Qrcode("obLoadScanReader");
-    _obLoadScanner.start(
-      { facingMode: "environment" },
+    startManagedQrScanner(
+      _obLoadScanner,
+      "obLoadScanReader",
       { fps: 10, qrbox: { width: 250, height: 150 } },
       function(decoded) {
         stopOutboundScan();
@@ -2018,6 +2132,7 @@ function startOutboundScan() {
       function() {}
     ).catch(function(e) {
       alert("摄像头启动失败 / 카메라 시작 실패: " + e);
+      removeCameraSwitchButton("obLoadScanReader");
       _obLoadScanner = null;
     });
     if (btn) btn.textContent = "取消扫码 / 스캔 취소";
@@ -2029,6 +2144,7 @@ function startOutboundScan() {
 function stopOutboundScan() {
   if (_obLoadScanner) {
     try { _obLoadScanner.stop(); } catch(e) {}
+    removeCameraSwitchButton("obLoadScanReader");
     _obLoadScanner = null;
     var el = document.getElementById("obLoadScanReader");
     if (el) el.innerHTML = "";
@@ -2573,7 +2689,8 @@ async function loadIssueDetail() {
       html += '<div class="detail-section"><label>反馈内容 / 피드백 내용 <span style="color:red;">*必填/필수</span></label>';
       html += '<textarea id="issueFeedback" rows="3" placeholder="输入处理结果 / 처리 결과를 입력하세요 (必填/필수)"></textarea>';
       html += '<label>上传照片 / 사진 업로드</label>';
-      html += '<div class="photo-upload" id="issuePhotos"><div class="photo-add" onclick="uploadIssueHandlePhoto()">+</div></div>';
+      html += '<div class="photo-upload" id="issuePhotos"></div>';
+      html += renderPhotoSourceBar("uploadIssueHandlePhoto('camera')", "uploadIssueHandlePhoto('album')");
       html += '<button class="btn btn-danger mt-10" onclick="handleIssueFinish(this)">结束处理 / 처리 종료</button>';
       html += '<button class="btn btn-outline mt-10" onclick="handleIssueLeave(this)">暂时离开 / 일시 퇴장</button>';
       html += '</div>';
@@ -2772,8 +2889,9 @@ function togglePickCreateScan() {
   readerEl.innerHTML = "";
   try {
     _pickCreateScanner = new Html5Qrcode("pickCreateScanReader");
-    _pickCreateScanner.start(
-      { facingMode: "environment" },
+    startManagedQrScanner(
+      _pickCreateScanner,
+      "pickCreateScanReader",
       { fps: 10, qrbox: { width: 250, height: 150 } },
       function(decoded) {
         var code = String(decoded || "").trim();
@@ -2786,6 +2904,7 @@ function togglePickCreateScan() {
       function() {}
     ).catch(function(e) {
       alert("摄像头启动失败 / 카메라 시작 실패: " + e);
+      removeCameraSwitchButton("pickCreateScanReader");
       _pickCreateScanner = null;
     });
     var btn = document.getElementById("pickCreateScanBtn");
@@ -2798,6 +2917,7 @@ function togglePickCreateScan() {
 function stopPickCreateScan() {
   if (_pickCreateScanner) {
     try { _pickCreateScanner.stop(); } catch(e) {}
+    removeCameraSwitchButton("pickCreateScanReader");
     _pickCreateScanner = null;
     var el = document.getElementById("pickCreateScanReader");
     if (el) el.innerHTML = "";
@@ -2907,8 +3027,9 @@ function togglePickStartScan() {
   readerEl.innerHTML = "";
   try {
     _pickStartScanner = new Html5Qrcode("pickStartScanReader");
-    _pickStartScanner.start(
-      { facingMode: "environment" },
+    startManagedQrScanner(
+      _pickStartScanner,
+      "pickStartScanReader",
       { fps: 10, qrbox: { width: 250, height: 150 } },
       function(decoded) {
         var code = String(decoded || "").trim();
@@ -2922,6 +3043,7 @@ function togglePickStartScan() {
       function() {}
     ).catch(function(e) {
       alert("摄像头启动失败 / 카메라 시작 실패: " + e);
+      removeCameraSwitchButton("pickStartScanReader");
       _pickStartScanner = null;
     });
     var btn = document.getElementById("pickStartScanBtn");
@@ -3901,7 +4023,9 @@ async function checkAndResumeParent() {
 }
 
 // ===== Photo Upload =====
-function uploadPhoto(docType, category) {
+// 拍照（capture=environment）/ 相册（multiple，无 capture）— 现场必须双入口
+// source: 'camera' | 'album'
+function uploadPhoto(docType, category, source) {
   var docId = "";
   if (docType === "outbound_order") {
     docId = (document.getElementById("loadOrderSelect") || {}).value || "";
@@ -3912,12 +4036,12 @@ function uploadPhoto(docType, category) {
     attachment_category: category,
     related_doc_id: docId
   };
-  document.getElementById("photoInput").click();
+  _triggerPhotoInput(source);
 }
 
 // 问题点处理过程上传照片：优先 issue_handle_run（有 _currentRunId 时），fallback ops_job
 // 后端 v2_issue_detail 会通过 run_ids/job_ids 把这些附件挂回该 issue
-function uploadIssueHandlePhoto() {
+function uploadIssueHandlePhoto(source) {
   var docType = '';
   var docId = '';
   if (_currentRunId) {
@@ -3938,28 +4062,76 @@ function uploadIssueHandlePhoto() {
     attachment_category: 'issue_handle_photo',
     related_doc_id: docId
   };
-  document.getElementById('photoInput').click();
+  _triggerPhotoInput(source);
+}
+
+function _triggerPhotoInput(source) {
+  // source: 'camera'(拍照) / 'album'(相册多选) — 默认 album（不强制摄像头）
+  var inputId = (source === 'camera') ? 'photoInputCamera' : 'photoInputAlbum';
+  var el = document.getElementById(inputId);
+  if (!el) {
+    // 极端兜底：旧版本 photoInput 兼容
+    var legacy = document.getElementById('photoInput');
+    if (legacy) { legacy.click(); return; }
+    alert('上传入口缺失 / 업로드 입력 누락'); return;
+  }
+  el.value = '';  // 允许同一文件再次选择触发 change
+  el.click();
+}
+
+// 双按钮 HTML 片段（动态渲染处复用）：camera-trigger / album-trigger 两个 onclick
+function renderPhotoSourceBar(triggerCamera, triggerAlbum) {
+  return '<div class="photo-source-bar">' +
+    '<button type="button" class="btn btn-outline btn-sm" onclick="' + triggerCamera + '">📷 拍照 / 촬영</button>' +
+    '<button type="button" class="btn btn-outline btn-sm" onclick="' + triggerAlbum + '">🖼 从相册选择 / 앨범에서 선택</button>' +
+    '</div>';
 }
 
 async function handlePhotoUpload(input) {
-  if (!input.files || !input.files[0]) return;
-  var file = input.files[0];
-  var fd = new FormData();
-  fd.append("file", file);
-  fd.append("related_doc_type", _photoUploadCtx.related_doc_type || "");
-  fd.append("related_doc_id", _photoUploadCtx.related_doc_id || "");
-  fd.append("attachment_category", _photoUploadCtx.attachment_category || "");
-  fd.append("uploaded_by", getWorkerName());
+  if (!input.files || input.files.length === 0) return;
+  var files = Array.prototype.slice.call(input.files);
+  var ctx = {
+    related_doc_type: _photoUploadCtx.related_doc_type || '',
+    related_doc_id: _photoUploadCtx.related_doc_id || '',
+    attachment_category: _photoUploadCtx.attachment_category || ''
+  };
+  // 文件名去重（同一批次内）
+  var seen = {};
+  var deduped = files.filter(function(f) {
+    var key = (f.name || '') + '|' + (f.size || 0);
+    if (seen[key]) return false;
+    seen[key] = true;
+    return true;
+  });
 
-  var res = await uploadFile(fd);
-  if (res && res.ok) {
-    alert("上传成功 / 업로드 성공");
-    // Refresh if on issue detail
-    if (_currentPage === "issue_detail") loadIssueDetail();
-  } else {
-    alert("上传失败 / 업로드 실패: " + (res ? res.error : "unknown"));
+  var ok = [], fail = [];
+  for (var i = 0; i < deduped.length; i++) {
+    var file = deduped[i];
+    var fd = new FormData();
+    fd.append('file', file);
+    fd.append('related_doc_type', ctx.related_doc_type);
+    fd.append('related_doc_id', ctx.related_doc_id);
+    fd.append('attachment_category', ctx.attachment_category);
+    fd.append('uploaded_by', getWorkerName());
+    try {
+      var res = await uploadFile(fd);
+      if (res && res.ok) ok.push(file.name || ('文件' + (i + 1)));
+      else fail.push((file.name || ('文件' + (i + 1))) + ' (' + ((res && res.error) || 'error') + ')');
+    } catch (e) {
+      fail.push((file.name || ('文件' + (i + 1))) + ' (' + (e && e.message || 'exception') + ')');
+    }
   }
-  input.value = "";
+
+  if (fail.length === 0) {
+    alert('上传成功 / 업로드 성공: ' + ok.length + ' 张');
+  } else if (ok.length === 0) {
+    alert('全部失败 / 모두 실패:\n' + fail.join('\n'));
+  } else {
+    alert('成功 ' + ok.length + ' / 失败 ' + fail.length + '\n失败列表:\n' + fail.join('\n'));
+  }
+
+  if (_currentPage === 'issue_detail') loadIssueDetail();
+  input.value = '';
 }
 
 function showLightbox(url) {
