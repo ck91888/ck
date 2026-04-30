@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>仓库数据看板 — CK Warehouse</title>
-  <link rel="stylesheet" href="style.css?v=20260430h">
+  <link rel="stylesheet" href="style.css?v=20260430j">
 </head>
 <body>
 
@@ -117,9 +117,9 @@
   <div id="tab-orders" class="tab-content" style="display:none;">
     <div class="section-card">
       <div class="filter-row">
-        <label>开始日期</label>
+        <label title="按作业 created_at（KST 日期）筛选">作业创建日期 开始</label>
         <input type="date" id="ordersFilterStart">
-        <label>结束日期</label>
+        <label>结束</label>
         <input type="date" id="ordersFilterEnd">
         <select id="ordersFilterFlow"></select>
         <select id="ordersFilterJobType"></select>
@@ -144,7 +144,7 @@
           </tbody>
         </table>
       </div>
-      <div class="section-hint">默认按 created_at 倒序，列表最多 200 条；导出走独立接口，最多 10000 条带完整作业结果与拣货明细。</div>
+      <div class="section-hint">日期口径 = 作业 created_at（KST 日历日）。客服按"预计出库日期"筛选请去协同中心。列表最多 200 条；导出最多 10000 条。</div>
     </div>
   </div>
 
@@ -152,9 +152,9 @@
   <div id="tab-workhours" class="tab-content" style="display:none;">
     <div class="section-card">
       <div class="filter-row">
-        <label>开始日期</label>
+        <label title="按工人 joined_at（KST 日期）筛选">工时日期 开始</label>
         <input type="date" id="whFilterStart">
-        <label>结束日期</label>
+        <label>结束</label>
         <input type="date" id="whFilterEnd">
         <input type="text" id="whFilterWorker" placeholder="员工姓名（模糊）">
         <select id="whFilterFlow"></select>
@@ -290,12 +290,12 @@
   <div id="tab-management" class="tab-content" style="display:none;">
     <div class="section-card">
       <div class="filter-row">
-        <label>开始日期</label>
+        <label title="工时按 joined_at KST 日期；WMS 按 work_date">日期 开始</label>
         <input type="date" id="mgmtFilterStart">
-        <label>结束日期</label>
+        <label>结束</label>
         <input type="date" id="mgmtFilterEnd">
         <button class="btn-primary" onclick="loadManagement(this)">查询</button>
-        <span class="muted" style="font-size:12px;margin-left:auto;">人效 = WMS 数量 ÷ 工时小时（V1 简化口径）</span>
+        <span class="muted" style="font-size:12px;margin-left:auto;">工时按 joined_at（KST），WMS 按 work_date；人效 = WMS 数量 ÷ 工时小时</span>
       </div>
       <div class="stat-row" id="mgmtSummaryRow">
         <div class="muted" style="grid-column:1/-1;padding:20px;text-align:center;">请点击「查询」</div>
@@ -361,7 +361,7 @@
 </div>
 
 <script src="../shared/xlsx.full.min.js"></script>
-<script src="config.js?v=20260430h"></script>
-<script src="app.js?v=20260430h"></script>
+<script src="config.js?v=20260430j"></script>
+<script src="app.js?v=20260430j"></script>
 </body>
 </html>

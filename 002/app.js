@@ -396,6 +396,13 @@ function fmtTime(isoStr) {
   } catch(e) { return String(isoStr); }
 }
 
+// 业务预约时间（datetime-local 字符串：expected_ship_at / pickup_time）
+// 直接 T→空格、截到 16 位；不做时区换算（这类字段不是 UTC ISO）
+function formatBusinessLocalDateTime(s) {
+  if (!s) return '--';
+  return String(s).replace('T', ' ').slice(0, 16);
+}
+
 // ===== Navigation =====
 function goTab(tab, btn) {
   _currentTab = tab;
@@ -981,7 +988,9 @@ async function loadOutboundList() {
   try {
     res = await api({
       action: "v2_outbound_order_list",
-      start_date: start, end_date: end, status: status, accounted: accounted,
+      start_date: start, end_date: end,
+      date_basis: "expected_ship_at",
+      status: status, accounted: accounted,
       biz_class: biz_class,
       customer_keyword: customer_keyword,
       uses_stock_operation: uses_stock_operation,
@@ -1029,9 +1038,9 @@ async function loadOutboundList() {
     // 优先显示预计出库时间；为空 fallback 到作业单日期
     var dateLabel = '';
     if (o.expected_ship_at) {
-      dateLabel = '预计出库 ' + esc(o.expected_ship_at);
+      dateLabel = '预计出库：' + esc(formatBusinessLocalDateTime(o.expected_ship_at));
     } else {
-      dateLabel = '作业单日期 ' + esc(o.order_date || '--');
+      dateLabel = '作业单日期：' + esc(o.order_date || '--');
     }
     var meta = dateLabel;
     if (o.destination) meta += ' · ' + esc(o.destination);
@@ -1039,7 +1048,7 @@ async function loadOutboundList() {
     if (o.outbound_mode) meta += ' · ' + esc(outModeLabel(o.outbound_mode));
     if (o.planned_box_count) meta += ' · ' + L("planned_prefix") + o.planned_box_count + L("unit_box");
     if (o.planned_pallet_count) meta += ' · ' + o.planned_pallet_count + L("unit_pallet");
-    meta += ' · ' + esc(fmtTime(o.created_at));
+    meta += ' · 创建：' + esc(fmtTime(o.created_at));
     if (o.accounted == 1 && (o.accounted_by || o.accounted_at)) {
       meta += ' · ' + L("accounted_by_short") + ': ' + esc(o.accounted_by || "") + (o.accounted_at ? ' ' + esc(fmtTime(o.accounted_at)) : '');
     }
@@ -1089,7 +1098,9 @@ async function exportOutboundOrders(btnEl) {
   try {
     var res = await api({
       action: 'v2_outbound_order_export',
-      start_date: start, end_date: end, status: status, accounted: accounted,
+      start_date: start, end_date: end,
+      date_basis: 'expected_ship_at',
+      status: status, accounted: accounted,
       biz_class: biz_class, customer_keyword: customer_keyword,
       uses_stock_operation: uses_stock_operation, has_material: has_material,
       limit: 10000
@@ -1200,11 +1211,11 @@ async function submitOutbound(btnEl) {
     var reqEl = document.getElementById("oc-outbound-requirement");
     var outbound_requirement = reqEl ? reqEl.value.trim() : "";
 
-    // 作业单日期（order_date）自动取自预计出库时间的日期部分；都没有就用今日
-    // hidden 输入仍保留，用户/调试端可手动覆盖
+    // 作业单日期（order_date）以预计出库时间为准；hidden oc-date 仅 admin/调试用
+    // 顺序：expected_ship_at 派生 → manualDate（hidden 调试覆盖）→ 今日兜底
     var dateEl = document.getElementById("oc-date");
     var manualDate = dateEl ? dateEl.value.trim() : "";
-    var date = manualDate || (expected_ship_at ? expected_ship_at.slice(0, 10) : "") || kstToday();
+    var date = (expected_ship_at ? expected_ship_at.slice(0, 10) : "") || manualDate || kstToday();
 
     var matFiles = _obCreateMaterials.slice(0);
 
@@ -1355,7 +1366,7 @@ async function loadOutboundDetail() {
   if (o.po_no) html += '<div class="detail-field"><b>' + L("po_no") + ':</b> ' + esc(o.po_no) + '</div>';
   if (o.wms_work_order_no) html += '<div class="detail-field"><b>' + L("wms_work_order_no") + ':</b> ' + esc(o.wms_work_order_no) + '</div>';
   html += '<div class="detail-field"><b>' + L("outbound_mode") + ':</b> ' + esc(outModeLabel(o.outbound_mode)) + '</div>';
-  if (o.expected_ship_at) html += '<div class="detail-field"><b>' + L("expected_ship_at") + ':</b> ' + esc(o.expected_ship_at) + '</div>';
+  if (o.expected_ship_at) html += '<div class="detail-field"><b>' + L("expected_ship_at") + ':</b> ' + esc(formatBusinessLocalDateTime(o.expected_ship_at)) + '</div>';
   // 出库要求 / 作业说明 / 备注 — 始终显示（无则 --，库内操作型尤其依赖这三项）
   html += '<div class="detail-section"><b>' + L("outbound_requirement") + ':</b>'
        + (o.outbound_requirement ? '<div class="remark-block">' + esc(o.outbound_requirement) + '</div>' : ' --')
@@ -1539,7 +1550,7 @@ async function loadOutboundDetail() {
       if (o.pickup_company) html += ' (' + esc(o.pickup_company) + ')';
       html += '</div>';
     }
-    if (o.pickup_time) html += '<div><b>提货时间 / 픽업 시간:</b> ' + esc(o.pickup_time) + '</div>';
+    if (o.pickup_time) html += '<div><b>提货时间 / 픽업 시간:</b> ' + esc(formatBusinessLocalDateTime(o.pickup_time)) + '</div>';
     html += '<div><b>提货备注 / 픽업 비고:</b> ' + (o.pickup_note ? esc(o.pickup_note) : ' --') + '</div>';
     html += '</div>';
     if (Number(o.pickup_confirm_required) === 0 && o.pickup_confirmed_by) {
@@ -2312,7 +2323,7 @@ async function loadInboundDetail() {
       html += '<td>' + esc(ob.customer || '--') + '</td>';
       html += '<td>' + (ob.biz_class ? '<span class="biz-tag biz-' + esc(ob.biz_class) + '">' + esc(bizLabel(ob.biz_class)) + '</span>' : '--') + '</td>';
       html += '<td>' + esc(outModeLabel(ob.outbound_mode) || '--') + '</td>';
-      html += '<td>' + esc(ob.expected_ship_at || '--') + '</td>';
+      html += '<td>' + esc(ob.expected_ship_at ? formatBusinessLocalDateTime(ob.expected_ship_at) : '--') + '</td>';
       html += '<td>' + Number(ob.planned_box_count || 0) + '/' + Number(ob.planned_pallet_count || 0) + '</td>';
       html += '</tr>';
     });
@@ -4061,7 +4072,8 @@ function updateVerifyBatch(id, target, btnEl) {
 window.addEventListener("DOMContentLoaded", function() {
   var today = kstToday();
   var el;
-  el = document.getElementById("oc-date"); if (el) el.value = today;
+  // oc-date 不再自动填今天：order_date 由后端按 expected_ship_at 派生
+  // （如客服未填预计出库时间，后端会兜底 kstToday）
   el = document.getElementById("ibc-date"); if (el) el.value = today;
 
   var d7 = new Date(new Date().getTime() + 9*3600000 - 7*86400000);

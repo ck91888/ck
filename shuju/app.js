@@ -26,6 +26,7 @@ async function api(params) {
   } catch(e) { return { ok: false, error: e.message }; }
 }
 
+// UTC ISO（created_at / joined_at / left_at 等）→ KST 显示（MM-DD HH:mm）
 function fmtTime(isoStr) {
   if (!isoStr) return "--";
   try {
@@ -34,6 +35,13 @@ function fmtTime(isoStr) {
     var kst = new Date(d.getTime() + 9 * 3600 * 1000);
     return kst.toISOString().slice(5, 16).replace("T", " ");
   } catch(e) { return isoStr; }
+}
+
+// 业务预约时间（datetime-local 字符串：expected_ship_at / pickup_time）
+// 直接 T→空格、截到 16 位；不做时区换算
+function formatBusinessLocalDateTime(s) {
+  if (!s) return '--';
+  return String(s).replace('T', ' ').slice(0, 16);
 }
 function minutesSince(isoStr) {
   if (!isoStr) return "--";

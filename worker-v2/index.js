@@ -58,6 +58,15 @@ function fmtKst(iso) {
   return s.slice(0, 10) + ' ' + s.slice(11, 19);
 }
 
+// 业务预约时间格式化（expected_ship_at / pickup_time 这种 datetime-local 文本）
+// 不做 +9 时区换算，仅 T→空格、截到 16 位
+// 输入 "2026-05-04T09:22" → "2026-05-04 09:22"
+function fmtBusinessDateTime(s) {
+  if (!s) return '';
+  const str = String(s);
+  return str.replace('T', ' ').slice(0, 16);
+}
+
 // KST 日期 → UTC 范围 [startUtc, endUtc)
 // 输入 "2026-04-27" → { startUtc: "2026-04-26T15:00:00.000Z", endUtc: "2026-04-27T15:00:00.000Z" }
 function kstDayRangeUtc(dateStr) {
@@ -1163,7 +1172,8 @@ route("v2_dashboard_summary", async (body, env) => {
     env.DB.prepare(
       `SELECT * FROM v2_outbound_orders
         WHERE status IN ('pending_issue','issued','working','ready_to_ship','preparing_outbound','operation_reserved','stock_operating','pending_outbound_update')
-        ORDER BY order_date ASC, created_at ASC LIMIT 3`
+        ORDER BY (CASE WHEN expected_ship_at IS NOT NULL AND expected_ship_at != '' THEN substr(expected_ship_at,1,10) ELSE order_date END) ASC,
+                 created_at ASC LIMIT 3`
     ).all(),
 
     // ---- inbounds（待执行入库 / 多业务计划部分完成也算"待执行"）----
@@ -1687,12 +1697,16 @@ route("v2_outbound_order_create", async (body, env) => {
     if (!outbound_mode || !VALID_MODES.includes(outbound_mode)) return { ok: false, error: "invalid outbound_mode" };
     const id = "OB-" + uid();
     const t = now();
-    const order_date = String(body.order_date || kstToday());
+    // order_date 派生口径：客服 expected_ship_at 是真业务排单日期；
+    // body.order_date 优先（admin/调试覆盖）→ expected_ship_at 日期 → 今日
+    const _esa = String(body.expected_ship_at || "").trim();
+    const _esaDate = _esa.length >= 10 ? _esa.slice(0, 10) : "";
+    const order_date = String(body.order_date || _esaDate || kstToday());
     const display_no = await nextOutboundDisplayNo(env, order_date);
     // 库内操作型：初始状态 operation_reserved；普通：pending_issue
     const initStatus = uses_stock_operation === 1 ? 'operation_reserved' : 'pending_issue';
     const initStockOpStatus = uses_stock_operation === 1 ? 'reserved' : '';
-    const expected_ship_at = String(body.expected_ship_at || "").trim();
+    const expected_ship_at = _esa;
     const outbound_requirement = String(body.outbound_requirement || "").trim();
     const source_inbound_plan_id = String(body.source_inbound_plan_id || "").trim();
     await env.DB.prepare(`
@@ -1743,6 +1757,8 @@ route("v2_outbound_order_list", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
   const start = String(body.start_date || "").trim();
   const end = String(body.end_date || "").trim();
+  // date_basis：'expected_ship_at'（默认，按预计出库日期）/ 'order_date'（兼容旧调用）
+  const date_basis = String(body.date_basis || "expected_ship_at").trim();
   const status = String(body.status || "").trim();
   const accounted = String(body.accounted == null ? "" : body.accounted).trim();
   const biz_class = String(body.biz_class || "").trim();
@@ -1752,8 +1768,12 @@ route("v2_outbound_order_list", async (body, env) => {
   const { limit, offset } = pageParams(body);
   let sql = "SELECT * FROM v2_outbound_orders WHERE 1=1";
   const binds = [];
-  if (start) { sql += " AND order_date>=?"; binds.push(start); }
-  if (end) { sql += " AND order_date<=?"; binds.push(end); }
+  // 按 date_basis 选择字段：expected_ship_at 派生 date_key（非空时取其日期，否则 fallback order_date）
+  const _dateExpr = (date_basis === 'order_date')
+    ? "order_date"
+    : "(CASE WHEN expected_ship_at IS NOT NULL AND expected_ship_at != '' THEN substr(expected_ship_at,1,10) ELSE order_date END)";
+  if (start) { sql += " AND " + _dateExpr + ">=?"; binds.push(start); }
+  if (end)   { sql += " AND " + _dateExpr + "<=?"; binds.push(end); }
   if (status) { sql += " AND status=?"; binds.push(status); }
   else { sql += " AND status != 'cancelled'"; } // 默认"全部状态"排除已取消，仅当显式筛 cancelled 才返回
   if (accounted === "1") { sql += " AND accounted=1"; }
@@ -1767,7 +1787,7 @@ route("v2_outbound_order_list", async (body, env) => {
   } else if (hasMaterialRaw === "0") {
     sql += " AND NOT EXISTS (SELECT 1 FROM v2_attachments a WHERE a.related_doc_type='outbound_order' AND a.related_doc_id=v2_outbound_orders.id AND a.attachment_category='outbound_material')";
   }
-  sql += " ORDER BY order_date DESC, created_at DESC LIMIT ? OFFSET ?";
+  sql += " ORDER BY " + _dateExpr + " DESC, created_at DESC LIMIT ? OFFSET ?";
   binds.push(limit, offset);
   const rs = await env.DB.prepare(sql).bind(...binds).all();
   const items = rs.results || [];
@@ -1938,7 +1958,13 @@ route("v2_outbound_order_update_ship_plan", async (body, env) => {
     // 仅更新提供的字段；空串保留原值
     const sets = ["updated_at=?"];
     const binds = [t];
-    if (expected_ship_at) { sets.push("expected_ship_at=?"); binds.push(expected_ship_at); }
+    if (expected_ship_at) {
+      sets.push("expected_ship_at=?"); binds.push(expected_ship_at);
+      // 同步 order_date 到新预约日期（display_no 沿用旧值，仅筛选/排序口径对齐）
+      if (expected_ship_at.length >= 10) {
+        sets.push("order_date=?"); binds.push(expected_ship_at.slice(0, 10));
+      }
+    }
     if (outbound_mode)    { sets.push("outbound_mode=?");    binds.push(outbound_mode); }
     if (destination)      { sets.push("destination=?");      binds.push(destination); }
     if (outbound_requirement) { sets.push("outbound_requirement=?"); binds.push(outbound_requirement); }
@@ -1985,6 +2011,8 @@ route("v2_outbound_order_update", async (body, env) => {
     const sets = [];
     const binds = [];
     let pickupTouched = false;
+    let expectedShipTouched = false;
+    let orderDateExplicit = false;
     for (const k of editable) {
       if (body[k] !== undefined) {
         sets.push(k + "=?");
@@ -1995,6 +2023,17 @@ route("v2_outbound_order_update", async (body, env) => {
           binds.push(String(v == null ? '' : v));
         }
         if (k.indexOf('pickup_') === 0) pickupTouched = true;
+        if (k === 'expected_ship_at') expectedShipTouched = true;
+        if (k === 'order_date') orderDateExplicit = true;
+      }
+    }
+    // 修改 expected_ship_at 但未显式覆盖 order_date → 同步派生 order_date
+    // 历史 display_no 不重写（避免引用混乱）；下次新单按新日期生成
+    if (expectedShipTouched && !orderDateExplicit) {
+      const _esa = String(body.expected_ship_at || '').trim();
+      if (_esa.length >= 10) {
+        sets.push("order_date=?");
+        binds.push(_esa.slice(0, 10));
       }
     }
     if (sets.length === 0) {
@@ -2055,6 +2094,89 @@ route("v2_outbound_pickup_confirm", async (body, env) => {
     ).bind(worker, t, t, id).run();
     return { ok: true, id };
   });
+});
+
+// 只读诊断：列出 substr(expected_ship_at,1,10) != order_date 的出库单
+// 用途：客服反馈"4-30 筛出 5-4 的单"前的 audit；不修改任何数据
+route("v2_outbound_order_diag_date_mismatch", async (body, env) => {
+  if (!isAuth(body, env)) return err("unauthorized", 401);
+  let limit = parseInt(body.limit, 10);
+  if (!Number.isFinite(limit) || limit <= 0) limit = 200;
+  if (limit > 1000) limit = 1000;
+  const include_frozen = body.include_frozen === true || body.include_frozen === 1 || body.include_frozen === "1";
+  let sql = `
+    SELECT id, display_no, order_date, expected_ship_at, status, customer, created_at
+    FROM v2_outbound_orders
+    WHERE expected_ship_at IS NOT NULL AND expected_ship_at != ''
+      AND substr(expected_ship_at,1,10) != order_date`;
+  if (!include_frozen) {
+    sql += " AND status NOT IN ('shipped','completed','cancelled')";
+  }
+  sql += " ORDER BY created_at DESC LIMIT ?";
+  const rs = await env.DB.prepare(sql).bind(limit).all();
+  const rows = rs.results || [];
+  return json({
+    ok: true,
+    count: rows.length,
+    truncated: rows.length >= limit,
+    items: rows.map(r => ({
+      id: r.id,
+      display_no: r.display_no || '',
+      order_date: r.order_date || '',
+      expected_ship_at: fmtBusinessDateTime(r.expected_ship_at),
+      expected_ship_date: String(r.expected_ship_at || '').slice(0, 10),
+      status: r.status || '',
+      customer: r.customer || '',
+      created_at: fmtKst(r.created_at)
+    }))
+  });
+});
+
+// 只读 → 行动：把 expected_ship_at 非空的单 order_date 同步为 expected_ship_at 日期
+// 限制：仅对未 shipped/completed/cancelled、且没有现场 job 的单生效；display_no 不重写
+// 必须显式传 confirm:true 才执行；返回每条的 before/after
+route("v2_outbound_order_admin_realign_order_date", async (body, env) => {
+  if (!isAuth(body, env)) return err("unauthorized", 401);
+  if (body.confirm !== true && body.confirm !== "true" && body.confirm !== 1 && body.confirm !== "1") {
+    return err("missing confirm:true (dry-run protection)");
+  }
+  let limit = parseInt(body.limit, 10);
+  if (!Number.isFinite(limit) || limit <= 0) limit = 100;
+  if (limit > 500) limit = 500;
+  // 没有进行中 job 的单 = NOT EXISTS in v2_ops_jobs(linked_outbound_order_id 或 related_doc_id)
+  const rs = await env.DB.prepare(`
+    SELECT id, display_no, order_date, expected_ship_at, status, customer
+    FROM v2_outbound_orders o
+    WHERE expected_ship_at IS NOT NULL AND expected_ship_at != ''
+      AND substr(expected_ship_at,1,10) != order_date
+      AND status NOT IN ('shipped','completed','cancelled')
+      AND NOT EXISTS (
+        SELECT 1 FROM v2_ops_jobs j
+        WHERE (j.linked_outbound_order_id = o.id
+            OR (j.related_doc_type IN ('outbound','outbound_order') AND j.related_doc_id = o.id))
+          AND j.status IN ('pending','working','awaiting_close')
+      )
+    ORDER BY created_at DESC LIMIT ?
+  `).bind(limit).all();
+  const rows = rs.results || [];
+  const t = now();
+  const out = [];
+  for (const r of rows) {
+    const newDate = String(r.expected_ship_at).slice(0, 10);
+    await env.DB.prepare(
+      "UPDATE v2_outbound_orders SET order_date=?, updated_at=? WHERE id=?"
+    ).bind(newDate, t, r.id).run();
+    out.push({
+      id: r.id,
+      display_no: r.display_no || '',
+      before_order_date: r.order_date || '',
+      after_order_date: newDate,
+      expected_ship_at: fmtBusinessDateTime(r.expected_ship_at),
+      status: r.status,
+      customer: r.customer || ''
+    });
+  }
+  return json({ ok: true, updated: out.length, items: out });
 });
 
 // =====================================================
@@ -4702,6 +4824,7 @@ route("v2_outbound_order_export", async (body, env) => {
   if (!isAuth(body, env)) return err("unauthorized", 401);
   const start = String(body.start_date || "").trim();
   const end = String(body.end_date || "").trim();
+  const date_basis = String(body.date_basis || "expected_ship_at").trim();
   const status = String(body.status || "").trim();
   const accounted = String(body.accounted == null ? "" : body.accounted).trim();
   const biz_class = String(body.biz_class || "").trim();
@@ -4714,8 +4837,11 @@ route("v2_outbound_order_export", async (body, env) => {
 
   let sql = "SELECT * FROM v2_outbound_orders WHERE 1=1";
   const binds = [];
-  if (start) { sql += " AND order_date>=?"; binds.push(start); }
-  if (end) { sql += " AND order_date<=?"; binds.push(end); }
+  const _dateExpr = (date_basis === 'order_date')
+    ? "order_date"
+    : "(CASE WHEN expected_ship_at IS NOT NULL AND expected_ship_at != '' THEN substr(expected_ship_at,1,10) ELSE order_date END)";
+  if (start) { sql += " AND " + _dateExpr + ">=?"; binds.push(start); }
+  if (end)   { sql += " AND " + _dateExpr + "<=?"; binds.push(end); }
   if (status) { sql += " AND status=?"; binds.push(status); }
   else { sql += " AND status != 'cancelled'"; }
   if (accounted === "1") { sql += " AND accounted=1"; }
@@ -4729,7 +4855,7 @@ route("v2_outbound_order_export", async (body, env) => {
   } else if (hasMaterialRaw === "0") {
     sql += " AND NOT EXISTS (SELECT 1 FROM v2_attachments a WHERE a.related_doc_type='outbound_order' AND a.related_doc_id=v2_outbound_orders.id AND a.attachment_category='outbound_material')";
   }
-  sql += " ORDER BY order_date DESC, created_at DESC LIMIT ?";
+  sql += " ORDER BY " + _dateExpr + " DESC, created_at DESC LIMIT ?";
   binds.push(limit);
   const rs = await env.DB.prepare(sql).bind(...binds).all();
   const rows = rs.results || [];
@@ -4773,7 +4899,7 @@ route("v2_outbound_order_export", async (body, env) => {
     return {
       出库单号: o.display_no || o.id,
       作业单日期: o.order_date || '',
-      预计出库时间: o.expected_ship_at || '',
+      预计出库时间: fmtBusinessDateTime(o.expected_ship_at),
       客户: o.customer || '',
       状态: _statusLabelZh(o.status),
       业务分类: _BIZ_LABEL_ZH[o.biz_class] || o.biz_class || '',
@@ -6366,8 +6492,11 @@ route("v2_order_ops_job_list", async (body, env) => {
   let sql = "SELECT * FROM v2_ops_jobs WHERE flow_stage='order_op'";
   const binds = [];
   if (job_type) { sql += " AND job_type=?"; binds.push(job_type); }
-  if (start) { sql += " AND created_at>=?"; binds.push(start + "T00:00:00.000Z"); }
-  if (end) { sql += " AND created_at<=?"; binds.push(end + "T23:59:59.999Z"); }
+  // created_at 为 UTC ISO；按 KST 日历日筛选
+  const _stR = kstDayRangeUtc(start);
+  const _enR = kstDayRangeUtc(end);
+  if (_stR) { sql += " AND created_at>=?"; binds.push(_stR.startUtc); }
+  if (_enR) { sql += " AND created_at<?";  binds.push(_enR.endUtc); }
   sql += " ORDER BY created_at DESC LIMIT 200";
   const stmt = env.DB.prepare(sql);
   const rs = binds.length > 0 ? await stmt.bind(...binds).all() : await stmt.all();
@@ -6927,8 +7056,11 @@ route("v2_verify_batch_list", async (body, env) => {
   const binds = [];
   if (status) { sql += " AND status=?"; binds.push(status); }
   if (customer_name) { sql += " AND customer_name LIKE ?"; binds.push('%' + customer_name + '%'); }
-  if (start_date) { sql += " AND created_at >= ?"; binds.push(start_date); }
-  if (end_date) { sql += " AND created_at <= ?"; binds.push(end_date + 'T23:59:59Z'); }
+  // created_at 为 UTC ISO；按 KST 日历日筛选
+  const _stR2 = kstDayRangeUtc(start_date);
+  const _enR2 = kstDayRangeUtc(end_date);
+  if (_stR2) { sql += " AND created_at >= ?"; binds.push(_stR2.startUtc); }
+  if (_enR2) { sql += " AND created_at < ?";  binds.push(_enR2.endUtc); }
   sql += " ORDER BY created_at DESC LIMIT ? OFFSET ?";
   binds.push(limit, offset);
 
@@ -7676,7 +7808,8 @@ route("v2_dashboard_order_export", async (body, env) => {
     // 出库扩展字段（库内操作型 + 资料）
     const ob_uses_stock_operation = (ob_for_fields && Number(ob_for_fields.uses_stock_operation) === 1) ? 1 : 0;
     const ob_outbound_status = (ob_for_fields && ob_for_fields.status) || '';
-    const ob_expected_ship_at = (ob_for_fields && ob_for_fields.expected_ship_at) ? fmtKst(ob_for_fields.expected_ship_at) : '';
+    // expected_ship_at 是 datetime-local 文本（已是本地预约时间），不做 +9 换算，仅 T→空格
+    const ob_expected_ship_at = fmtBusinessDateTime(ob_for_fields && ob_for_fields.expected_ship_at);
     const ob_outbound_requirement = (ob_for_fields && ob_for_fields.outbound_requirement) || '';
     const ob_instruction = (ob_for_fields && ob_for_fields.instruction) || '';
     const ob_remark = (ob_for_fields && ob_for_fields.remark) || '';
