@@ -2521,6 +2521,13 @@ async function loadIssueDetail() {
   var it = res.issue;
   var runs = res.handle_runs || [];
   var atts = res.attachments || [];
+  // 恢复 _currentRunId（页面刷新后接续进行中处理）
+  for (var ri = 0; ri < runs.length; ri++) {
+    if (runs[ri].run_status === 'working' && runs[ri].handler_id === getWorkerId()) {
+      _currentRunId = runs[ri].id;
+      break;
+    }
+  }
 
   var html = '<div class="card">';
   html += '<div style="font-size:18px;font-weight:700;margin-bottom:8px;">' + esc(_issueTitleText(it)) + '</div>';
@@ -2566,7 +2573,7 @@ async function loadIssueDetail() {
       html += '<div class="detail-section"><label>反馈内容 / 피드백 내용 <span style="color:red;">*必填/필수</span></label>';
       html += '<textarea id="issueFeedback" rows="3" placeholder="输入处理结果 / 처리 결과를 입력하세요 (必填/필수)"></textarea>';
       html += '<label>上传照片 / 사진 업로드</label>';
-      html += '<div class="photo-upload" id="issuePhotos"><div class="photo-add" onclick="uploadPhoto(\'issue_ticket\',\'issue_handle_photo\')">+</div></div>';
+      html += '<div class="photo-upload" id="issuePhotos"><div class="photo-add" onclick="uploadIssueHandlePhoto()">+</div></div>';
       html += '<button class="btn btn-danger mt-10" onclick="handleIssueFinish(this)">结束处理 / 처리 종료</button>';
       html += '<button class="btn btn-outline mt-10" onclick="handleIssueLeave(this)">暂时离开 / 일시 퇴장</button>';
       html += '</div>';
@@ -3906,6 +3913,32 @@ function uploadPhoto(docType, category) {
     related_doc_id: docId
   };
   document.getElementById("photoInput").click();
+}
+
+// 问题点处理过程上传照片：优先 issue_handle_run（有 _currentRunId 时），fallback ops_job
+// 后端 v2_issue_detail 会通过 run_ids/job_ids 把这些附件挂回该 issue
+function uploadIssueHandlePhoto() {
+  var docType = '';
+  var docId = '';
+  if (_currentRunId) {
+    docType = 'issue_handle_run';
+    docId = _currentRunId;
+  } else if (_activeJobId) {
+    docType = 'ops_job';
+    docId = _activeJobId;
+  } else if (_currentIssueId) {
+    // 兜底：直接挂到 issue_ticket，附件能被详情查到（虽不归属到具体 run）
+    docType = 'issue_ticket';
+    docId = _currentIssueId;
+  } else {
+    alert('无法关联问题点 / 이슈 연결 실패'); return;
+  }
+  _photoUploadCtx = {
+    related_doc_type: docType,
+    attachment_category: 'issue_handle_photo',
+    related_doc_id: docId
+  };
+  document.getElementById('photoInput').click();
 }
 
 async function handlePhotoUpload(input) {

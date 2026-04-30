@@ -640,6 +640,9 @@ async function loadIssueList() {
     } else if (Number(it.accounting_required) === 1) {
       html += '<span class="biz-tag" style="background:#ffe0b2;color:#bf360c;">需记帐</span> ';
     }
+    if (it.status === 'rework_required') {
+      html += '<span class="biz-tag" style="background:#ffccbc;color:#bf360c;">需追加处理</span> ';
+    }
     html += esc(issueTitleText(it));
     html += '</div>';
     html += '<div class="item-meta">';
@@ -693,6 +696,61 @@ function issueTitleText(it) {
   return d || "(无描述)";
 }
 
+// 问题点详情：附件 grid（图片缩略 + 非图片下载）
+function _renderIssueAttsHtml(atts) {
+  if (!atts || atts.length === 0) return '';
+  var html = '';
+  atts.forEach(function(att) {
+    var ct = att.content_type || '';
+    var url = fileUrl(att.file_key);
+    var who = (att.uploaded_by ? esc(att.uploaded_by) : '') + (att.created_at ? ' · ' + esc(fmtTime(att.created_at)) : '');
+    if (ct.indexOf('image/') === 0) {
+      html += '<div class="att-cell" style="text-align:center;">';
+      html += '<img class="att-thumb issue-photo-thumb" src="' + esc(url) + '" onclick="showLightbox(\'' + esc(url) + '\')" style="cursor:zoom-in;">';
+      if (who) html += '<div class="muted" style="font-size:10px;">' + who + '</div>';
+      html += '</div>';
+    } else {
+      var isPdf = ct.indexOf('pdf') !== -1 || (att.file_name && /\.pdf$/i.test(att.file_name));
+      var icon = isPdf ? '📄' : '📎';
+      html += '<div class="att-cell" style="display:inline-block;padding:8px 10px;border:1px solid #e0e0e0;border-radius:6px;background:#fafafa;margin:4px;">';
+      html += '<a href="' + esc(url) + '" target="_blank" download="' + esc(att.file_name || '') + '" style="font-size:12px;color:#1565c0;text-decoration:none;">';
+      html += icon + ' ' + esc(att.file_name || '附件') + '</a>';
+      if (who) html += '<div class="muted" style="font-size:10px;margin-top:2px;">' + who + '</div>';
+      html += '</div>';
+    }
+  });
+  return html;
+}
+
+// 问题点详情：时间线一条事件
+function _renderTimelineEvent(ev) {
+  var color, bg;
+  switch (ev.type) {
+    case 'issue_created':       color = '#1565c0'; bg = '#e3f2fd'; break;
+    case 'handle_started':      color = '#2e7d32'; bg = '#e8f5e9'; break;
+    case 'handle_finished':     color = '#1b5e20'; bg = '#c8e6c9'; break;
+    case 'rework_requested':    color = '#bf360c'; bg = '#ffccbc'; break;
+    case 'accounting_required': color = '#ef6c00'; bg = '#ffe0b2'; break;
+    case 'accounted':           color = '#1b5e20'; bg = '#c8e6c9'; break;
+    case 'issue_closed':        color = '#37474f'; bg = '#cfd8dc'; break;
+    case 'issue_cancelled':     color = '#c62828'; bg = '#ffcdd2'; break;
+    default:                    color = '#555';    bg = '#eeeeee';
+  }
+  var html = '<div class="timeline-row" style="border-left:3px solid ' + color + ';padding:8px 12px;margin:6px 0;background:#fafafa;">';
+  html += '<div style="font-size:12px;color:#888;">' + esc(fmtTime(ev.at)) + (ev.user ? ' · ' + esc(ev.user) : '');
+  if (ev.minutes_worked) html += ' · 用时 ' + Number(ev.minutes_worked).toFixed(1) + ' 分钟';
+  html += '</div>';
+  html += '<div style="font-weight:700;color:' + color + ';margin-top:2px;">' + esc(ev.title || '') + '</div>';
+  if (ev.content) {
+    html += '<div style="margin-top:4px;white-space:pre-wrap;">' + esc(ev.content) + '</div>';
+  }
+  if (ev.attachments && ev.attachments.length > 0) {
+    html += '<div class="att-grid" style="margin-top:6px;">' + _renderIssueAttsHtml(ev.attachments) + '</div>';
+  }
+  html += '</div>';
+  return html;
+}
+
 // ===== Issue Detail =====
 function openIssueDetail(id) {
   _currentIssueId = id;
@@ -712,9 +770,12 @@ async function loadIssueDetail() {
   }
 
   var it = res.issue;
-  var runs = res.handle_runs || [];
-  var atts = res.attachments || [];
+  var runs = res.handle_runs || [];   // 已附 attachments
+  var reworks = res.reworks || [];
+  var ticketAtts = res.attachments || [];  // 主附件
+  var timeline = res.timeline || [];
 
+  // ===== A. 基本信息 =====
   var html = '<div class="card">';
   html += '<div style="font-size:18px;font-weight:700;margin-bottom:8px;">' + esc(issueTitleText(it)) + '</div>';
   html += '<div class="detail-field"><b>' + L("status") + ':</b> <span class="st st-' + esc(it.status) + '">' + esc(stLabel(it.status)) + '</span>';
@@ -722,6 +783,11 @@ async function loadIssueDetail() {
     html += ' <span class="biz-tag" style="background:#c8e6c9;color:#1b5e20;">已记帐</span>';
   } else if (Number(it.accounting_required) === 1) {
     html += ' <span class="biz-tag" style="background:#ffe0b2;color:#bf360c;">需记帐</span>';
+  }
+  // 当前是否有未解决追加
+  var openReworks = reworks.filter(function(w) { return w.status !== 'resolved'; });
+  if (openReworks.length > 0) {
+    html += ' <span class="biz-tag" style="background:#ffccbc;color:#bf360c;">需追加处理 ' + openReworks.length + '</span>';
   }
   html += '</div>';
   html += '<div class="detail-field"><b>' + L("biz_class") + ':</b> <span class="biz-tag biz-' + esc(it.biz_class) + '">' + esc(bizLabel(it.biz_class)) + '</span></div>';
@@ -731,66 +797,43 @@ async function loadIssueDetail() {
   html += '<div class="detail-field"><b>' + L("created_at") + ':</b> ' + esc(fmtTime(it.created_at)) + '</div>';
   html += '<div class="detail-section"><b>' + L("issue_description") + ':</b>';
   html += '<div style="margin-top:4px;white-space:pre-wrap;">' + esc(it.issue_description) + '</div></div>';
-
-  // Latest feedback
-  if (it.latest_feedback_text) {
-    html += '<div class="detail-section"><b>' + L("latest_feedback") + ':</b>';
-    html += '<div style="margin-top:4px;white-space:pre-wrap;color:#1565c0;">' + esc(it.latest_feedback_text) + '</div></div>';
-  }
-
-  // Work time
   if (it.total_minutes_worked > 0) {
-    html += '<div class="detail-field"><b>' + L("total_work_time") + ':</b> ' + it.total_minutes_worked.toFixed(1) + ' ' + L("minutes") + '</div>';
+    html += '<div class="detail-field"><b>' + L("total_work_time") + ':</b> ' + Number(it.total_minutes_worked).toFixed(1) + ' ' + L("minutes") + '</div>';
   }
   html += '</div>';
 
-  // P1-5: 处理图片/附件（含 issue_handle_photo / feedback_photo / issue_photo / issue_attachment 等所有 issue_ticket 下附件）
-  if (atts.length > 0) {
-    html += '<div class="card"><div class="card-title">处理图片/附件 / 처리 사진·첨부 (' + atts.length + ')</div>';
-    html += '<div class="att-grid">';
-    atts.forEach(function(att) {
-      var ct = att.content_type || '';
-      var url = fileUrl(att.file_key);
-      var who = (att.uploaded_by ? esc(att.uploaded_by) : '') + (att.created_at ? ' · ' + esc(fmtTime(att.created_at)) : '');
-      if (ct.indexOf('image/') === 0) {
-        html += '<div class="att-cell" style="text-align:center;">';
-        html += '<img class="att-thumb" src="' + esc(url) + '" onclick="showLightbox(\'' + esc(url) + '\')" style="cursor:zoom-in;">';
-        if (who) html += '<div class="muted" style="font-size:10px;">' + who + '</div>';
-        html += '</div>';
-      } else {
-        var isPdf = ct.indexOf('pdf') !== -1 || (att.file_name && /\.pdf$/i.test(att.file_name));
-        var icon = isPdf ? '📄' : '📎';
-        html += '<div class="att-cell" style="display:inline-block;padding:8px 10px;border:1px solid #e0e0e0;border-radius:6px;background:#fafafa;margin:4px;">';
-        html += '<a href="' + esc(url) + '" target="_blank" download="' + esc(att.file_name || '') + '" style="font-size:12px;color:#1565c0;text-decoration:none;">';
-        html += icon + ' ' + esc(att.file_name || '附件') + '</a>';
-        if (who) html += '<div class="muted" style="font-size:10px;margin-top:2px;">' + who + '</div>';
-        html += '</div>';
-      }
+  // ===== B. 原始附件（issue_ticket 下） =====
+  if (ticketAtts.length > 0) {
+    html += '<div class="card"><div class="card-title">原始附件 / 원본 첨부 (' + ticketAtts.length + ')</div>';
+    html += '<div class="att-grid">' + _renderIssueAttsHtml(ticketAtts) + '</div></div>';
+  }
+
+  // ===== C. 处理时间线（基于 timeline 升序） =====
+  if (timeline.length > 0) {
+    html += '<div class="card"><div class="card-title">处理时间线 / 처리 타임라인</div>';
+    html += '<div class="issue-timeline">';
+    timeline.forEach(function(ev) {
+      html += _renderTimelineEvent(ev);
     });
     html += '</div></div>';
   }
 
-  // Handle runs
-  if (runs.length > 0) {
-    html += '<div class="card"><div class="card-title">' + L("handle_history") + '</div>';
-    runs.forEach(function(r) {
-      html += '<div style="border-bottom:1px solid #f0f0f0;padding:8px 0;font-size:13px;">';
-      html += '<div><b>' + esc(r.handler_name || r.handler_id) + '</b> · ';
-      html += '<span class="st st-' + esc(r.run_status) + '">' + esc(r.run_status) + '</span></div>';
-      html += '<div class="muted">' + esc(fmtTime(r.started_at)) + ' → ' + esc(fmtTime(r.ended_at));
-      if (r.minutes_worked) html += ' (' + r.minutes_worked.toFixed(1) + ' ' + L("minutes") + ')';
+  // ===== D. 客服追加历史（仅 reworks 列表，方便快速回看） =====
+  if (reworks.length > 0) {
+    html += '<div class="card" style="border-left:3px solid #e65100;">';
+    html += '<div class="card-title" style="color:#e65100;">客服追加处理需求 / 추가 처리 요청 (' + reworks.length + ')</div>';
+    reworks.slice().reverse().forEach(function(w) {
+      html += '<div style="padding:6px 0;border-bottom:1px dashed #ffe0b2;">';
+      html += '<div style="font-size:12px;color:#888;">' + esc(w.requested_by || '客服') + ' · ' + esc(fmtTime(w.created_at));
+      if (w.status === 'resolved') {
+        html += ' <span class="biz-tag" style="background:#e8f5e9;color:#2e7d32;font-size:10px;">已响应</span>';
+      } else {
+        html += ' <span class="biz-tag" style="background:#ffe0b2;color:#bf360c;font-size:10px;">待响应</span>';
+      }
       html += '</div>';
-      if (r.feedback_text) html += '<div style="margin-top:4px;color:#1565c0;">' + esc(r.feedback_text) + '</div>';
+      html += '<div style="white-space:pre-wrap;color:#bf360c;margin-top:2px;">' + esc(w.request_note || '') + '</div>';
       html += '</div>';
     });
-    html += '</div>';
-  }
-
-  // Rework note
-  if (it.rework_note) {
-    html += '<div class="card" style="border-left:3px solid #e65100;">';
-    html += '<div class="card-title" style="color:#e65100;">' + L("rework_note") + '</div>';
-    html += '<div style="white-space:pre-wrap;">' + esc(it.rework_note) + '</div>';
     html += '</div>';
   }
 
@@ -889,7 +932,7 @@ async function reworkIssue(btnEl) {
   var note = prompt(L("rework_prompt"));
   if (!note || !note.trim()) return;
   withActionLock('reworkIssue', btnEl || null, '提交中.../저장중...', async function() {
-    var res = await api({ action: "v2_issue_rework", id: _currentIssueId, rework_note: note.trim() });
+    var res = await api({ action: "v2_issue_rework", id: _currentIssueId, rework_note: note.trim(), requested_by: getUser() });
     if (res && res.ok) {
       alert(L("rework_sent"));
       loadIssueDetail();

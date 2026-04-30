@@ -1035,10 +1035,24 @@ const MIGRATIONS = [
   `ALTER TABLE v2_inbound_plans ADD COLUMN force_complete_reason TEXT DEFAULT ''`,
   `ALTER TABLE v2_inbound_plan_biz_tasks ADD COLUMN completion_source TEXT DEFAULT ''`,
   `ALTER TABLE v2_inbound_plan_biz_tasks ADD COLUMN completion_note TEXT DEFAULT ''`,
+
+  // ---- v2.20260430g：问题点客服追加处理需求历史（保留多轮，不覆盖） ----
+  `CREATE TABLE IF NOT EXISTS v2_issue_rework_requests (
+    id TEXT PRIMARY KEY,
+    issue_id TEXT DEFAULT '',
+    request_note TEXT DEFAULT '',
+    requested_by TEXT DEFAULT '',
+    status TEXT DEFAULT 'open',
+    created_at TEXT,
+    resolved_at TEXT DEFAULT '',
+    resolved_by TEXT DEFAULT '',
+    related_run_id TEXT DEFAULT ''
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_issue_rework_issue ON v2_issue_rework_requests(issue_id, created_at)`,
 ];
 
 // 每次发布迁移变化时手动 +1（patch 段），冷启动只比对一次字符串即可跳过整段 MIGRATIONS
-const CURRENT_SCHEMA_VERSION = 'v2.20260430f';
+const CURRENT_SCHEMA_VERSION = 'v2.20260430g';
 
 let _migrated = false;
 async function ensureMigrated(db) {
@@ -1260,19 +1274,193 @@ route("v2_issue_detail", async (body, env) => {
   if (!id) return err("missing id");
   const row = await env.DB.prepare("SELECT * FROM v2_issue_tickets WHERE id=?").bind(id).first();
   if (!row) return err("not found", 404);
-  // get handle runs
-  const runs = await env.DB.prepare(
-    "SELECT * FROM v2_issue_handle_runs WHERE issue_id=? ORDER BY started_at DESC"
+
+  // 处理轮次（升序，便于 timeline；前端需要倒序时自己反转）
+  const runsRs = await env.DB.prepare(
+    "SELECT * FROM v2_issue_handle_runs WHERE issue_id=? ORDER BY started_at ASC"
   ).bind(id).all();
-  // get attachments
-  const atts = await env.DB.prepare(
-    "SELECT * FROM v2_attachments WHERE related_doc_type='issue_ticket' AND related_doc_id=? ORDER BY created_at DESC"
+  const runs = runsRs.results || [];
+  const runIds = runs.map(r => r.id).filter(Boolean);
+  const jobIds = runs.map(r => r.job_id).filter(Boolean);
+
+  // 客服追加处理需求（升序）
+  const rwksRs = await env.DB.prepare(
+    "SELECT * FROM v2_issue_rework_requests WHERE issue_id=? ORDER BY created_at ASC"
   ).bind(id).all();
+  const reworks = rwksRs.results || [];
+
+  // 三类附件查询（issue_ticket / issue_handle_run / ops_job）+ 旧数据兼容（issue / job / issue_handle）
+  // 注意：旧 BUG 把照片写到 related_doc_type='issue_ticket' related_doc_id=job_id，这里也要捞回来
+  const allAtts = [];
+  // 1) issue_ticket / issue / issue_handle 同 issue_id
+  {
+    const r = await env.DB.prepare(
+      "SELECT * FROM v2_attachments WHERE related_doc_type IN ('issue_ticket','issue','issue_handle') AND related_doc_id=?"
+    ).bind(id).all();
+    for (const a of (r.results || [])) allAtts.push(a);
+  }
+  // 2) issue_handle_run + run_ids
+  if (runIds.length > 0) {
+    const rows2 = await batchSelectInGlobal(env,
+      "SELECT * FROM v2_attachments WHERE related_doc_type IN ('issue_handle_run','issue_handle') AND related_doc_id IN (PLACEHOLDER)",
+      runIds);
+    for (const a of rows2) allAtts.push(a);
+  }
+  // 3) ops_job / job + job_ids（attachment_category='issue_handle_photo' 或 'issue_attachment'，为兼容老数据放宽）
+  if (jobIds.length > 0) {
+    const rows3 = await batchSelectInGlobal(env,
+      "SELECT * FROM v2_attachments WHERE related_doc_type IN ('ops_job','job','issue_ticket') AND related_doc_id IN (PLACEHOLDER)",
+      jobIds);
+    for (const a of rows3) {
+      // 旧 bug 路径：related_doc_type='issue_ticket' 且 related_doc_id=job_id（不会和 issue_id=ISS-xxx 冲突，因 job_id 是 JOB-xxx）
+      allAtts.push(a);
+    }
+  }
+  // 去重（按 id）
+  const seenAtt = {};
+  const attachmentsAll = [];
+  for (const a of allAtts) {
+    if (seenAtt[a.id]) continue;
+    seenAtt[a.id] = 1;
+    attachmentsAll.push(a);
+  }
+  // 排序：created_at 升序
+  attachmentsAll.sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')));
+
+  // 主附件（issue_ticket/issue/issue_handle 且 related_doc_id == issue.id）
+  const ticketAtts = attachmentsAll.filter(a =>
+    (a.related_doc_type === 'issue_ticket' || a.related_doc_type === 'issue' || a.related_doc_type === 'issue_handle')
+    && a.related_doc_id === id
+  );
+
+  // 处理轮次附件归属：按 run_id (issue_handle_run/issue_handle) 和 job_id (ops_job/job/issue_ticket-orphan)
+  const attsByRun = {};
+  for (const a of attachmentsAll) {
+    if ((a.related_doc_type === 'issue_handle_run' || a.related_doc_type === 'issue_handle') && a.related_doc_id) {
+      (attsByRun[a.related_doc_id] = attsByRun[a.related_doc_id] || []).push(a);
+    }
+  }
+  const attsByJob = {};
+  for (const a of attachmentsAll) {
+    const isJobLike = (a.related_doc_type === 'ops_job' || a.related_doc_type === 'job');
+    // 旧 bug：issue_ticket 类型但 id 是 JOB-xxx
+    const isOrphanIssueTicket = (a.related_doc_type === 'issue_ticket' && a.related_doc_id && /^JOB-/.test(a.related_doc_id));
+    if (isJobLike || isOrphanIssueTicket) {
+      (attsByJob[a.related_doc_id] = attsByJob[a.related_doc_id] || []).push(a);
+    }
+  }
+  // 把附件挂到对应 run 上
+  const runsEnriched = runs.map(r => {
+    const list = [];
+    if (r.id && attsByRun[r.id]) list.push(...attsByRun[r.id]);
+    if (r.job_id && attsByJob[r.job_id]) list.push(...attsByJob[r.job_id]);
+    // 同 run 内去重
+    const seen = {};
+    const dedup = [];
+    for (const a of list) { if (!seen[a.id]) { seen[a.id] = 1; dedup.push(a); } }
+    return Object.assign({}, r, { attachments: dedup });
+  });
+
+  // ---- timeline（升序）----
+  const timeline = [];
+  // 1) 创建
+  timeline.push({
+    type: 'issue_created',
+    title: '客服提出问题 / 고객지원 문제 제기',
+    content: row.issue_description || '',
+    user: row.submitted_by || '',
+    at: row.created_at || '',
+    attachments: ticketAtts
+  });
+  // 2) 每轮处理（开始 + 结束分两条；如未完成只有开始）
+  for (const r of runsEnriched) {
+    timeline.push({
+      type: 'handle_started',
+      title: '仓库开始处理 / 창고 처리 시작',
+      content: '',
+      user: r.handler_name || r.handler_id || '',
+      at: r.started_at || '',
+      attachments: []
+    });
+    if (r.run_status === 'completed' && r.ended_at) {
+      timeline.push({
+        type: 'handle_finished',
+        title: '仓库处理完成 / 창고 처리 완료',
+        content: r.feedback_text || '',
+        user: r.handler_name || r.handler_id || '',
+        at: r.ended_at || '',
+        minutes_worked: Number(r.minutes_worked || 0),
+        attachments: r.attachments || []
+      });
+    }
+  }
+  // 3) 客服追加请求
+  for (const w of reworks) {
+    timeline.push({
+      type: 'rework_requested',
+      title: '客服追加处理需求 / 고객지원 추가 처리 요청',
+      content: w.request_note || '',
+      user: w.requested_by || '',
+      at: w.created_at || '',
+      rework_status: w.status || '',
+      attachments: []
+    });
+  }
+  // 4) 记账提示 / 已记账
+  if (row.accounting_required_at) {
+    timeline.push({
+      type: 'accounting_required',
+      title: '提示需记帐 / 기장 알림',
+      content: row.accounting_note || '',
+      user: row.accounting_required_by || '',
+      at: row.accounting_required_at,
+      attachments: []
+    });
+  }
+  if (row.accounted_at) {
+    timeline.push({
+      type: 'accounted',
+      title: '已记帐 / 기장 완료',
+      content: '',
+      user: row.accounted_by || '',
+      at: row.accounted_at,
+      attachments: []
+    });
+  }
+  // 5) 关闭：用 issue.updated_at 作为 closed 时间（仅当 status=completed 且无后续事件）
+  if (row.status === 'completed' || row.status === 'closed') {
+    timeline.push({
+      type: 'issue_closed',
+      title: '问题完成 / 문제 완료',
+      content: '',
+      user: '',
+      at: row.updated_at || '',
+      attachments: []
+    });
+  }
+  if (row.status === 'cancelled') {
+    timeline.push({
+      type: 'issue_cancelled',
+      title: '问题已作废 / 문제 취소',
+      content: '',
+      user: '',
+      at: row.updated_at || '',
+      attachments: []
+    });
+  }
+  // timeline 升序
+  timeline.sort((a, b) => String(a.at || '').localeCompare(String(b.at || '')));
+
   return json({
     ok: true,
     issue: row,
-    handle_runs: runs.results || [],
-    attachments: atts.results || []
+    item: row,                  // 别名，方便新前端
+    handle_runs: runsEnriched,  // 已附 attachments
+    runs: runsEnriched,         // 别名
+    reworks,
+    attachments: ticketAtts,    // 主附件（issue_ticket）
+    all_attachments: attachmentsAll,  // 全部附件（含 run/job）
+    timeline
   });
 });
 
@@ -1330,10 +1518,29 @@ route("v2_issue_rework", async (body, env) => {
   const rework_note = String(body.rework_note || "").trim();
   if (!id) return err("missing id");
   if (!rework_note) return err("missing rework_note");
-  await env.DB.prepare(
-    "UPDATE v2_issue_tickets SET status='rework_required', rework_note=?, updated_at=? WHERE id=?"
-  ).bind(rework_note, now(), id).run();
-  return json({ ok: true });
+
+  return withIdem(env, body, "v2_issue_rework", async () => {
+    const issue = await env.DB.prepare("SELECT id, status FROM v2_issue_tickets WHERE id=?").bind(id).first();
+    if (!issue) return { ok: false, error: "not_found" };
+    if (issue.status === 'cancelled') return { ok: false, error: "cancelled_cannot_rework" };
+    const t = now();
+    const requested_by = String(body.requested_by || body.by || "").trim();
+    const rework_id = "RWK-" + uid();
+    // 关联最新一轮 working/completed run（方便追溯客服是针对哪一轮发的追加）
+    const lastRun = await env.DB.prepare(
+      "SELECT id FROM v2_issue_handle_runs WHERE issue_id=? ORDER BY started_at DESC LIMIT 1"
+    ).bind(id).first();
+    await env.DB.prepare(`
+      INSERT INTO v2_issue_rework_requests
+        (id, issue_id, request_note, requested_by, status, created_at, related_run_id)
+      VALUES(?,?,?,?, 'open', ?, ?)
+    `).bind(rework_id, id, rework_note, requested_by, t, lastRun ? lastRun.id : '').run();
+    // 同时回写 issue.rework_note（兼容旧前端：详情页只显示最新一条）
+    await env.DB.prepare(
+      "UPDATE v2_issue_tickets SET status='rework_required', rework_note=?, updated_at=? WHERE id=?"
+    ).bind(rework_note, t, id).run();
+    return { ok: true, rework_id };
+  });
 });
 
 route("v2_issue_cancel", async (body, env) => {
@@ -1452,7 +1659,14 @@ route("v2_issue_handle_finish", async (body, env) => {
     UPDATE v2_issue_tickets SET status='responded', latest_feedback_text=?, total_minutes_worked=?, updated_at=? WHERE id=?
   `).bind(feedback_text, totalMin, t, run.issue_id).run();
 
-  return json({ ok: true, minutes_worked: minutes, total_minutes: totalMin });
+  // 关闭尚未 resolved 的客服追加请求（本轮处理视为对最近追加的回应）
+  await env.DB.prepare(`
+    UPDATE v2_issue_rework_requests
+       SET status='resolved', resolved_at=?, resolved_by=?
+     WHERE issue_id=? AND status='open'
+  `).bind(t, run.handler_name || run.handler_id || '', run.issue_id).run();
+
+  return json({ ok: true, minutes_worked: minutes, total_minutes: totalMin, run_id, job_id: run.job_id || '' });
 });
 
 // =====================================================

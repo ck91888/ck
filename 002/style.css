@@ -440,6 +440,20 @@ select { cursor: pointer; }
   border: 1px solid #ffd591;
 }
 
+/* 问题点详情：处理照片缩略图（比默认 att-thumb 略大；点击放大） */
+.issue-photo-thumb {
+  width: 110px;
+  height: 110px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid #ddd;
+  margin: 4px;
+}
+/* 时间线行容器，避免文本贴边 */
+.issue-timeline {
+  padding: 4px 0;
+}
+
 /* 备注行（列表/详情通用）— 浅色但可读 */
 .remark-line {
   color: #666;
