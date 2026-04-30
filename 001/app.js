@@ -3056,6 +3056,7 @@ function togglePickStartScan() {
 function stopPickStartScan() {
   if (_pickStartScanner) {
     try { _pickStartScanner.stop(); } catch(e) {}
+    removeCameraSwitchButton("pickStartScanReader");
     _pickStartScanner = null;
     var el = document.getElementById("pickStartScanReader");
     if (el) el.innerHTML = "";
@@ -3506,8 +3507,9 @@ function startBulkScan() {
   readerEl.innerHTML = "";
   try {
     _bulkScanner = new Html5Qrcode("bulkScanReader");
-    _bulkScanner.start(
-      { facingMode: "environment" },
+    startManagedQrScanner(
+      _bulkScanner,
+      "bulkScanReader",
       { fps: 10, qrbox: { width: 250, height: 150 } },
       function(decoded) {
         stopBulkScan();
@@ -3519,6 +3521,7 @@ function startBulkScan() {
       function() {}
     ).catch(function(e) {
       alert("摄像头启动失败 / 카메라 시작 실패: " + e);
+      removeCameraSwitchButton("bulkScanReader");
       _bulkScanner = null;
     });
     document.getElementById("bulkScanBtn").textContent = "停止扫码 / 스캔 중지";
@@ -3530,6 +3533,7 @@ function startBulkScan() {
 function stopBulkScan() {
   if (_bulkScanner) {
     try { _bulkScanner.stop(); } catch(e) {}
+    removeCameraSwitchButton("bulkScanReader");
     _bulkScanner = null;
     var el = document.getElementById("bulkScanReader");
     if (el) el.innerHTML = "";

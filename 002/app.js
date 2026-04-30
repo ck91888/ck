@@ -857,7 +857,10 @@ async function loadIssueDetail() {
     html += '<button class="btn btn-danger" onclick="cancelIssue(this)">' + L("cancel_issue") + '</button>';
     html += '<div style="margin-top:10px;"><label>' + L("attachments") + '</label>';
     html += '<div class="att-grid" id="issueDetailAtts">';
-    html += '<div class="att-upload" onclick="doUpload(\'issue_ticket\',\'' + esc(it.id) + '\',\'issue_photo\')">+</div>';
+    html += renderPhotoSourceBar(
+      'doUpload(\'issue_ticket\',\'' + esc(it.id) + '\',\'issue_photo\',\'camera\')',
+      'doUpload(\'issue_ticket\',\'' + esc(it.id) + '\',\'issue_photo\',\'album\')'
+    );
     html += '</div></div>';
     html += '</div>';
   }
@@ -3269,31 +3272,76 @@ async function convertFeedbackToInbound(btnEl) {
 }
 
 // ===== File Upload =====
-function doUpload(docType, docId, category) {
+// source: 'camera'(拍照，capture=environment) / 'album'(相册多选) — 老调用缺省走 album
+function doUpload(docType, docId, category, source) {
   _uploadCtx = { related_doc_type: docType, related_doc_id: docId, attachment_category: category };
-  document.getElementById("fileInput").click();
+  var inputId = (source === 'camera') ? 'fileInputCamera' : 'fileInputAlbum';
+  var el = document.getElementById(inputId);
+  if (!el) {
+    // 兼容旧 #fileInput
+    var legacy = document.getElementById('fileInput');
+    if (legacy) { legacy.click(); return; }
+    alert('上传入口缺失 / 업로드 입력 누락'); return;
+  }
+  el.value = '';
+  el.click();
+}
+
+// 双按钮 HTML 片段（与 001 风格一致）
+function renderPhotoSourceBar(triggerCamera, triggerAlbum) {
+  return '<div class="photo-source-bar">' +
+    '<button type="button" class="btn btn-outline btn-sm" onclick="' + triggerCamera + '">📷 拍照 / 촬영</button>' +
+    '<button type="button" class="btn btn-outline btn-sm" onclick="' + triggerAlbum + '">🖼 从相册选择 / 앨범에서 선택</button>' +
+    '</div>';
 }
 
 async function handleFileUpload(input) {
-  if (!input.files || !input.files[0]) return;
-  var file = input.files[0];
-  var fd = new FormData();
-  fd.append("file", file);
-  fd.append("related_doc_type", _uploadCtx.related_doc_type || "");
-  fd.append("related_doc_id", _uploadCtx.related_doc_id || "");
-  fd.append("attachment_category", _uploadCtx.attachment_category || "");
-  fd.append("uploaded_by", getUser());
+  if (!input.files || input.files.length === 0) return;
+  var files = Array.prototype.slice.call(input.files);
+  var ctx = {
+    related_doc_type: _uploadCtx.related_doc_type || "",
+    related_doc_id: _uploadCtx.related_doc_id || "",
+    attachment_category: _uploadCtx.attachment_category || ""
+  };
+  // 文件名+大小去重（同一批次内）
+  var seen = {};
+  var deduped = files.filter(function(f) {
+    var key = (f.name || '') + '|' + (f.size || 0);
+    if (seen[key]) return false;
+    seen[key] = true;
+    return true;
+  });
 
-  var res = await uploadFile(fd);
-  if (res && res.ok) {
-    alert("上传成功");
-    // Refresh current detail
-    if (_currentView === "issue_detail") loadIssueDetail();
-    if (_currentView === "outbound_detail") loadOutboundDetail();
-    if (_currentView === "inbound_detail") loadInboundDetail();
-  } else {
-    alert("上传失败: " + (res ? res.error : "unknown"));
+  var ok = [], fail = [];
+  for (var i = 0; i < deduped.length; i++) {
+    var file = deduped[i];
+    var fd = new FormData();
+    fd.append("file", file);
+    fd.append("related_doc_type", ctx.related_doc_type);
+    fd.append("related_doc_id", ctx.related_doc_id);
+    fd.append("attachment_category", ctx.attachment_category);
+    fd.append("uploaded_by", getUser());
+    try {
+      var res = await uploadFile(fd);
+      if (res && res.ok) ok.push(file.name || ('文件' + (i + 1)));
+      else fail.push((file.name || ('文件' + (i + 1))) + ' (' + ((res && res.error) || 'error') + ')');
+    } catch (e) {
+      fail.push((file.name || ('文件' + (i + 1))) + ' (' + (e && e.message || 'exception') + ')');
+    }
   }
+
+  if (fail.length === 0) {
+    alert('上传成功 / 업로드 성공: ' + ok.length + ' 张');
+  } else if (ok.length === 0) {
+    alert('全部失败 / 모두 실패:\n' + fail.join('\n'));
+  } else {
+    alert('成功 ' + ok.length + ' / 失败 ' + fail.length + '\n失败列表:\n' + fail.join('\n'));
+  }
+
+  // Refresh current detail
+  if (_currentView === "issue_detail") loadIssueDetail();
+  if (_currentView === "outbound_detail") loadOutboundDetail();
+  if (_currentView === "inbound_detail") loadInboundDetail();
   input.value = "";
 }
 

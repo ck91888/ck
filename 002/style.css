@@ -473,3 +473,23 @@ select { cursor: pointer; }
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+
+/* 照片入口：拍照 / 相册双按钮（与 001 一致） */
+.photo-source-bar {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+.photo-source-bar .btn {
+  flex: 1 1 auto;
+  min-width: 130px;
+}
+
+/* 扫码切换摄像头按钮（注入到 reader 旁） */
+.cam-switch-btn {
+  display: inline-block;
+  margin: 6px 0 4px 0;
+  font-size: 12px;
+}
