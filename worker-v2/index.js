@@ -4648,20 +4648,34 @@ route("v2_inbound_plan_force_complete", async (body, env) => {
         WHERE plan_id=? AND status!='completed'
     `).bind(t, operator, operator, reason, t, id).run();
 
-    // 更新入库计划：force_completed=1 + status=completed + 可选 actual 数量
-    let upd = "UPDATE v2_inbound_plans SET status='completed', updated_at=?, force_completed=1, force_completed_by=?, force_completed_at=?, force_complete_reason=?, manual_completed_by=?, manual_completed_at=?";
-    const binds = [t, operator, t, reason, operator, t];
-    if (actual_box_count != null && Number.isFinite(actual_box_count)) {
-      upd += ", actual_box_count=?";
-      binds.push(actual_box_count);
+    // 实际数量写入 v2_inbound_plan_lines（按 unit_type=carton/pallet 分别 upsert）
+    // v2_inbound_plans 主表无 actual_box_count / actual_pallet_count 字段
+    async function upsertPlanLineActual(unit_type, qty) {
+      if (qty == null || !Number.isFinite(qty)) return;
+      const existed = await env.DB.prepare(
+        "SELECT id FROM v2_inbound_plan_lines WHERE plan_id=? AND unit_type=? LIMIT 1"
+      ).bind(id, unit_type).first();
+      if (existed) {
+        await env.DB.prepare(
+          "UPDATE v2_inbound_plan_lines SET actual_qty=? WHERE id=?"
+        ).bind(qty, existed.id).run();
+      } else if (qty > 0) {
+        const maxRow = await env.DB.prepare(
+          "SELECT MAX(line_no) AS m FROM v2_inbound_plan_lines WHERE plan_id=?"
+        ).bind(id).first();
+        const nextLineNo = (maxRow && Number(maxRow.m) ? Number(maxRow.m) : 0) + 1;
+        await env.DB.prepare(
+          "INSERT INTO v2_inbound_plan_lines(id, plan_id, line_no, unit_type, planned_qty, actual_qty, remark) VALUES(?,?,?,?,?,?,?)"
+        ).bind(uid(), id, nextLineNo, unit_type, 0, qty, 'manual_force_complete').run();
+      }
     }
-    if (actual_pallet_count != null && Number.isFinite(actual_pallet_count)) {
-      upd += ", actual_pallet_count=?";
-      binds.push(actual_pallet_count);
-    }
-    upd += " WHERE id=?";
-    binds.push(id);
-    await env.DB.prepare(upd).bind(...binds).run();
+    await upsertPlanLineActual('carton', actual_box_count);
+    await upsertPlanLineActual('pallet', actual_pallet_count);
+
+    // 更新入库计划：force_completed=1 + status=completed（仅写真实存在字段）
+    await env.DB.prepare(
+      "UPDATE v2_inbound_plans SET status='completed', updated_at=?, force_completed=1, force_completed_by=?, force_completed_at=?, force_complete_reason=?, manual_completed_by=?, manual_completed_at=? WHERE id=?"
+    ).bind(t, operator, t, reason, operator, t, id).run();
 
     return { ok: true, status: 'completed', force_completed: 1, completed_at: t, completed_by: operator };
   });
@@ -4757,10 +4771,21 @@ route("v2_inbound_plan_export", async (body, env) => {
     planIds);
   const attByPlan = {};
   for (const r of attRows) attByPlan[r.plan_id] = Number(r.c || 0);
+  // 入库实际数量来源是 v2_inbound_plan_lines（按 unit_type='carton'/'pallet' 分行）
+  // v2_inbound_plans 主表无 actual_box_count / actual_pallet_count 字段
   const planLineRows = await batchSelectInGlobal(env,
-    `SELECT plan_id, SUM(planned_qty) AS pq, SUM(actual_qty) AS aq, SUM(putaway_qty) AS pu
-       FROM v2_inbound_plan_lines WHERE plan_id IN (PLACEHOLDER) GROUP BY plan_id`,
+    `SELECT plan_id, unit_type, SUM(planned_qty) AS pq, SUM(actual_qty) AS aq, SUM(putaway_qty) AS pu
+       FROM v2_inbound_plan_lines WHERE plan_id IN (PLACEHOLDER) GROUP BY plan_id, unit_type`,
     planIds);
+  const linesByPlan = {};
+  for (const r of planLineRows) {
+    if (!linesByPlan[r.plan_id]) linesByPlan[r.plan_id] = {};
+    linesByPlan[r.plan_id][r.unit_type || ''] = {
+      pq: Number(r.pq || 0),
+      aq: Number(r.aq || 0),
+      pu: Number(r.pu || 0)
+    };
+  }
 
   const out = rows.map(p => {
     const bizArr = extractPlanBizClasses(p);
@@ -4780,6 +4805,12 @@ route("v2_inbound_plan_export", async (body, env) => {
       }
     }).join('；');
     const linkedNos = linkByPlan[p.id] || [];
+    const lp = linesByPlan[p.id] || {};
+    const cartonAgg = lp.carton || { pq: 0, aq: 0, pu: 0 };
+    const palletAgg = lp.pallet || { pq: 0, aq: 0, pu: 0 };
+    // 实际数量优先取 putaway（实际入库），否则取卸货 actual
+    const actualBox = cartonAgg.pu || cartonAgg.aq;
+    const actualPallet = palletAgg.pu || palletAgg.aq;
 
     return {
       入库单号: p.display_no || p.id,
@@ -4797,10 +4828,10 @@ route("v2_inbound_plan_export", async (body, env) => {
       备注: p.remark || '',
       创建人: p.created_by || '',
       创建时间: fmtKst(p.created_at),
-      计划箱数: Number(p.planned_box_count || 0),
-      计划托数: Number(p.planned_pallet_count || 0),
-      实际箱数: Number(p.actual_box_count || 0),
-      实际托数: Number(p.actual_pallet_count || 0),
+      计划箱数: cartonAgg.pq,
+      计划托数: palletAgg.pq,
+      实际箱数: actualBox,
+      实际托数: actualPallet,
       是否记账: p.accounted == 1 ? '已记账' : '未记账',
       记账人: p.accounted_by || '',
       记账时间: p.accounted_at ? fmtKst(p.accounted_at) : '',

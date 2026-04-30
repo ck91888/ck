@@ -2490,17 +2490,41 @@ async function loadInboundDetail() {
     onUnmark: "markInboundAccounted(0, this)"
   });
 
-  // --- Actions ---
+  // --- Actions: 完成入口合并（避免"文员直接完成入库" + "手动设为已入库"重复） ---
+  // 三态：A active job → 禁止；B pending biz_task → 仅手动完成；C 全部完成 → 状态修正
+  var hasActiveJob = jobs.some(function(j) {
+    return j && ['pending', 'working', 'awaiting_close'].indexOf(j.status) !== -1;
+  });
+  var pendingBizCount = (res.pending_biz_classes || []).length;
+  var FORCE_OK = ['pending', 'arrived_pending_putaway', 'putting_away', 'partially_completed'];
+  var MARK_OK = ['arrived_pending_putaway', 'putting_away', 'partially_completed'];
+  var isCompletable = FORCE_OK.indexOf(p.status) !== -1 && Number(p.force_completed || 0) !== 1;
+
+  // 缓存 lines 给 openForceCompleteForm 取默认值用
+  window._currentInboundLines = lines;
+
   html += '<div class="card">';
   html += '<button class="btn btn-outline btn-sm" onclick="printIbQr()">' + L("print") + '</button> ';
-  if (p.status === "arrived_pending_putaway" || p.status === "putting_away" || p.status === "partially_completed") {
-    html += '<button class="btn btn-success" onclick="markInboundCompleted(this)">文员直接完成入库 / 직접 입고 완료</button> ';
+
+  if (isCompletable) {
+    if (hasActiveJob) {
+      html += '<div style="color:#c62828;background:#ffebee;border-left:3px solid #c62828;padding:8px 10px;margin-top:8px;font-size:12px;line-height:1.7;">';
+      html += '当前存在进行中的现场作业，请先让现场结束/离开任务后再操作完成。';
+      html += '<br>현재 진행 중인 현장 작업이 있습니다. 현장에서 작업을 종료한 뒤 완료 처리하세요.';
+      html += '</div>';
+    } else if (pendingBizCount > 0) {
+      // 仍有未完成业务 → 仅显示"手动设为已入库"（外部 WMS 已完成 / 补录）
+      html += '<button class="btn" style="background:#8e24aa;color:#fff;" onclick="openForceCompleteForm()">手动设为已入库 / 수동 입고완료 처리</button> ';
+      html += '<div style="color:#6d4c00;background:#fff3e0;border-left:3px solid #ef6c00;padding:8px 10px;margin-top:8px;font-size:12px;line-height:1.7;">';
+      html += '此操作不生成现场工时，仅用于外部 WMS 已完成或补录单据。';
+      html += '<br>이 작업은 현장 작업시간을 생성하지 않으며, 외부 WMS에서 이미 완료되었거나 보정용 입고건에 사용됩니다.';
+      html += '</div>';
+    } else if (MARK_OK.indexOf(p.status) !== -1) {
+      // 所有 biz_task 已完成但主单未 completed → 状态修正
+      html += '<button class="btn btn-success" onclick="markInboundCompleted(this)">修正为已入库 / 입고상태 보정</button> ';
+    }
   }
-  // 手动设为已入库（外部 WMS 已完成 / 仅登记单）— pending 也允许
-  var FORCE_OK = ['pending','arrived_pending_putaway','putting_away','partially_completed'];
-  if (FORCE_OK.indexOf(p.status) !== -1 && Number(p.force_completed || 0) !== 1) {
-    html += '<button class="btn" style="background:#8e24aa;color:#fff;" onclick="openForceCompleteForm()">手动设为已入库 / 수동 입고완료 처리</button> ';
-  }
+
   // P1-7：未到库（pending）才能修改
   if (p.status === "pending") {
     html += '<button class="btn btn-primary" onclick="openInboundEditForm()">修改入库计划 / 입고 계획 수정</button> ';
@@ -2932,6 +2956,17 @@ function openForceCompleteForm() {
     alert('当前状态不允许手动完成 / 현재 상태로 수동 완료 불가: ' + p.status);
     return;
   }
+  // 默认数量从 v2_inbound_plan_lines 汇总（按 unit_type='carton'/'pallet'）
+  // 优先实际入库 putaway_qty / 卸货 actual_qty，最后回落 planned_qty
+  var lines = window._currentInboundLines || [];
+  var aggBox = 0, aggPallet = 0;
+  lines.forEach(function(ln) {
+    if (!ln) return;
+    var actual = Number(ln.putaway_qty || ln.actual_qty || ln.planned_qty || 0);
+    if (ln.unit_type === 'carton') aggBox += actual;
+    else if (ln.unit_type === 'pallet') aggPallet += actual;
+  });
+
   var html = '';
   html += '<div class="modal-overlay" id="fcOverlay" onclick="closeForceCompleteForm(event)">';
   html += '<div class="modal-box" onclick="event.stopPropagation();" style="max-width:520px;">';
@@ -2942,8 +2977,8 @@ function openForceCompleteForm() {
   html += '</div>';
   html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:13px;">';
   html += '<div style="grid-column:1/-1;"><label><b>原因 / 사유 *</b></label><textarea id="fc-reason" class="input" rows="2" placeholder="例如：外部 WMS 已完成；客户已自行入库"></textarea></div>';
-  html += '<div><label><b>实际箱数 / 실제 박스</b></label><input id="fc-box" class="input" type="number" min="0" value="' + Number(p.actual_box_count || p.planned_box_count || 0) + '"></div>';
-  html += '<div><label><b>实际托数 / 실제 팔레트</b></label><input id="fc-pallet" class="input" type="number" min="0" value="' + Number(p.actual_pallet_count || p.planned_pallet_count || 0) + '"></div>';
+  html += '<div><label><b>实际箱数 / 실제 박스</b></label><input id="fc-box" class="input" type="number" min="0" value="' + aggBox + '"></div>';
+  html += '<div><label><b>实际托数 / 실제 팔레트</b></label><input id="fc-pallet" class="input" type="number" min="0" value="' + aggPallet + '"></div>';
   html += '</div>';
   html += '<div style="margin-top:14px;text-align:right;">';
   html += '<button class="btn btn-outline" onclick="closeForceCompleteForm()">取消 / 취소</button> ';
