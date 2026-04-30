@@ -67,6 +67,84 @@ function fmtBusinessDateTime(s) {
   return str.replace('T', ' ').slice(0, 16);
 }
 
+// 出库单字段标签（中文/韩文）— change_log diff 渲染用
+const OUTBOUND_FIELD_LABELS = {
+  customer:               { zh: '客户',           ko: '고객' },
+  biz_class:              { zh: '业务分类',       ko: '업무 분류' },
+  destination:            { zh: '目的地',         ko: '목적지' },
+  po_no:                  { zh: 'PO号',           ko: 'PO번호' },
+  wms_work_order_no:      { zh: 'WMS工单号',      ko: 'WMS 작업번호' },
+  outbound_mode:          { zh: '出库模式',       ko: '출고 모드' },
+  instruction:            { zh: '作业说明',       ko: '작업 설명' },
+  remark:                 { zh: '备注',           ko: '비고' },
+  planned_box_count:      { zh: '计划箱数',       ko: '계획 박스' },
+  planned_pallet_count:   { zh: '计划托数',       ko: '계획 팔레트' },
+  expected_ship_at:       { zh: '预计出库时间',   ko: '예상 출고시간' },
+  outbound_requirement:   { zh: '出库要求',       ko: '출고 요구사항' },
+  uses_stock_operation:   { zh: '是否库内操作',   ko: '창고 내 작업 여부' },
+  pickup_vehicle_no:      { zh: '车牌',           ko: '차번' },
+  pickup_driver_name:     { zh: '司机',           ko: '기사' },
+  pickup_driver_phone:    { zh: '司机电话',       ko: '기사 전화' },
+  pickup_person_name:     { zh: '提货人',         ko: '픽업 담당자' },
+  pickup_company:         { zh: '提货公司',       ko: '픽업 회사' },
+  pickup_time:            { zh: '提货时间',       ko: '픽업 시간' },
+  pickup_note:            { zh: '提货备注',       ko: '픽업 비고' },
+  order_date:             { zh: '订单日期',       ko: '주문일' },
+  operation_mode:         { zh: '操作方式',       ko: '작업 방식' }
+};
+
+// 比较 outbound 单字段值 — 数值字段以数值比较，其他统一字符串比较
+function _outboundValEqual(field, oldVal, newVal) {
+  const numericFields = ['planned_box_count', 'planned_pallet_count', 'uses_stock_operation'];
+  if (numericFields.indexOf(field) !== -1) {
+    return Number(oldVal || 0) === Number(newVal || 0);
+  }
+  return String(oldVal == null ? '' : oldVal) === String(newVal == null ? '' : newVal);
+}
+
+function _outboundValForDisplay(field, val) {
+  if (val == null || val === '') return '--';
+  if (field === 'uses_stock_operation') return Number(val) === 1 ? '是' : '否';
+  return String(val);
+}
+
+// 构建 outbound 修改 diff
+// 返回 { diff: { field: { from, to } }, summary: '字段：旧 → 新；...', changedFields: [...] }
+function buildOutboundDiff(oldRow, newValues, editableFields) {
+  const diff = {};
+  const summaryParts = [];
+  const changedFields = [];
+  for (const f of editableFields) {
+    if (newValues[f] === undefined) continue;
+    const oldVal = oldRow ? oldRow[f] : null;
+    const newVal = newValues[f];
+    if (_outboundValEqual(f, oldVal, newVal)) continue;
+    diff[f] = { from: oldVal == null ? '' : oldVal, to: newVal == null ? '' : newVal };
+    changedFields.push(f);
+    const lbl = (OUTBOUND_FIELD_LABELS[f] && OUTBOUND_FIELD_LABELS[f].zh) || f;
+    summaryParts.push(lbl + '：' + _outboundValForDisplay(f, oldVal) + ' → ' + _outboundValForDisplay(f, newVal));
+  }
+  return { diff, summary: summaryParts.join('；'), changedFields };
+}
+
+// 写入一条出库修改日志（在事务外调用即可，调用方负责升 revision）
+async function insertOutboundChangeLog(env, params) {
+  const { order_id, revision_no, change_type, changed_by, diff, summary, t } = params;
+  const log_id = uid();
+  await env.DB.prepare(`
+    INSERT INTO v2_outbound_order_change_logs(
+      id, order_id, revision_no, change_type, changed_by, changed_at,
+      diff_json, summary_text, warehouse_ack_required, warehouse_ack_by, warehouse_ack_at, ack_source, created_at
+    ) VALUES(?,?,?,?,?,?,?,?,1,'','','',?)
+  `).bind(
+    log_id, order_id, revision_no, change_type || 'order_update',
+    changed_by || '', t,
+    JSON.stringify(diff || {}), summary || '',
+    t
+  ).run();
+  return log_id;
+}
+
 // KST 日期 → UTC 范围 [startUtc, endUtc)
 // 输入 "2026-04-27" → { startUtc: "2026-04-26T15:00:00.000Z", endUtc: "2026-04-27T15:00:00.000Z" }
 function kstDayRangeUtc(dateStr) {
@@ -1058,10 +1136,29 @@ const MIGRATIONS = [
     related_run_id TEXT DEFAULT ''
   )`,
   `CREATE INDEX IF NOT EXISTS idx_v2_issue_rework_issue ON v2_issue_rework_requests(issue_id, created_at)`,
+
+  // ---- v2.20260430h：出库单修改明细日志 + 仓库确认链路 ----
+  `CREATE TABLE IF NOT EXISTS v2_outbound_order_change_logs (
+    id TEXT PRIMARY KEY,
+    order_id TEXT,
+    revision_no INTEGER DEFAULT 0,
+    change_type TEXT DEFAULT 'order_update',
+    changed_by TEXT DEFAULT '',
+    changed_at TEXT,
+    diff_json TEXT DEFAULT '{}',
+    summary_text TEXT DEFAULT '',
+    warehouse_ack_required INTEGER DEFAULT 1,
+    warehouse_ack_by TEXT DEFAULT '',
+    warehouse_ack_at TEXT DEFAULT '',
+    ack_source TEXT DEFAULT '',
+    created_at TEXT
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_ob_change_logs_order ON v2_outbound_order_change_logs(order_id, revision_no)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_ob_change_logs_ack ON v2_outbound_order_change_logs(warehouse_ack_required, changed_at)`,
 ];
 
 // 每次发布迁移变化时手动 +1（patch 段），冷启动只比对一次字符串即可跳过整段 MIGRATIONS
-const CURRENT_SCHEMA_VERSION = 'v2.20260430g';
+const CURRENT_SCHEMA_VERSION = 'v2.20260430h';
 
 let _migrated = false;
 async function ensureMigrated(db) {
@@ -1802,6 +1899,23 @@ route("v2_outbound_order_list", async (body, env) => {
     const map = {};
     for (const r of matRows) map[r.id] = Number(r.c || 0);
     for (const it of items) it.material_count = Number(map[it.id] || 0);
+
+    // 注入 latest_change_summary（每单最新一条 change_log 摘要，用于列表 hover/小字显示）
+    const ackIds = items.filter(o => Number(o.warehouse_ack_required) === 1).map(o => o.id);
+    if (ackIds.length > 0) {
+      const sumRows = await batchSelectInGlobal(env,
+        `SELECT order_id, summary_text, revision_no FROM v2_outbound_order_change_logs
+          WHERE order_id IN (PLACEHOLDER) AND warehouse_ack_required=1
+          ORDER BY revision_no DESC, changed_at DESC`,
+        ackIds);
+      const sumMap = {};
+      for (const r of sumRows) {
+        if (!sumMap[r.order_id]) sumMap[r.order_id] = r.summary_text || '';
+      }
+      for (const it of items) {
+        if (sumMap[it.id]) it.latest_change_summary = sumMap[it.id];
+      }
+    }
   }
   return json({ ok: true, items, limit, offset });
 });
@@ -1834,12 +1948,45 @@ route("v2_outbound_order_detail", async (body, env) => {
   // 注入 material_count
   const materialCount = (orderAtts.results || []).filter(a => a.attachment_category === 'outbound_material').length;
   row.material_count = materialCount;
+
+  // 修改日志（按 revision_no DESC）
+  const changeLogRs = await env.DB.prepare(
+    `SELECT id, revision_no, change_type, changed_by, changed_at,
+            diff_json, summary_text, warehouse_ack_required, warehouse_ack_by, warehouse_ack_at, ack_source
+       FROM v2_outbound_order_change_logs
+      WHERE order_id=?
+      ORDER BY revision_no DESC, changed_at DESC
+      LIMIT 50`
+  ).bind(id).all();
+  const change_logs = (changeLogRs.results || []).map(r => {
+    let diff = {};
+    try { diff = JSON.parse(r.diff_json || '{}'); } catch (e) {}
+    return {
+      id: r.id,
+      revision_no: Number(r.revision_no || 0),
+      change_type: r.change_type || 'order_update',
+      changed_by: r.changed_by || '',
+      changed_at: r.changed_at || '',
+      diff,
+      summary_text: r.summary_text || '',
+      warehouse_ack_required: Number(r.warehouse_ack_required || 0),
+      warehouse_ack_by: r.warehouse_ack_by || '',
+      warehouse_ack_at: r.warehouse_ack_at || '',
+      ack_source: r.ack_source || ''
+    };
+  });
+  const pending_change_logs = change_logs.filter(x => x.warehouse_ack_required === 1);
+  const latest_change_log = change_logs.length > 0 ? change_logs[0] : null;
+
   return json({
     ok: true,
     order: row,
     lines: lines.results || [],
     jobs: jobs.results || [],
-    attachments: allAtts
+    attachments: allAtts,
+    change_logs,
+    pending_change_logs,
+    latest_change_log
   });
 });
 
@@ -1955,36 +2102,69 @@ route("v2_outbound_order_update_ship_plan", async (body, env) => {
       return { ok: false, error: "invalid_outbound_mode" };
     }
     const t = now();
-    // 仅更新提供的字段；空串保留原值
+    // 仅更新"提供且非空"的字段；空串保留原值
+    const provided = {};
+    if (expected_ship_at) provided.expected_ship_at = expected_ship_at;
+    if (outbound_mode) provided.outbound_mode = outbound_mode;
+    if (destination) provided.destination = destination;
+    if (outbound_requirement) provided.outbound_requirement = outbound_requirement;
+    if (remark) provided.remark = remark;
+
+    const diffResult = buildOutboundDiff(order, provided, [
+      'expected_ship_at','outbound_mode','destination','outbound_requirement','remark'
+    ]);
+
     const sets = ["updated_at=?"];
     const binds = [t];
-    if (expected_ship_at) {
-      sets.push("expected_ship_at=?"); binds.push(expected_ship_at);
-      // 同步 order_date 到新预约日期（display_no 沿用旧值，仅筛选/排序口径对齐）
-      if (expected_ship_at.length >= 10) {
-        sets.push("order_date=?"); binds.push(expected_ship_at.slice(0, 10));
-      }
+    for (const k of diffResult.changedFields) {
+      sets.push(k + "=?");
+      binds.push(provided[k]);
     }
-    if (outbound_mode)    { sets.push("outbound_mode=?");    binds.push(outbound_mode); }
-    if (destination)      { sets.push("destination=?");      binds.push(destination); }
-    if (outbound_requirement) { sets.push("outbound_requirement=?"); binds.push(outbound_requirement); }
-    if (remark)           { sets.push("remark=?");           binds.push(remark); }
-    // 库内操作型 + pending_outbound_update → preparing_outbound
+    // expected_ship_at 变化时同步 order_date（display_no 沿用旧值）
+    if (diffResult.changedFields.indexOf('expected_ship_at') !== -1 && expected_ship_at.length >= 10) {
+      sets.push("order_date=?");
+      binds.push(expected_ship_at.slice(0, 10));
+    }
+    // 库内操作型 + pending_outbound_update → preparing_outbound（流程必经路径，与 diff 无关）
     let nextStatus = cur;
     if (Number(order.uses_stock_operation) === 1 && cur === 'pending_outbound_update') {
       nextStatus = 'preparing_outbound';
       sets.push("status=?");
       binds.push(nextStatus);
     }
+    // 有 diff 时同步把 warehouse_ack_required 标记，写 change_log
+    const by = String(body.by || body.actor || body.modified_by || "");
+    if (diffResult.changedFields.length > 0) {
+      sets.push("revision_no=COALESCE(revision_no,0)+1");
+      sets.push("last_modified_by=?"); binds.push(by);
+      sets.push("last_modified_at=?"); binds.push(t);
+      sets.push("warehouse_ack_required=1");
+      sets.push("warehouse_ack_by=''");
+      sets.push("warehouse_ack_at=''");
+    }
     binds.push(id);
     await env.DB.prepare(
       "UPDATE v2_outbound_orders SET " + sets.join(", ") + " WHERE id=?"
     ).bind(...binds).run();
-    return { ok: true, status: nextStatus };
+
+    if (diffResult.changedFields.length > 0) {
+      const newRevision = Number(order.revision_no || 0) + 1;
+      await insertOutboundChangeLog(env, {
+        order_id: id,
+        revision_no: newRevision,
+        change_type: 'ship_plan',
+        changed_by: by,
+        diff: diffResult.diff,
+        summary: diffResult.summary,
+        t
+      });
+    }
+
+    return { ok: true, status: nextStatus, no_change: diffResult.changedFields.length === 0 };
   });
 });
 
-// P1-8：未出库完成的出库单 — 修改（产生 warehouse_ack 提示）
+// P1-8：未出库完成的出库单 — 修改（产生 warehouse_ack 提示 + 写 change_log）
 route("v2_outbound_order_update", async (body, env) => {
   if (!isAuth(body, env)) return err("unauthorized", 401);
   const id = String(body.id || "").trim();
@@ -2008,24 +2188,29 @@ route("v2_outbound_order_update", async (body, env) => {
       'pickup_vehicle_no','pickup_driver_name','pickup_driver_phone',
       'pickup_person_name','pickup_company','pickup_time','pickup_note'
     ];
+
+    // 先做 diff 对比，只把真正变化的字段写库
+    const diffResult = buildOutboundDiff(order, body, editable);
+    if (diffResult.changedFields.length === 0) {
+      return { ok: true, id, revision_no: Number(order.revision_no || 0), no_change: true };
+    }
+
     const sets = [];
     const binds = [];
     let pickupTouched = false;
     let expectedShipTouched = false;
     let orderDateExplicit = false;
-    for (const k of editable) {
-      if (body[k] !== undefined) {
-        sets.push(k + "=?");
-        const v = body[k];
-        if (k.startsWith('planned_') || k === 'uses_stock_operation') {
-          binds.push(Number(v || 0));
-        } else {
-          binds.push(String(v == null ? '' : v));
-        }
-        if (k.indexOf('pickup_') === 0) pickupTouched = true;
-        if (k === 'expected_ship_at') expectedShipTouched = true;
-        if (k === 'order_date') orderDateExplicit = true;
+    for (const k of diffResult.changedFields) {
+      sets.push(k + "=?");
+      const v = body[k];
+      if (k.startsWith('planned_') || k === 'uses_stock_operation') {
+        binds.push(Number(v || 0));
+      } else {
+        binds.push(String(v == null ? '' : v));
       }
+      if (k.indexOf('pickup_') === 0) pickupTouched = true;
+      if (k === 'expected_ship_at') expectedShipTouched = true;
+      if (k === 'order_date') orderDateExplicit = true;
     }
     // 修改 expected_ship_at 但未显式覆盖 order_date → 同步派生 order_date
     // 历史 display_no 不重写（避免引用混乱）；下次新单按新日期生成
@@ -2036,10 +2221,8 @@ route("v2_outbound_order_update", async (body, env) => {
         binds.push(_esa.slice(0, 10));
       }
     }
-    if (sets.length === 0) {
-      return { ok: false, error: "nothing_to_update" };
-    }
-    sets.push("revision_no=COALESCE(revision_no,0)+1");
+    const newRevision = Number(order.revision_no || 0) + 1;
+    sets.push("revision_no=?"); binds.push(newRevision);
     sets.push("last_modified_by=?"); binds.push(by);
     sets.push("last_modified_at=?"); binds.push(t);
     sets.push("warehouse_ack_required=1");
@@ -2055,27 +2238,55 @@ route("v2_outbound_order_update", async (body, env) => {
     await env.DB.prepare(
       "UPDATE v2_outbound_orders SET " + sets.join(", ") + " WHERE id=?"
     ).bind(...binds).run();
-    return { ok: true, id, revision_no: Number(order.revision_no || 0) + 1 };
+
+    // 写入修改明细日志（仅当有变化时）
+    await insertOutboundChangeLog(env, {
+      order_id: id,
+      revision_no: newRevision,
+      change_type: pickupTouched && diffResult.changedFields.every(f => f.indexOf('pickup_') === 0)
+        ? 'pickup_update'
+        : 'order_update',
+      changed_by: by,
+      diff: diffResult.diff,
+      summary: diffResult.summary,
+      t
+    });
+
+    return { ok: true, id, revision_no: newRevision, summary_text: diffResult.summary };
   });
 });
 
-// P1-8：仓库确认已查看出库单变更
+// P1-8：仓库确认已查看出库单变更（同步清掉 change_logs 中所有 pending 记录）
 route("v2_outbound_order_ack_change", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
   const id = String(body.id || "").trim();
   if (!id) return err("missing id");
   return withIdem(env, body, "v2_outbound_order_ack_change", async () => {
-    const order = await env.DB.prepare("SELECT id, warehouse_ack_required FROM v2_outbound_orders WHERE id=?").bind(id).first();
+    const order = await env.DB.prepare("SELECT id, warehouse_ack_required, revision_no FROM v2_outbound_orders WHERE id=?").bind(id).first();
     if (!order) return { ok: false, error: "not_found" };
-    if (Number(order.warehouse_ack_required) !== 1) {
-      return { ok: true, already_acked: true };
-    }
+    const alreadyAcked = Number(order.warehouse_ack_required) !== 1;
     const t = now();
     const worker = String(body.worker_name || body.by || "");
-    await env.DB.prepare(
-      "UPDATE v2_outbound_orders SET warehouse_ack_required=0, warehouse_ack_by=?, warehouse_ack_at=?, updated_at=? WHERE id=?"
-    ).bind(worker, t, t, id).run();
-    return { ok: true, id };
+    const ack_source = String(body.source || '').trim() || 'warehouse';
+
+    if (!alreadyAcked) {
+      await env.DB.prepare(
+        "UPDATE v2_outbound_orders SET warehouse_ack_required=0, warehouse_ack_by=?, warehouse_ack_at=?, updated_at=? WHERE id=?"
+      ).bind(worker, t, t, id).run();
+    }
+    // 清掉该 order_id 所有 pending change_logs（即便主表已 ack 也确保日志同步）
+    const updRs = await env.DB.prepare(
+      "UPDATE v2_outbound_order_change_logs SET warehouse_ack_required=0, warehouse_ack_by=?, warehouse_ack_at=?, ack_source=? WHERE order_id=? AND warehouse_ack_required=1"
+    ).bind(worker, t, ack_source, id).run();
+    const acked_count = (updRs && updRs.meta && Number(updRs.meta.changes || 0)) || 0;
+
+    return {
+      ok: true,
+      id,
+      already_acked: alreadyAcked,
+      acked_revision_no: Number(order.revision_no || 0),
+      acked_count
+    };
   });
 });
 

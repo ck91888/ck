@@ -371,6 +371,174 @@ function outModeLabel(mode) {
   return L("outmode_" + mode) || mode;
 }
 
+// 出库单字段标签（中韩双语）— change_log diff 渲染用，与后端 OUTBOUND_FIELD_LABELS 对齐
+var OUTBOUND_FIELD_LABELS_FE = {
+  customer:               { zh: '客户',           ko: '고객' },
+  biz_class:              { zh: '业务分类',       ko: '업무 분류' },
+  destination:            { zh: '目的地',         ko: '목적지' },
+  po_no:                  { zh: 'PO号',           ko: 'PO번호' },
+  wms_work_order_no:      { zh: 'WMS工单号',      ko: 'WMS 작업번호' },
+  outbound_mode:          { zh: '出库模式',       ko: '출고 모드' },
+  instruction:            { zh: '作业说明',       ko: '작업 설명' },
+  remark:                 { zh: '备注',           ko: '비고' },
+  planned_box_count:      { zh: '计划箱数',       ko: '계획 박스' },
+  planned_pallet_count:   { zh: '计划托数',       ko: '계획 팔레트' },
+  expected_ship_at:       { zh: '预计出库时间',   ko: '예상 출고시간' },
+  outbound_requirement:   { zh: '出库要求',       ko: '출고 요구사항' },
+  uses_stock_operation:   { zh: '是否库内操作',   ko: '창고 내 작업 여부' },
+  pickup_vehicle_no:      { zh: '车牌',           ko: '차번' },
+  pickup_driver_name:     { zh: '司机',           ko: '기사' },
+  pickup_driver_phone:    { zh: '司机电话',       ko: '기사 전화' },
+  pickup_person_name:     { zh: '提货人',         ko: '픽업 담당자' },
+  pickup_company:         { zh: '提货公司',       ko: '픽업 회사' },
+  pickup_time:            { zh: '提货时间',       ko: '픽업 시간' },
+  pickup_note:            { zh: '提货备注',       ko: '픽업 비고' },
+  order_date:             { zh: '订单日期',       ko: '주문일' },
+  operation_mode:         { zh: '操作方式',       ko: '작업 방식' }
+};
+function obFieldLabel(field) {
+  var m = OUTBOUND_FIELD_LABELS_FE[field];
+  if (!m) return field;
+  return m.zh + ' / ' + m.ko;
+}
+function obFieldDisplayValue(field, val) {
+  if (val == null || val === '') return '--';
+  if (field === 'uses_stock_operation') return Number(val) === 1 ? '是 / 예' : '否 / 아니오';
+  if (field === 'biz_class') return bizLabel(String(val));
+  if (field === 'outbound_mode') return outModeLabel(String(val));
+  if (field === 'expected_ship_at' || field === 'pickup_time') {
+    return formatBusinessLocalDateTime(String(val));
+  }
+  return String(val);
+}
+
+// 渲染单条 change_log 的 diff 明细表
+function renderOutboundDiffTable(diff) {
+  if (!diff || typeof diff !== 'object') return '';
+  var keys = Object.keys(diff);
+  if (keys.length === 0) return '';
+  var html = '<table class="line-table" style="margin-top:6px;font-size:12px;">';
+  html += '<thead><tr><th style="width:34%;">字段 / 항목</th><th style="width:33%;">修改前 / 변경 전</th><th style="width:33%;">修改后 / 변경 후</th></tr></thead><tbody>';
+  keys.forEach(function(k) {
+    var cell = diff[k] || {};
+    html += '<tr>';
+    html += '<td><b>' + esc(obFieldLabel(k)) + '</b></td>';
+    html += '<td style="color:#888;">' + esc(obFieldDisplayValue(k, cell.from)) + '</td>';
+    html += '<td style="color:#c62828;font-weight:700;">' + esc(obFieldDisplayValue(k, cell.to)) + '</td>';
+    html += '</tr>';
+  });
+  html += '</tbody></table>';
+  return html;
+}
+
+// 出库单修改明细 + 仓库确认卡片（详情页主信息卡之后渲染）
+function renderOutboundChangeLogsCard(o, change_logs, pending_change_logs) {
+  var ackRequired = Number(o.warehouse_ack_required) === 1;
+  var hasAnyLog = (change_logs && change_logs.length > 0);
+  var hasRevisionWithoutLog = Number(o.revision_no || 0) > 0 && !hasAnyLog;
+
+  // 没有任何修改 → 不渲染
+  if (!ackRequired && !hasAnyLog && !hasRevisionWithoutLog) return '';
+
+  var html = '';
+
+  if (ackRequired) {
+    // 红色卡片：待仓库确认
+    html += '<div class="card" style="border:2px solid #c62828;background:#fff5f5;">';
+    html += '<div class="card-title" style="color:#c62828;">⚠ 出库单已修改，待仓库确认 / 출고단 변경됨, 창고 확인 대기</div>';
+
+    var pendings = (pending_change_logs && pending_change_logs.length > 0)
+      ? pending_change_logs
+      : (hasAnyLog ? [change_logs[0]] : []);
+
+    if (pendings.length > 0) {
+      pendings.forEach(function(log) {
+        html += '<div style="padding:8px 0;border-bottom:1px dashed #f5b7b1;">';
+        html += '<div style="font-size:13px;line-height:1.7;">';
+        html += '<div><b>修改版本 / 버전:</b> #' + Number(log.revision_no || 0);
+        if (log.change_type && log.change_type !== 'order_update') {
+          html += ' <span class="muted" style="font-size:11px;">[' + esc(log.change_type) + ']</span>';
+        }
+        html += '</div>';
+        html += '<div><b>修改人 / 수정자:</b> ' + esc(log.changed_by || '--') + '</div>';
+        html += '<div><b>修改时间 / 수정 시간:</b> ' + esc(log.changed_at ? fmtTime(log.changed_at) : '--') + '</div>';
+        html += '</div>';
+        html += renderOutboundDiffTable(log.diff);
+        html += '</div>';
+      });
+    } else if (hasRevisionWithoutLog) {
+      html += '<div class="muted" style="padding:6px 0;font-size:12px;">该单有历史修改（版本 #' + Number(o.revision_no || 0) + '），但旧版本未记录具体修改内容。/ 이 단은 변경 이력이 있으나 구버전은 상세 내역이 기록되지 않았습니다.</div>';
+    }
+
+    // 仓库确认方式说明
+    html += '<div style="background:#fff3e0;border-left:3px solid #ef6c00;padding:8px 10px;margin-top:8px;font-size:12px;color:#6d4c00;line-height:1.7;">';
+    html += '<b>仓库确认方式 / 창고 확인 방법:</b><br>';
+    html += '请仓库人员打开 <b>001 现场执行系统</b> → 出库作业 → 出库装货 → 扫描或选择该出库单 → 点击「确认已查看变更」。<br>';
+    html += '창고 직원은 <b>001 현장 시스템</b> → 출고 작업 → 출고 상차 → 해당 출고단을 스캔/선택 → 「변경 확인 완료」를 누르세요.';
+    html += '</div>';
+
+    // 办公室代确认按钮
+    html += '<div style="margin-top:10px;">';
+    html += '<button class="btn btn-outline btn-sm" onclick="ackOutboundChangeProxy(this)">办公室代确认 / 사무실 대리 확인</button>';
+    html += '<span class="muted" style="font-size:11px;margin-left:8px;">仓库已口头确认时使用 / 창고가 구두 확인한 경우 사용</span>';
+    html += '</div>';
+    html += '</div>';
+  }
+
+  // 历史修改记录折叠列表（即便已确认也保留可查）
+  var pastLogs = (change_logs || []).filter(function(log) {
+    return Number(log.warehouse_ack_required) === 0;
+  });
+  if (pastLogs.length > 0) {
+    html += '<div class="card">';
+    html += '<details>';
+    html += '<summary style="cursor:pointer;font-weight:700;color:#666;">📜 修改历史 / 변경 이력 (' + pastLogs.length + ')</summary>';
+    pastLogs.forEach(function(log, idx) {
+      if (idx > 0) html += '<div style="border-top:1px solid #eee;margin:8px 0;"></div>';
+      html += '<div style="padding:6px 0;font-size:12px;line-height:1.7;">';
+      html += '<div><b>#' + Number(log.revision_no || 0) + '</b> · ' + esc(log.changed_by || '--');
+      html += ' · ' + esc(log.changed_at ? fmtTime(log.changed_at) : '--');
+      if (log.warehouse_ack_by) {
+        html += ' · <span style="color:#2e7d32;">已确认: ' + esc(log.warehouse_ack_by);
+        if (log.warehouse_ack_at) html += ' · ' + esc(fmtTime(log.warehouse_ack_at));
+        html += '</span>';
+      }
+      html += '</div>';
+      html += renderOutboundDiffTable(log.diff);
+      html += '</div>';
+    });
+    html += '</details>';
+    html += '</div>';
+  } else if (!ackRequired && hasRevisionWithoutLog) {
+    // 旧数据：revision_no>0 但无 logs 且已确认
+    html += '<div class="card">';
+    html += '<div class="muted" style="font-size:12px;">该单有历史修改（版本 #' + Number(o.revision_no || 0) + '），但旧版本未记录具体修改内容。/ 이 단은 변경 이력이 있으나 구버전은 상세 내역이 기록되지 않았습니다.</div>';
+    html += '</div>';
+  }
+
+  return html;
+}
+
+// 办公室代确认（清掉待仓库确认状态）
+async function ackOutboundChangeProxy(btnEl) {
+  if (!_currentOutboundId) return;
+  if (!confirm('确认仓库已知晓本次修改？此操作会清除待仓库确认状态。\n창고가 변경 사항을 인지하였음을 확인하시겠습니까? 확인 대기 상태가 해제됩니다.')) return;
+  withActionLock('ackOutboundChangeProxy', btnEl || null, '提交中.../저장중...', async function() {
+    var res = await api({
+      action: 'v2_outbound_order_ack_change',
+      id: _currentOutboundId,
+      worker_name: getUser() + '（办公室代确认）',
+      source: '002_office_proxy'
+    });
+    if (res && res.ok) {
+      alert('已代确认 · 共清除 ' + Number(res.acked_count || 0) + ' 条待确认\n대리 확인 완료 · ' + Number(res.acked_count || 0) + '건 처리됨');
+      loadOutboundDetail();
+    } else {
+      alert('失败/실패: ' + (res ? (res.message || res.error) : 'unknown'));
+    }
+  });
+}
+
 // priLabel: UI 不再展示优先级；保留函数定义只为兼容外部潜在引用，返回原值
 function priLabel(pri) { return pri; }
 
@@ -1027,7 +1195,13 @@ async function loadOutboundList() {
       html += '<span class="st" style="background:#fff3e0;color:#e65100;">[' + esc(L("uses_stock_operation")) + ']</span> ';
     }
     if (Number(o.warehouse_ack_required) === 1) {
-      html += '<span class="st" style="background:#ffebee;color:#c62828;">⚠ 已变更待确认</span> ';
+      var revLabel = Number(o.revision_no || 0) > 0 ? ' #' + Number(o.revision_no) : '';
+      var sumPreview = (o.latest_change_summary || '').slice(0, 50);
+      var sumTitle = sumPreview ? esc(o.latest_change_summary || '') : '';
+      html += '<span class="st" style="background:#ffebee;color:#c62828;" title="' + sumTitle + '">⚠ 已修改' + revLabel + '｜待仓库确认</span> ';
+      if (sumPreview) {
+        html += '<span class="muted" style="font-size:11px;">' + esc(sumPreview) + (sumPreview.length >= 50 ? '…' : '') + '</span> ';
+      }
     }
     var matCount = Number(o.material_count || 0);
     if (matCount > 0) {
@@ -1357,9 +1531,6 @@ async function loadOutboundDetail() {
     html += ' <span class="st" style="background:#ffebee;color:#c62828;">⚠ 待仓库确认变更 / 창고 확인 대기</span>';
   }
   html += '</div>';
-  if (Number(o.revision_no || 0) > 0 && o.last_modified_by) {
-    html += '<div class="detail-field muted" style="font-size:12px;"><b>最近修改 / 최근 수정:</b> ' + esc(o.last_modified_by) + (o.last_modified_at ? ' · ' + esc(fmtTime(o.last_modified_at)) : '') + '</div>';
-  }
   if (Number(o.warehouse_ack_required) === 0 && o.warehouse_ack_by) {
     html += '<div class="detail-field muted" style="font-size:12px;"><b>仓库已确认 / 창고 확인됨:</b> ' + esc(o.warehouse_ack_by) + (o.warehouse_ack_at ? ' · ' + esc(fmtTime(o.warehouse_ack_at)) : '') + '</div>';
   }
@@ -1387,6 +1558,9 @@ async function loadOutboundDetail() {
     html += '<div class="detail-field"><b>来源入库计划 / 출처 입고:</b> <a href="javascript:void(0);" onclick="openInboundDetail(\'' + esc(o.source_inbound_plan_id) + '\')">查看入库单 / 입고단 보기</a></div>';
   }
   html += '</div>';
+
+  // 出库单修改明细 + 仓库确认卡片
+  html += renderOutboundChangeLogsCard(o, res.change_logs || [], res.pending_change_logs || []);
 
   // 库内操作型：pending_outbound_update 提示 + 仓库反馈结果 + 更新出库计划按钮
   if (usesStockOp) {

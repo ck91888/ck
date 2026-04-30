@@ -2057,6 +2057,64 @@ async function loadOutboundOrders() {
 // ===== 出库装货：扫码/识别/清空 =====
 var _obResolvedOrderId = "";
 var _obLoadScanner = null;
+var _obAckPending = false;  // 当前选中单是否仍待仓库确认变更（阻止开始装货）
+
+// 出库单字段标签（中韩双语）— change_log diff 渲染用
+var OUTBOUND_FIELD_LABELS_001 = {
+  customer:               { zh: '客户',           ko: '고객' },
+  biz_class:              { zh: '业务分类',       ko: '업무 분류' },
+  destination:            { zh: '目的地',         ko: '목적지' },
+  po_no:                  { zh: 'PO号',           ko: 'PO번호' },
+  wms_work_order_no:      { zh: 'WMS工单号',      ko: 'WMS 작업번호' },
+  outbound_mode:          { zh: '出库模式',       ko: '출고 모드' },
+  instruction:            { zh: '作业说明',       ko: '작업 설명' },
+  remark:                 { zh: '备注',           ko: '비고' },
+  planned_box_count:      { zh: '计划箱数',       ko: '계획 박스' },
+  planned_pallet_count:   { zh: '计划托数',       ko: '계획 팔레트' },
+  expected_ship_at:       { zh: '预计出库时间',   ko: '예상 출고시간' },
+  outbound_requirement:   { zh: '出库要求',       ko: '출고 요구사항' },
+  uses_stock_operation:   { zh: '是否库内操作',   ko: '창고 내 작업 여부' },
+  pickup_vehicle_no:      { zh: '车牌',           ko: '차번' },
+  pickup_driver_name:     { zh: '司机',           ko: '기사' },
+  pickup_driver_phone:    { zh: '司机电话',       ko: '기사 전화' },
+  pickup_person_name:     { zh: '提货人',         ko: '픽업 담당자' },
+  pickup_company:         { zh: '提货公司',       ko: '픽업 회사' },
+  pickup_time:            { zh: '提货时间',       ko: '픽업 시간' },
+  pickup_note:            { zh: '提货备注',       ko: '픽업 비고' },
+  order_date:             { zh: '订单日期',       ko: '주문일' },
+  operation_mode:         { zh: '操作方式',       ko: '작업 방식' }
+};
+function obFieldLabel001(field) {
+  var m = OUTBOUND_FIELD_LABELS_001[field];
+  if (!m) return field;
+  return m.zh + ' / ' + m.ko;
+}
+function obFieldDisplayValue001(field, val) {
+  if (val == null || val === '') return '--';
+  if (field === 'uses_stock_operation') return Number(val) === 1 ? '是 / 예' : '否 / 아니오';
+  if (field === 'expected_ship_at' || field === 'pickup_time') {
+    var s = String(val).replace('T', ' ');
+    return s.length >= 16 ? s.slice(0, 16) : s;
+  }
+  return String(val);
+}
+function renderOutboundDiffTable001(diff) {
+  if (!diff || typeof diff !== 'object') return '';
+  var keys = Object.keys(diff);
+  if (keys.length === 0) return '';
+  var html = '<table class="line-table" style="margin-top:6px;font-size:12px;width:100%;">';
+  html += '<thead><tr><th>字段 / 항목</th><th>修改前</th><th>修改后</th></tr></thead><tbody>';
+  keys.forEach(function(k) {
+    var cell = diff[k] || {};
+    html += '<tr>';
+    html += '<td><b>' + esc(obFieldLabel001(k)) + '</b></td>';
+    html += '<td style="color:#888;">' + esc(obFieldDisplayValue001(k, cell.from)) + '</td>';
+    html += '<td style="color:#c62828;font-weight:700;">' + esc(obFieldDisplayValue001(k, cell.to)) + '</td>';
+    html += '</tr>';
+  });
+  html += '</tbody></table>';
+  return html;
+}
 
 async function resolveOutboundCode(btnEl) {
   var inp = document.getElementById("obLoadCodeInput");
@@ -2096,6 +2154,7 @@ async function resolveOutboundCode(btnEl) {
 
 function clearOutboundResolve() {
   _obResolvedOrderId = "";
+  _obAckPending = false;
   var inp = document.getElementById("obLoadCodeInput");
   if (inp) inp.value = "";
   var resultEl = document.getElementById("obResolveResult");
@@ -2167,6 +2226,11 @@ function onOutboundCandidateSelect() {
 
 async function startOutboundLoad(btnEl) {
   if (hasOtherActiveJob()) return warnActiveJob();
+  // 阻止：仍待仓库确认变更
+  if (_obAckPending) {
+    alert('该出库单已被修改，请先点击「我已查看并确认变更」再开始装货。\n출고단이 변경되었습니다. 「변경 확인 완료」를 먼저 누르세요.');
+    return;
+  }
   withActionLock('startOutboundLoad', btnEl || null, '提交中.../저장중...', async function() {
     var orderId = _obResolvedOrderId || document.getElementById("loadOrderSelect").value || "";
     var res = await api({
@@ -2298,19 +2362,28 @@ async function _refreshOutboundLoadMaterial() {
 async function _refreshOutboundLoadOrderState() {
   var ackBox = document.getElementById("obAckBox");
   var pickupBox = document.getElementById("obPickupBox");
-  if (!ackBox && !pickupBox) return;
+  if (!ackBox && !pickupBox) {
+    _obAckPending = false;
+    return;
+  }
   if (!_obResolvedOrderId) {
+    _obAckPending = false;
     if (ackBox) ackBox.innerHTML = '';
     if (pickupBox) pickupBox.innerHTML = '';
     return;
   }
   var res = await api({ action: 'v2_outbound_order_detail', id: _obResolvedOrderId });
   if (!res || !res.ok || !res.order) {
+    _obAckPending = false;
     if (ackBox) ackBox.innerHTML = '';
     if (pickupBox) pickupBox.innerHTML = '';
     return;
   }
   var o = res.order;
+  _obAckPending = Number(o.warehouse_ack_required) === 1;
+  var pendingLogs = res.pending_change_logs || [];
+  var allLogs = res.change_logs || [];
+  var hasRevisionWithoutLog = Number(o.revision_no || 0) > 0 && allLogs.length === 0;
   // 变更确认红牌 + 出库要求/作业说明/备注（让现场不用回协同中心也能看到）
   if (ackBox) {
     var html = '';
@@ -2318,13 +2391,28 @@ async function _refreshOutboundLoadOrderState() {
     if (notes) {
       html += '<div class="remark-block" style="margin-top:0;">' + notes + '</div>';
     }
-    if (Number(o.warehouse_ack_required) === 1) {
+    if (_obAckPending) {
       html += '<div style="border:2px solid #c62828;background:#fff5f5;border-radius:6px;padding:10px;margin-top:6px;">';
-      html += '<div style="font-weight:700;color:#c62828;font-size:14px;">⚠ 出库单已变更，需仓库确认 / 출고단 변경됨, 창고 확인 필요</div>';
+      html += '<div style="font-weight:700;color:#c62828;font-size:14px;">⚠ 出库单已变更，未确认前不能开始装货 / 출고단 변경됨, 확인 전 상차 불가</div>';
       if (Number(o.revision_no || 0) > 0) {
-        html += '<div style="font-size:12px;color:#666;margin-top:4px;">版本 / 버전: #' + Number(o.revision_no) + (o.last_modified_by ? ' · 修改人: ' + esc(o.last_modified_by) : '') + '</div>';
+        html += '<div style="font-size:12px;color:#666;margin-top:4px;">版本 / 버전: #' + Number(o.revision_no) + (o.last_modified_by ? ' · 修改人 / 수정자: ' + esc(o.last_modified_by) : '') + '</div>';
       }
-      html += '<button class="btn btn-primary mt-10" onclick="ackOutboundChange(this)">确认已查看变更 / 변경 확인 완료</button>';
+      // 渲染待确认 change_logs 明细
+      if (pendingLogs.length > 0) {
+        pendingLogs.forEach(function(log) {
+          html += '<div style="margin-top:8px;padding-top:8px;border-top:1px dashed #f5b7b1;">';
+          html += '<div style="font-size:12px;color:#444;"><b>#' + Number(log.revision_no || 0) + '</b> · ' + esc(log.changed_by || '--') + ' · ' + esc(log.changed_at ? log.changed_at.replace('T', ' ').slice(0, 16) : '--') + '</div>';
+          html += renderOutboundDiffTable001(log.diff);
+          html += '</div>';
+        });
+      } else if (hasRevisionWithoutLog) {
+        html += '<div class="muted" style="font-size:12px;margin-top:6px;">该单有历史修改，但旧版本未记录具体修改内容 / 구버전 변경 내역 없음</div>';
+      }
+      html += '<button class="btn btn-primary mt-10" onclick="ackOutboundChange(this)">我已查看并确认变更 / 변경 확인 완료</button>';
+      html += '</div>';
+    } else if (allLogs.length > 0 && o.warehouse_ack_by) {
+      html += '<div style="border:1px solid #2e7d32;background:#e8f5e9;border-radius:6px;padding:8px;margin-top:6px;font-size:12px;color:#1b5e20;">';
+      html += '✓ 已确认 / 확인됨: ' + esc(o.warehouse_ack_by) + (o.warehouse_ack_at ? ' · ' + esc(o.warehouse_ack_at.replace('T',' ').slice(0,16)) : '');
       html += '</div>';
     }
     ackBox.innerHTML = html;
