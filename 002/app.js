@@ -913,11 +913,46 @@ function _renderTimelineEvent(ev) {
   }
   var html = '<div class="timeline-row" style="border-left:3px solid ' + color + ';padding:8px 12px;margin:6px 0;background:#fafafa;">';
   html += '<div style="font-size:12px;color:#888;">' + esc(fmtTime(ev.at)) + (ev.user ? ' · ' + esc(ev.user) : '');
-  if (ev.minutes_worked) html += ' · 用时 ' + Number(ev.minutes_worked).toFixed(1) + ' 分钟';
+  // 处理完成事件：仅展示"实际工时"，避免把暂时离开/跨天等待算入
+  if (ev.type !== 'handle_finished' && ev.minutes_worked) {
+    html += ' · 用时 ' + Number(ev.minutes_worked).toFixed(1) + ' 分钟';
+  }
   html += '</div>';
   html += '<div style="font-weight:700;color:' + color + ';margin-top:2px;">' + esc(ev.title || '') + '</div>';
   if (ev.content) {
     html += '<div style="margin-top:4px;white-space:pre-wrap;">' + esc(ev.content) + '</div>';
+  }
+  // 处理完成：展示 实际工时 + 自然跨度 + 工时段；若两者差距大给出提示
+  if (ev.type === 'handle_finished') {
+    var actual = Number(ev.actual_minutes != null ? ev.actual_minutes : (ev.minutes_worked || 0)) || 0;
+    var span = Number(ev.natural_span_minutes || 0) || 0;
+    html += '<div style="margin-top:6px;font-size:12px;line-height:1.6;">';
+    html += '<div><b>实际工时 / 실제 작업시간:</b> ' + actual.toFixed(1) + ' 分钟</div>';
+    if (ev.started_at) {
+      html += '<div><b>自然跨度 / 자연 경과:</b> ' + esc(fmtTime(ev.started_at)) + ' → ' + esc(fmtTime(ev.at));
+      if (span > 0) html += '（' + span.toFixed(1) + ' 分钟）';
+      html += '</div>';
+    }
+    if (ev.worker_names) {
+      html += '<div><b>参与人 / 참여자:</b> ' + esc(ev.worker_names) + '</div>';
+    }
+    if (span > actual + 60) {
+      html += '<div style="margin-top:4px;color:#bf360c;background:#fff3e0;padding:4px 6px;border-radius:4px;">';
+      html += '该任务中间存在离开/暂停，工时按实际参与段计算<br>중간 퇴장/일시중지가 있어 실제 참여 구간만 작업시간으로 계산됨';
+      html += '</div>';
+    }
+    if (Array.isArray(ev.segments) && ev.segments.length > 1) {
+      html += '<div style="margin-top:6px;"><b>工时段 / 작업 구간:</b><ol style="margin:4px 0 0 18px;padding:0;">';
+      ev.segments.forEach(function(s, i) {
+        html += '<li>' + esc(fmtTime(s.joined_at));
+        html += ' → ' + (s.left_at ? esc(fmtTime(s.left_at)) : '<span style="color:#bf360c;">进行中</span>');
+        html += '，' + Number(s.minutes_worked || 0).toFixed(1) + ' 分钟';
+        if (s.worker_name) html += '（' + esc(s.worker_name) + '）';
+        html += '</li>';
+      });
+      html += '</ol></div>';
+    }
+    html += '</div>';
   }
   if (ev.attachments && ev.attachments.length > 0) {
     html += '<div class="att-grid" style="margin-top:6px;">' + _renderIssueAttsHtml(ev.attachments) + '</div>';

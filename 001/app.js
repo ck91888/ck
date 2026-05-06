@@ -208,7 +208,7 @@ function getWorkerName() {
 // ===== API =====
 // 写操作 action 集合 — 自动注入 client_req_id 供后端幂等
 var _WRITE_ACTIONS = [
-  'v2_issue_create','v2_issue_handle_start','v2_issue_handle_finish',
+  'v2_issue_create','v2_issue_handle_start','v2_issue_handle_resume','v2_issue_handle_finish',
   'v2_issue_close','v2_issue_cancel',
   'v2_outbound_order_create','v2_outbound_order_update_status',
   'v2_outbound_load_start','v2_outbound_load_finish',
@@ -2759,12 +2759,16 @@ async function loadIssueDetail() {
   var runs = res.handle_runs || [];
   var atts = res.attachments || [];
   // 恢复 _currentRunId（页面刷新后接续进行中处理）
+  var _myWorkingRun = null;
   for (var ri = 0; ri < runs.length; ri++) {
     if (runs[ri].run_status === 'working' && runs[ri].handler_id === getWorkerId()) {
       _currentRunId = runs[ri].id;
+      _myWorkingRun = runs[ri];
       break;
     }
   }
+  // 是否需要"继续处理"：本人有 working run，但本端没有活动 job（说明此前点过暂时离开）
+  var _needResume = !!(_myWorkingRun && _myWorkingRun.job_id && _activeJobId !== _myWorkingRun.job_id);
 
   var html = '<div class="card">';
   html += '<div style="font-size:18px;font-weight:700;margin-bottom:8px;">' + esc(_issueTitleText(it)) + '</div>';
@@ -2807,14 +2811,23 @@ async function loadIssueDetail() {
       html += '<button class="btn btn-success" onclick="handleIssueStart(this)">开始处理 / 처리 시작</button>';
     }
     if (it.status === "processing") {
-      html += '<div class="detail-section"><label>反馈内容 / 피드백 내용 <span style="color:red;">*必填/필수</span></label>';
-      html += '<textarea id="issueFeedback" rows="3" placeholder="输入处理结果 / 처리 결과를 입력하세요 (必填/필수)"></textarea>';
-      html += '<label>上传照片 / 사진 업로드</label>';
-      html += '<div class="photo-upload" id="issuePhotos"></div>';
-      html += renderPhotoSourceBar("uploadIssueHandlePhoto('camera')", "uploadIssueHandlePhoto('album')");
-      html += '<button class="btn btn-danger mt-10" onclick="handleIssueFinish(this)">结束处理 / 처리 종료</button>';
-      html += '<button class="btn btn-outline mt-10" onclick="handleIssueLeave(this)">暂时离开 / 일시 퇴장</button>';
-      html += '</div>';
+      if (_needResume) {
+        html += '<div class="detail-section">';
+        html += '<div style="background:#fff3e0;border-left:3px solid #ef6c00;padding:8px 10px;margin-bottom:8px;font-size:13px;color:#bf360c;">';
+        html += '此前已暂时离开，请先点击"继续处理"再继续作业（工时按实际参与段累计）<br>일시 퇴장 후 재개하려면 먼저 "처리 재개"를 누르세요 (작업시간은 실제 참여 구간만 누적)';
+        html += '</div>';
+        html += '<button class="btn btn-success" onclick="handleIssueResume(this)">继续处理 / 처리 재개</button>';
+        html += '</div>';
+      } else {
+        html += '<div class="detail-section"><label>反馈内容 / 피드백 내용 <span style="color:red;">*必填/필수</span></label>';
+        html += '<textarea id="issueFeedback" rows="3" placeholder="输入处理结果 / 처리 결과를 입력하세요 (必填/필수)"></textarea>';
+        html += '<label>上传照片 / 사진 업로드</label>';
+        html += '<div class="photo-upload" id="issuePhotos"></div>';
+        html += renderPhotoSourceBar("uploadIssueHandlePhoto('camera')", "uploadIssueHandlePhoto('album')");
+        html += '<button class="btn btn-danger mt-10" onclick="handleIssueFinish(this)">结束处理 / 처리 종료</button>';
+        html += '<button class="btn btn-outline mt-10" onclick="handleIssueLeave(this)">暂时离开 / 일시 퇴장</button>';
+        html += '</div>';
+      }
     }
     html += '</div>';
   }
@@ -2901,6 +2914,26 @@ async function handleIssueLeave(btnEl) {
     if (res && res.ok) {
       clearActiveJob();
       alert("已暂时离开问题点处理，可稍后重新开始\n이슈 처리에서 일시 퇴장했습니다. 나중에 다시 시작할 수 있습니다");
+      loadIssueDetail();
+    } else {
+      alert("失败/실패: " + (res ? (res.message || res.error) : "unknown"));
+    }
+  });
+}
+
+async function handleIssueResume(btnEl) {
+  if (hasOtherActiveJob()) return warnActiveJob();
+  withActionLock('handleIssueResume', btnEl || null, '提交中.../저장중...', async function() {
+    var res = await api({
+      action: "v2_issue_handle_resume",
+      issue_id: _currentIssueId,
+      handler_id: getWorkerId(),
+      handler_name: getWorkerName()
+    });
+    if (res && res.ok) {
+      _currentRunId = res.run_id;
+      saveActiveJob(res.job_id, res.worker_seg_id);
+      alert("已继续处理 / 처리 재개됨");
       loadIssueDetail();
     } else {
       alert("失败/실패: " + (res ? (res.message || res.error) : "unknown"));

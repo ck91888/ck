@@ -449,6 +449,68 @@ async function closeAllOpenSegs(env, jobId, workerId, t, reason) {
   return rows.length;
 }
 
+// 按 v2_ops_job_workers 汇总实际工时（人时累加，多人并行不抵扣）
+// - closed segment：直接用 minutes_worked；若为 0/缺失则用 left_at-joined_at 兜底
+// - open segment：用 fallbackEndAt - joined_at 计算（不写库）；如果传 closeOpen=true 则同步关闭
+// 返回 { total_minutes, worker_names, worker_count, segments }
+async function sumJobWorkerMinutes(env, jobId, fallbackEndAt, closeOpen) {
+  if (!jobId) return { total_minutes: 0, worker_names: '', worker_count: 0, segments: [] };
+  const fallback = fallbackEndAt || now();
+  const rs = await env.DB.prepare(
+    "SELECT id, worker_id, worker_name, joined_at, left_at, minutes_worked, leave_reason FROM v2_ops_job_workers WHERE job_id=? ORDER BY joined_at ASC"
+  ).bind(jobId).all();
+  const rows = rs.results || [];
+  const segments = [];
+  const nameSet = new Set();
+  const idSet = new Set();
+  let total = 0;
+  for (const r of rows) {
+    const closed = !!(r.left_at && String(r.left_at).length > 0);
+    const joinedMs = Date.parse(r.joined_at || '');
+    let leftAt = closed ? r.left_at : fallback;
+    let leftMs = Date.parse(leftAt);
+    let minutes = 0;
+    if (closed) {
+      const stored = Number(r.minutes_worked);
+      if (Number.isFinite(stored) && stored > 0) {
+        minutes = stored;
+      } else if (Number.isFinite(joinedMs) && Number.isFinite(leftMs)) {
+        minutes = Math.max(0, Math.round((leftMs - joinedMs) / 60000 * 10) / 10);
+      }
+    } else {
+      // open segment：按 fallback 计算；可选地写回 DB
+      if (Number.isFinite(joinedMs) && Number.isFinite(leftMs)) {
+        minutes = Math.max(0, Math.round((leftMs - joinedMs) / 60000 * 10) / 10);
+      }
+      if (closeOpen) {
+        await env.DB.prepare(
+          "UPDATE v2_ops_job_workers SET left_at=?, minutes_worked=?, leave_reason=COALESCE(NULLIF(leave_reason,''), 'auto_close') WHERE id=?"
+        ).bind(leftAt, minutes, r.id).run();
+      }
+    }
+    minutes = Math.max(0, minutes);
+    total += minutes;
+    if (r.worker_name) nameSet.add(r.worker_name);
+    if (r.worker_id) idSet.add(r.worker_id);
+    segments.push({
+      id: r.id,
+      worker_id: r.worker_id || '',
+      worker_name: r.worker_name || '',
+      joined_at: r.joined_at || '',
+      left_at: closed ? (r.left_at || '') : '',
+      open: !closed,
+      minutes_worked: minutes,
+      leave_reason: r.leave_reason || ''
+    });
+  }
+  return {
+    total_minutes: Math.round(total * 10) / 10,
+    worker_names: Array.from(nameSet).join('、'),
+    worker_count: idSet.size,
+    segments
+  };
+}
+
 // 从表中重算某 job 的 active_worker_count
 async function recalcActiveCount(env, jobId, t) {
   const cnt = await env.DB.prepare(
@@ -1456,8 +1518,9 @@ route("v2_issue_detail", async (body, env) => {
       (attsByJob[a.related_doc_id] = attsByJob[a.related_doc_id] || []).push(a);
     }
   }
-  // 把附件挂到对应 run 上
-  const runsEnriched = runs.map(r => {
+  // 把附件挂到对应 run 上 + 拉取 segment 详情、计算实际工时/自然跨度
+  const runsEnriched = [];
+  for (const r of runs) {
     const list = [];
     if (r.id && attsByRun[r.id]) list.push(...attsByRun[r.id]);
     if (r.job_id && attsByJob[r.job_id]) list.push(...attsByJob[r.job_id]);
@@ -1465,8 +1528,35 @@ route("v2_issue_detail", async (body, env) => {
     const seen = {};
     const dedup = [];
     for (const a of list) { if (!seen[a.id]) { seen[a.id] = 1; dedup.push(a); } }
-    return Object.assign({}, r, { attachments: dedup });
-  });
+
+    // 实际工时 = v2_ops_job_workers segment 累加；run.minutes_worked 兜底
+    let actual_minutes = Number(r.minutes_worked || 0);
+    let segments = [];
+    let worker_names = r.handler_name || '';
+    if (r.job_id) {
+      const sum = await sumJobWorkerMinutes(env, r.job_id, r.ended_at || now(), false);
+      segments = sum.segments;
+      if (segments.length > 0) {
+        actual_minutes = sum.total_minutes;
+        if (sum.worker_names) worker_names = sum.worker_names;
+      }
+    }
+    // 自然跨度：started_at → ended_at（未完成则到 now）
+    let natural_span_minutes = 0;
+    const sMs = Date.parse(r.started_at || '');
+    const eMs = Date.parse(r.ended_at || now());
+    if (Number.isFinite(sMs) && Number.isFinite(eMs)) {
+      natural_span_minutes = Math.max(0, Math.round((eMs - sMs) / 60000 * 10) / 10);
+    }
+
+    runsEnriched.push(Object.assign({}, r, {
+      attachments: dedup,
+      segments,
+      actual_minutes,
+      natural_span_minutes,
+      worker_names
+    }));
+  }
 
   // ---- timeline（升序）----
   const timeline = [];
@@ -1496,7 +1586,12 @@ route("v2_issue_detail", async (body, env) => {
         content: r.feedback_text || '',
         user: r.handler_name || r.handler_id || '',
         at: r.ended_at || '',
-        minutes_worked: Number(r.minutes_worked || 0),
+        minutes_worked: Number(r.actual_minutes || r.minutes_worked || 0),
+        actual_minutes: Number(r.actual_minutes || r.minutes_worked || 0),
+        natural_span_minutes: Number(r.natural_span_minutes || 0),
+        started_at: r.started_at || '',
+        worker_names: r.worker_names || '',
+        segments: r.segments || [],
         attachments: r.attachments || []
       });
     }
@@ -1723,6 +1818,51 @@ route("v2_issue_handle_start", async (body, env) => {
   });
 });
 
+// 暂时离开后继续处理：在原 job 内新建一段 segment，工时按段累加
+route("v2_issue_handle_resume", async (body, env) => {
+  if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  const issue_id = String(body.issue_id || "").trim();
+  const handler_id = String(body.handler_id || "").trim();
+  const handler_name = String(body.handler_name || "").trim();
+  if (!issue_id || !handler_id) return err("missing issue_id or handler_id");
+
+  return withIdem(env, body, "v2_issue_handle_resume", async () => {
+    // 找当前 worker 的 working run
+    const run = await env.DB.prepare(
+      "SELECT * FROM v2_issue_handle_runs WHERE issue_id=? AND handler_id=? AND run_status='working' ORDER BY started_at DESC LIMIT 1"
+    ).bind(issue_id, handler_id).first();
+    if (!run) return { ok: false, error: "no_working_run", message: "未找到进行中的处理记录，请重新开始" };
+    if (!run.job_id) return { ok: false, error: "run_missing_job_id" };
+
+    // 已经有 open segment 直接返回（幂等）
+    const existing = await findOpenSeg(env, run.job_id, handler_id);
+    if (existing) {
+      return { ok: true, run_id: run.id, job_id: run.job_id, worker_seg_id: existing.id, already_open: true };
+    }
+
+    // 检查 worker 是否在其它 job 忙（允许在同一 job_id）
+    const busy = await checkWorkerBusy(env, handler_id, run.job_id);
+    if (busy) return { ok: false, error: "worker_busy", busy_job_type: busy.job_type };
+
+    const t = now();
+
+    // 确保 job 仍处于 working
+    await env.DB.prepare(
+      "UPDATE v2_ops_jobs SET status='working', updated_at=? WHERE id=? AND status!='completed'"
+    ).bind(t, run.job_id).run();
+
+    const worker_seg_id = "WS-" + uid();
+    await env.DB.prepare(`
+      INSERT INTO v2_ops_job_workers(id, job_id, worker_id, worker_name, joined_at)
+      VALUES(?,?,?,?,?)
+    `).bind(worker_seg_id, run.job_id, handler_id, handler_name || run.handler_name || '', t).run();
+
+    await recalcActiveCount(env, run.job_id, t);
+
+    return { ok: true, run_id: run.id, job_id: run.job_id, worker_seg_id, resumed: true };
+  });
+});
+
 route("v2_issue_handle_finish", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
   const run_id = String(body.run_id || "").trim();
@@ -1735,32 +1875,29 @@ route("v2_issue_handle_finish", async (body, env) => {
   if (run.run_status === "completed") return err("already completed");
 
   const t = now();
-  const started = new Date(run.started_at).getTime();
-  const ended = new Date(t).getTime();
-  const minutes = Math.round((ended - started) / 60000 * 10) / 10;
+
+  // 关闭该 job 下所有 open segment（逐段算 left_at-joined_at），再按 segment 汇总实际工时
+  // 严禁用 finish_time - run.started_at 作为工时（会把暂时离开/跨天等待都算入）
+  let minutes = 0;
+  if (run.job_id) {
+    const sum = await sumJobWorkerMinutes(env, run.job_id, t, true);
+    minutes = Math.round((sum.total_minutes || 0) * 10) / 10;
+
+    await env.DB.prepare(
+      "UPDATE v2_ops_jobs SET status='completed', updated_at=? WHERE id=?"
+    ).bind(t, run.job_id).run();
+  }
 
   // Update run
   await env.DB.prepare(`
     UPDATE v2_issue_handle_runs SET ended_at=?, minutes_worked=?, feedback_text=?, run_status='completed' WHERE id=?
   `).bind(t, minutes, feedback_text, run_id).run();
 
-  // Update job
-  if (run.job_id) {
-    await env.DB.prepare(
-      "UPDATE v2_ops_jobs SET status='completed', updated_at=? WHERE id=?"
-    ).bind(t, run.job_id).run();
-
-    // Close worker segment
-    await env.DB.prepare(`
-      UPDATE v2_ops_job_workers SET left_at=?, minutes_worked=? WHERE job_id=? AND left_at=''
-    `).bind(t, minutes, run.job_id).run();
-  }
-
-  // Update issue
+  // Update issue：按所有完成轮次的实际 minutes_worked 汇总
   const allRuns = await env.DB.prepare(
     "SELECT minutes_worked FROM v2_issue_handle_runs WHERE issue_id=? AND run_status='completed'"
   ).bind(run.issue_id).all();
-  const totalMin = (allRuns.results || []).reduce((s, r) => s + (r.minutes_worked || 0), 0);
+  const totalMin = Math.round((allRuns.results || []).reduce((s, r) => s + (Number(r.minutes_worked) || 0), 0) * 10) / 10;
 
   await env.DB.prepare(`
     UPDATE v2_issue_tickets SET status='responded', latest_feedback_text=?, total_minutes_worked=?, updated_at=? WHERE id=?
@@ -7224,6 +7361,85 @@ route("v2_admin_cleanup_log_list", async (body, env) => {
     "SELECT * FROM v2_admin_cleanup_logs ORDER BY created_at DESC LIMIT 100"
   ).all();
   return json({ ok: true, items: rs.results || [] });
+});
+
+// =====================================================
+// 历史脏数据修复：按 v2_ops_job_workers 重算 issue_handle_runs.minutes_worked
+// 仅 ADMINKEY；默认 dry_run=true，仅返回差异列表
+// =====================================================
+route("v2_admin_recalc_issue_work_minutes", async (body, env) => {
+  if (!isAdmin(body, env)) return err("unauthorized_admin_only", 401);
+  const issue_id = String(body.issue_id || "").trim();
+  const run_id = String(body.run_id || "").trim();
+  const dry_run = body.dry_run === false ? false : true; // 默认 true
+  const limit = Math.min(Math.max(parseInt(body.limit || 200, 10) || 200, 1), 2000);
+
+  let runsRs;
+  if (run_id) {
+    runsRs = await env.DB.prepare(
+      "SELECT * FROM v2_issue_handle_runs WHERE id=?"
+    ).bind(run_id).all();
+  } else if (issue_id) {
+    runsRs = await env.DB.prepare(
+      "SELECT * FROM v2_issue_handle_runs WHERE issue_id=? ORDER BY started_at ASC"
+    ).bind(issue_id).all();
+  } else {
+    runsRs = await env.DB.prepare(
+      "SELECT * FROM v2_issue_handle_runs WHERE run_status='completed' ORDER BY started_at DESC LIMIT ?"
+    ).bind(limit).all();
+  }
+  const runs = runsRs.results || [];
+
+  const diffs = [];
+  const issueIds = new Set();
+  for (const r of runs) {
+    let new_minutes = Number(r.minutes_worked || 0);
+    if (r.job_id) {
+      const sum = await sumJobWorkerMinutes(env, r.job_id, r.ended_at || now(), false);
+      if ((sum.segments || []).length > 0) {
+        new_minutes = sum.total_minutes;
+      }
+    }
+    const old_minutes = Number(r.minutes_worked || 0);
+    const diff = Math.round((new_minutes - old_minutes) * 10) / 10;
+    diffs.push({
+      run_id: r.id,
+      issue_id: r.issue_id,
+      job_id: r.job_id || '',
+      handler_name: r.handler_name || r.handler_id || '',
+      started_at: r.started_at || '',
+      ended_at: r.ended_at || '',
+      old_minutes,
+      new_minutes,
+      diff
+    });
+    if (r.issue_id) issueIds.add(r.issue_id);
+  }
+
+  if (!dry_run) {
+    const t = now();
+    for (const d of diffs) {
+      if (Math.abs(d.diff) < 0.05) continue;
+      await env.DB.prepare(
+        "UPDATE v2_issue_handle_runs SET minutes_worked=? WHERE id=?"
+      ).bind(d.new_minutes, d.run_id).run();
+    }
+    // 重算每个 issue 的 total_minutes_worked
+    const issueTotals = [];
+    for (const iid of issueIds) {
+      const rrs = await env.DB.prepare(
+        "SELECT minutes_worked FROM v2_issue_handle_runs WHERE issue_id=? AND run_status='completed'"
+      ).bind(iid).all();
+      const total = Math.round((rrs.results || []).reduce((s, r) => s + (Number(r.minutes_worked) || 0), 0) * 10) / 10;
+      await env.DB.prepare(
+        "UPDATE v2_issue_tickets SET total_minutes_worked=?, updated_at=? WHERE id=?"
+      ).bind(total, t, iid).run();
+      issueTotals.push({ issue_id: iid, total_minutes: total });
+    }
+    return json({ ok: true, dry_run: false, updated: diffs.length, diffs, issue_totals: issueTotals });
+  }
+
+  return json({ ok: true, dry_run: true, count: diffs.length, diffs, issue_count: issueIds.size });
 });
 
 
