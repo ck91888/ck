@@ -336,6 +336,10 @@ function checkBadgeAuth() {
 function resumeActiveOrHome() {
   restoreActiveJob();
   api({ action: "v2_ops_my_active_job", worker_id: getWorkerId() }).then(function(res) {
+    // 检测上一班未退出（跨天 / 任务已完成）— 仅提示，不强制退出
+    if (res && res.ok && Array.isArray(res.stale_segments) && res.stale_segments.length > 0) {
+      notifyStaleSegmentsOnLogin(res.stale_segments, res);
+    }
     if (res && res.ok && res.active && res.job) {
       saveActiveJob(res.job.id, res.segment ? res.segment.id : null);
       var jt = res.job.job_type || "";
@@ -353,6 +357,35 @@ function resumeActiveOrHome() {
       showPage("home");
     }
   }).catch(function() { showPage("home"); });
+}
+
+// 登录时检测到未关闭的跨天/任务已完成段：alert 提示，引导员工先处理或申请主管修正
+// 不在客户端强制退出（管理员才能 force_leave），避免误伤通宵作业
+function notifyStaleSegmentsOnLogin(staleSegments, res) {
+  if (!staleSegments || staleSegments.length === 0) return;
+  var lines = staleSegments.map(function(s) {
+    var jt = s.job_type ? (JOB_TYPE_LABEL[s.job_type] || s.job_type) : '';
+    var when = s.joined_at ? String(s.joined_at).replace('T', ' ').slice(0, 16) : '--';
+    return '· ' + (jt || s.job_id) + ' · 开始 ' + when + ' · ' + (s.stale_reason || '未退出');
+  }).join('\n');
+  // 是否仍能"返回原任务处理"：当前 active job 命中其中之一时可以继续
+  var canResume = !!(res && res.active && res.job && res.segment);
+  var msg = '⚠ 检测到你有上一班未退出的任务，请先处理：\n'
+          + '⚠ 미퇴장 작업이 감지되었습니다. 먼저 처리해주세요:\n\n'
+          + lines + '\n\n';
+  if (canResume) {
+    msg += '点击"确定"返回原任务继续处理；\n点击"取消"如无法处理，请联系主管申请修正。';
+    msg += '\n\n확인: 작업으로 복귀 / 취소: 주관자에게 수정 요청';
+    if (!confirm(msg)) {
+      // 取消 → 进 home，提示申请主管修正
+      alert('请联系主管在 shuju 实时总览中执行强制退出（管理员功能）。\n주관자에게 shuju 대시보드에서 강제 퇴장 처리를 요청하세요.');
+    }
+    // 确定 → 不阻断，继续走原 resumeActiveOrHome 跳转
+  } else {
+    msg += '相关任务可能已结束，请联系主管在 shuju 实时总览中执行强制退出（管理员功能）。';
+    msg += '\n관련 작업이 이미 종료되었을 수 있습니다. 주관자에게 강제 퇴장 처리를 요청하세요.';
+    alert(msg);
+  }
 }
 
 function applyBadge(raw) {

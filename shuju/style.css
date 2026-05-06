@@ -212,3 +212,28 @@ body {
   .filter-row { padding: 10px; }
   .filter-row select, .filter-row input[type=date], .filter-row input[type=text] { min-width: 120px; }
 }
+
+/* ===== 强制退出 / 异常工时段（管理员） ===== */
+.stale-row { background: #fff5f5; }
+.stale-row:hover { background: #ffe9e8; }
+.stale-warning { color: #c62828; font-weight: 700; }
+
+.row-action.force-leave-btn {
+  border-color: #c62828;
+  color: #c62828;
+}
+.row-action.force-leave-btn:hover {
+  border-color: #b71c1c;
+  background: #ffebee;
+  color: #b71c1c;
+}
+.row-action.force-leave-btn.force-leave-stale {
+  background: #c62828;
+  color: #fff;
+  border-color: #c62828;
+}
+.row-action.force-leave-btn.force-leave-stale:hover {
+  background: #b71c1c;
+  border-color: #b71c1c;
+  color: #fff;
+}

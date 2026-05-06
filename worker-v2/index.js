@@ -5362,12 +5362,52 @@ route("v2_ops_my_active_job", async (body, env) => {
      WHERE w.worker_id=? AND w.left_at='' AND j.status IN ('pending','working','awaiting_close')
      ORDER BY w.joined_at DESC LIMIT 1`
   ).bind(worker_id).first();
-  if (!seg) return json({ ok: true, active: false });
+
+  // 检测该员工的"跨天未退出"或"任务已完成但未退出"的脏段（用于登录时提示）
+  const today = kstToday();
+  const allOpen = await env.DB.prepare(
+    `SELECT w.id AS segment_id, w.job_id, w.joined_at, w.worker_name,
+            j.status AS job_status, j.job_type, j.flow_stage, j.related_doc_id
+       FROM v2_ops_job_workers w
+       JOIN v2_ops_jobs j ON j.id = w.job_id
+      WHERE w.worker_id=? AND w.left_at=''
+      ORDER BY w.joined_at ASC`
+  ).bind(worker_id).all();
+  const stale_segments = [];
+  for (const r of (allOpen.results || [])) {
+    let joinedKstDate = '';
+    if (r.joined_at) {
+      const jms = Date.parse(r.joined_at);
+      if (Number.isFinite(jms)) {
+        const dt = new Date(jms + 9 * 3600 * 1000);
+        joinedKstDate = dt.getUTCFullYear() + '-' +
+          String(dt.getUTCMonth() + 1).padStart(2, '0') + '-' +
+          String(dt.getUTCDate()).padStart(2, '0');
+      }
+    }
+    let reason = '';
+    if (r.job_status === 'completed') reason = '任务已完成但未退出';
+    else if (joinedKstDate && joinedKstDate !== today) reason = '跨天未退出';
+    if (reason) {
+      stale_segments.push({
+        segment_id: r.segment_id,
+        job_id: r.job_id,
+        joined_at: r.joined_at || '',
+        job_status: r.job_status || '',
+        job_type: r.job_type || '',
+        flow_stage: r.flow_stage || '',
+        related_doc_id: r.related_doc_id || '',
+        stale_reason: reason
+      });
+    }
+  }
+
+  if (!seg) return json({ ok: true, active: false, stale_segments });
 
   const t = now();
   await recalcActiveCount(env, seg.job_id, t);
   const job = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(seg.job_id).first();
-  return json({ ok: true, active: true, segment: seg, job });
+  return json({ ok: true, active: true, segment: seg, job, stale_segments });
 });
 
 // Resume parent job after interrupt
@@ -6848,10 +6888,11 @@ route("v2_dashboard_realtime_overview", async (body, env) => {
   ).first();
 
   // 5. Worker live status — each open segment joined with its job + best display_no
+  //    包含 segment_id (w.id) 用于管理员强制退出定位；is_stale / stale_reason 标记异常段
   const liveWorkers = await env.DB.prepare(`
-    SELECT w.worker_id, w.worker_name, w.joined_at, w.job_id,
+    SELECT w.id AS segment_id, w.worker_id, w.worker_name, w.joined_at, w.job_id,
            j.flow_stage, j.biz_class, j.job_type, j.related_doc_type, j.related_doc_id,
-           j.display_no as job_display_no, j.status as job_status,
+           j.display_no as job_display_no, j.status as job_status, j.updated_at as job_updated_at,
            p.display_no as plan_display_no
     FROM v2_ops_job_workers w
     JOIN v2_ops_jobs j ON w.job_id = j.id
@@ -6859,9 +6900,38 @@ route("v2_dashboard_realtime_overview", async (body, env) => {
     WHERE w.left_at=''
     ORDER BY j.job_type ASC, w.worker_name ASC, w.joined_at ASC
   `).all();
-  // Inject unified display_no: priority = plan_display_no > job_display_no > related_doc_id > job_id
+  // Inject unified display_no + 异常判定（is_stale / stale_reason / minutes_open）
+  // priority: plan_display_no > job_display_no > related_doc_id > job_id
+  const _nowMs = Date.parse(now());
   const liveWorkerRows = (liveWorkers.results || []).map(function(r) {
     r.display_no = r.plan_display_no || r.job_display_no || r.related_doc_id || r.job_id || '';
+    let minutesOpen = 0;
+    let joinedKstDate = '';
+    if (r.joined_at) {
+      const jms = Date.parse(r.joined_at);
+      if (Number.isFinite(jms)) {
+        minutesOpen = Math.max(0, Math.floor((_nowMs - jms) / 60000));
+        // KST 日期：joined_at 是 UTC ISO，加 9h 后取 UTC 年月日即 KST 年月日
+        const dt = new Date(jms + 9 * 3600 * 1000);
+        const yy = dt.getUTCFullYear();
+        const mm = String(dt.getUTCMonth() + 1).padStart(2, '0');
+        const dd = String(dt.getUTCDate()).padStart(2, '0');
+        joinedKstDate = yy + '-' + mm + '-' + dd;
+      }
+    }
+    let is_stale = 0;
+    let stale_reason = '';
+    // 异常优先级：完成未退出 > 跨天未退出 > 超长 12h
+    if (r.job_status === 'completed') {
+      is_stale = 1; stale_reason = '任务已完成但人员未退出';
+    } else if (joinedKstDate && joinedKstDate !== today) {
+      is_stale = 1; stale_reason = '跨天未退出';
+    } else if (minutesOpen >= 720) {
+      is_stale = 1; stale_reason = '超长未退出';
+    }
+    r.minutes_open = minutesOpen;
+    r.is_stale = is_stale;
+    r.stale_reason = stale_reason;
     return r;
   });
 
@@ -7158,6 +7228,91 @@ route("v2_admin_cleanup_log_list", async (body, env) => {
 
 
 
+
+// =====================================================
+// 管理员强制退出 — 关闭 v2_ops_job_workers 中遗留的未关闭参与段
+//   只 close 工时段，不删除原始数据，不创建 ops_job_results
+//   仅 ADMINKEY 允许；OPSKEY/VIEWKEY 拒绝
+// =====================================================
+route("v2_admin_force_worker_leave", async (body, env) => {
+  if (!isAdmin(body, env)) return err("unauthorized_admin_only", 401);
+  const job_id = String(body.job_id || "").trim();
+  const worker_id = String(body.worker_id || "").trim();
+  const segment_id = String(body.segment_id || "").trim();
+  const reason = String(body.reason || "").trim();
+  const operator_name = String(body.operator_name || "").trim();
+  const close_mode = String(body.close_mode || "now").trim();
+  const customLeaveAt = String(body.leave_at || "").trim();
+
+  if (!job_id) return err("missing job_id");
+  if (!worker_id) return err("missing worker_id");
+  if (!reason) return err("missing reason");
+  if (!operator_name) return err("missing operator_name");
+
+  return withIdem(env, body, "v2_admin_force_worker_leave", async () => {
+    // 定位 open segment：优先 segment_id，否则 job_id+worker_id 最新一条
+    let seg = null;
+    if (segment_id) {
+      seg = await env.DB.prepare(
+        "SELECT * FROM v2_ops_job_workers WHERE id=? AND left_at=''"
+      ).bind(segment_id).first();
+    } else {
+      seg = await env.DB.prepare(
+        "SELECT * FROM v2_ops_job_workers WHERE job_id=? AND worker_id=? AND left_at='' ORDER BY joined_at DESC LIMIT 1"
+      ).bind(job_id, worker_id).first();
+    }
+    if (!seg) return { ok: false, error: "already_closed", message: "未找到未关闭参与段（可能已退出）" };
+
+    // 选择 leave_at
+    const job = await env.DB.prepare("SELECT id, status, updated_at FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
+    let leave_at = now();
+    if (close_mode === "custom" && customLeaveAt) {
+      leave_at = customLeaveAt;
+    } else if (close_mode === "job_completed_at" && job && job.updated_at) {
+      leave_at = job.updated_at;
+    }
+
+    // minutes 不允许为负
+    let minutes_worked = 0;
+    if (seg.joined_at) {
+      const j = Date.parse(seg.joined_at);
+      const l = Date.parse(leave_at);
+      if (Number.isFinite(j) && Number.isFinite(l)) {
+        const m = (l - j) / 60000;
+        minutes_worked = Math.max(0, Math.round(m * 10) / 10);
+      }
+    }
+
+    const fullReason = "admin_force_leave: " + reason + " | operator=" + operator_name;
+    await env.DB.prepare(
+      "UPDATE v2_ops_job_workers SET left_at=?, minutes_worked=?, leave_reason=? WHERE id=?"
+    ).bind(leave_at, minutes_worked, fullReason, seg.id).run();
+
+    // 重算 active_worker_count；若 job 还在 working/pending 且无 open，可降级 awaiting_close
+    const t = now();
+    const real = await recalcActiveCount(env, job_id, t);
+    if (job && real === 0) {
+      const cur = String(job.status || "");
+      if (cur === "working" || cur === "pending") {
+        await env.DB.prepare(
+          "UPDATE v2_ops_jobs SET status='awaiting_close', updated_at=? WHERE id=?"
+        ).bind(t, job_id).run();
+      }
+      // completed 不动
+    }
+
+    return {
+      ok: true,
+      closed_segment_id: seg.id,
+      worker_id: seg.worker_id || worker_id,
+      worker_name: seg.worker_name || "",
+      job_id,
+      joined_at: seg.joined_at || "",
+      left_at,
+      minutes_worked
+    };
+  });
+});
 
 // =====================================================
 // CORRECTION REQUESTS — 看板主管修正申请（不直接改业务数据）

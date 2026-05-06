@@ -224,6 +224,7 @@ function switchTab(tab, btn) {
 // ===== Realtime overview =====
 var _liveWorkersCache = [];
 var _liveBizFilter = '';
+var _liveShowStaleOnly = false;
 async function loadRealtime() {
   var res = await api({ action: "v2_dashboard_realtime_overview" });
   if (!res || !res.ok) return;
@@ -278,11 +279,25 @@ function renderLiveWorkers() {
   if (_liveBizFilter) {
     rows = rows.filter(function(w) { return w.job_type === _liveBizFilter; });
   }
-  // 筛选条 + 重置按钮
+  if (_liveShowStaleOnly) {
+    rows = rows.filter(function(w) { return Number(w.is_stale) === 1; });
+  }
+  var staleCount = (_liveWorkersCache || []).filter(function(w) { return Number(w.is_stale) === 1; }).length;
+
+  // 筛选条 + 重置按钮 + stale 切换
   var hint = document.getElementById('workerLiveFilterHint');
   if (hint) {
+    var parts = [];
     if (_liveBizFilter) {
-      hint.innerHTML = '已筛选业务：<b>' + esc(jobTypeLabel(_liveBizFilter)) + '</b>（' + rows.length + ' 人） <a href="#" onclick="filterLiveByJobType(\'\');return false;">清除筛选</a>';
+      parts.push('已筛选业务：<b>' + esc(jobTypeLabel(_liveBizFilter)) + '</b> <a href="#" onclick="filterLiveByJobType(\'\');return false;">清除</a>');
+    }
+    if (_liveShowStaleOnly) {
+      parts.push('<span class="stale-warning">⚠ 仅显示疑似忘记退出</span> <a href="#" onclick="toggleStaleOnly();return false;">显示全部</a>');
+    } else if (staleCount > 0) {
+      parts.push('<span class="stale-warning">⚠ 检测到 ' + staleCount + ' 条疑似忘记退出</span> <a href="#" onclick="toggleStaleOnly();return false;">一键查看</a>');
+    }
+    if (parts.length > 0) {
+      hint.innerHTML = parts.join(' · ') + '（共 ' + rows.length + ' 行）';
       hint.style.display = '';
     } else {
       hint.innerHTML = '';
@@ -290,25 +305,119 @@ function renderLiveWorkers() {
     }
   }
   if (rows.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="9" class="muted" style="text-align:center;">' +
-      (_liveBizFilter ? '该业务下当前无在岗人员' : '当前没有在岗人员') + '</td></tr>';
+    var emptyMsg = _liveShowStaleOnly ? '当前没有疑似忘记退出的记录'
+      : (_liveBizFilter ? '该业务下当前无在岗人员' : '当前没有在岗人员');
+    tbody.innerHTML = '<tr><td colspan="9" class="muted" style="text-align:center;">' + emptyMsg + '</td></tr>';
     return;
   }
   var html = "";
   rows.forEach(function(w) {
-    html += "<tr>";
+    var isStale = Number(w.is_stale) === 1;
+    var minutesOpen = (w.minutes_open != null) ? Number(w.minutes_open) : minutesSince(w.joined_at);
+    var trClass = isStale ? ' class="stale-row"' : '';
+    html += "<tr" + trClass + ">";
     html += "<td><b>" + esc(w.worker_name) + "</b></td>";
     html += "<td>" + esc(bizLabel(w.biz_class)) + "</td>";
     html += "<td>" + esc(flowLabel(w.flow_stage)) + "</td>";
     html += "<td>" + esc(jobTypeLabel(w.job_type)) + "</td>";
     html += "<td>" + esc(w.display_no || w.related_doc_id || "--") + "</td>";
     html += "<td>" + esc(fmtTime(w.joined_at)) + "</td>";
-    html += "<td>" + minutesSince(w.joined_at) + "</td>";
-    html += "<td>" + statusTag(w.job_status) + "</td>";
-    html += '<td><button class="row-action warn" onclick="markAnomaly(\'worker\',\'' + esc(w.worker_id) + '\')">标记异常</button></td>';
+    var minClass = (Number(minutesOpen) >= 720 || isStale) ? ' class="stale-warning"' : '';
+    html += "<td" + minClass + ">" + minutesOpen + "</td>";
+    if (isStale) {
+      html += '<td>' + statusTag(w.job_status) + '<div class="stale-warning" style="font-size:11px;margin-top:2px;">⚠ ' + esc(w.stale_reason || '异常') + '</div></td>';
+    } else {
+      html += "<td>" + statusTag(w.job_status) + "</td>";
+    }
+    // 操作列：强制退出 + 标记异常
+    var btnClass = isStale ? 'row-action force-leave-btn force-leave-stale' : 'row-action force-leave-btn';
+    var args = [
+      "'" + esc(w.job_id || '') + "'",
+      "'" + esc(w.worker_id || '') + "'",
+      "'" + esc(w.segment_id || '') + "'",
+      "'" + esc(w.worker_name || '') + "'",
+      "'" + esc(w.joined_at || '') + "'",
+      "'" + esc(w.job_status || '') + "'",
+      "'" + esc(w.job_updated_at || '') + "'"
+    ].join(',');
+    html += '<td>';
+    html += '<button class="' + btnClass + '" onclick="forceLeaveWorker(' + args + ')">强制退出</button> ';
+    html += '<button class="row-action warn" onclick="markAnomaly(\'worker\',\'' + esc(w.worker_id) + '\')">标记异常</button>';
+    html += '</td>';
     html += "</tr>";
   });
   tbody.innerHTML = html;
+}
+
+function toggleStaleOnly() {
+  _liveShowStaleOnly = !_liveShowStaleOnly;
+  renderLiveWorkers();
+}
+
+// 管理员强制退出某员工的工时段
+async function forceLeaveWorker(jobId, workerId, segmentId, workerName, joinedAt, jobStatus, jobUpdatedAt) {
+  if (!jobId || !workerId) { alert('参数缺失'); return; }
+  var minutesOpen = minutesSince(joinedAt);
+  var info = '员工：' + (workerName || workerId) + '\n'
+           + '任务：' + jobId + (jobStatus ? '（状态：' + jobStatus + '）' : '') + '\n'
+           + '开始：' + fmtTime(joinedAt) + '\n'
+           + '已持续：' + minutesOpen + ' 分钟';
+
+  // 选择退出时间
+  var modeOptions = '请选择退出时间口径：\n'
+                  + '1 = 当前时间（默认）\n'
+                  + '2 = 任务完成/最后更新时间' + (jobUpdatedAt ? '（' + fmtTime(jobUpdatedAt) + '）' : '（无）') + '\n'
+                  + '3 = 自定义时间（输入 ISO，如 2026-05-06T18:00:00.000Z）';
+  var modeRaw = prompt(info + '\n\n' + modeOptions, '1');
+  if (modeRaw === null) return;
+  var mode = String(modeRaw || '').trim();
+
+  var close_mode = 'now';
+  var leave_at = '';
+  if (mode === '2') {
+    if (!jobUpdatedAt) { alert('该任务无更新时间，无法用此口径'); return; }
+    close_mode = 'job_completed_at';
+  } else if (mode === '3') {
+    var custom = prompt('请输入自定义退出时间 (UTC ISO 8601，例 2026-05-06T18:00:00.000Z):', '');
+    if (!custom || !String(custom).trim()) return;
+    close_mode = 'custom';
+    leave_at = String(custom).trim();
+  }
+
+  var reason = prompt('请填写强制退出原因（例：日当忘记退出 / 직원 퇴장 누락）:');
+  if (!reason || !reason.trim()) return;
+
+  var operator = prompt('您的姓名/工号（操作人）:');
+  if (!operator || !operator.trim()) return;
+
+  if (!confirm('确认强制关闭该员工的工时段？\n此操作会影响人效统计，但不会删除原始记录。')) return;
+
+  var res = await api({
+    action: 'v2_admin_force_worker_leave',
+    job_id: jobId,
+    worker_id: workerId,
+    segment_id: segmentId || '',
+    leave_at: leave_at,
+    close_mode: close_mode,
+    reason: reason.trim(),
+    operator_name: operator.trim()
+  });
+
+  if (res && res.ok) {
+    alert('已强制退出 / 강제 퇴장 완료\n员工：' + (res.worker_name || workerName || workerId)
+        + '\n离开时间：' + fmtTime(res.left_at)
+        + '\n本次工时：' + Number(res.minutes_worked || 0) + ' 分钟');
+    loadRealtime();
+    loadLiveDocs();
+  } else if (res && res.error === 'already_closed') {
+    alert('该员工已退出 / 已无未关闭参与段：' + (res.message || ''));
+    loadRealtime();
+    loadLiveDocs();
+  } else if (res && res.error === 'unauthorized_admin_only') {
+    alert('权限不足：仅 ADMINKEY 可执行强制退出');
+  } else {
+    alert('失败：' + (res ? (res.message || res.error) : 'unknown'));
+  }
 }
 
 async function loadLiveDocs() {
