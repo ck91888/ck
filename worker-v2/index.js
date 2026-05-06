@@ -7263,30 +7263,28 @@ route("v2_admin_force_worker_leave", async (body, env) => {
     }
     if (!seg) return { ok: false, error: "already_closed", message: "未找到未关闭参与段（可能已退出）" };
 
-    // 选择 leave_at
+    // 选择退出时间（内部统一用 camelCase 变量，避免与 JSON 字段名 left_at 混淆）
     const job = await env.DB.prepare("SELECT id, status, updated_at FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
-    let leave_at = now();
-    if (close_mode === "custom" && customLeaveAt) {
-      leave_at = customLeaveAt;
-    } else if (close_mode === "job_completed_at" && job && job.updated_at) {
-      leave_at = job.updated_at;
+    let leaveAt = now();
+    if (close_mode === "custom") {
+      if (!customLeaveAt) return { ok: false, error: "missing_leave_at", message: "close_mode=custom 时必须传 leave_at" };
+      leaveAt = customLeaveAt;
+    } else if (close_mode === "job_completed_at") {
+      leaveAt = (job && job.updated_at) ? job.updated_at : now();
     }
 
+    const leaveMs = Date.parse(leaveAt);
+    const joinMs = Date.parse(seg.joined_at || "");
+    if (!Number.isFinite(leaveMs)) return { ok: false, error: "invalid_leave_at", message: "leave_at 解析失败：" + leaveAt };
+    if (!Number.isFinite(joinMs)) return { ok: false, error: "invalid_joined_at", message: "joined_at 解析失败：" + (seg.joined_at || '') };
+
     // minutes 不允许为负
-    let minutes_worked = 0;
-    if (seg.joined_at) {
-      const j = Date.parse(seg.joined_at);
-      const l = Date.parse(leave_at);
-      if (Number.isFinite(j) && Number.isFinite(l)) {
-        const m = (l - j) / 60000;
-        minutes_worked = Math.max(0, Math.round(m * 10) / 10);
-      }
-    }
+    const minutesWorked = Math.max(0, Math.round(((leaveMs - joinMs) / 60000) * 10) / 10);
 
     const fullReason = "admin_force_leave: " + reason + " | operator=" + operator_name;
     await env.DB.prepare(
       "UPDATE v2_ops_job_workers SET left_at=?, minutes_worked=?, leave_reason=? WHERE id=?"
-    ).bind(leave_at, minutes_worked, fullReason, seg.id).run();
+    ).bind(leaveAt, minutesWorked, fullReason, seg.id).run();
 
     // 重算 active_worker_count；若 job 还在 working/pending 且无 open，可降级 awaiting_close
     const t = now();
@@ -7308,8 +7306,8 @@ route("v2_admin_force_worker_leave", async (body, env) => {
       worker_name: seg.worker_name || "",
       job_id,
       joined_at: seg.joined_at || "",
-      left_at,
-      minutes_worked
+      left_at: leaveAt,
+      minutes_worked: minutesWorked
     };
   });
 });

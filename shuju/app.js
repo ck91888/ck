@@ -415,8 +415,15 @@ async function forceLeaveWorker(jobId, workerId, segmentId, workerName, joinedAt
     loadLiveDocs();
   } else if (res && res.error === 'unauthorized_admin_only') {
     alert('权限不足：仅 ADMINKEY 可执行强制退出');
+  } else if (res && (res.error === 'missing_leave_at' || res.error === 'invalid_leave_at' || res.error === 'invalid_joined_at')) {
+    alert('退出时间参数错误（' + res.error + '）：' + (res.message || '请重试或改用"当前时间"模式'));
   } else {
-    alert('失败：' + (res ? (res.message || res.error) : 'unknown'));
+    var rawMsg = res ? (res.message || res.error || JSON.stringify(res)) : 'unknown';
+    if (typeof rawMsg === 'string' && /is not defined|ReferenceError/i.test(rawMsg)) {
+      alert('强制退出失败：后端变量错误，请刷新后重试或联系开发。\n원인: ' + rawMsg);
+    } else {
+      alert('失败：' + rawMsg);
+    }
   }
 }
 
