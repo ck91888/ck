@@ -711,32 +711,79 @@ async function openOrderDetail(jobId) {
     html += '</tbody></table>';
   }
 
-  // 作业结果 — 业务可读
+  // 作业结果 — 业务可读（仅显示有数值/有内容的字段）
   var results = res.results || [];
   var p = res.parsed || {};
   if (results.length > 0 || p.result_summary) {
     html += '<h3 style="margin-top:14px;">作业结果（业务摘要）</h3>';
     html += '<table class="data-table">';
-    html += '<tr><th>作业结果摘要</th><td colspan="3">' + esc(p.result_summary || '--') + '</td></tr>';
-    html += '<tr><th>箱数合计</th><td>' + (p.box_count_sum || 0) + '</td>';
-    html += '<th>板数合计</th><td>' + (p.pallet_count_sum || 0) + '</td></tr>';
-    html += '<tr><th>打包SKU数</th><td>' + (p.packed_sku_count_sum || 0) + '</td>';
-    html += '<th>打包箱数</th><td>' + (p.packed_box_count_sum || 0) + '</td></tr>';
-    html += '<tr><th>贴标数</th><td>' + (p.label_count_sum || 0) + '</td>';
-    html += '<th>总操作箱数</th><td>' + (p.total_operated_box_count_sum || 0) + '</td></tr>';
-    html += '<tr><th>修箱数</th><td>' + (p.repaired_box_count_sum || 0) + '</td>';
-    html += '<th>换箱数</th><td>' + (p.reboxed_count_sum || 0) + '</td></tr>';
-    html += '<tr><th>使用大纸箱</th><td>' + (p.used_carton_large_count_sum || 0) + '</td>';
-    html += '<th>使用小纸箱</th><td>' + (p.used_carton_small_count_sum || 0) + '</td></tr>';
-    if ((p.verify_ok_count_sum || 0) + (p.verify_ng_count_sum || 0) > 0) {
-      html += '<tr><th>核对OK</th><td>' + (p.verify_ok_count_sum || 0) + '</td>';
-      html += '<th>核对NG</th><td>' + (p.verify_ng_count_sum || 0) + '</td></tr>';
+    html += '<tr><th>作业结果摘要 / 작업 결과 요약</th><td colspan="3">' + esc(p.result_summary || '--') + '</td></tr>';
+
+    // 字段顺序 + 中韩文 label；仅累加 >0 的字段
+    var qtyFields = [
+      ['putaway_carton_qty_sum', '理货箱数 / 정리 박스'],
+      ['putaway_pallet_qty_sum', '理货托数 / 정리 팔레트'],
+      ['putaway_qty_sum',        '理货数量 / 정리수량'],
+      ['actual_carton_qty_sum',  '实际箱数 / 실제 박스'],
+      ['actual_pallet_qty_sum',  '实际托数 / 실제 팔레트'],
+      ['actual_qty_sum',         '实际数量 / 실제 수량'],
+      ['box_count_sum',          '箱数 / 박스'],
+      ['pallet_count_sum',       '托数 / 팔레트'],
+      ['sort_qty_sum',           '整理数量 / 정리수량'],
+      ['label_count_sum',        '贴标数 / 라벨 수'],
+      ['repaired_box_count_sum', '修补箱数 / 수리 박스'],
+      ['reboxed_count_sum',      '换箱数 / 박스 교체'],
+      ['packed_sku_count_sum',   '打包SKU数 / 포장 SKU'],
+      ['packed_box_count_sum',   '打包箱数 / 포장 박스'],
+      ['total_operated_box_count_sum', '总操作箱数 / 총 작업 박스'],
+      ['used_carton_large_count_sum',  '使用大纸箱 / 대형 박스 사용'],
+      ['used_carton_small_count_sum',  '使用小纸箱 / 소형 박스 사용'],
+      ['verify_ok_count_sum',    '核对OK / 검수 OK'],
+      ['verify_ng_count_sum',    '核对NG / 검수 NG']
+    ];
+    // 入库类：理货数量 与 carton/pallet 分桶并存时，避免重复累计；不重复展示去重总和
+    var pq = Number(p.putaway_qty_sum || 0);
+    var pqc = Number(p.putaway_carton_qty_sum || 0);
+    var pqp = Number(p.putaway_pallet_qty_sum || 0);
+    if (pq > 0 && (pqc > 0 || pqp > 0) && pq === pqc + pqp) {
+      // 总和已等于分桶之和 → 隐藏 putaway_qty_sum 这一行
+      qtyFields = qtyFields.filter(function(f) { return f[0] !== 'putaway_qty_sum'; });
     }
-    html += '<tr><th>作业备注</th><td colspan="3">' + esc(p.result_notes || '--') + '</td></tr>';
-    html += '<tr><th>差异说明</th><td colspan="3">' + esc(p.diff_notes || '--') + '</td></tr>';
-    html += '<tr><th>作业明细 (' + (p.result_lines_count || 0) + ' 行)</th><td colspan="3" style="white-space:pre-wrap;">' + esc(p.readable_result_lines || '--') + '</td></tr>';
-    html += '<tr><th>结果提交人</th><td>' + esc(p.result_submitters || '--') + '</td>';
-    html += '<th>结果提交时间</th><td>' + esc(p.result_submitted_at || '--') + '</td></tr>';
+    var aq = Number(p.actual_qty_sum || 0);
+    var aqc = Number(p.actual_carton_qty_sum || 0);
+    var aqp = Number(p.actual_pallet_qty_sum || 0);
+    if (aq > 0 && (aqc > 0 || aqp > 0) && aq === aqc + aqp) {
+      qtyFields = qtyFields.filter(function(f) { return f[0] !== 'actual_qty_sum'; });
+    }
+
+    var nonZero = qtyFields.filter(function(f) { return Number(p[f[0]] || 0) > 0; });
+    if (nonZero.length > 0) {
+      // 两列布局
+      for (var i = 0; i < nonZero.length; i += 2) {
+        html += '<tr>';
+        html += '<th>' + esc(nonZero[i][1]) + '</th><td>' + Number(p[nonZero[i][0]]) + '</td>';
+        if (i + 1 < nonZero.length) {
+          html += '<th>' + esc(nonZero[i+1][1]) + '</th><td>' + Number(p[nonZero[i+1][0]]) + '</td>';
+        } else {
+          html += '<th></th><td></td>';
+        }
+        html += '</tr>';
+      }
+    }
+
+    if (p.result_notes) {
+      html += '<tr><th>作业备注 / 작업 비고</th><td colspan="3">' + esc(p.result_notes) + '</td></tr>';
+    }
+    if (p.diff_notes) {
+      html += '<tr><th>差异说明 / 차이 설명</th><td colspan="3">' + esc(p.diff_notes) + '</td></tr>';
+    }
+    if (p.readable_result_lines) {
+      html += '<tr><th>作业明细 (' + (p.result_lines_count || 0) + ' 行) / 작업 명세</th><td colspan="3" style="white-space:pre-wrap;">' + esc(p.readable_result_lines) + '</td></tr>';
+    }
+    if (p.result_submitters || p.result_submitted_at) {
+      html += '<tr><th>结果提交人 / 제출자</th><td>' + esc(p.result_submitters || '--') + '</td>';
+      html += '<th>结果提交时间 / 제출 시간</th><td>' + esc(p.result_submitted_at || '--') + '</td></tr>';
+    }
     html += '</table>';
 
     html += '<details style="margin-top:8px;"><summary class="muted" style="cursor:pointer;">原始JSON（排查用）— ' + results.length + ' 条</summary>';

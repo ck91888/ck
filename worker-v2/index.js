@@ -180,6 +180,17 @@ function parseOpsResultForExport(job_type, resultRows) {
     diff_notes: '',
     box_count_sum: 0,
     pallet_count_sum: 0,
+    // 入库理货数量（按 unit_type 分桶 + 总和）
+    putaway_qty_sum: 0,
+    putaway_carton_qty_sum: 0,
+    putaway_pallet_qty_sum: 0,
+    // 卸货 / 通用实际数量（fallback：line 没有 putaway_qty 但有 actual_qty）
+    actual_qty_sum: 0,
+    actual_carton_qty_sum: 0,
+    actual_pallet_qty_sum: 0,
+    // 入库 extra_ops（理货顺手做的）
+    sort_qty_sum: 0,           // 单独整理数量
+    repair_box_qty_sum: 0,     // extra_ops.repair_box_qty（与 repaired_box_count 区分写入端）
     packed_sku_count_sum: 0,
     packed_box_count_sum: 0,
     total_operated_box_count_sum: 0,
@@ -200,6 +211,30 @@ function parseOpsResultForExport(job_type, resultRows) {
   const remarks = [], diffs = [], rawObjs = [], readableLines = [], submitters = new Set();
   let lastCreatedAt = '';
 
+  // 累加单行 line 中的 putaway_qty / actual_qty 到分桶（unit_type 兼容 carton/pallet/box）
+  const aggregateLine = (item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return;
+    const unit = String(item.unit_type || item.unit || '').toLowerCase();
+    const isCarton = (unit === 'carton' || unit === 'box' || unit === 'cartons' || unit === 'boxes');
+    const isPallet = (unit === 'pallet' || unit === 'pallets' || unit === 'plt' || unit === 'tray');
+    const pq = Number(item.putaway_qty);
+    const aq = Number(item.actual_qty);
+    if (Number.isFinite(pq) && pq > 0) {
+      out.putaway_qty_sum += pq;
+      if (isCarton) out.putaway_carton_qty_sum += pq;
+      else if (isPallet) out.putaway_pallet_qty_sum += pq;
+    }
+    if (Number.isFinite(aq) && aq > 0) {
+      out.actual_qty_sum += aq;
+      if (isCarton) out.actual_carton_qty_sum += aq;
+      else if (isPallet) out.actual_pallet_qty_sum += aq;
+    }
+    // 行内附带的 label_count / repaired_box_count 等也尝试累加
+    const ln = Number(item.label_count); if (Number.isFinite(ln) && ln > 0) out.label_count_sum += ln;
+    const rb = Number(item.repaired_box_count); if (Number.isFinite(rb) && rb > 0) out.repaired_box_count_sum += rb;
+    const rx = Number(item.reboxed_count); if (Number.isFinite(rx) && rx > 0) out.reboxed_count_sum += rx;
+  };
+
   // result_lines_json 单行 → 可读文本
   const renderLine = (item) => {
     if (item == null) return '';
@@ -210,9 +245,16 @@ function parseOpsResultForExport(job_type, resultRows) {
     if (id) parts.push('SKU ' + id);
     const planned = item.planned_qty ?? item.plan_qty ?? item['计划'] ?? null;
     const actual = item.actual_qty ?? item.qty ?? item['实际'] ?? null;
+    const putaway = item.putaway_qty ?? item['入库'] ?? null;
     const diff = item.diff_qty ?? item.diff ?? null;
+    if (item.unit_type) {
+      const u = String(item.unit_type).toLowerCase();
+      const unitLbl = (u === 'carton' || u === 'box') ? '箱' : (u === 'pallet' ? '托' : item.unit_type);
+      parts.push(unitLbl);
+    }
     if (planned != null && planned !== '') parts.push('计划 ' + planned);
     if (actual != null && actual !== '') parts.push('实际 ' + actual);
+    if (putaway != null && putaway !== '') parts.push('理货 ' + putaway);
     if (diff != null && diff !== '') parts.push('差异 ' + diff);
     if (item.box_count != null && item.box_count !== '') parts.push('箱 ' + item.box_count);
     if (item.pallet_count != null && item.pallet_count !== '') parts.push('板 ' + item.pallet_count);
@@ -221,6 +263,21 @@ function parseOpsResultForExport(job_type, resultRows) {
       try { return JSON.stringify(item); } catch (e) { return ''; }
     }
     return parts.join(' / ');
+  };
+
+  // 从 result_json 顶层兼容老 shorthand：{carton:4}/{pallet:3}/{box_count:4}
+  const aggregateShorthand = (rj) => {
+    if (!rj || typeof rj !== 'object' || Array.isArray(rj)) return;
+    const c = Number(rj.carton);
+    if (Number.isFinite(c) && c > 0) {
+      out.putaway_qty_sum += c;
+      out.putaway_carton_qty_sum += c;
+    }
+    const p = Number(rj.pallet);
+    if (Number.isFinite(p) && p > 0) {
+      out.putaway_qty_sum += p;
+      out.putaway_pallet_qty_sum += p;
+    }
   };
 
   rows.forEach(r => {
@@ -253,6 +310,33 @@ function parseOpsResultForExport(job_type, resultRows) {
       if (!r.pallet_count && Number(rj.pallet_count) > 0) {
         out.pallet_count_sum += Number(rj.pallet_count);
       }
+      // 入库 extra_ops（理货顺手贴标/修箱/整理）— 与 packing 端的 *_count 区分但归入同一摘要桶
+      if (rj.extra_ops && typeof rj.extra_ops === 'object') {
+        const eo = rj.extra_ops;
+        const sq = Number(eo.sort_qty); if (Number.isFinite(sq) && sq > 0) out.sort_qty_sum += sq;
+        const lq = Number(eo.label_qty); if (Number.isFinite(lq) && lq > 0) out.label_count_sum += lq;
+        const rq = Number(eo.repair_box_qty);
+        if (Number.isFinite(rq) && rq > 0) {
+          out.repair_box_qty_sum += rq;
+          out.repaired_box_count_sum += rq;
+        }
+        if (eo.other_op_remark) remarks.push(String(eo.other_op_remark));
+      }
+      // result_json 顶层"单行式" e.g. {unit_type:'carton', putaway_qty:4}
+      if (rj.unit_type) aggregateLine(rj);
+      // result_json 内嵌 result_lines / lines
+      const innerLines = Array.isArray(rj.result_lines) ? rj.result_lines
+                       : Array.isArray(rj.lines) ? rj.lines
+                       : null;
+      if (innerLines) {
+        innerLines.forEach(aggregateLine);
+        if (out.result_lines_count === 0 && innerLines.length > 0) {
+          // 仅当 result_lines_json 不存在时才用 inner 计数（避免重复）
+          if (!r.result_lines_json) out.result_lines_count += innerLines.length;
+        }
+      }
+      // 老 shorthand：{carton:4}/{pallet:3}
+      aggregateShorthand(rj);
       const diffVal = rj.diff_note || rj.diff_notes || rj.diff || rj['差异'] || rj['差异说明'] || '';
       if (diffVal) diffs.push(String(diffVal));
       rawObjs.push(rj);
@@ -264,16 +348,17 @@ function parseOpsResultForExport(job_type, resultRows) {
     if (r.result_lines_json) {
       let lines = null;
       try { lines = JSON.parse(r.result_lines_json); } catch (e) { lines = null; }
-      if (Array.isArray(lines)) {
-        out.result_lines_count += lines.length;
-        lines.forEach(item => {
-          const txt = renderLine(item);
-          if (txt) readableLines.push(txt);
-        });
-      } else if (lines) {
-        const txt = renderLine(lines);
-        if (txt) { readableLines.push(txt); out.result_lines_count += 1; }
-      }
+      const arr = Array.isArray(lines)
+        ? lines
+        : (lines && Array.isArray(lines.lines)) ? lines.lines
+        : (lines && Array.isArray(lines.result_lines)) ? lines.result_lines
+        : (lines ? [lines] : []);
+      out.result_lines_count += arr.length;
+      arr.forEach(item => {
+        aggregateLine(item);
+        const txt = renderLine(item);
+        if (txt) readableLines.push(txt);
+      });
     }
   });
 
@@ -294,6 +379,7 @@ function parseOpsResultForExport(job_type, resultRows) {
 
   // 生成业务摘要
   const parts = [];
+  const isInboundJob = (job_type || '').indexOf('inbound') === 0; // inbound_direct / inbound_bulk / inbound_change_order / inbound_return
   if (job_type === 'pack_direct') {
     if (out.packed_sku_count_sum > 0) parts.push('打包SKU ' + out.packed_sku_count_sum);
     if (out.packed_box_count_sum > 0) parts.push('打包箱 ' + out.packed_box_count_sum);
@@ -311,19 +397,73 @@ function parseOpsResultForExport(job_type, resultRows) {
     if (out.verify_ng_count_sum > 0) parts.push('核对NG ' + out.verify_ng_count_sum);
     if (out.box_count_sum > 0) parts.push('箱 ' + out.box_count_sum);
     if (out.pallet_count_sum > 0) parts.push('板 ' + out.pallet_count_sum);
-  } else {
-    // 默认：装卸/入库/出库/库内/拣货 等
+  } else if (isInboundJob) {
+    // 入库类：理货箱数/理货托数 优先；无 putaway 时 fallback actual
+    if (out.putaway_carton_qty_sum > 0) parts.push('理货箱数 ' + out.putaway_carton_qty_sum);
+    if (out.putaway_pallet_qty_sum > 0) parts.push('理货托数 ' + out.putaway_pallet_qty_sum);
+    if (out.putaway_qty_sum > 0 && out.putaway_carton_qty_sum === 0 && out.putaway_pallet_qty_sum === 0) {
+      parts.push('理货数量 ' + out.putaway_qty_sum);
+    }
+    if (out.putaway_qty_sum === 0) {
+      if (out.actual_carton_qty_sum > 0) parts.push('实际箱数 ' + out.actual_carton_qty_sum);
+      if (out.actual_pallet_qty_sum > 0) parts.push('实际托数 ' + out.actual_pallet_qty_sum);
+    }
+    if (out.sort_qty_sum > 0) parts.push('整理 ' + out.sort_qty_sum);
+    if (out.label_count_sum > 0) parts.push('贴标 ' + out.label_count_sum);
+    if (out.repaired_box_count_sum > 0) parts.push('修箱 ' + out.repaired_box_count_sum);
     if (out.box_count_sum > 0) parts.push('箱 ' + out.box_count_sum);
     if (out.pallet_count_sum > 0) parts.push('板 ' + out.pallet_count_sum);
+  } else if (job_type === 'unload') {
+    // 卸货：以行内 actual_qty 为准；按 unit 分桶
+    if (out.actual_carton_qty_sum > 0) parts.push('卸货箱数 ' + out.actual_carton_qty_sum);
+    if (out.actual_pallet_qty_sum > 0) parts.push('卸货托数 ' + out.actual_pallet_qty_sum);
+    if (out.actual_qty_sum > 0 && out.actual_carton_qty_sum === 0 && out.actual_pallet_qty_sum === 0) {
+      parts.push('卸货数量 ' + out.actual_qty_sum);
+    }
+    if (out.box_count_sum > 0) parts.push('箱 ' + out.box_count_sum);
+    if (out.pallet_count_sum > 0) parts.push('板 ' + out.pallet_count_sum);
+  } else {
+    // 默认：出库/库内/拣货 等
+    if (out.box_count_sum > 0) parts.push('箱 ' + out.box_count_sum);
+    if (out.pallet_count_sum > 0) parts.push('板 ' + out.pallet_count_sum);
+    if (out.actual_qty_sum > 0 && out.box_count_sum === 0 && out.pallet_count_sum === 0) {
+      parts.push('实际数量 ' + out.actual_qty_sum);
+    }
   }
+
+  // 任意一个数量字段 > 0 都不应再判定"无数量结果"
+  const hasAnyQty = (
+    out.box_count_sum > 0 ||
+    out.pallet_count_sum > 0 ||
+    out.putaway_qty_sum > 0 ||
+    out.putaway_carton_qty_sum > 0 ||
+    out.putaway_pallet_qty_sum > 0 ||
+    out.actual_qty_sum > 0 ||
+    out.actual_carton_qty_sum > 0 ||
+    out.actual_pallet_qty_sum > 0 ||
+    out.sort_qty_sum > 0 ||
+    out.repair_box_qty_sum > 0 ||
+    out.packed_sku_count_sum > 0 ||
+    out.packed_box_count_sum > 0 ||
+    out.total_operated_box_count_sum > 0 ||
+    out.label_count_sum > 0 ||
+    out.repaired_box_count_sum > 0 ||
+    out.reboxed_count_sum > 0 ||
+    out.used_carton_large_count_sum > 0 ||
+    out.used_carton_small_count_sum > 0 ||
+    out.verify_ok_count_sum > 0 ||
+    out.verify_ng_count_sum > 0
+  );
 
   if (parts.length === 0) {
     if (out.result_notes && job_type !== 'change_order') {
       out.result_summary = '备注：' + out.result_notes;
     } else if (job_type === 'change_order') {
       out.result_summary = '仅计时，无数量结果';
-    } else {
+    } else if (!hasAnyQty) {
       out.result_summary = '仅记录工时，无数量结果';
+    } else {
+      out.result_summary = '';
     }
   } else {
     out.result_summary = parts.join('，');
@@ -8491,6 +8631,13 @@ route("v2_dashboard_order_export", async (body, env) => {
       diff_notes: parsed.diff_notes,
       box_count_sum: parsed.box_count_sum,
       pallet_count_sum: parsed.pallet_count_sum,
+      putaway_qty_sum: parsed.putaway_qty_sum,
+      putaway_carton_qty_sum: parsed.putaway_carton_qty_sum,
+      putaway_pallet_qty_sum: parsed.putaway_pallet_qty_sum,
+      actual_qty_sum: parsed.actual_qty_sum,
+      actual_carton_qty_sum: parsed.actual_carton_qty_sum,
+      actual_pallet_qty_sum: parsed.actual_pallet_qty_sum,
+      sort_qty_sum: parsed.sort_qty_sum,
       packed_sku_count_sum: parsed.packed_sku_count_sum,
       packed_box_count_sum: parsed.packed_box_count_sum,
       total_operated_box_count_sum: parsed.total_operated_box_count_sum,
