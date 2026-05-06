@@ -3911,53 +3911,47 @@ route("v2_unplanned_unload_start", async (body, env) => {
   const worker_name = String(body.worker_name || "").trim();
   const parent_job_id = String(body.parent_job_id || "").trim();
   const interrupt_type = String(body.interrupt_type || "").trim();
+  // 新建批次时携带的可选信息（同一时段允许多批同时存在）
+  const cargo_summary = String(body.cargo_summary || body.title || "").trim();
+  const customer = String(body.customer || "").trim();
+  const vehicle_info = String(body.vehicle_info || "").trim();
+  const driver_info = String(body.driver_info || "").trim();
+  const source_info = String(body.source_info || "").trim();
+  const remark_in = String(body.remark || "").trim();
   if (!worker_id) return err("missing worker_id");
 
   return withIdem(env, body, "v2_unplanned_unload_start", async () => {
+    // 仅检查当前 worker 是否在其它任务（与 parent_job_id 兼容）；
+    // 允许同时存在多批不同客户/不同车辆的计划外卸货 — 不再因"已有 active unplanned_unload"而阻断
     if (!parent_job_id) {
       const busy = await checkWorkerBusy(env, worker_id, null);
       if (busy) return { ok: false, error: "worker_has_active_job", active_job_id: busy.job_id, active_job_type: busy.job_type };
-    }
-
-    // === 去重硬约束：避免多人同时点"开始"重复创建 FB ===
-    // - 普通模式（无 parent_job_id）：全局只允许一个 active unplanned_unload field_working
-    // - 中断模式（带 parent_job_id）：同一 parent_job_id 下只允许一个
-    // 命中已存在 → 返回 existing_active，前端转为加入（join）流程
-    let existing = null;
-    if (!parent_job_id) {
-      existing = await env.DB.prepare(
-        "SELECT id, display_no, related_doc_id, submitted_by FROM v2_field_feedbacks WHERE feedback_type='unplanned_unload' AND status='field_working' AND (parent_job_id IS NULL OR parent_job_id='') ORDER BY created_at ASC LIMIT 1"
-      ).first();
-    } else {
-      existing = await env.DB.prepare(
-        "SELECT id, display_no, related_doc_id, submitted_by FROM v2_field_feedbacks WHERE feedback_type='unplanned_unload' AND status='field_working' AND parent_job_id=? ORDER BY created_at ASC LIMIT 1"
-      ).bind(parent_job_id).first();
-    }
-    if (existing) {
-      return {
-        ok: false,
-        error: "existing_active_unplanned_unload",
-        message: "已有进行中的计划外卸货任务（" + (existing.display_no || existing.id) + " 由 " + (existing.submitted_by || '?') + " 发起），请加入而非重复创建 / 진행 중인 계획외 하차가 있습니다. 참여하세요",
-        feedback_id: existing.id,
-        display_no: existing.display_no,
-        job_id: existing.related_doc_id,
-        submitted_by: existing.submitted_by
-      };
     }
 
     const t = now();
     const fb_id = "FB-" + uid();
     const fb_display_no = await nextFeedbackDisplayNo(env, kstToday(), 'XCXH');
 
+    // 标题：优先使用现场录入的"货物说明"，否则给默认占位
+    const fb_title = cargo_summary || "计划外到货-现场卸货中";
+    // content：拼接 客户/车辆/司机/来源 多行结构（便于详情/列表展示）
+    const contentParts = [];
+    if (customer) contentParts.push("客户/고객: " + customer);
+    if (vehicle_info) contentParts.push("车辆/차량: " + vehicle_info);
+    if (driver_info) contentParts.push("司机/기사: " + driver_info);
+    if (source_info) contentParts.push("来源/출처: " + source_info);
+    if (contentParts.length === 0) contentParts.push("现场操作人员发起计划外卸货");
+    const fb_content = contentParts.join("\n");
+
     await env.DB.prepare(`
       INSERT INTO v2_field_feedbacks(id, feedback_type, related_doc_type, related_doc_id,
-        title, content, submitted_by, status, parent_job_id, interrupt_type, display_no, created_at, updated_at)
-      VALUES(?,'unplanned_unload','ops_job','',?,?,?,'field_working',?,?,?,?,?)
+        title, content, submitted_by, status, parent_job_id, interrupt_type, display_no, remark, created_at, updated_at)
+      VALUES(?,'unplanned_unload','ops_job','',?,?,?,'field_working',?,?,?,?,?,?)
     `).bind(fb_id,
-        "计划外到货-现场卸货中",
-        "现场操作人员发起计划外卸货",
+        fb_title,
+        fb_content,
         worker_name || worker_id,
-        parent_job_id, interrupt_type, fb_display_no, t, t).run();
+        parent_job_id, interrupt_type, fb_display_no, remark_in, t, t).run();
 
     const job_id = "JOB-" + uid();
     await env.DB.prepare(`
@@ -4062,32 +4056,69 @@ route("v2_unplanned_unload_finish", async (body, env) => {
 });
 
 // List active (field_working) unplanned unload feedbacks for join
+// 返回所有进行中的批次（不只是第一条）；含 cargo/customer/remark 供前端列表展示
 route("v2_unplanned_unload_active_list", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
   const fbs = await env.DB.prepare(
-    "SELECT * FROM v2_field_feedbacks WHERE feedback_type='unplanned_unload' AND status='field_working' ORDER BY created_at DESC LIMIT 50"
+    "SELECT * FROM v2_field_feedbacks WHERE feedback_type='unplanned_unload' AND status='field_working' ORDER BY created_at DESC LIMIT 100"
   ).all();
   const items = [];
   for (const fb of (fbs.results || [])) {
     const jobId = fb.related_doc_id || '';
-    let activeCount = 0, workerNames = [];
+    let activeCount = 0, workerNames = [], totalWorkerCount = 0, allWorkerNames = [];
     if (jobId) {
       const ws = await env.DB.prepare(
-        "SELECT worker_id, worker_name FROM v2_ops_job_workers WHERE job_id=? AND left_at=''"
+        "SELECT worker_id, worker_name, left_at FROM v2_ops_job_workers WHERE job_id=?"
       ).bind(jobId).all();
       const rows = ws.results || [];
-      activeCount = rows.length;
-      workerNames = rows.map(r => r.worker_name || r.worker_id);
+      const activeRows = rows.filter(r => !r.left_at);
+      activeCount = activeRows.length;
+      workerNames = activeRows.map(r => r.worker_name || r.worker_id);
+      const distinctIds = new Set();
+      const distinctNames = [];
+      for (const r of rows) {
+        const k = r.worker_id || r.worker_name;
+        if (k && !distinctIds.has(k)) {
+          distinctIds.add(k);
+          distinctNames.push(r.worker_name || r.worker_id);
+        }
+      }
+      totalWorkerCount = distinctIds.size;
+      allWorkerNames = distinctNames;
     }
+    // 解析 content 中的 客户/车辆/司机/来源 提示（不强约束格式，仅尽力解析）
+    const contentStr = String(fb.content || '');
+    const _extract = (label) => {
+      const m = contentStr.match(new RegExp("^" + label + "[/／/]?[^:：]*[:：]\\s*(.+)$", "m"));
+      return m ? m[1].trim() : '';
+    };
+    const customer = _extract("客户");
+    const vehicle_info = _extract("车辆");
+    const driver_info = _extract("司机");
+    const source_info = _extract("来源");
+
     items.push({
       feedback_id: fb.id,
       display_no: fb.display_no || fb.id,
-      title: fb.title,
-      submitted_by: fb.submitted_by,
-      created_at: fb.created_at,
+      title: fb.title || '',
+      cargo_summary: fb.title || '',
+      customer,
+      vehicle_info,
+      driver_info,
+      source_info,
+      content: contentStr,
+      remark: fb.remark || '',
+      submitted_by: fb.submitted_by || '',
+      created_by: fb.submitted_by || '',
+      created_at: fb.created_at || '',
+      started_at: fb.created_at || '',
+      job_id: jobId,
       related_job_id: jobId,
       active_worker_count: activeCount,
-      worker_names: workerNames
+      worker_count: totalWorkerCount,
+      worker_names: workerNames,
+      all_worker_names: allWorkerNames,
+      parent_job_id: fb.parent_job_id || ''
     });
   }
   return json({ ok: true, items });

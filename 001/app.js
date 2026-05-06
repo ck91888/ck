@@ -943,26 +943,51 @@ async function showUnloadEntry() {
 async function loadUnplannedActiveList() {
   var wrap = document.getElementById("unplannedActiveList");
   var box = document.getElementById("unplannedActiveItems");
+  var hint = document.getElementById("unplannedActiveHint");
   if (!wrap || !box) return;
   var res = await api({ action: "v2_unplanned_unload_active_list" });
   if (!res || !res.ok || !res.items || res.items.length === 0) {
     wrap.style.display = "none";
     box.innerHTML = "";
+    if (hint) hint.style.display = "none";
     return;
   }
   wrap.style.display = "";
+  if (hint) hint.style.display = "";
   var html = "";
   res.items.forEach(function(item) {
     html += '<div style="border:1px solid #e67e22;border-radius:6px;padding:8px;margin-bottom:6px;background:#fff8f0;">';
     html += '<div style="font-weight:700;font-size:13px;">' + esc(item.display_no) + '</div>';
-    html += '<div style="font-size:12px;color:#555;">';
-    html += '发起: ' + esc(item.submitted_by) + ' · ' + esc(fmtTime(item.created_at));
-    html += ' · 参与: ' + item.active_worker_count + '人';
+    html += '<div style="font-size:12px;color:#555;line-height:1.6;">';
+    html += '发起 / 시작: ' + esc(item.submitted_by || '--') + ' · ' + esc(fmtTime(item.created_at));
+    var wc = (item.worker_count != null) ? item.worker_count : item.active_worker_count;
+    html += ' · 参与 / 참여: ' + (wc || 0) + '人';
+    if (item.active_worker_count != null && item.active_worker_count !== wc) {
+      html += '（在场 ' + item.active_worker_count + '）';
+    }
     if (item.worker_names && item.worker_names.length > 0) {
-      html += ' (' + esc(item.worker_names.join(', ')) + ')';
+      html += ' · ' + esc(item.worker_names.join('、'));
     }
     html += '</div>';
-    html += '<button class="btn btn-outline btn-sm" style="margin-top:4px;" onclick="joinUnplannedUnload(\'' + esc(item.feedback_id) + '\', this)">加入卸货 / 참여</button>';
+    if (item.cargo_summary && item.cargo_summary !== '计划外到货-现场卸货中') {
+      html += '<div style="font-size:12px;margin-top:2px;"><b>货物 / 화물:</b> ' + esc(item.cargo_summary) + '</div>';
+    }
+    if (item.customer) {
+      html += '<div style="font-size:12px;"><b>客户 / 고객:</b> ' + esc(item.customer) + '</div>';
+    }
+    if (item.vehicle_info) {
+      html += '<div style="font-size:12px;"><b>车辆 / 차량:</b> ' + esc(item.vehicle_info) + '</div>';
+    }
+    if (item.driver_info) {
+      html += '<div style="font-size:12px;"><b>司机 / 기사:</b> ' + esc(item.driver_info) + '</div>';
+    }
+    if (item.source_info) {
+      html += '<div style="font-size:12px;"><b>来源 / 출처:</b> ' + esc(item.source_info) + '</div>';
+    }
+    if (item.remark) {
+      html += '<div style="font-size:12px;color:#666;"><b>备注 / 비고:</b> ' + esc(item.remark) + '</div>';
+    }
+    html += '<button class="btn btn-outline btn-sm" style="margin-top:6px;" onclick="joinUnplannedUnload(\'' + esc(item.feedback_id) + '\', this)">加入卸货 / 참여</button>';
     html += '</div>';
   });
   box.innerHTML = html;
@@ -1278,53 +1303,62 @@ async function startUnload(btnEl) {
   });
 }
 
-async function startUnloadNoPlan(btnEl) {
+// 打开/关闭"新建计划外卸货"表单
+function openUnplannedUnloadForm() {
   if (hasOtherActiveJob()) return warnActiveJob();
-  withActionLock('startUnloadNoPlan', btnEl || null, '提交中.../저장중...', async function() {
-    // 从挂起上下文带入 parent_job_id（自 patch.js 合并）
+  var card = document.getElementById("unplannedUnloadFormCard");
+  if (!card) return;
+  card.style.display = "";
+  var first = document.getElementById("uplCargoInput");
+  if (first) first.focus();
+}
+
+function closeUnplannedUnloadForm() {
+  var card = document.getElementById("unplannedUnloadFormCard");
+  if (!card) return;
+  card.style.display = "none";
+  ['uplCargoInput','uplCustomerInput','uplVehicleInput','uplDriverInput','uplSourceInput','uplRemarkInput']
+    .forEach(function(id) { var el = document.getElementById(id); if (el) el.value = ''; });
+}
+
+// 提交新建计划外卸货 — 同一时段允许并存多批，不再因"已有 active"而阻断
+async function submitUnplannedUnload(btnEl) {
+  if (hasOtherActiveJob()) return warnActiveJob();
+  var cargo = (document.getElementById("uplCargoInput") || {}).value || '';
+  cargo = String(cargo).trim();
+  if (!cargo) {
+    alert("请填写临时货物说明 / 임시 화물 설명을 입력하세요");
+    return;
+  }
+  var customer = String(((document.getElementById("uplCustomerInput") || {}).value) || '').trim();
+  var vehicle = String(((document.getElementById("uplVehicleInput") || {}).value) || '').trim();
+  var driver = String(((document.getElementById("uplDriverInput") || {}).value) || '').trim();
+  var source = String(((document.getElementById("uplSourceInput") || {}).value) || '').trim();
+  var remark = String(((document.getElementById("uplRemarkInput") || {}).value) || '').trim();
+
+  withActionLock('submitUnplannedUnload', btnEl || null, '提交中.../저장중...', async function() {
     var interruptInfo = null;
     try { interruptInfo = JSON.parse(localStorage.getItem(V2_INTERRUPT_KEY) || 'null'); } catch (e) {}
     var parentJobId = (interruptInfo && interruptInfo.parent_job_id) || '';
-
-    // 客户端预检：避免重复创建 FB —— 如已有 active 计划外卸货，引导加入
-    // （后端 existing_active_unplanned_unload 是兜底硬保障）
-    if (!parentJobId) {
-      try {
-        var actRes = await api({ action: "v2_unplanned_unload_active_list" });
-        if (actRes && actRes.ok && actRes.items && actRes.items.length > 0) {
-          var item = actRes.items[0];
-          var msg = "已有进行中的计划外卸货：" + (item.display_no || '') +
-                    "（发起: " + (item.submitted_by || '?') + "，参与 " + (item.active_worker_count || 0) + " 人）\n" +
-                    "请加入此任务而非重复创建。点确定 = 加入；取消 = 放弃。\n" +
-                    "진행 중인 계획외 하차가 있습니다. 참여하세요.";
-          if (confirm(msg)) {
-            joinUnplannedUnload(item.feedback_id, btnEl);
-          }
-          return;
-        }
-      } catch (e) { /* 预检失败不阻塞，由后端兜底 */ }
-    }
 
     var res = await api({
       action: "v2_unplanned_unload_start",
       worker_id: getWorkerId(),
       worker_name: getWorkerName(),
       parent_job_id: parentJobId,
-      interrupt_type: parentJobId ? 'unload' : ''
+      interrupt_type: parentJobId ? 'unload' : '',
+      cargo_summary: cargo,
+      customer: customer,
+      vehicle_info: vehicle,
+      driver_info: driver,
+      source_info: source,
+      remark: remark
     });
-
-    // 后端兜底：existing_active 自动转加入
-    if (res && res.error === 'existing_active_unplanned_unload' && res.feedback_id) {
-      var msg2 = (res.message || "已有进行中的计划外卸货任务") + "\n点确定加入此任务";
-      if (confirm(msg2)) {
-        joinUnplannedUnload(res.feedback_id, btnEl);
-      }
-      return;
-    }
 
     if (res && res.ok) {
       saveActiveJob(res.job_id, res.worker_seg_id);
       localStorage.setItem('v2_unplanned_fb_id', res.feedback_id || '');
+      closeUnplannedUnloadForm();
       stopUnloadScan();
       _unloadPlanData = null;
       alert("已创建计划外卸货单: " + (res.display_no || res.feedback_id) + "\n계획외 하차 작업 생성됨");
@@ -1335,6 +1369,11 @@ async function startUnloadNoPlan(btnEl) {
       alert("失败/실패: " + (res ? (res.message || res.error) : "unknown"));
     }
   });
+}
+
+// 兼容旧入口：保留函数名，转为打开表单
+function startUnloadNoPlan(btnEl) {
+  openUnplannedUnloadForm();
 }
 
 function startUnloadScan() {
@@ -2071,17 +2110,59 @@ function showOutboundLoadWorking() {
   document.getElementById("loadInterruptBar").style.display = "";
 }
 
+// 出库装货：状态/业务文案映射（韩文兼容现有 UI 不强求）
+var _OB_STATUS_LABEL_001 = {
+  ready_to_ship: '待下发',
+  preparing_outbound: '备货中'
+};
+var _OB_BIZ_LABEL_001 = {
+  direct_ship: '代发',
+  bulk: '大货',
+  return: '退件'
+};
+function _ob_pick_date_001(o) {
+  // 取 expected_ship_at 的日期部分；兜底 order_date
+  var s = String(o.expected_ship_at || '').trim();
+  if (s.length >= 10) return s.slice(0, 10);
+  return String(o.order_date || '').trim();
+}
+
 async function loadOutboundOrders() {
   var sel = document.getElementById("loadOrderSelect");
   if (!sel) return;
-  var res = await api({ action: "v2_outbound_order_list", start_date: "", end_date: "" });
+  // date_basis 显式按预计出库日期；按预计出库日期升序更贴近现场操作排程
+  var res = await api({ action: "v2_outbound_order_list", start_date: "", end_date: "", date_basis: "expected_ship_at" });
   var opts = '<option value="">-- 选择出库单/출고단 선택 --</option>';
   if (res && res.ok && res.items) {
-    res.items.forEach(function(o) {
-      // 装货页只显示可装货状态：ready_to_ship / preparing_outbound（库内操作型已被客服更新）
-      if (o.status !== "ready_to_ship" && o.status !== "preparing_outbound") return;
-      var bizTag = o.biz_class ? '['+ o.biz_class + '] ' : '';
-      opts += '<option value="' + esc(o.id) + '">[' + esc(o.status) + '] ' + bizTag + esc(o.order_date) + ' ' + esc(o.customer) + '</option>';
+    var rows = res.items.filter(function(o) {
+      // 装货页只显示可装货状态：ready_to_ship / preparing_outbound
+      return o.status === "ready_to_ship" || o.status === "preparing_outbound";
+    });
+    // 排序：1) ready_to_ship 优先 2) 预计出库日期升序 3) display_no 升序
+    rows.sort(function(a, b) {
+      var sa = a.status === 'ready_to_ship' ? 0 : 1;
+      var sb = b.status === 'ready_to_ship' ? 0 : 1;
+      if (sa !== sb) return sa - sb;
+      var da = _ob_pick_date_001(a) || '9999-99-99';
+      var db = _ob_pick_date_001(b) || '9999-99-99';
+      if (da !== db) return da < db ? -1 : 1;
+      var na = String(a.display_no || a.id || '');
+      var nb = String(b.display_no || b.id || '');
+      return na < nb ? -1 : (na > nb ? 1 : 0);
+    });
+    rows.forEach(function(o) {
+      var displayNo = String(o.display_no || '').trim();
+      var label = displayNo || String(o.wms_work_order_no || '').trim() || String(o.id || '');
+      var stLbl = _OB_STATUS_LABEL_001[o.status] || o.status;
+      var bizLbl = _OB_BIZ_LABEL_001[o.biz_class] || o.biz_class || '';
+      var dateStr = _ob_pick_date_001(o) || '--';
+      var qty = (Number(o.planned_box_count || 0) || 0) + '箱/' + (Number(o.planned_pallet_count || 0) || 0) + '托';
+      var text = label + '｜[' + stLbl + ']';
+      if (bizLbl) text += ' [' + bizLbl + ']';
+      text += '｜预计 ' + dateStr;
+      if (o.customer) text += '｜' + o.customer;
+      text += '｜' + qty;
+      opts += '<option value="' + esc(o.id) + '">' + esc(text) + '</option>';
     });
   }
   sel.innerHTML = opts;

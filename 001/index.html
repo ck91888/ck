@@ -135,10 +135,37 @@
     <div style="height:10px"></div>
     <button class="btn btn-success" onclick="startUnload(this)">开始卸货 / 하차 시작</button>
     <div style="height:8px"></div>
-    <button class="btn btn-outline btn-sm" onclick="startUnloadNoPlan(this)">无单临时卸货 / 서류없이 임시 하차</button>
+    <button class="btn btn-outline btn-sm" onclick="openUnplannedUnloadForm()">新建计划外卸货 / 계획외 하차 신규</button>
+
     <div id="unplannedActiveList" style="margin-top:12px;display:none;">
       <div style="font-weight:700;font-size:13px;margin-bottom:6px;">当前计划外卸货中 / 진행 중 계획외 하차</div>
+      <div id="unplannedActiveHint" style="font-size:12px;color:#bf360c;background:#fff3e0;border-left:3px solid #ef6c00;padding:6px 8px;border-radius:4px;margin-bottom:6px;display:none;">
+        如是同一批货请加入；如是另一批货请新建。<br>같은 화물이면 참여, 다른 화물이면 신규 생성하세요.
+      </div>
       <div id="unplannedActiveItems"></div>
+      <div style="margin-top:8px;">
+        <button class="btn btn-outline btn-sm" onclick="openUnplannedUnloadForm()">+ 新建另一批计划外卸货 / 다른 계획외 하차 생성</button>
+      </div>
+    </div>
+
+    <div id="unplannedUnloadFormCard" style="display:none;margin-top:12px;border:1px solid #ef6c00;border-radius:6px;padding:10px;background:#fff8f0;">
+      <div style="font-weight:700;font-size:13px;margin-bottom:6px;">新建一批计划外卸货 / 새 계획외 하차</div>
+      <label style="font-size:12px;">临时货物说明 / 임시 화물 설명 <span style="color:red;">*</span></label>
+      <input type="text" id="uplCargoInput" placeholder="如：3 托纸箱 / 例: 3 팔레트 박스" style="width:100%;">
+      <label style="font-size:12px;margin-top:6px;display:block;">客户名 / 고객명</label>
+      <input type="text" id="uplCustomerInput" style="width:100%;">
+      <label style="font-size:12px;margin-top:6px;display:block;">车辆 / 차량</label>
+      <input type="text" id="uplVehicleInput" style="width:100%;">
+      <label style="font-size:12px;margin-top:6px;display:block;">司机 / 기사</label>
+      <input type="text" id="uplDriverInput" style="width:100%;">
+      <label style="font-size:12px;margin-top:6px;display:block;">来源 / 출처</label>
+      <input type="text" id="uplSourceInput" style="width:100%;">
+      <label style="font-size:12px;margin-top:6px;display:block;">备注 / 비고</label>
+      <textarea id="uplRemarkInput" rows="2" style="width:100%;"></textarea>
+      <div style="margin-top:8px;">
+        <button class="btn btn-success btn-sm" onclick="submitUnplannedUnload(this)">提交并开始 / 제출 후 시작</button>
+        <button class="btn btn-outline btn-sm" onclick="closeUnplannedUnloadForm()">取消 / 취소</button>
+      </div>
     </div>
   </div>
 
