@@ -154,6 +154,44 @@ function withActionLock(key, btnEl, pendingText, fn) {
   }
 }
 
+// ===== Finish 幂等响应识别 =====
+// 后端在不同 finish action 上历史返回不一致：可能是
+//   {ok:false, error:'already_completed', message:'任务已完成...'}
+//   {ok:false, error:'biz_task_already_completed', ...}
+//   {ok:true,  already_completed:true, ...}（新格式）
+// 现场员工连点提交 / 网络重试 / 别人已完成 都会触发——前端必须当成功态处理。
+function isAlreadyCompletedResponse(res) {
+  if (!res) return false;
+  if (res.already_completed === true) return true;
+  var s = '';
+  s += String(res.error || '') + '|' + String(res.code || '') + '|' + String(res.message || '');
+  s = s.toLowerCase();
+  if (s.indexOf('already_completed') >= 0) return true;
+  if (s.indexOf('already completed') >= 0) return true;
+  if (s.indexOf('duplicate_finish') >= 0) return true;
+  if (s.indexOf('job_already_completed') >= 0) return true;
+  if (s.indexOf('trip_already_completed') >= 0) return true;
+  if (s.indexOf('biz_task_already_completed') >= 0) return true;
+  if (s.indexOf('bulk_order_already_completed') >= 0) return true;
+  if (s.indexOf('bulk_work_order_already_completed') >= 0) return true;
+  if (s.indexOf('biz_already_completed') >= 0) return true;
+  if (s.indexOf('任务已完成') >= 0) return true;
+  if (s.indexOf('趟次已完成') >= 0) return true;
+  if (s.indexOf('이미 완료') >= 0) return true;
+  return false;
+}
+
+// 完成成功（含幂等已完成）统一退出：清 active job → 提示 → 回首页（或指定页）
+function handleFinishSuccessAndExit(message, targetPage) {
+  try { clearActiveJob(); } catch(e) {}
+  if (message) { try { alert(message); } catch(e) {} }
+  try {
+    if (typeof targetPage === 'function') targetPage();
+    else goPage(targetPage || 'home');
+  } catch(e) { try { goPage('home'); } catch(_) {} }
+  try { if (typeof checkMyActiveJob === 'function') checkMyActiveJob(); } catch(e) {}
+}
+
 // ===== Badge logic (ported from main system app.js) =====
 function parseBadge(code) {
   var raw = (code || "").trim();
@@ -912,6 +950,14 @@ async function initUnload() {
   // 有进行中的卸货任务 → 直接进入 working
   if (_activeJobId) {
     var res = await api({ action: "v2_ops_job_detail", job_id: _activeJobId });
+    // 旧任务已 completed/cancelled — 清掉本地 active 后退到 home，避免再走完成表单
+    if (res && res.ok && res.job && (res.job.status === "completed" || res.job.status === "cancelled")) {
+      clearActiveJob();
+      try { localStorage.removeItem('v2_unplanned_fb_id'); } catch(e) {}
+      alert("该任务已完成，返回首页\n해당 작업은 이미 완료되었습니다. 홈으로 이동");
+      goPage("home");
+      return;
+    }
     if (res && res.ok && res.job && res.job.job_type === "unload" && res.job.status === "working") {
       // 仅 inbound_plan 关联才回灌 plan 数据；feedback-first 流程 _unloadPlanData 保持 null
       if (res.job.related_doc_type === "inbound_plan" && res.job.related_doc_id) {
@@ -1485,7 +1531,7 @@ async function unloadComplete(btnEl) {
       complete_job: true
     });
 
-    if (res && res.ok) {
+    if (res && res.ok && !res.already_completed) {
       var msg = "卸货已完成 / 하차 완료";
       if (fbId || res.feedback_id) {
         msg += "\n（现场反馈已更新，请协同中心补充信息并转正 / 현장 피드백 업데이트됨, 협업센터에서 정보 보완 후 전환 필요）";
@@ -1494,12 +1540,19 @@ async function unloadComplete(btnEl) {
       }
       alert(msg);
       localStorage.removeItem('v2_unplanned_fb_id');
-
+      _unloadPlanData = null;
       var resumed = await checkAndResumeParent();
       if (!resumed) {
         clearActiveJob();
-        _unloadPlanData = null;
         goPage("home");
+      }
+    } else if (isAlreadyCompletedResponse(res)) {
+      // 幂等已完成 — 当成功处理（连点 / 别人先完成 / 网络重试）
+      localStorage.removeItem('v2_unplanned_fb_id');
+      _unloadPlanData = null;
+      var resumedAC = await checkAndResumeParent();
+      if (!resumedAC) {
+        handleFinishSuccessAndExit("任务已完成，已返回首页\n작업이 이미 완료되어 홈으로 돌아갑니다");
       }
     } else if (res && res.error === "diff_note_required") {
       // 自 patch.js 合并：自动补默认差异说明 + 重试一次
@@ -1515,19 +1568,22 @@ async function unloadComplete(btnEl) {
         remark: remark,
         complete_job: true
       });
-      if (retry && retry.ok) {
+      if (retry && retry.ok && !retry.already_completed) {
         alert("卸货已完成（已自动补充差异备注）/ 하차 완료 (차이 메모 자동 추가됨)");
         localStorage.removeItem('v2_unplanned_fb_id');
+        _unloadPlanData = null;
         var resumedR = await checkAndResumeParent();
-        if (!resumedR) { clearActiveJob(); _unloadPlanData = null; goPage("home"); }
+        if (!resumedR) { clearActiveJob(); goPage("home"); }
+      } else if (isAlreadyCompletedResponse(retry)) {
+        localStorage.removeItem('v2_unplanned_fb_id');
+        _unloadPlanData = null;
+        var resumedR2 = await checkAndResumeParent();
+        if (!resumedR2) {
+          handleFinishSuccessAndExit("任务已完成，已返回首页\n작업이 이미 완료되어 홈으로 돌아갑니다");
+        }
       } else {
         alert("失败/실패: " + (retry ? (retry.message || retry.error) : "unknown"));
       }
-    } else if (res && res.error === "already_completed") {
-      alert("任务已完成，请勿重复提交\n작업이 이미 완료되었습니다. 중복 제출하지 마세요");
-      localStorage.removeItem('v2_unplanned_fb_id');
-      var resumed2 = await checkAndResumeParent();
-      if (!resumed2) { clearActiveJob(); _unloadPlanData = null; goPage("home"); }
     } else if (res && res.error === "unload_plan_status_invalid") {
       alert("当前卸货计划状态已变化，不能继续完成，请返回刷新\n하차 계획 상태가 변경되었습니다. 새로고침해 주세요");
       clearActiveJob();
@@ -1620,6 +1676,13 @@ async function initInbound() {
   // If already in a putaway job, show working state
   if (_activeJobId) {
     var res = await api({ action: "v2_ops_job_detail", job_id: _activeJobId });
+    if (res && res.ok && res.job && (res.job.status === "completed" || res.job.status === "cancelled")) {
+      clearActiveJob();
+      _inboundPlanData = null;
+      alert("该任务已完成，返回首页\n해당 작업은 이미 완료되었습니다. 홈으로 이동");
+      goPage("home");
+      return;
+    }
     if (res && res.ok && res.job && res.job.job_type && (res.job.job_type === 'inbound_direct' || res.job.job_type === 'inbound_bulk' || res.job.job_type === 'inbound_change_order') && res.job.status === "working") {
       document.getElementById("inboundEntryCard").style.display = "none";
       document.getElementById("inboundWorkingCard").style.display = "";
@@ -1805,7 +1868,7 @@ async function finishInbound(btnEl) {
       extra_ops: extraOps,
       complete_job: true
     });
-    if (res && res.ok) {
+    if (res && res.ok && !res.already_completed) {
       // Check plan status to show appropriate message
       var planAfter = null;
       try { planAfter = await api({ action: "v2_inbound_plan_detail", plan_id: _inboundPlanData && _inboundPlanData.plan ? _inboundPlanData.plan.id : "" }); } catch(e) {}
@@ -1820,11 +1883,9 @@ async function finishInbound(btnEl) {
       clearActiveJob();
       _inboundPlanData = null;
       goPage("home");
-    } else if (res && res.error === "already_completed") {
-      alert("任务已完成，请勿重复提交\n작업이 이미 완료되었습니다. 중복 제출하지 마세요");
-      clearActiveJob();
+    } else if (isAlreadyCompletedResponse(res)) {
       _inboundPlanData = null;
-      goPage("home");
+      handleFinishSuccessAndExit("任务已完成，已返回首页\n작업이 이미 완료되어 홈으로 돌아갑니다");
     } else if (res && res.error === "unload_not_finished") {
       // Unload still running — user stays on current page, no logout
       alert("卸货未完成，无法完成理货。请等待卸货结束后再完成。\n하차가 아직 완료되지 않아 입고 완료 처리할 수 없습니다. 하차 완료 후 다시 시도하세요.");
@@ -1856,6 +1917,12 @@ async function initInboundReturn() {
   // If already in a return inbound job, show working state
   if (_activeJobId) {
     var res = await api({ action: "v2_ops_job_detail", job_id: _activeJobId });
+    if (res && res.ok && res.job && (res.job.status === "completed" || res.job.status === "cancelled")) {
+      clearActiveJob();
+      alert("该任务已完成，返回首页\n해당 작업은 이미 완료되었습니다. 홈으로 이동");
+      goPage("home");
+      return;
+    }
     if (res && res.ok && res.job && res.job.job_type === 'inbound_return' && res.job.status === 'working') {
       document.getElementById("inboundReturnEntryCard").style.display = "none";
       document.getElementById("inboundReturnWorkingCard").style.display = "";
@@ -1941,14 +2008,12 @@ async function finishInboundReturn(btnEl) {
       result_note: resultNote.trim(),
       complete_job: true
     });
-    if (res && res.ok) {
+    if (res && res.ok && !res.already_completed) {
       alert("退件入库工时已记录 / 반품 입고 작업 시간 기록됨");
       clearActiveJob();
       goPage("home");
-    } else if (res && res.error === "already_completed") {
-      alert("任务已完成，请勿重复提交\n작업이 이미 완료되었습니다");
-      clearActiveJob();
-      goPage("home");
+    } else if (isAlreadyCompletedResponse(res)) {
+      handleFinishSuccessAndExit("任务已完成，已返回首页\n작업이 이미 완료되어 홈으로 돌아갑니다");
     } else if (res && res.error === "others_still_working") {
       var _n3 = res.active_worker_count || res.active_count || "?";
       alert("您已退出此任务，还有 " + _n3 + " 人继续作业\n현재 작업에서 퇴장했습니다. " + _n3 + "명이 계속 작업 중입니다");
@@ -1970,6 +2035,12 @@ async function refreshInboundReturnWorkers() {
 async function initImportDelivery() {
   if (_activeJobId) {
     var res = await api({ action: "v2_ops_job_detail", job_id: _activeJobId });
+    if (res && res.ok && res.job && (res.job.status === "completed" || res.job.status === "cancelled")) {
+      clearActiveJob();
+      alert("该任务已完成，返回首页\n해당 작업은 이미 완료되었습니다. 홈으로 이동");
+      goPage("home");
+      return;
+    }
     if (res && res.ok && res.job && res.job.job_type === 'pickup_delivery_import' && res.job.status === 'working') {
       document.getElementById("idEntryCard").style.display = "none";
       document.getElementById("idWorkingCard").style.display = "";
@@ -2032,14 +2103,12 @@ async function finishImportDelivery(btnEl) {
       estimated_piece_count: pieceCount,
       remark: remark
     });
-    if (res && res.ok) {
+    if (res && res.ok && !res.already_completed) {
       alert("外出任务完成 / 외부 작업 완료");
       clearActiveJob();
       goPage("home");
-    } else if (res && res.error === "already_completed") {
-      alert("任务已完成，请勿重复提交\n작업이 이미 완료되었습니다");
-      clearActiveJob();
-      goPage("home");
+    } else if (isAlreadyCompletedResponse(res)) {
+      handleFinishSuccessAndExit("任务已完成，已返回首页\n작업이 이미 완료되어 홈으로 돌아갑니다");
     } else if (res && res.error === "others_still_working") {
       var _n = res.active_worker_count || res.active_count || "?";
       alert("您已退出此任务，还有 " + _n + " 人继续作业\n현재 작업에서 퇴장했습니다. " + _n + "명이 계속 작업 중입니다");
@@ -2083,6 +2152,12 @@ async function initOutboundLoad() {
 
   if (_activeJobId) {
     var res = await api({ action: "v2_ops_job_detail", job_id: _activeJobId });
+    if (res && res.ok && res.job && (res.job.status === "completed" || res.job.status === "cancelled")) {
+      clearActiveJob();
+      alert("该任务已完成，返回首页\n해당 작업은 이미 완료되었습니다. 홈으로 이동");
+      goPage("home");
+      return;
+    }
     if (res && res.ok && res.job && res.job.job_type === 'load_outbound' && res.job.status === 'working') {
       showOutboundLoadWorking();
       refreshLoadWorkers();
@@ -2389,19 +2464,17 @@ async function finishOutboundLoad(btnEl) {
       remark: remark,
       complete_job: true
     });
-    if (res && res.ok) {
+    if (res && res.ok && !res.already_completed) {
       alert("装货已完成 / 상차 완료");
       var resumed = await checkAndResumeParent();
       if (!resumed) {
         clearActiveJob();
         goPage("home");
       }
-    } else if (res && res.error === "already_completed") {
-      alert("任务已完成，请勿重复提交\n작업이 이미 완료되었습니다. 중복 제출하지 마세요");
+    } else if (isAlreadyCompletedResponse(res)) {
       var resumed2 = await checkAndResumeParent();
       if (!resumed2) {
-        clearActiveJob();
-        goPage("home");
+        handleFinishSuccessAndExit("任务已完成，已返回首页\n작업이 이미 완료되어 홈으로 돌아갑니다");
       }
     } else {
       alert("失败/실패: " + (res ? res.error : "unknown"));
@@ -2601,11 +2674,18 @@ async function confirmOutboundPickup(btnEl) {
 // ===== 库内操作页面 =====
 var _osoOrderId = "";
 
-function initOutboundStockOp() {
+async function initOutboundStockOp() {
   _osoOrderId = "";
   showStockOpEntry();
   loadStockOpCandidates();
   if (_activeJobId) {
+    var detail = await api({ action: "v2_ops_job_detail", job_id: _activeJobId });
+    if (detail && detail.ok && detail.job && (detail.job.status === "completed" || detail.job.status === "cancelled")) {
+      clearActiveJob();
+      alert("该任务已完成，返回首页\n해당 작업은 이미 완료되었습니다. 홈으로 이동");
+      goPage("home");
+      return;
+    }
     showStockOpWorking();
     refreshStockOpWorkers();
   }
@@ -2714,17 +2794,15 @@ async function finishOutboundStockOp(btnEl) {
       remark: remark,
       complete_job: true
     });
-    if (res && res.ok) {
+    if (res && res.ok && !res.already_completed) {
       alert("库内操作已完成 / 작업 완료\n出库计划等待客服更新 / 출고 계획은 고객지원팀이 업데이트 예정");
       var resumed = await checkAndResumeParent();
       if (!resumed) {
         clearActiveJob();
         goPage("home");
       }
-    } else if (res && res.error === "already_completed") {
-      alert("任务已完成，请勿重复提交\n작업이 이미 완료되었습니다");
-      clearActiveJob();
-      goPage("home");
+    } else if (isAlreadyCompletedResponse(res)) {
+      handleFinishSuccessAndExit("任务已完成，已返回首页\n작업이 이미 완료되어 홈으로 돌아갑니다");
     } else {
       alert("失败/실패: " + (res ? (res.message || res.error) : "unknown"));
     }
@@ -2973,10 +3051,15 @@ async function handleIssueFinish(btnEl) {
       feedback_text: feedbackText
     });
 
-    if (res && res.ok) {
+    if (res && res.ok && !res.already_completed) {
       alert("处理完成 / 처리 완료\n工时/작업시간: " + res.minutes_worked.toFixed(1) + " 分钟/분");
       clearActiveJob();
       loadIssueDetail();
+    } else if (isAlreadyCompletedResponse(res)) {
+      try { clearActiveJob(); } catch(e) {}
+      alert("该问题点已完成处理，已刷新页面\n해당 이슈는 이미 처리 완료되었습니다");
+      loadIssueDetail();
+      try { checkMyActiveJob(); } catch(e) {}
     } else {
       alert("失败/실패: " + (res ? res.error : "unknown"));
     }
@@ -3575,9 +3658,17 @@ async function finalizePickJob(btnEl, jobId, createdBy) {
       loadPickActiveList();
     } else if (res && res.error === "missing_worker_id") {
       alert(res.message || "请提供拣货人ID / worker_id 필요");
-    } else if (res && res.error === "already_completed") {
-      alert("趟次已完成 / 차수 완료");
-      loadPickActiveList();
+    } else if (isAlreadyCompletedResponse(res)) {
+      try { stopPickCreateScan(); stopPickStartScan(); stopPickElapsedTimer(); } catch(e) {}
+      if (_activeJobId === jobId) {
+        clearActiveJob();
+        alert("趟次已完成，返回上一级 / 차수 완료, 이전으로");
+        goPage("order_op_menu");
+        try { checkMyActiveJob(); } catch(e) {}
+      } else {
+        alert("趟次已完成 / 차수 완료");
+        loadPickActiveList();
+      }
     } else if (res && res.error === "already_cancelled") {
       alert("趟次已取消 / 차수 취소됨");
       loadPickActiveList();
@@ -3598,7 +3689,7 @@ async function finishPickJob(btnEl) {
       remark: (document.getElementById("pickRemark") || {}).value || "",
       result_note: (document.getElementById("pickResultNote") || {}).value || ""
     });
-    if (res && res.ok) {
+    if (res && res.ok && !res.already_completed) {
       var msg = "本次拣货已完成 / 이번 피킹 완료\n用时/소요: " + (res.minutes_worked != null ? res.minutes_worked + " 分钟/분" : "--");
       if (res.finished_pick_doc_nos && res.finished_pick_doc_nos.length > 0) {
         msg += "\n本次参与的拣货单/이번 피킹번호: " + res.finished_pick_doc_nos.join(", ");
@@ -3614,10 +3705,9 @@ async function finishPickJob(btnEl) {
       stopPickElapsedTimer();
       clearActiveJob();
       goPage("order_op_menu");
-    } else if (res && res.error === "already_completed") {
-      alert("趟次已完成 / 차수 완료");
-      clearActiveJob();
-      goPage("order_op_menu");
+    } else if (isAlreadyCompletedResponse(res)) {
+      try { stopPickCreateScan(); stopPickStartScan(); stopPickElapsedTimer(); } catch(e) {}
+      handleFinishSuccessAndExit("趟次已完成，返回上一级\n차수가 이미 완료되어 이전으로 이동", function() { goPage('order_op_menu'); });
     } else if (res && res.error === "no_open_segment") {
       alert("您未在该趟次中拣货 / 이 차수에서 작업 중이 아닙니다");
       clearActiveJob();
@@ -3897,18 +3987,17 @@ async function finishBulkJob(btnEl) {
       result_note: (document.getElementById("bulkResultNote") || {}).value || ""
     });
 
-    if (res && res.ok) {
+    if (res && res.ok && !res.already_completed) {
       // Success — exit
       _bulkStopElapsedTimer();
       alert("大货操作已完成 / 대량화물 작업 완료");
       stopBulkScan();
       clearActiveJob();
       goPage("order_op_menu");
-    } else if (res && res.error === "already_completed") {
+    } else if (isAlreadyCompletedResponse(res)) {
       _bulkStopElapsedTimer();
-      alert("任务已完成，请勿重复提交\n작업이 이미 완료되었습니다");
-      clearActiveJob();
-      goPage("order_op_menu");
+      try { stopBulkScan(); } catch(e) {}
+      handleFinishSuccessAndExit("任务已完成，已返回上一级\n작업이 이미 완료되어 이전으로 이동", function() { goPage('order_op_menu'); });
     } else if (res && res.error === "others_still_working") {
       // Not last person — kicked out
       _bulkStopElapsedTimer();
@@ -4125,16 +4214,17 @@ async function finishGenericJob(btnEl) {
       job_id: _activeJobId,
       worker_id: getWorkerId()
     });
-    if (res && res.ok) {
+    if (res && res.ok && !res.already_completed) {
       resetGenericJobState();
       clearActiveJob();
       alert("任务已完成 / 작업 완료");
       goGenericBack();
-    } else if (res && res.error === "already_completed") {
+    } else if (isAlreadyCompletedResponse(res)) {
       resetGenericJobState();
       clearActiveJob();
-      alert("任务已完成，请勿重复提交\n작업이 이미 완료되었습니다");
+      alert("任务已完成，已返回上一级\n작업이 이미 완료되어 이전으로 이동");
       goGenericBack();
+      try { checkMyActiveJob(); } catch(e) {}
     } else if (res && res.error === "others_still_working") {
       resetGenericJobState();
       clearActiveJob();
@@ -4704,14 +4794,20 @@ async function finishVerifyScan(btnEl) {
       complete_job: true,
       complete_batch: !!doCloseBatch
     });
-    if (!res || !res.ok) {
-      alert((res && (res.message || res.error)) || "完成失败 / 완료 실패");
+    if (res && res.ok && !res.already_completed) {
+      clearActiveJob();
+      _vsBatchId = "";
+      _vsLastPallet = "";
+      goPage("home");
       return;
     }
-    clearActiveJob();
-    _vsBatchId = "";
-    _vsLastPallet = "";
-    goPage("home");
+    if (isAlreadyCompletedResponse(res)) {
+      _vsBatchId = "";
+      _vsLastPallet = "";
+      handleFinishSuccessAndExit("任务已完成，已返回首页\n작업이 이미 완료되어 홈으로 돌아갑니다");
+      return;
+    }
+    alert((res && (res.message || res.error)) || "完成失败 / 완료 실패");
   });
 }
 

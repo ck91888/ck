@@ -2012,7 +2012,9 @@ route("v2_issue_handle_finish", async (body, env) => {
 
   const run = await env.DB.prepare("SELECT * FROM v2_issue_handle_runs WHERE id=?").bind(run_id).first();
   if (!run) return err("run not found", 404);
-  if (run.run_status === "completed") return err("already completed");
+  if (run.run_status === "completed") {
+    return json({ ok: true, already_completed: true, error: "already_completed", message: "处理已完成，请勿重复提交", run_id, job_id: run.job_id || '' });
+  }
 
   const t = now();
 
@@ -2784,10 +2786,10 @@ route("v2_outbound_load_finish", async (body, env) => {
   const remark = String(body.remark || "");
   const complete_job = body.complete_job === true;
 
-  // 终态幂等保护：已完成的 job 不再重复写
+  // 终态幂等保护：已完成的 job — finish 是幂等操作，返回 ok:true + already_completed:true
   const jobCheck = await env.DB.prepare("SELECT status FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
   if (jobCheck && jobCheck.status === 'completed') {
-    return json({ ok: false, error: "already_completed", message: "任务已完成，请勿重复提交" });
+    return json({ ok: true, already_completed: true, error: "already_completed", message: "任务已完成，请勿重复提交" });
   }
 
   // 自愈：关闭该 worker 全部 open segments + 重算 count
@@ -2932,11 +2934,11 @@ route("v2_outbound_stock_op_finish", async (body, env) => {
     const result_lines_json = String(body.result_lines_json || "");
     const extraResultJson = String(body.result_json || "");
 
-    // 终态幂等保护
+    // 终态幂等保护 — finish 幂等：返回 ok:true + already_completed:true
     const jobCheck = await env.DB.prepare("SELECT status, related_doc_id FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
     if (!jobCheck) return { ok: false, error: "job_not_found" };
     if (jobCheck.status === 'completed') {
-      return { ok: false, error: "already_completed", message: "任务已完成，请勿重复提交" };
+      return { ok: true, already_completed: true, error: "already_completed", message: "任务已完成，请勿重复提交" };
     }
     const order_id = jobCheck.related_doc_id || "";
 
@@ -4136,7 +4138,7 @@ route("v2_unplanned_unload_finish", async (body, env) => {
     if (!leave_only) {
       const jobCheck = await env.DB.prepare("SELECT status FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
       if (jobCheck && jobCheck.status === 'completed') {
-        return { ok: false, error: "already_completed", message: "任务已完成，请勿重复提交" };
+        return { ok: true, already_completed: true, error: "already_completed", message: "任务已完成，请勿重复提交" };
       }
     }
 
@@ -4850,7 +4852,7 @@ route("v2_inbound_job_finish", async (body, env) => {
     if (!leave_only) {
       const jobCheck = await env.DB.prepare("SELECT status, job_type FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
       if (jobCheck && jobCheck.status === 'completed') {
-        return { ok: false, error: "already_completed", message: "任务已完成，请勿重复提交" };
+        return { ok: true, already_completed: true, error: "already_completed", message: "任务已完成，请勿重复提交" };
       }
     }
 
@@ -5021,7 +5023,7 @@ route("v2_import_delivery_job_finish", async (body, env) => {
     if (!leave_only) {
       const jobCheck = await env.DB.prepare("SELECT status FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
       if (jobCheck && jobCheck.status === 'completed') {
-        return { ok: false, error: "already_completed", message: "任务已完成，请勿重复提交" };
+        return { ok: true, already_completed: true, error: "already_completed", message: "任务已完成，请勿重复提交" };
       }
     }
 
@@ -5600,7 +5602,7 @@ route("v2_ops_job_finish", async (body, env) => {
 
     const jobCheck = await env.DB.prepare("SELECT status FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
     if (jobCheck && jobCheck.status === 'completed') {
-      return { ok: false, error: "already_completed", message: "任务已完成，请勿重复提交" };
+      return { ok: true, already_completed: true, error: "already_completed", message: "任务已完成，请勿重复提交" };
     }
 
     await closeAllOpenSegs(env, job_id, worker_id, t, 'finished');
@@ -6506,7 +6508,7 @@ route("v2_pick_job_finish", async (body, env) => {
     const openSeg = await findOpenSeg(env, job_id, worker_id);
     if (!openSeg) {
       if (jobCheck.status === 'completed') {
-        return { ok: false, error: "already_completed", message: "趟次已完成，请勿重复提交" };
+        return { ok: true, already_completed: true, error: "already_completed", message: "趟次已完成，请勿重复提交" };
       }
       return { ok: false, error: "no_open_segment",
         message: "您未在该趟次中拣货，无法完成" };
@@ -6586,7 +6588,7 @@ route("v2_pick_job_finalize", async (body, env) => {
     ).bind(job_id).first();
     if (!job) return { ok: false, error: "job_not_found", message: "趟次不存在" };
     if (job.status === 'completed') {
-      return { ok: false, error: "already_completed", message: "趟次已完成，请勿重复提交" };
+      return { ok: true, already_completed: true, error: "already_completed", message: "趟次已完成，请勿重复提交" };
     }
     if (job.status === 'cancelled') {
       return { ok: false, error: "already_cancelled", message: "趟次已取消" };
@@ -6953,7 +6955,7 @@ route("v2_bulk_op_job_finish", async (body, env) => {
 
     const jobCheck = await env.DB.prepare("SELECT status FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
     if (jobCheck && jobCheck.status === 'completed') {
-      return { ok: false, error: "already_completed", message: "任务已完成，请勿重复提交" };
+      return { ok: true, already_completed: true, error: "already_completed", message: "任务已完成，请勿重复提交" };
     }
 
     // Leave-only: close segments, recalc, set awaiting_close if no one left
@@ -8185,7 +8187,7 @@ route("v2_verify_job_finish", async (body, env) => {
     const job = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
     if (!job) return { ok: false, error: "job_not_found" };
     if (job.job_type !== 'verify_scan') return { ok: false, error: "job_type_mismatch" };
-    if (job.status === 'completed') return { ok: false, error: "already_completed" };
+    if (job.status === 'completed') return { ok: true, already_completed: true, error: "already_completed", message: "核对任务已完成，请勿重复提交" };
 
     // 关闭本人 segment
     await closeAllOpenSegs(env, job_id, worker_id, t, 'finished');
