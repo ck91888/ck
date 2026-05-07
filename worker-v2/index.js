@@ -5877,7 +5877,21 @@ route("v2_attachment_upload", async (body, env, request) => {
   `).bind(id, related_doc_type, related_doc_id, attachment_category,
       file.name, fileKey, file.size, file.type, uploaded_by, t).run();
 
-  return json({ ok: true, id, file_key: fileKey });
+  // 完整附件对象供前端立即渲染（避免再请求列表）
+  const attachment = {
+    id,
+    related_doc_type,
+    related_doc_id,
+    attachment_category,
+    file_name: file.name,
+    file_key: fileKey,
+    file_size: file.size,
+    content_type: file.type,
+    mime_type: file.type,
+    uploaded_by,
+    created_at: t
+  };
+  return json({ ok: true, id, file_key: fileKey, attachment });
 });
 
 route("v2_attachment_list", async (body, env) => {

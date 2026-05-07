@@ -17,6 +17,16 @@ var _unloadPlanData = null;   // loaded plan detail (plan + lines)
 var _unloadScanner = null;
 var _currentRunId = null;
 var _photoUploadCtx = {};  // { related_doc_type, attachment_category, related_doc_id }
+// 问题点处理本轮草稿（防止上传照片后 textarea 被清空 + 缓存当前轮已上传缩略图）
+// session_photos 仅缓存"本轮上传成功"的附件 — loadIssueDetail 再渲染时与 atts 合并去重
+var _issueHandleDraft = { issue_id: '', run_id: '', feedback_note: '', session_photos: [] };
+function _resetIssueHandleDraft() {
+  _issueHandleDraft = { issue_id: '', run_id: '', feedback_note: '', session_photos: [] };
+}
+function _saveIssueFeedbackDraft() {
+  var ta = document.getElementById('issueFeedback');
+  if (ta) _issueHandleDraft.feedback_note = ta.value || '';
+}
 var _badgeScanner = null;  // Html5Qrcode instance for badge scan
 var _badgeModalScanner = null; // Html5Qrcode instance for badge change modal
 var _startInflight = false; // in-flight guard for start actions
@@ -2911,6 +2921,12 @@ function openIssue(id) {
 async function loadIssueDetail() {
   var body = document.getElementById("issueDetailBody");
   if (!body || !_currentIssueId) return;
+  // 进入新 issue 时清掉旧 draft（保留同一 issue 内的草稿）
+  if (_issueHandleDraft.issue_id && _issueHandleDraft.issue_id !== _currentIssueId) {
+    _resetIssueHandleDraft();
+  }
+  // 重渲前先把当前 textarea 的草稿落到内存（避免被覆盖）
+  _saveIssueFeedbackDraft();
   body.innerHTML = '<div class="card"><span class="muted">加载中.../로딩중...</span></div>';
 
   var res = await api({ action: "v2_issue_detail", id: _currentIssueId });
@@ -2984,10 +3000,12 @@ async function loadIssueDetail() {
         html += '</div>';
       } else {
         html += '<div class="detail-section"><label>反馈内容 / 피드백 내용 <span style="color:red;">*必填/필수</span></label>';
-        html += '<textarea id="issueFeedback" rows="3" placeholder="输入处理结果 / 처리 결과를 입력하세요 (必填/필수)"></textarea>';
+        // textarea 双向绑定 _issueHandleDraft.feedback_note：每次 input 同步到内存
+        // 上传照片若触发整页重渲，新元素由本函数末尾恢复 value
+        html += '<textarea id="issueFeedback" rows="3" placeholder="输入处理结果 / 처리 결과를 입력하세요 (必填/필수)" oninput="_saveIssueFeedbackDraft()"></textarea>';
         html += '<label>上传照片 / 사진 업로드</label>';
         html += '<div class="photo-upload" id="issuePhotos"></div>';
-        html += renderPhotoSourceBar("uploadIssueHandlePhoto('camera')", "uploadIssueHandlePhoto('album')");
+        html += renderPhotoSourceBar("uploadIssueHandlePhoto(\'camera\')", "uploadIssueHandlePhoto(\'album\')");
         html += '<button class="btn btn-danger mt-10" onclick="handleIssueFinish(this)">结束处理 / 처리 종료</button>';
         html += '<button class="btn btn-outline mt-10" onclick="handleIssueLeave(this)">暂时离开 / 일시 퇴장</button>';
         html += '</div>';
@@ -3012,6 +3030,25 @@ async function loadIssueDetail() {
   }
 
   body.innerHTML = html;
+
+  // 恢复本轮草稿：feedback_note 与本轮缩略图（避免上传后清空）
+  // - 同一 issue：保持既有 draft
+  // - 不同 issue：上面已 reset
+  _issueHandleDraft.issue_id = _currentIssueId || '';
+  if (_currentRunId) _issueHandleDraft.run_id = _currentRunId;
+  var ta = document.getElementById('issueFeedback');
+  if (ta && _issueHandleDraft.feedback_note) {
+    ta.value = _issueHandleDraft.feedback_note;
+  }
+  // 后端已通过 attachments 全量返回（含本轮的）；session_photos 中已落库的去重避免重复显示
+  if (_issueHandleDraft.session_photos && _issueHandleDraft.session_photos.length > 0) {
+    var serverIds = {};
+    atts.forEach(function(a) { if (a && a.id) serverIds[a.id] = 1; });
+    _issueHandleDraft.session_photos = _issueHandleDraft.session_photos.filter(function(a) {
+      return !(a && a.id && serverIds[a.id]);
+    });
+    renderIssueSessionPhotos();
+  }
 }
 
 async function handleIssueStart(btnEl) {
@@ -3059,6 +3096,7 @@ async function handleIssueFinish(btnEl) {
     if (res && res.ok && !res.already_completed) {
       alert("处理完成 / 처리 완료\n工时/작업시간: " + res.minutes_worked.toFixed(1) + " 分钟/분");
       clearActiveJob();
+      _resetIssueHandleDraft();
       loadIssueDetail();
     } else if (isAlreadyCompletedResponse(res)) {
       try { clearActiveJob(); } catch(e) {}
@@ -4429,6 +4467,8 @@ async function handlePhotoUpload(input) {
     related_doc_id: _photoUploadCtx.related_doc_id || '',
     attachment_category: _photoUploadCtx.attachment_category || ''
   };
+  // 上传前先把"反馈内容"草稿保存好——任何后续渲染都能恢复
+  _saveIssueFeedbackDraft();
   // 文件名去重（同一批次内）
   var seen = {};
   var deduped = files.filter(function(f) {
@@ -4438,7 +4478,7 @@ async function handlePhotoUpload(input) {
     return true;
   });
 
-  var ok = [], fail = [];
+  var ok = [], fail = [], newAtts = [];
   for (var i = 0; i < deduped.length; i++) {
     var file = deduped[i];
     var fd = new FormData();
@@ -4449,11 +4489,47 @@ async function handlePhotoUpload(input) {
     fd.append('uploaded_by', getWorkerName());
     try {
       var res = await uploadFile(fd);
-      if (res && res.ok) ok.push(file.name || ('文件' + (i + 1)));
-      else fail.push((file.name || ('文件' + (i + 1))) + ' (' + ((res && res.error) || 'error') + ')');
+      if (res && res.ok) {
+        ok.push(file.name || ('文件' + (i + 1)));
+        // 兼容老后端：没返 attachment 时本地构造一份够前端渲染的对象
+        var att = res.attachment || {
+          id: res.id || ('ATT-LOCAL-' + Date.now() + '-' + i),
+          file_key: res.file_key || '',
+          file_name: file.name || '',
+          content_type: file.type || '',
+          mime_type: file.type || '',
+          file_size: file.size || 0,
+          related_doc_type: ctx.related_doc_type,
+          related_doc_id: ctx.related_doc_id,
+          attachment_category: ctx.attachment_category,
+          created_at: new Date().toISOString()
+        };
+        newAtts.push(att);
+      } else {
+        fail.push((file.name || ('文件' + (i + 1))) + ' (' + ((res && res.error) || 'error') + ')');
+      }
     } catch (e) {
       fail.push((file.name || ('文件' + (i + 1))) + ' (' + (e && e.message || 'exception') + ')');
     }
+  }
+
+  // 问题点处理：把新附件追加到 _issueHandleDraft.session_photos
+  // - 仅在反馈表单存在（issueFeedback 元素存在）时启用 draft 缓存
+  // - 立即渲染缩略图，不再 loadIssueDetail，避免 textarea 被清空
+  var isIssueHandleUpload = (ctx.attachment_category === 'issue_handle_photo')
+    || (ctx.related_doc_type === 'issue_handle_run')
+    || (ctx.related_doc_type === 'ops_job' && _currentPage === 'issue_detail');
+  if (isIssueHandleUpload) {
+    if (_currentIssueId && _issueHandleDraft.issue_id !== _currentIssueId) {
+      // 切换到新问题点：清空旧 draft session（避免互相串）
+      _resetIssueHandleDraft();
+    }
+    _issueHandleDraft.issue_id = _currentIssueId || '';
+    _issueHandleDraft.run_id = _currentRunId || '';
+    for (var k = 0; k < newAtts.length; k++) {
+      _issueHandleDraft.session_photos.push(newAtts[k]);
+    }
+    renderIssueSessionPhotos();
   }
 
   if (fail.length === 0) {
@@ -4464,8 +4540,32 @@ async function handlePhotoUpload(input) {
     alert('成功 ' + ok.length + ' / 失败 ' + fail.length + '\n失败列表:\n' + fail.join('\n'));
   }
 
-  if (_currentPage === 'issue_detail') loadIssueDetail();
+  // 非问题点处理场景：保留原行为（issue_detail 页全量刷新一次以看到新附件）
+  // 问题点处理：上面已局部追加，不再 reload，避免清空 textarea
+  if (_currentPage === 'issue_detail' && !isIssueHandleUpload) loadIssueDetail();
   input.value = '';
+}
+
+// 渲染本轮已上传缩略图（仅本会话内的新照片，老照片由 loadIssueDetail 渲染在主附件区）
+function renderIssueSessionPhotos() {
+  var box = document.getElementById('issuePhotos');
+  if (!box) return;
+  var photos = _issueHandleDraft.session_photos || [];
+  if (photos.length === 0) { box.innerHTML = ''; return; }
+  var html = '';
+  for (var i = 0; i < photos.length; i++) {
+    var att = photos[i];
+    var url = att.file_key ? fileUrl(att.file_key) : '';
+    var isImage = (att.content_type || att.mime_type || '').indexOf('image/') === 0;
+    if (isImage && url) {
+      html += '<img class="photo-thumb" src="' + esc(url) + '" alt="' + esc(att.file_name || '') + '" onclick="showLightbox(\'' + esc(url) + '\')">';
+    } else if (url) {
+      html += '<a class="btn btn-outline btn-sm" style="margin:0 6px 6px 0;" href="' + esc(url) + '" target="_blank" rel="noopener">📎 ' + esc(att.file_name || '附件') + '</a>';
+    } else {
+      html += '<span class="muted" style="font-size:12px;margin-right:6px;">' + esc(att.file_name || '已上传') + '</span>';
+    }
+  }
+  box.innerHTML = html;
 }
 
 function showLightbox(url) {
