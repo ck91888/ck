@@ -589,6 +589,35 @@ async function closeAllOpenSegs(env, jobId, workerId, t, reason) {
   return rows.length;
 }
 
+// 关闭某 job 下所有未退出的 worker segment（不限当前 worker，job 完成时统一收口）
+// 返回关闭数量；自动重算 active_worker_count（必为 0）
+async function closeOpenWorkerSegmentsForJob(env, jobId, t, reason) {
+  if (!jobId) return 0;
+  const closeAt = t || now();
+  const closeReason = String(reason || 'job_completed_auto_close');
+  const segs = await env.DB.prepare(
+    "SELECT id, joined_at FROM v2_ops_job_workers WHERE job_id=? AND left_at=''"
+  ).bind(jobId).all();
+  const rows = segs.results || [];
+  for (const seg of rows) {
+    const joinedMs = Date.parse(seg.joined_at || '');
+    const leftMs = Date.parse(closeAt);
+    let minutes = 0;
+    if (Number.isFinite(joinedMs) && Number.isFinite(leftMs)) {
+      minutes = Math.max(0, Math.round((leftMs - joinedMs) / 60000 * 10) / 10);
+    }
+    await env.DB.prepare(
+      "UPDATE v2_ops_job_workers SET left_at=?, minutes_worked=?, leave_reason=? WHERE id=?"
+    ).bind(closeAt, minutes, closeReason, seg.id).run();
+  }
+  if (rows.length > 0) {
+    await env.DB.prepare(
+      "UPDATE v2_ops_jobs SET active_worker_count=0, updated_at=? WHERE id=?"
+    ).bind(closeAt, jobId).run();
+  }
+  return rows.length;
+}
+
 // 按 v2_ops_job_workers 汇总实际工时（人时累加，多人并行不抵扣）
 // - closed segment：直接用 minutes_worked；若为 0/缺失则用 left_at-joined_at 兜底
 // - open segment：用 fallbackEndAt - joined_at 计算（不写库）；如果传 closeOpen=true 则同步关闭
@@ -2787,9 +2816,11 @@ route("v2_outbound_load_finish", async (body, env) => {
   const complete_job = body.complete_job === true;
 
   // 终态幂等保护：已完成的 job — finish 是幂等操作，返回 ok:true + already_completed:true
+  // 同时兜底关闭可能残留的 open segment（即首次完成时漏关也能在重提交时修复）
   const jobCheck = await env.DB.prepare("SELECT status FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
   if (jobCheck && jobCheck.status === 'completed') {
-    return json({ ok: true, already_completed: true, error: "already_completed", message: "任务已完成，请勿重复提交" });
+    const cleaned = await closeOpenWorkerSegmentsForJob(env, job_id, now(), 'already_completed_cleanup');
+    return json({ ok: true, already_completed: true, error: "already_completed", cleaned_open_segments: cleaned, message: "任务已完成" });
   }
 
   // 自愈：关闭该 worker 全部 open segments + 重算 count
@@ -2814,6 +2845,8 @@ route("v2_outbound_load_finish", async (body, env) => {
   // Complete job if requested — 基于 realCount 判断
   if (complete_job) {
     if (realCount <= 0) {
+      // 防御性收口：关闭所有遗留 open segment（多人任务即使 realCount=0 也确保 left_at 全部写入）
+      await closeOpenWorkerSegmentsForJob(env, job_id, t, 'job_completed');
       await env.DB.prepare(
         "UPDATE v2_ops_jobs SET status='completed', updated_at=? WHERE id=?"
       ).bind(t, job_id).run();
@@ -2934,11 +2967,12 @@ route("v2_outbound_stock_op_finish", async (body, env) => {
     const result_lines_json = String(body.result_lines_json || "");
     const extraResultJson = String(body.result_json || "");
 
-    // 终态幂等保护 — finish 幂等：返回 ok:true + already_completed:true
+    // 终态幂等保护 — finish 幂等：返回 ok:true + already_completed:true；兜底关闭遗留 open segment
     const jobCheck = await env.DB.prepare("SELECT status, related_doc_id FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
     if (!jobCheck) return { ok: false, error: "job_not_found" };
     if (jobCheck.status === 'completed') {
-      return { ok: true, already_completed: true, error: "already_completed", message: "任务已完成，请勿重复提交" };
+      const cleaned = await closeOpenWorkerSegmentsForJob(env, job_id, t, 'already_completed_cleanup');
+      return { ok: true, already_completed: true, error: "already_completed", cleaned_open_segments: cleaned, message: "任务已完成" };
     }
     const order_id = jobCheck.related_doc_id || "";
 
@@ -2966,6 +3000,8 @@ route("v2_outbound_stock_op_finish", async (body, env) => {
     const complete_job = body.complete_job !== false; // 默认完成
 
     if (complete_job && realCount <= 0) {
+      // 防御性收口：关闭所有遗留 open segment
+      await closeOpenWorkerSegmentsForJob(env, job_id, t, 'job_completed');
       // 关闭 job
       await env.DB.prepare(
         "UPDATE v2_ops_jobs SET status='completed', shared_result_json=?, updated_at=? WHERE id=?"
@@ -4138,7 +4174,15 @@ route("v2_unplanned_unload_finish", async (body, env) => {
     if (!leave_only) {
       const jobCheck = await env.DB.prepare("SELECT status FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
       if (jobCheck && jobCheck.status === 'completed') {
-        return { ok: true, already_completed: true, error: "already_completed", message: "任务已完成，请勿重复提交" };
+        const cleaned = await closeOpenWorkerSegmentsForJob(env, job_id, t, 'already_completed_cleanup');
+        // feedback 兜底 — 如果首次完成时未推进 feedback 状态，已完成 job 的 feedback 也强制推进
+        const _job = await env.DB.prepare("SELECT related_doc_type, related_doc_id FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
+        if (_job && _job.related_doc_type === 'field_feedback' && _job.related_doc_id) {
+          await env.DB.prepare(
+            "UPDATE v2_field_feedbacks SET status='unloaded_pending_info', updated_at=? WHERE id=? AND status='field_working'"
+          ).bind(t, _job.related_doc_id).run();
+        }
+        return { ok: true, already_completed: true, error: "already_completed", cleaned_open_segments: cleaned, message: "任务已完成" };
       }
     }
 
@@ -4170,13 +4214,13 @@ route("v2_unplanned_unload_finish", async (body, env) => {
         JSON.stringify({ result_lines, diff_note, remark }),
         JSON.stringify(result_lines), diff_note, worker_id, t).run();
 
+    // 防御性收口 — 关闭所有遗留 open segment（多人卸货必须确保所有人 left_at 写入）
+    await closeOpenWorkerSegmentsForJob(env, job_id, t, 'job_completed');
+
     const sharedResult = JSON.stringify({ result_lines, diff_note, remark });
     await env.DB.prepare(
       "UPDATE v2_ops_jobs SET status='completed', shared_result_json=?, active_worker_count=0, updated_at=? WHERE id=?"
     ).bind(sharedResult, t, job_id).run();
-    await env.DB.prepare(
-      "UPDATE v2_ops_job_workers SET left_at=?, leave_reason='job_completed' WHERE job_id=? AND left_at=''"
-    ).bind(t, job_id).run();
 
     const fb_id = (job.related_doc_type === 'field_feedback') ? job.related_doc_id : '';
     if (fb_id) {
@@ -4205,8 +4249,24 @@ route("v2_unplanned_unload_active_list", async (body, env) => {
     "SELECT * FROM v2_field_feedbacks WHERE feedback_type='unplanned_unload' AND status='field_working' ORDER BY created_at DESC LIMIT 100"
   ).all();
   const items = [];
+  const _now = now();
   for (const fb of (fbs.results || [])) {
     const jobId = fb.related_doc_id || '';
+    // 防御性自愈：如果反馈关联的 job 已 completed，但 feedback.status 仍 field_working
+    // → 强制把 feedback 推进到 unloaded_pending_info；不再加入"当前计划外卸货中"列表
+    if (jobId) {
+      const jobRow = await env.DB.prepare(
+        "SELECT status FROM v2_ops_jobs WHERE id=?"
+      ).bind(jobId).first();
+      if (jobRow && jobRow.status === 'completed') {
+        // 顺手关掉残留 open segment 并推进 feedback
+        await closeOpenWorkerSegmentsForJob(env, jobId, _now, 'feedback_self_heal');
+        await env.DB.prepare(
+          "UPDATE v2_field_feedbacks SET status='unloaded_pending_info', updated_at=? WHERE id=? AND status='field_working'"
+        ).bind(_now, fb.id).run();
+        continue;
+      }
+    }
     let activeCount = 0, workerNames = [], totalWorkerCount = 0, allWorkerNames = [];
     if (jobId) {
       const ws = await env.DB.prepare(
@@ -4482,7 +4542,8 @@ route("v2_unload_job_finish", async (body, env) => {
   if (!leave_only) {
     const jobCheck = await env.DB.prepare("SELECT status FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
     if (jobCheck && jobCheck.status === 'completed') {
-      return { ok: false, error: "already_completed", message: "任务已完成，请勿重复提交" };
+      const cleaned = await closeOpenWorkerSegmentsForJob(env, job_id, t, 'already_completed_cleanup');
+      return { ok: true, already_completed: true, error: "already_completed", cleaned_open_segments: cleaned, message: "任务已完成" };
     }
   }
 
@@ -4566,16 +4627,12 @@ route("v2_unload_job_finish", async (body, env) => {
       }
     }
 
-    // 4f. Complete job
+    // 4f. Complete job — 先关闭所有遗留 open segment，再标记完成
+    await closeOpenWorkerSegmentsForJob(env, job_id, t, 'job_completed');
     const sharedResult = JSON.stringify({ box_count, pallet_count, remark, result_lines, diff_note, has_diff: hasDiff });
     await env.DB.prepare(
-      "UPDATE v2_ops_jobs SET status='completed', shared_result_json=?, updated_at=? WHERE id=?"
+      "UPDATE v2_ops_jobs SET status='completed', shared_result_json=?, active_worker_count=0, updated_at=? WHERE id=?"
     ).bind(sharedResult, t, job_id).run();
-
-    // Close any remaining open worker segments
-    await env.DB.prepare(
-      "UPDATE v2_ops_job_workers SET left_at=?, leave_reason='job_completed' WHERE job_id=? AND left_at=''"
-    ).bind(t, job_id).run();
 
     // Update inbound plan status
     if (plan_id) {
@@ -4852,7 +4909,8 @@ route("v2_inbound_job_finish", async (body, env) => {
     if (!leave_only) {
       const jobCheck = await env.DB.prepare("SELECT status, job_type FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
       if (jobCheck && jobCheck.status === 'completed') {
-        return { ok: true, already_completed: true, error: "already_completed", message: "任务已完成，请勿重复提交" };
+        const cleaned = await closeOpenWorkerSegmentsForJob(env, job_id, t, 'already_completed_cleanup');
+        return { ok: true, already_completed: true, error: "already_completed", cleaned_open_segments: cleaned, message: "任务已完成" };
       }
     }
 
@@ -4903,11 +4961,10 @@ route("v2_inbound_job_finish", async (body, env) => {
       ).bind(result_id, job_id, remark, JSON.stringify(resultData),
              JSON.stringify(isReturnJob ? [] : result_lines), worker_id, t).run();
 
+      // 防御性收口：先关闭所有遗留 open segment，再标记完成
+      await closeOpenWorkerSegmentsForJob(env, job_id, t, 'job_completed');
       await env.DB.prepare(
-        "UPDATE v2_ops_jobs SET status='completed', updated_at=? WHERE id=?"
-      ).bind(t, job_id).run();
-      await env.DB.prepare(
-        "UPDATE v2_ops_job_workers SET left_at=?, leave_reason='job_completed' WHERE job_id=? AND left_at=''"
+        "UPDATE v2_ops_jobs SET status='completed', active_worker_count=0, updated_at=? WHERE id=?"
       ).bind(t, job_id).run();
 
       if (!isReturnJob && jobRow.related_doc_id) {
@@ -5023,7 +5080,8 @@ route("v2_import_delivery_job_finish", async (body, env) => {
     if (!leave_only) {
       const jobCheck = await env.DB.prepare("SELECT status FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
       if (jobCheck && jobCheck.status === 'completed') {
-        return { ok: true, already_completed: true, error: "already_completed", message: "任务已完成，请勿重复提交" };
+        const cleaned = await closeOpenWorkerSegmentsForJob(env, job_id, t, 'already_completed_cleanup');
+        return { ok: true, already_completed: true, error: "already_completed", cleaned_open_segments: cleaned, message: "任务已完成" };
       }
     }
 
@@ -5055,11 +5113,10 @@ route("v2_import_delivery_job_finish", async (body, env) => {
         "INSERT INTO v2_ops_job_results(id, job_id, box_count, pallet_count, remark, result_json, result_lines_json, created_by, created_at) VALUES(?,?,0,0,?,?,?,?,?)"
       ).bind(result_id, job_id, remark, JSON.stringify(resultData), '[]', worker_id, t).run();
 
+      // 防御性收口：先关闭所有遗留 open segment，再标记完成
+      await closeOpenWorkerSegmentsForJob(env, job_id, t, 'job_completed');
       await env.DB.prepare(
-        "UPDATE v2_ops_jobs SET status='completed', updated_at=? WHERE id=?"
-      ).bind(t, job_id).run();
-      await env.DB.prepare(
-        "UPDATE v2_ops_job_workers SET left_at=?, leave_reason='job_completed' WHERE job_id=? AND left_at=''"
+        "UPDATE v2_ops_jobs SET status='completed', active_worker_count=0, updated_at=? WHERE id=?"
       ).bind(t, job_id).run();
 
       return { ok: true, result_id };
@@ -5602,7 +5659,8 @@ route("v2_ops_job_finish", async (body, env) => {
 
     const jobCheck = await env.DB.prepare("SELECT status FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
     if (jobCheck && jobCheck.status === 'completed') {
-      return { ok: true, already_completed: true, error: "already_completed", message: "任务已完成，请勿重复提交" };
+      const cleaned = await closeOpenWorkerSegmentsForJob(env, job_id, t, 'already_completed_cleanup');
+      return { ok: true, already_completed: true, error: "already_completed", cleaned_open_segments: cleaned, message: "任务已完成" };
     }
 
     await closeAllOpenSegs(env, job_id, worker_id, t, 'finished');
@@ -5623,11 +5681,10 @@ route("v2_ops_job_finish", async (body, env) => {
           String(body.remark || ""), JSON.stringify(shared), worker_id, t).run();
     }
 
+    // 防御性收口：再关一次（避免 closeAllOpenSegs 之后还有别人 open）
+    await closeOpenWorkerSegmentsForJob(env, job_id, t, 'job_completed');
     await env.DB.prepare(
       "UPDATE v2_ops_jobs SET status='completed', active_worker_count=0, updated_at=? WHERE id=?"
-    ).bind(t, job_id).run();
-    await env.DB.prepare(
-      "UPDATE v2_ops_job_workers SET left_at=?, leave_reason='job_completed' WHERE job_id=? AND left_at=''"
     ).bind(t, job_id).run();
 
     return { ok: true };
@@ -5673,17 +5730,21 @@ route("v2_ops_my_active_job", async (body, env) => {
      ORDER BY w.joined_at DESC LIMIT 1`
   ).bind(worker_id).first();
 
-  // 检测该员工的"跨天未退出"或"任务已完成但未退出"的脏段（用于登录时提示）
+  // 检测该员工的"跨天未退出"或"任务已完成但未退出"的脏段
+  // 任务已完成的脏段直接自动关闭（系统数据残留，无需员工/主管干预）
+  // 跨天未退出仍提示员工/主管
   const today = kstToday();
   const allOpen = await env.DB.prepare(
     `SELECT w.id AS segment_id, w.job_id, w.joined_at, w.worker_name,
-            j.status AS job_status, j.job_type, j.flow_stage, j.related_doc_id
+            j.status AS job_status, j.job_type, j.flow_stage, j.related_doc_id, j.updated_at AS job_updated_at
        FROM v2_ops_job_workers w
        JOIN v2_ops_jobs j ON j.id = w.job_id
       WHERE w.worker_id=? AND w.left_at=''
       ORDER BY w.joined_at ASC`
   ).bind(worker_id).all();
   const stale_segments = [];
+  const auto_cleaned_segments = [];
+  const _t = now();
   for (const r of (allOpen.results || [])) {
     let joinedKstDate = '';
     if (r.joined_at) {
@@ -5695,10 +5756,31 @@ route("v2_ops_my_active_job", async (body, env) => {
           String(dt.getUTCDate()).padStart(2, '0');
       }
     }
-    let reason = '';
-    if (r.job_status === 'completed') reason = '任务已完成但未退出';
-    else if (joinedKstDate && joinedKstDate !== today) reason = '跨天未退出';
-    if (reason) {
+    if (r.job_status === 'completed') {
+      // 自动收口：用 job.updated_at 兜底（最接近完成时刻），否则用 now
+      const closeAt = r.job_updated_at || _t;
+      const joinedMs = Date.parse(r.joined_at || '');
+      const leftMs = Date.parse(closeAt);
+      let minutes = 0;
+      if (Number.isFinite(joinedMs) && Number.isFinite(leftMs)) {
+        minutes = Math.max(0, Math.round((leftMs - joinedMs) / 60000 * 10) / 10);
+      }
+      await env.DB.prepare(
+        "UPDATE v2_ops_job_workers SET left_at=?, minutes_worked=?, leave_reason='auto_cleanup_completed_job' WHERE id=?"
+      ).bind(closeAt, minutes, r.segment_id).run();
+      // 同步重算 active_worker_count（防御性，仍应为 0）
+      await env.DB.prepare(
+        "UPDATE v2_ops_jobs SET active_worker_count=0, updated_at=? WHERE id=?"
+      ).bind(_t, r.job_id).run();
+      auto_cleaned_segments.push({
+        segment_id: r.segment_id,
+        job_id: r.job_id,
+        job_type: r.job_type || '',
+        related_doc_id: r.related_doc_id || ''
+      });
+      continue;
+    }
+    if (joinedKstDate && joinedKstDate !== today) {
       stale_segments.push({
         segment_id: r.segment_id,
         job_id: r.job_id,
@@ -5707,17 +5789,17 @@ route("v2_ops_my_active_job", async (body, env) => {
         job_type: r.job_type || '',
         flow_stage: r.flow_stage || '',
         related_doc_id: r.related_doc_id || '',
-        stale_reason: reason
+        stale_reason: '跨天未退出'
       });
     }
   }
 
-  if (!seg) return json({ ok: true, active: false, stale_segments });
+  if (!seg) return json({ ok: true, active: false, stale_segments, auto_cleaned_segments });
 
   const t = now();
   await recalcActiveCount(env, seg.job_id, t);
   const job = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(seg.job_id).first();
-  return json({ ok: true, active: true, segment: seg, job, stale_segments });
+  return json({ ok: true, active: true, segment: seg, job, stale_segments, auto_cleaned_segments });
 });
 
 // Resume parent job after interrupt
@@ -6508,7 +6590,8 @@ route("v2_pick_job_finish", async (body, env) => {
     const openSeg = await findOpenSeg(env, job_id, worker_id);
     if (!openSeg) {
       if (jobCheck.status === 'completed') {
-        return { ok: true, already_completed: true, error: "already_completed", message: "趟次已完成，请勿重复提交" };
+        const cleaned = await closeOpenWorkerSegmentsForJob(env, job_id, t, 'already_completed_cleanup');
+        return { ok: true, already_completed: true, error: "already_completed", cleaned_open_segments: cleaned, message: "趟次已完成" };
       }
       return { ok: false, error: "no_open_segment",
         message: "您未在该趟次中拣货，无法完成" };
@@ -6588,7 +6671,8 @@ route("v2_pick_job_finalize", async (body, env) => {
     ).bind(job_id).first();
     if (!job) return { ok: false, error: "job_not_found", message: "趟次不存在" };
     if (job.status === 'completed') {
-      return { ok: true, already_completed: true, error: "already_completed", message: "趟次已完成，请勿重复提交" };
+      const cleaned = await closeOpenWorkerSegmentsForJob(env, job_id, t, 'already_completed_cleanup');
+      return { ok: true, already_completed: true, error: "already_completed", cleaned_open_segments: cleaned, message: "趟次已完成" };
     }
     if (job.status === 'cancelled') {
       return { ok: false, error: "already_cancelled", message: "趟次已取消" };
@@ -6955,7 +7039,8 @@ route("v2_bulk_op_job_finish", async (body, env) => {
 
     const jobCheck = await env.DB.prepare("SELECT status FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
     if (jobCheck && jobCheck.status === 'completed') {
-      return { ok: true, already_completed: true, error: "already_completed", message: "任务已完成，请勿重复提交" };
+      const cleaned = await closeOpenWorkerSegmentsForJob(env, job_id, t, 'already_completed_cleanup');
+      return { ok: true, already_completed: true, error: "already_completed", cleaned_open_segments: cleaned, message: "任务已完成" };
     }
 
     // Leave-only: close segments, recalc, set awaiting_close if no one left
@@ -7031,11 +7116,10 @@ route("v2_bulk_op_job_finish", async (body, env) => {
       VALUES(?,?,?,?,?,?,?)
     `).bind(result_id, job_id, String(body.remark || ""), JSON.stringify(resultData), '[]', worker_id, t).run();
 
+    // 防御性收口：先关闭所有遗留 open segment，再标记完成
+    await closeOpenWorkerSegmentsForJob(env, job_id, t, 'job_completed');
     await env.DB.prepare(
       "UPDATE v2_ops_jobs SET status='completed', active_worker_count=0, updated_at=? WHERE id=?"
-    ).bind(t, job_id).run();
-    await env.DB.prepare(
-      "UPDATE v2_ops_job_workers SET left_at=?, leave_reason='job_completed' WHERE job_id=? AND left_at=''"
     ).bind(t, job_id).run();
 
     // 口径联动：大货操作完成 → 通过强关联回写出库单（首次覆盖 / reopen 累加）
@@ -7177,9 +7261,13 @@ route("v2_dashboard_realtime_overview", async (body, env) => {
   if (!isAuth(body, env)) return err("unauthorized", 401);
   const today = kstToday();
 
-  // 1. 当前在岗人数 = distinct worker_id with open segments (left_at='')
+  // 1. 当前在岗人数 = distinct worker_id with open segments AND job 仍处于活跃状态
+  // 已 completed/cancelled 的 job 即使有残留 left_at='' 也不算在岗
   const activeWorkers = await env.DB.prepare(
-    "SELECT COUNT(DISTINCT worker_id) as c FROM v2_ops_job_workers WHERE left_at=''"
+    `SELECT COUNT(DISTINCT w.worker_id) as c
+       FROM v2_ops_job_workers w
+       JOIN v2_ops_jobs j ON j.id = w.job_id
+      WHERE w.left_at='' AND j.status IN ('pending','working','awaiting_close')`
   ).first();
 
   // 2. 今日上岗人数 = distinct worker_id from login events today
@@ -7702,6 +7790,90 @@ route("v2_admin_force_worker_leave", async (body, env) => {
 });
 
 // =====================================================
+// 一次性脏数据清理：v2_ops_jobs.status='completed' 但 v2_ops_job_workers.left_at='' 的残留段
+// 原因：历史 finish action 未统一关闭所有人员段；老脏数据不会自动消失
+// 仅 ADMINKEY 可调；自动按 job.updated_at（首选）或 now 兜底关闭
+// =====================================================
+route("v2_admin_cleanup_completed_open_segments", async (body, env) => {
+  if (!isAdmin(body, env)) return err("unauthorized_admin_only", 401);
+  const dryRun = body.dry_run === true;
+  const t = now();
+  const rs = await env.DB.prepare(`
+    SELECT w.id AS segment_id, w.job_id, w.worker_id, w.worker_name, w.joined_at,
+           j.status AS job_status, j.job_type, j.related_doc_id, j.updated_at AS job_updated_at
+      FROM v2_ops_job_workers w
+      JOIN v2_ops_jobs j ON j.id = w.job_id
+     WHERE w.left_at='' AND j.status='completed'
+     ORDER BY w.joined_at ASC
+  `).all();
+  const rows = rs.results || [];
+  const examples = [];
+  const touchedJobIds = new Set();
+  let cleaned = 0;
+  for (const r of rows) {
+    const closeAt = r.job_updated_at || t;
+    const joinedMs = Date.parse(r.joined_at || '');
+    const leftMs = Date.parse(closeAt);
+    let minutes = 0;
+    if (Number.isFinite(joinedMs) && Number.isFinite(leftMs)) {
+      minutes = Math.max(0, Math.round((leftMs - joinedMs) / 60000 * 10) / 10);
+    }
+    if (!dryRun) {
+      await env.DB.prepare(
+        "UPDATE v2_ops_job_workers SET left_at=?, minutes_worked=?, leave_reason='admin_cleanup_completed_job' WHERE id=?"
+      ).bind(closeAt, minutes, r.segment_id).run();
+      touchedJobIds.add(r.job_id);
+    }
+    cleaned++;
+    if (examples.length < 20) {
+      examples.push({
+        segment_id: r.segment_id,
+        job_id: r.job_id,
+        job_type: r.job_type,
+        related_doc_id: r.related_doc_id || '',
+        worker_id: r.worker_id || '',
+        worker_name: r.worker_name || '',
+        joined_at: r.joined_at || '',
+        will_close_at: closeAt,
+        will_minutes: minutes
+      });
+    }
+  }
+  // 同步把这些 job 的 active_worker_count 修为 0
+  if (!dryRun) {
+    for (const jid of touchedJobIds) {
+      await env.DB.prepare(
+        "UPDATE v2_ops_jobs SET active_worker_count=0, updated_at=? WHERE id=?"
+      ).bind(t, jid).run();
+    }
+  }
+  // 兜底：把所有"反馈仍 field_working 但关联 job 已 completed"的反馈推进到 unloaded_pending_info
+  let feedbackHealed = 0;
+  if (!dryRun) {
+    const fbRs = await env.DB.prepare(`
+      SELECT fb.id AS fb_id
+        FROM v2_field_feedbacks fb
+        JOIN v2_ops_jobs j ON j.id = fb.related_doc_id
+       WHERE fb.feedback_type='unplanned_unload' AND fb.status='field_working' AND j.status='completed'
+    `).all();
+    for (const fb of (fbRs.results || [])) {
+      await env.DB.prepare(
+        "UPDATE v2_field_feedbacks SET status='unloaded_pending_info', updated_at=? WHERE id=? AND status='field_working'"
+      ).bind(t, fb.fb_id).run();
+      feedbackHealed++;
+    }
+  }
+  return json({
+    ok: true,
+    dry_run: dryRun,
+    cleaned_count: cleaned,
+    affected_job_count: touchedJobIds.size,
+    feedback_healed_count: feedbackHealed,
+    examples
+  });
+});
+
+// =====================================================
 // CORRECTION REQUESTS — 看板主管修正申请（不直接改业务数据）
 // =====================================================
 route("v2_correction_request_create", async (body, env) => {
@@ -8187,16 +8359,17 @@ route("v2_verify_job_finish", async (body, env) => {
     const job = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
     if (!job) return { ok: false, error: "job_not_found" };
     if (job.job_type !== 'verify_scan') return { ok: false, error: "job_type_mismatch" };
-    if (job.status === 'completed') return { ok: true, already_completed: true, error: "already_completed", message: "核对任务已完成，请勿重复提交" };
+    if (job.status === 'completed') {
+      const cleaned = await closeOpenWorkerSegmentsForJob(env, job_id, t, 'already_completed_cleanup');
+      return { ok: true, already_completed: true, error: "already_completed", cleaned_open_segments: cleaned, message: "核对任务已完成" };
+    }
 
     // 关闭本人 segment
     await closeAllOpenSegs(env, job_id, worker_id, t, 'finished');
 
     if (complete_job) {
-      // 关闭所有 open segments
-      await env.DB.prepare(
-        "UPDATE v2_ops_job_workers SET left_at=?, leave_reason='job_completed' WHERE job_id=? AND left_at=''"
-      ).bind(t, job_id).run();
+      // 防御性收口 — 关闭所有遗留 open segment
+      await closeOpenWorkerSegmentsForJob(env, job_id, t, 'job_completed');
 
       // 写入结果摘要
       const batch_id = job.related_doc_id || '';
