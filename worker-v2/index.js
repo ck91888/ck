@@ -8157,23 +8157,51 @@ route("v2_verify_batch_detail", async (body, env) => {
   const batch = await env.DB.prepare("SELECT * FROM v2_verify_batches WHERE id=?").bind(id).first();
   if (!batch) return err("not found", 404);
 
+  // 默认拉满 5000 条流水，足够覆盖单次核对场景；如果后续超大批次再做 chunk
+  const logsLimit = Math.max(500, Math.min(20000, Number(body.scan_logs_limit || 5000)));
   const itemsRs = await env.DB.prepare(
     "SELECT * FROM v2_verify_batch_items WHERE batch_id=? ORDER BY created_at"
   ).bind(id).all();
   const logsRs = await env.DB.prepare(
-    "SELECT * FROM v2_verify_scan_logs WHERE batch_id=? ORDER BY scanned_at DESC LIMIT 500"
-  ).bind(id).all();
+    "SELECT * FROM v2_verify_scan_logs WHERE batch_id=? ORDER BY scanned_at DESC LIMIT ?"
+  ).bind(id, logsLimit).all();
   // 每个 barcode 已扫 ok 次数
   const okByBcRs = await env.DB.prepare(
     "SELECT barcode, COUNT(*) AS c FROM v2_verify_scan_logs WHERE batch_id=? AND scan_result='ok' GROUP BY barcode"
   ).bind(id).all();
+  // 流水真实总条数（用于前端判断是否截断）
+  const totalLogsRs = await env.DB.prepare(
+    "SELECT COUNT(*) AS c FROM v2_verify_scan_logs WHERE batch_id=?"
+  ).bind(id).first();
+  const total_scan_logs = Number((totalLogsRs && totalLogsRs.c) || 0);
 
   const itemsRaw = itemsRs.results || [];
   const logs = logsRs.results || [];
   const okByBc = {};
   (okByBcRs.results || []).forEach(r => { okByBc[r.barcode] = Number(r.c || 0); });
 
-  // 每个 item 的状态
+  // 预聚合：每个 barcode 的托盘集合 / 最后扫描时间&人
+  const barcodeMeta = {};
+  for (const l of logs) {
+    if (!l || !l.barcode) continue;
+    const m = barcodeMeta[l.barcode] || (barcodeMeta[l.barcode] = {
+      pallets: new Set(),
+      pallet_scanned: {},  // pallet_no -> ok_count
+      last_scanned_at: '', last_scanned_by: ''
+    });
+    if (l.pallet_no) m.pallets.add(l.pallet_no);
+    if (l.scan_result === 'ok') {
+      const p = l.pallet_no || '';
+      m.pallet_scanned[p] = (m.pallet_scanned[p] || 0) + 1;
+    }
+    // logs 已按 scanned_at DESC，第一条即最近
+    if (!m.last_scanned_at) {
+      m.last_scanned_at = l.scanned_at || '';
+      m.last_scanned_by = l.worker_name || l.worker_id || '';
+    }
+  }
+
+  // 每个 item 的状态（计划内条码）
   let planned_total_box_count = 0, scanned_ok_total_count = 0;
   let shortage_count = 0, overflow_count_items = 0, ok_items = 0, not_scanned_count = 0;
   const items = itemsRaw.map(it => {
@@ -8186,6 +8214,7 @@ route("v2_verify_batch_detail", async (body, env) => {
     else if (ok < planned) { st = 'shortage'; shortage_count++; }
     else if (ok === planned) { st = 'ok'; ok_items++; }
     else { st = 'overflow'; overflow_count_items++; }
+    const meta = barcodeMeta[it.barcode] || null;
     return {
       id: it.id,
       barcode: it.barcode,
@@ -8193,7 +8222,10 @@ route("v2_verify_batch_detail", async (body, env) => {
       planned_box_count: planned,
       scanned_ok_count: ok,
       diff_count: ok - planned,
-      status: st
+      status: st,
+      pallet_numbers: meta ? Array.from(meta.pallets).sort() : [],
+      last_scanned_at: meta ? meta.last_scanned_at : '',
+      last_scanned_by: meta ? meta.last_scanned_by : ''
     };
   });
 
@@ -8208,23 +8240,66 @@ route("v2_verify_batch_detail", async (body, env) => {
     else if (l.scan_result === 'not_found') log_not_found++;
     else if (l.scan_result === 'duplicate') log_duplicate++;
     const p = l.pallet_no || '(未填/미기입)';
-    if (!palletMap[p]) palletMap[p] = { pallet_no: p, scanned_ok_count: 0, abnormal_count: 0 };
+    if (!palletMap[p]) palletMap[p] = {
+      pallet_no: p, scanned_ok_count: 0, abnormal_count: 0,
+      not_found_count: 0, overflow_count: 0, duplicate_count: 0
+    };
     if (l.scan_result === 'ok') palletMap[p].scanned_ok_count++;
-    else palletMap[p].abnormal_count++;
+    else {
+      palletMap[p].abnormal_count++;
+      if (l.scan_result === 'not_found') palletMap[p].not_found_count++;
+      else if (l.scan_result === 'overflow') palletMap[p].overflow_count++;
+      else if (l.scan_result === 'duplicate') palletMap[p].duplicate_count++;
+    }
     const matched = itemMap[l.barcode];
     return { ...l, customer_name: matched ? (matched.customer_name || '') : '' };
   });
-  const pallet_summary = Object.values(palletMap).sort((a, b) =>
-    (b.scanned_ok_count + b.abnormal_count) - (a.scanned_ok_count + a.abnormal_count)
-  );
+  // 异常托盘排前面；同档按总扫描数降序
+  const pallet_summary = Object.values(palletMap).sort((a, b) => {
+    if (b.abnormal_count !== a.abnormal_count) return b.abnormal_count - a.abnormal_count;
+    return (b.scanned_ok_count + b.abnormal_count) - (a.scanned_ok_count + a.abnormal_count);
+  });
 
-  const abnormal_count = shortage_count + overflow_count_items + log_not_found;
+  // 计划外（非本批次）条码合成行 — 让"按条码核对"也能看到 not_found
+  const extraMap = {};
+  for (const l of enrichedLogs) {
+    if (l.scan_result !== 'not_found') continue;
+    if (!l.barcode) continue;
+    const k = l.barcode;
+    if (!extraMap[k]) {
+      extraMap[k] = {
+        id: 'EXTRA-' + k,
+        barcode: k,
+        customer_name: '',
+        planned_box_count: 0,
+        scanned_ok_count: 0,
+        not_found_count: 0,
+        diff_count: 0,
+        status: 'not_in_batch',
+        pallet_numbers: new Set(),
+        last_scanned_at: l.scanned_at || '',
+        last_scanned_by: l.worker_name || l.worker_id || ''
+      };
+    }
+    extraMap[k].not_found_count++;
+    if (l.pallet_no) extraMap[k].pallet_numbers.add(l.pallet_no);
+  }
+  const extra_items = Object.values(extraMap).map(x => Object.assign({}, x, {
+    pallet_numbers: Array.from(x.pallet_numbers).sort(),
+    diff_count: x.not_found_count  // 视为正向超扫量，便于前端展示
+  }));
+  const not_in_batch_count = extra_items.length;
+
+  const abnormal_count = shortage_count + overflow_count_items + log_not_found + not_scanned_count;
 
   return json({
     ok: true,
     batch,
     items,
+    extra_items,
     scan_logs: enrichedLogs,
+    total_scan_logs,
+    scan_logs_truncated: total_scan_logs > enrichedLogs.length,
     summary: {
       planned_total_box_count,
       scanned_ok_total_count,
@@ -8233,6 +8308,7 @@ route("v2_verify_batch_detail", async (body, env) => {
       shortage_count,
       overflow_count: overflow_count_items,
       not_scanned_count,
+      not_in_batch_count,
       // 扫码流水级统计
       log_ok_count: log_ok,
       log_overflow_count: log_overflow,

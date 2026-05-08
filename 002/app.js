@@ -4172,17 +4172,80 @@ function openVerifyBatch(id) {
   loadVerifyDetail();
 }
 
+// 核对详情 — 模块级缓存（最近一次 detail 返回），筛选/展开复用
+var _verifyDetailCache = null;
+var _verifyBarcodeFilter = 'abnormal';   // 默认只看异常
+var _verifyPalletExpanded = {};          // pallet_no -> bool
+
+function _verifyStatusMeta(s) {
+  // class 复用现有 .st-* 着色
+  var map = {
+    ok:           { cls: 'st-completed',        label: '完成/완료',           rank: 5 },
+    shortage:     { cls: 'st-issued',           label: '少扫/부족',           rank: 3 },
+    overflow:     { cls: 'st-rework_required',  label: '超扫/초과',           rank: 4 },
+    not_scanned:  { cls: 'st-pending',          label: '未扫/미스캔',         rank: 2 },
+    not_in_batch: { cls: 'st-cancelled',        label: '非本批次/미일치',     rank: 1 }
+  };
+  return map[s] || { cls: '', label: s, rank: 99 };
+}
+
+function _verifyMatchesFilter(it, filter) {
+  if (filter === 'all') return true;
+  if (filter === 'abnormal') return it.status !== 'ok';
+  if (filter === 'completed') return it.status === 'ok';
+  if (filter === 'shortage') return it.status === 'shortage';
+  if (filter === 'overflow') return it.status === 'overflow';
+  if (filter === 'not_scanned') return it.status === 'not_scanned';
+  if (filter === 'not_in_batch') return it.status === 'not_in_batch';
+  if (filter === 'diff') return (Number(it.diff_count) || 0) !== 0 || it.status !== 'ok';
+  return true;
+}
+
+function setVerifyBarcodeFilter(f) {
+  _verifyBarcodeFilter = f || 'all';
+  renderVerifyDetail();
+}
+
+function toggleVerifyPallet(pno) {
+  _verifyPalletExpanded[pno] = !_verifyPalletExpanded[pno];
+  renderVerifyDetail();
+}
+
 async function loadVerifyDetail() {
   var body = document.getElementById("checkDetailBody");
   if (!body || !_currentVerifyBatchId) return;
   body.innerHTML = '<span class="muted">加载中...</span>';
   var res = await api({ action: "v2_verify_batch_detail", id: _currentVerifyBatchId });
   if (!res || !res.ok) { body.innerHTML = '<span class="muted">加载失败</span>'; return; }
+  _verifyDetailCache = res;
+  // 进入详情默认 "只看异常"
+  _verifyBarcodeFilter = 'abnormal';
+  _verifyPalletExpanded = {};
+  renderVerifyDetail();
+}
+
+function renderVerifyDetail() {
+  var body = document.getElementById("checkDetailBody");
+  if (!body || !_verifyDetailCache) return;
+  var res = _verifyDetailCache;
   var b = res.batch;
   var s = res.summary || {};
-  var items = res.items || [];
+  var items = (res.items || []).slice();
+  var extra = (res.extra_items || []).slice();
   var logs = res.scan_logs || [];
-  var pallets = res.pallet_summary || [];
+  var pallets = (res.pallet_summary || []).slice();
+
+  // 合并条码（计划内 + 计划外），按异常优先排序
+  var allRows = items.concat(extra);
+  allRows.sort(function(a, b2) {
+    var ra = _verifyStatusMeta(a.status).rank;
+    var rb = _verifyStatusMeta(b2.status).rank;
+    if (ra !== rb) return ra - rb;
+    var da = Math.abs(Number(a.diff_count) || 0);
+    var db = Math.abs(Number(b2.diff_count) || 0);
+    if (da !== db) return db - da;
+    return String(a.barcode || '').localeCompare(String(b2.barcode || ''));
+  });
 
   var canClose = (b.status === 'pending' || b.status === 'verifying');
   var html = '';
@@ -4211,58 +4274,199 @@ async function loadVerifyDetail() {
   }
   html += '</div></div>';
 
-  // 按条码核对表格
-  html += '<div class="card"><div class="card-title">按条码核对 <span class="count">' + items.length + ' 条</span></div>';
-  if (!items.length) html += '<span class="muted">无条码</span>';
-  else {
+  // 异常摘要 chips（点击即筛选）
+  function chip(label, filter, cls) {
+    var active = _verifyBarcodeFilter === filter;
+    return '<button type="button" class="btn btn-sm ' + (active ? 'btn-primary' : 'btn-outline') + '" '
+      + 'style="margin:2px 4px 2px 0;' + (cls ? cls : '') + '" '
+      + 'onclick="setVerifyBarcodeFilter(\'' + filter + '\')">' + esc(label) + '</button>';
+  }
+  html += '<div class="card"><div class="card-title">按条码核对 <span class="count">' + allRows.length + ' 条</span></div>';
+  html += '<div style="margin-bottom:8px;">';
+  html += chip('全部 (' + allRows.length + ')', 'all');
+  html += chip('只看异常 (' + ((s.shortage_count || 0) + (s.overflow_count || 0) + (s.not_scanned_count || 0) + (s.not_in_batch_count || 0)) + ')', 'abnormal');
+  html += chip('完成 ' + (s.ok_count || 0), 'completed');
+  html += chip('未扫 ' + (s.not_scanned_count || 0), 'not_scanned');
+  html += chip('少扫 ' + (s.shortage_count || 0), 'shortage');
+  html += chip('超扫 ' + (s.overflow_count || 0), 'overflow');
+  html += chip('非本批次 ' + (s.not_in_batch_count || 0), 'not_in_batch');
+  html += '</div>';
+
+  // 表格（默认 max-height 滚动；首屏裁 300 行避免大批次卡顿）
+  var filtered = allRows.filter(function(it) { return _verifyMatchesFilter(it, _verifyBarcodeFilter); });
+  var capped = filtered.slice(0, 300);
+  if (filtered.length === 0) {
+    html += '<span class="muted">无符合筛选的条码</span>';
+  } else {
     html += '<div style="max-height:360px;overflow:auto;">';
     html += '<table class="verify-item-table" style="width:100%;border-collapse:collapse;font-size:13px;">' +
       '<thead><tr style="background:#fafafa;">' +
         '<th style="text-align:left;padding:6px;">条码</th>' +
         '<th style="text-align:left;padding:6px;">客户名</th>' +
-        '<th style="text-align:right;padding:6px;">计划箱数</th>' +
-        '<th style="text-align:right;padding:6px;">已扫箱数</th>' +
+        '<th style="text-align:right;padding:6px;">计划</th>' +
+        '<th style="text-align:right;padding:6px;">已扫</th>' +
         '<th style="text-align:right;padding:6px;">差异</th>' +
+        '<th style="text-align:left;padding:6px;">托盘</th>' +
+        '<th style="text-align:left;padding:6px;">最后扫描</th>' +
         '<th style="text-align:left;padding:6px;">状态</th>' +
       '</tr></thead><tbody>';
-    items.forEach(function(it) {
-      var stCls = ({ ok: 'st-completed', shortage: 'st-issued', overflow: 'st-rework_required', not_scanned: 'st-pending' })[it.status] || '';
-      var stLabel = ({ ok: '完成/완료', shortage: '少扫/부족', overflow: '超扫/초과', not_scanned: '未扫/미스캔' })[it.status] || it.status;
+    capped.forEach(function(it) {
+      var meta = _verifyStatusMeta(it.status);
+      var diffStyle = (it.diff_count !== 0 ? 'color:#c62828;font-weight:700;' : '');
+      var pl = (it.pallet_numbers && it.pallet_numbers.length > 0) ? it.pallet_numbers.join('、') : '--';
+      var lastWhen = (it.last_scanned_at || '').slice(0, 16).replace('T', ' ');
+      var lastWho = it.last_scanned_by || '';
+      var lastTxt = lastWhen ? (lastWhen + (lastWho ? ' · ' + lastWho : '')) : '--';
+      // not_in_batch 时把 not_found_count 显示为已扫
+      var scanCount = (it.status === 'not_in_batch') ? (it.not_found_count || 0) : (it.scanned_ok_count || 0);
       html += '<tr style="border-top:1px solid #f0f0f0;">' +
         '<td style="padding:6px;font-family:monospace;">' + esc(it.barcode) + '</td>' +
         '<td style="padding:6px;">' + esc(it.customer_name || '--') + '</td>' +
         '<td style="padding:6px;text-align:right;">' + (it.planned_box_count || 0) + '</td>' +
-        '<td style="padding:6px;text-align:right;">' + (it.scanned_ok_count || 0) + '</td>' +
-        '<td style="padding:6px;text-align:right;' + (it.diff_count !== 0 ? 'color:#c62828;font-weight:700;' : '') + '">' + (it.diff_count || 0) + '</td>' +
-        '<td style="padding:6px;"><span class="st ' + stCls + '">' + esc(stLabel) + '</span></td>' +
+        '<td style="padding:6px;text-align:right;">' + scanCount + '</td>' +
+        '<td style="padding:6px;text-align:right;' + diffStyle + '">' + (it.diff_count || 0) + '</td>' +
+        '<td style="padding:6px;font-size:12px;color:#555;">' + esc(pl) + '</td>' +
+        '<td style="padding:6px;font-size:12px;color:#555;">' + esc(lastTxt) + '</td>' +
+        '<td style="padding:6px;"><span class="st ' + meta.cls + '">' + esc(meta.label) + '</span></td>' +
       '</tr>';
     });
     html += '</tbody></table></div>';
+    if (filtered.length > capped.length) {
+      html += '<div class="muted" style="margin-top:6px;font-size:12px;">已显示前 ' + capped.length + ' / ' + filtered.length + ' 条，缩小筛选范围可看到更多</div>';
+    }
   }
   html += '</div>';
 
-  // 按托盘汇总
+  // 按托盘汇总（异常优先排序 + 可展开明细）
+  // 预先按 pallet 分组所有 logs（已加 customer_name）
+  var logsByPallet = {};
+  logs.forEach(function(l) {
+    var p = l.pallet_no || '(未填/미기입)';
+    (logsByPallet[p] = logsByPallet[p] || []).push(l);
+  });
+  // items 全批次扫描数（用于明细展示 total）
+  var totalScannedByBc = {};
+  items.forEach(function(it) { totalScannedByBc[it.barcode] = it.scanned_ok_count || 0; });
+  var plannedByBc = {};
+  items.forEach(function(it) { plannedByBc[it.barcode] = it.planned_box_count || 0; });
+
   html += '<div class="card"><div class="card-title">按托盘汇总 <span class="count">' + pallets.length + ' 托</span></div>';
   if (!pallets.length) html += '<span class="muted">尚无现场扫码</span>';
   else {
     pallets.forEach(function(p) {
-      html += '<div class="list-item">' +
-        '<div class="item-title">' + esc(p.pallet_no) + '</div>' +
-        '<div class="item-meta">正确 ' + p.scanned_ok_count + ' · 异常 ' + p.abnormal_count + '</div>' +
-      '</div>';
+      var hasAbn = Number(p.abnormal_count || 0) > 0;
+      var rowBg = hasAbn ? 'background:#fff5f5;' : '';
+      var expanded = !!_verifyPalletExpanded[p.pallet_no];
+      html += '<div style="border:1px solid ' + (hasAbn ? '#ffcdd2' : '#eee') + ';border-radius:6px;padding:8px;margin-bottom:6px;' + rowBg + '">';
+      html += '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">';
+      html += '<div style="font-weight:700;flex:1 1 auto;min-width:0;">托盘 ' + esc(p.pallet_no) + '</div>';
+      html += '<div style="font-size:12px;color:#2e7d32;">正确 <b>' + (p.scanned_ok_count || 0) + '</b></div>';
+      html += '<div style="font-size:12px;color:' + (hasAbn ? '#c62828' : '#888') + ';">异常 <b>' + (p.abnormal_count || 0) + '</b></div>';
+      if ((p.not_found_count || 0) > 0) html += '<div class="st st-cancelled" style="font-size:11px;">非本批次 ' + p.not_found_count + '</div>';
+      if ((p.overflow_count || 0) > 0) html += '<div class="st st-rework_required" style="font-size:11px;">超扫 ' + p.overflow_count + '</div>';
+      html += '<button type="button" class="btn btn-sm btn-outline" onclick="toggleVerifyPallet(\'' + esc(String(p.pallet_no).replace(/'/g, "\\'")) + '\')">'
+        + (expanded ? '收起明细 / 접기' : '查看明细 / 상세보기') + '</button>';
+      html += '</div>';
+
+      if (expanded) {
+        var palletLogs = logsByPallet[p.pallet_no] || [];
+        // 按 barcode 聚合（本托盘内）
+        var bcAgg = {};  // bc -> { ok, not_found, overflow, last_log }
+        palletLogs.forEach(function(l) {
+          var bc = l.barcode || '--';
+          var a = bcAgg[bc] || (bcAgg[bc] = {
+            ok: 0, not_found: 0, overflow: 0, duplicate: 0,
+            customer_name: l.customer_name || '',
+            scanned_by: l.worker_name || l.worker_id || '',
+            scanned_at: l.scanned_at || ''
+          });
+          if (l.scan_result === 'ok') a.ok++;
+          else if (l.scan_result === 'not_found') a.not_found++;
+          else if (l.scan_result === 'overflow') a.overflow++;
+          else if (l.scan_result === 'duplicate') a.duplicate++;
+        });
+        var bcRows = Object.keys(bcAgg).map(function(bc) {
+          var a = bcAgg[bc];
+          var planned = plannedByBc[bc] || 0;
+          var totalScanned = totalScannedByBc[bc] || 0;
+          var status;
+          if (planned === 0) status = 'not_in_batch';
+          else if (totalScanned === planned) status = 'ok';
+          else if (totalScanned < planned) status = 'shortage';
+          else status = 'overflow';
+          return {
+            barcode: bc,
+            customer_name: a.customer_name,
+            planned_count: planned,
+            pallet_scanned_count: a.ok,
+            pallet_extra_count: a.not_found + a.overflow + a.duplicate,
+            total_scanned_count: totalScanned,
+            total_diff: totalScanned - planned,
+            status: status,
+            scanned_by: a.scanned_by,
+            scanned_at: a.scanned_at
+          };
+        }).sort(function(x, y) {
+          // 异常优先
+          var rx = _verifyStatusMeta(x.status).rank;
+          var ry = _verifyStatusMeta(y.status).rank;
+          if (rx !== ry) return rx - ry;
+          return String(x.barcode).localeCompare(String(y.barcode));
+        });
+
+        html += '<div style="margin-top:8px;border-top:1px dashed #ddd;padding-top:6px;">';
+        if (bcRows.length === 0) {
+          html += '<span class="muted">本托盘暂无明细</span>';
+        } else {
+          html += '<div style="max-height:280px;overflow:auto;">';
+          html += '<table style="width:100%;border-collapse:collapse;font-size:12px;">' +
+            '<thead><tr style="background:#fafafa;">' +
+              '<th style="text-align:left;padding:5px;">条码</th>' +
+              '<th style="text-align:left;padding:5px;">客户</th>' +
+              '<th style="text-align:right;padding:5px;">计划</th>' +
+              '<th style="text-align:right;padding:5px;">本托盘扫</th>' +
+              '<th style="text-align:right;padding:5px;">全批次已扫</th>' +
+              '<th style="text-align:right;padding:5px;">全批次差异</th>' +
+              '<th style="text-align:left;padding:5px;">状态</th>' +
+              '<th style="text-align:left;padding:5px;">扫描人/时间</th>' +
+            '</tr></thead><tbody>';
+          bcRows.forEach(function(r) {
+            var meta = _verifyStatusMeta(r.status);
+            var palletScanTxt = r.pallet_scanned_count + (r.pallet_extra_count > 0 ? ' (含 ' + r.pallet_extra_count + ' 异常)' : '');
+            var diffStyle = (r.total_diff !== 0 ? 'color:#c62828;font-weight:700;' : '');
+            html += '<tr style="border-top:1px solid #f0f0f0;">' +
+              '<td style="padding:5px;font-family:monospace;">' + esc(r.barcode) + '</td>' +
+              '<td style="padding:5px;">' + esc(r.customer_name || (r.status === 'not_in_batch' ? '非本批次' : '--')) + '</td>' +
+              '<td style="padding:5px;text-align:right;">' + r.planned_count + '</td>' +
+              '<td style="padding:5px;text-align:right;">' + esc(palletScanTxt) + '</td>' +
+              '<td style="padding:5px;text-align:right;">' + r.total_scanned_count + '</td>' +
+              '<td style="padding:5px;text-align:right;' + diffStyle + '">' + r.total_diff + '</td>' +
+              '<td style="padding:5px;"><span class="st ' + meta.cls + '">' + esc(meta.label) + '</span></td>' +
+              '<td style="padding:5px;font-size:11px;color:#555;">' + esc(r.scanned_by || '--') +
+                (r.scanned_at ? ' · ' + esc((r.scanned_at || '').slice(0, 16).replace('T', ' ')) : '') +
+              '</td>' +
+            '</tr>';
+          });
+          html += '</tbody></table></div>';
+        }
+        html += '</div>';
+      }
+      html += '</div>';
     });
   }
   html += '</div>';
 
-  // 异常记录（只展示非 ok 的扫码流水）
+  // 异常记录（保留：纯流水视角，按时间倒序）
   var abnormalLogs = logs.filter(function(l) { return l.scan_result !== 'ok'; });
-  html += '<div class="card"><div class="card-title">异常记录 <span class="count">' + abnormalLogs.length + ' 条</span></div>';
+  html += '<div class="card"><div class="card-title">异常流水 <span class="count">' + abnormalLogs.length + ' 条</span>'
+    + (res.scan_logs_truncated ? ' <span class="muted" style="font-size:11px;">（共 ' + (res.total_scan_logs || 0) + '，仅展示最近 ' + logs.length + '）</span>' : '')
+    + '</div>';
   if (!abnormalLogs.length) html += '<span class="muted">暂无异常</span>';
   else {
     html += '<div style="max-height:260px;overflow:auto;">';
     abnormalLogs.forEach(function(l) {
       var tagCls = l.scan_result === 'not_found' ? 'st-cancelled' : 'st-rework_required';
-      var typeLabel = ({ not_found: '不在本批次', overflow: '超扫', duplicate: '重复(legacy)' })[l.scan_result] || l.scan_result;
+      var typeLabel = ({ not_found: '非本批次', overflow: '超扫', duplicate: '重复' })[l.scan_result] || l.scan_result;
       html += '<div style="padding:6px 0;border-bottom:1px solid #f0f0f0;font-size:13px;">' +
         '<span class="st ' + tagCls + '">' + esc(typeLabel) + '</span> ' +
         '<b>' + esc(l.barcode) + '</b>' +
@@ -4271,27 +4475,6 @@ async function loadVerifyDetail() {
         ' · ' + esc(l.worker_name || l.worker_id || '--') +
         ' · ' + esc((l.scanned_at || '').slice(0, 16).replace('T', ' ')) +
         (l.message ? '<div class="muted" style="margin-left:8px;">' + esc(l.message) + '</div>' : '') +
-      '</div>';
-    });
-    html += '</div>';
-  }
-  html += '</div>';
-
-  // 完整扫码流水
-  html += '<div class="card"><div class="card-title">扫码流水 <span class="count">最近 ' + Math.min(100, logs.length) + ' 条</span></div>';
-  if (!logs.length) html += '<span class="muted">暂无扫码记录</span>';
-  else {
-    html += '<div style="max-height:300px;overflow:auto;">';
-    logs.slice(0, 100).forEach(function(l) {
-      var tagCls = l.scan_result === 'ok' ? 'st-completed' :
-                   (l.scan_result === 'not_found' ? 'st-cancelled' : 'st-issued');
-      html += '<div style="padding:6px 0;border-bottom:1px solid #f0f0f0;font-size:13px;">' +
-        '<span class="st ' + tagCls + '">' + esc(l.scan_result) + '</span> ' +
-        '<b>' + esc(l.barcode) + '</b>' +
-        (l.customer_name ? ' · ' + esc(l.customer_name) : '') +
-        ' · 托盘 ' + esc(l.pallet_no || '--') +
-        ' · ' + esc(l.worker_name || l.worker_id || '--') +
-        ' · ' + esc((l.scanned_at || '').slice(0, 16).replace('T', ' ')) +
       '</div>';
     });
     html += '</div>';
