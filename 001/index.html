@@ -510,6 +510,12 @@
     <!-- 操作产出 -->
     <div class="card" id="bulkResultCard">
       <div class="card-title">操作产出 / 작업 산출</div>
+      <!-- 客户：系统出库单自动带出（只读）；非系统工单必填 -->
+      <div id="bulkCustomerWrap" style="margin-bottom:8px;">
+        <label>客户 / 고객 <span id="bulkCustomerRequired" style="color:#c62828;display:none;">*必填/필수</span></label>
+        <input type="text" id="bulkCustomer" placeholder="客户名称 / 고객명" autocomplete="off">
+        <div id="bulkCustomerHint" class="muted" style="font-size:11px;margin-top:2px;display:none;">非系统工单必须填写客户 / 시스템 외 작업은 고객명 필수</div>
+      </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
         <div><label>品数 / 품목수</label><input type="number" id="bulkPackedSku" placeholder="0"></div>
         <div><label>打包箱数 / 포장박스수</label><input type="number" id="bulkPackedBox" placeholder="0"></div>
@@ -901,6 +907,6 @@
 <input type="file" id="photoInputAlbum" accept="image/*" multiple style="display:none;" onchange="handlePhotoUpload(this)">
 
 <script src="config.js?v=20260506b"></script>
-<script src="app.js?v=20260507c-issuephoto"></script>
+<script src="app.js?v=20260508d-customer"></script>
 </body>
 </html>

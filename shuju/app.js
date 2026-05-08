@@ -782,6 +782,9 @@ async function exportOrders(btn) {
   }
 }
 
+// 缓存最近一次详情，供「修改产出」弹窗预填使用
+var _lastOrderDetail = null;
+
 async function openOrderDetail(jobId) {
   var modal = document.getElementById("orderDetailModal");
   var body = document.getElementById("orderDetailBody");
@@ -792,8 +795,29 @@ async function openOrderDetail(jobId) {
     body.innerHTML = '<div class="muted">加载失败</div>';
     return;
   }
+  _lastOrderDetail = res;
   var j = res.job || {};
   var html = '';
+  // 顶部状态/客户/手动收尾/修正 chip + 操作按钮
+  var chipHtml = '';
+  if (Number(j.manual_finalized) === 1) {
+    chipHtml += ' <span class="tag tag-orange" style="background:#fff3e0;color:#e65100;">手动收尾</span>';
+  }
+  if (Number(j.result_corrected) === 1) {
+    chipHtml += ' <span class="tag tag-orange" style="background:#fce4ec;color:#ad1457;">产出已修正</span>';
+  }
+  html += '<div style="margin-bottom:10px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;">';
+  html += statusTag(j.status) + chipHtml;
+  if (j.customer) html += ' <span style="font-size:13px;color:#1565c0;"><b>客户:</b> ' + esc(j.customer) + '</span>';
+  // 待收尾 → 补录按钮；已完成 → 修改产出按钮
+  if (j.status === 'awaiting_close' || j.status === 'pending' || j.status === 'working') {
+    html += ' <button class="btn-primary" onclick="openManualFinalize(\'' + esc(j.id) + '\')">补充产出并完成 / 결과 입력 후 완료</button>';
+  }
+  if (j.status === 'completed') {
+    html += ' <button class="btn-secondary" onclick="openResultUpdate(\'' + esc(j.id) + '\')">修改产出数据 / 결과 수정</button>';
+  }
+  html += '</div>';
+
   html += '<h3>基本信息</h3>';
   html += '<table class="data-table"><tr><th>job_id</th><td>' + esc(j.id) + '</td>';
   html += '<th>display_no</th><td>' + esc(j.display_no || '--') + '</td></tr>';
@@ -801,10 +825,28 @@ async function openOrderDetail(jobId) {
   html += '<th>任务类型</th><td>' + esc(jobTypeLabel(j.job_type)) + '</td></tr>';
   html += '<tr><th>业务分类</th><td>' + esc(bizLabel(j.biz_class)) + '</td>';
   html += '<th>状态</th><td>' + statusTag(j.status) + '</td></tr>';
+  html += '<tr><th>客户 / 고객</th><td>' + esc(j.customer || '--') + '</td>';
+  html += '<th>结果摘要</th><td>' + esc(j.result_summary || '--') + '</td></tr>';
   html += '<tr><th>related_doc_id</th><td>' + esc(j.related_doc_id || '--') + '</td>';
   html += '<th>linked_outbound_order_id</th><td>' + esc(j.linked_outbound_order_id || '--') + '</td></tr>';
   html += '<tr><th>created_at</th><td>' + esc(fmtTime(j.created_at)) + '</td>';
   html += '<th>updated_at</th><td>' + esc(fmtTime(j.updated_at)) + '</td></tr>';
+  if (j.finished_at) {
+    html += '<tr><th>finished_at</th><td colspan="3">' + esc(fmtTime(j.finished_at)) + '</td></tr>';
+  }
+  if (Number(j.manual_finalized) === 1) {
+    html += '<tr><th>手动收尾人</th><td>' + esc(j.manual_finalized_by || '--') + '</td>';
+    html += '<th>手动收尾时间</th><td>' + esc(fmtTime(j.manual_finalized_at)) + '</td></tr>';
+    html += '<tr><th>手动收尾原因</th><td colspan="3" style="white-space:pre-wrap;">' + esc(j.manual_finalize_reason || '--') + '</td></tr>';
+  }
+  if (Number(j.result_corrected) === 1) {
+    html += '<tr><th>产出修正人</th><td>' + esc(j.result_corrected_by || '--') + '</td>';
+    html += '<th>修正时间</th><td>' + esc(fmtTime(j.result_corrected_at)) + '</td></tr>';
+    html += '<tr><th>修正原因</th><td colspan="3" style="white-space:pre-wrap;">' + esc(j.result_correct_reason || '--') + '</td></tr>';
+  }
+  if (j.cleanup_note) {
+    html += '<tr><th>清理标记</th><td colspan="3" style="color:#888;font-size:11px;">' + esc(j.cleanup_note) + '</td></tr>';
+  }
   html += '</table>';
 
   // 入库手动完成标
@@ -1402,3 +1444,201 @@ window.addEventListener("DOMContentLoaded", function() {
     if (e.key === "Enter") doLogin();
   });
 });
+
+// =====================================================
+// 手动补产出 / 修改产出 — 共用弹窗
+// =====================================================
+// 字段集合按 job_type 选择展示；仅显示常用：客户 / 箱 / 托 / CBM / 操作箱 / 标签 / 换箱 / 修箱 / SKU / 备注
+var _opsResultFields = [
+  { key: 'customer', label: '客户 / 고객', type: 'text', required: 'auto' },  // auto: 非系统单必填
+  { key: 'box_count', label: '箱数 / 박스', type: 'number' },
+  { key: 'pallet_count', label: '托数 / 팔레트', type: 'number' },
+  { key: 'cbm_count', label: 'CBM', type: 'number_step' },
+  { key: 'container_large_count', label: '大柜 / 대형 컨테이너', type: 'number' },
+  { key: 'container_small_count', label: '小柜 / 소형 컨테이너', type: 'number' },
+  { key: 'operated_box_count', label: '处理箱数 / 작업 박스', type: 'number' },
+  { key: 'label_count', label: '标签数 / 라벨', type: 'number' },
+  { key: 'reboxed_count', label: '换箱数 / 박스 교체', type: 'number' },
+  { key: 'repaired_box_count', label: '修箱数 / 수리 박스', type: 'number' },
+  { key: 'sku_count', label: 'SKU 数 / SKU', type: 'number' },
+  { key: 'packed_box_count', label: '打包箱数 / 포장 박스', type: 'number' },
+  { key: 'packed_sku_count', label: '打包 SKU / 포장 SKU', type: 'number' }
+];
+
+function _resultFieldsForJobType(jt) {
+  // 卸货类
+  if (jt === 'unload' || jt === 'unplanned_unload') {
+    return ['customer','container_large_count','container_small_count','box_count','pallet_count','cbm_count'];
+  }
+  // 装货类
+  if (jt === 'load_outbound' || jt === 'load_import') {
+    return ['customer','box_count','pallet_count','cbm_count'];
+  }
+  // 大货 / 按单
+  if (jt === 'bulk_op' || jt === 'outbound_stock_op') {
+    return ['customer','operated_box_count','label_count','reboxed_count','repaired_box_count','sku_count','packed_box_count','packed_sku_count','box_count','pallet_count'];
+  }
+  // 入库
+  if (jt === 'inbound_direct' || jt === 'inbound_bulk' || jt === 'inbound_change_order') {
+    return ['customer','box_count','pallet_count','operated_box_count','sku_count'];
+  }
+  // 兜底：通用全集
+  return ['customer','box_count','pallet_count','cbm_count','operated_box_count','label_count','sku_count'];
+}
+
+function openManualFinalize(jobId) {
+  var det = _lastOrderDetail || {};
+  var j = det.job || {};
+  if (j.id !== jobId) {
+    alert('详情数据不一致，请刷新后重试');
+    return;
+  }
+  _renderResultModal({ mode: 'manual_finalize', job: j, results: det.results || [] });
+}
+
+function openResultUpdate(jobId) {
+  var det = _lastOrderDetail || {};
+  var j = det.job || {};
+  if (j.id !== jobId) {
+    alert('详情数据不一致，请刷新后重试');
+    return;
+  }
+  _renderResultModal({ mode: 'result_update', job: j, results: det.results || [] });
+}
+
+function closeResultModal(ev) {
+  if (ev && ev.target && ev.target.id !== 'opsResultOverlay') return;
+  var el = document.getElementById('opsResultOverlay');
+  if (el) el.parentNode.removeChild(el);
+}
+
+function _renderResultModal(opt) {
+  var old = document.getElementById('opsResultOverlay');
+  if (old) old.parentNode.removeChild(old);
+
+  var j = opt.job;
+  var mode = opt.mode;
+  var isCorrection = mode === 'result_update';
+  var keys = _resultFieldsForJobType(j.job_type || '');
+  var defs = _opsResultFields.filter(function(f) { return keys.indexOf(f.key) !== -1; });
+  // 初始值：取最近一条 result 的 result_json
+  var initial = {};
+  var results = opt.results || [];
+  var latestResult = results.length > 0 ? results[results.length - 1] : null;
+  if (latestResult) {
+    try {
+      var rj = JSON.parse(latestResult.result_json || '{}');
+      Object.keys(rj).forEach(function(k) { initial[k] = rj[k]; });
+    } catch (e) {}
+    if (latestResult.box_count != null && initial.box_count == null) initial.box_count = latestResult.box_count;
+    if (latestResult.pallet_count != null && initial.pallet_count == null) initial.pallet_count = latestResult.pallet_count;
+  }
+  if (!initial.customer) initial.customer = j.customer || '';
+  if (!initial.result_note) initial.result_note = (latestResult && latestResult.remark) || '';
+
+  // 是否系统单（非系统 → customer 必填）
+  var isSystemDoc = !!(j.linked_outbound_order_id || j.related_doc_id);
+
+  var html = '';
+  html += '<div class="modal-overlay" id="opsResultOverlay" onclick="closeResultModal(event)">';
+  html += '<div class="modal-box" onclick="event.stopPropagation();" style="max-width:560px;">';
+  html += '<div style="font-size:16px;font-weight:700;margin-bottom:10px;">' + (isCorrection ? '修改产出数据 / 결과 수정' : '补充产出并完成 / 결과 입력 후 완료') + '</div>';
+  html += '<div class="muted" style="font-size:12px;line-height:1.6;margin-bottom:8px;">'
+        + '<div>job_id: ' + esc(j.id) + ' · ' + esc(jobTypeLabel(j.job_type)) + '</div>'
+        + '<div>当前状态: ' + statusTag(j.status) + ' · 关联单据: ' + esc(j.related_doc_id || j.linked_outbound_order_id || '--') + '</div>'
+        + '</div>';
+
+  defs.forEach(function(f) {
+    var v = initial[f.key];
+    if (v == null) v = (f.type === 'text' ? '' : 0);
+    var inputType = (f.type === 'number' || f.type === 'number_step') ? 'number' : 'text';
+    var step = f.type === 'number_step' ? ' step="0.01"' : '';
+    var requiredHint = '';
+    if (f.required === 'auto' && f.key === 'customer' && !isSystemDoc) {
+      requiredHint = ' <span style="color:#c62828;">*必填/필수</span>';
+    }
+    html += '<div style="margin-bottom:8px;"><label><b>' + esc(f.label) + '</b>' + requiredHint + '</label>'
+         + '<input id="opsResField_' + esc(f.key) + '" class="input" type="' + inputType + '"' + step + ' value="' + esc(String(v)) + '" style="width:100%;"></div>';
+  });
+  html += '<div style="margin-bottom:8px;"><label><b>结果备注 / 결과 비고</b></label>'
+       + '<textarea id="opsResField_result_note" class="input" rows="2" style="width:100%;">' + esc(String(initial.result_note || '')) + '</textarea></div>';
+  html += '<div style="margin-bottom:8px;"><label><b>原因 / 사유</b> <span style="color:#c62828;">*</span></label>'
+       + '<input id="opsResReason" class="input" placeholder="例: 仓库填错箱数；或 现场未填产出，事后补录" style="width:100%;"></div>';
+  html += '<div style="margin-bottom:8px;"><label><b>操作人 / 작업자</b></label>'
+       + '<input id="opsResOperator" class="input" placeholder="您的姓名/工号" style="width:100%;"></div>';
+
+  html += '<div style="margin-top:12px;text-align:right;">';
+  html += '<button class="btn-secondary" onclick="closeResultModal()">取消 / 취소</button> ';
+  html += '<button class="btn-primary" onclick="submitOpsResult(this)" data-mode="' + esc(mode) + '" data-job="' + esc(j.id) + '" data-system="' + (isSystemDoc ? '1' : '0') + '">' + (isCorrection ? '保存修正 / 저장' : '保存并完成 / 저장 + 완료') + '</button>';
+  html += '</div></div></div>';
+  var div = document.createElement('div');
+  div.innerHTML = html;
+  document.body.appendChild(div.firstChild);
+}
+
+async function submitOpsResult(btnEl) {
+  var mode = btnEl.getAttribute('data-mode');
+  var jobId = btnEl.getAttribute('data-job');
+  var isSystemDoc = btnEl.getAttribute('data-system') === '1';
+  var reason = ((document.getElementById('opsResReason') || {}).value || '').trim();
+  var operator = ((document.getElementById('opsResOperator') || {}).value || '').trim() || 'ADMIN';
+  if (!reason) { alert('请填写原因 / 사유를 입력하세요'); return; }
+
+  var resultJson = {};
+  var customerInput = '';
+  _opsResultFields.forEach(function(f) {
+    var el = document.getElementById('opsResField_' + f.key);
+    if (!el) return;
+    var raw = el.value;
+    if (f.type === 'number' || f.type === 'number_step') {
+      var n = Number(raw); if (!isFinite(n)) n = 0;
+      if (n) resultJson[f.key] = n;
+    } else {
+      var s = String(raw || '').trim();
+      if (s) resultJson[f.key] = s;
+      if (f.key === 'customer') customerInput = s;
+    }
+  });
+  var resultNoteEl = document.getElementById('opsResField_result_note');
+  var resultNote = resultNoteEl ? String(resultNoteEl.value || '').trim() : '';
+  if (resultNote) resultJson.result_note = resultNote;
+
+  if (!isSystemDoc && !customerInput) {
+    alert('非系统单 必须填写客户 / 시스템 외 작업은 고객명 필수');
+    return;
+  }
+
+  btnEl.disabled = true;
+  btnEl.textContent = '保存中... / 저장중...';
+
+  var action = mode === 'result_update' ? 'v2_ops_job_result_update' : 'v2_ops_job_manual_finalize';
+  var res = await api({
+    action: action,
+    job_id: jobId,
+    customer: customerInput,
+    result_json: resultJson,
+    result_note: resultNote,
+    reason: reason,
+    by: operator
+  });
+
+  btnEl.disabled = false;
+  btnEl.textContent = mode === 'result_update' ? '保存修正 / 저장' : '保存并完成 / 저장 + 완료';
+
+  if (res && res.ok) {
+    alert((mode === 'result_update' ? '产出已修正 / 결과 수정 완료' : '已补录并完成 / 결과 입력 후 완료')
+      + (res.summary ? '\n摘要: ' + res.summary : ''));
+    closeResultModal();
+    closeOrderDetail();
+    if (typeof loadOrderList === 'function') loadOrderList();
+  } else if (res && res.error === 'active_worker_exists_cannot_finalize') {
+    alert('仍有人员在岗，请先让所有人退出再补录\n현재 작업 중인 인원이 있습니다');
+  } else if (res && res.error === 'only_completed_can_correct') {
+    alert(res.message || '仅已完成任务可修改产出');
+  } else if (res && res.error === 'already_completed') {
+    alert(res.message || '任务已完成');
+  } else {
+    var msg = res ? (res.message || res.error || JSON.stringify(res)) : 'unknown';
+    alert('失败 / 실패：' + msg);
+  }
+}

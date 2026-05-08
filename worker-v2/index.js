@@ -680,6 +680,84 @@ async function sumJobWorkerMinutes(env, jobId, fallbackEndAt, closeOpen) {
   };
 }
 
+// ===== 任务类型分类：仅记工时 vs 需要产出数据 =====
+// 仅记工时：最后一人退出后立即 completed，无需任何 result_json
+const TIME_ONLY_JOB_TYPES = new Set([
+  'inbound_return',     // 退件入库（轻量工时）
+  'pack_direct',        // 代发打包
+  'change_order',       // 换单操作
+  'other_internal',     // 仓库整理
+  'disposal',           // 废弃处理
+  'qc',                 // 质检
+  'inventory',          // 盘点
+  'scan_pallet',        // 过机扫描
+  'issue_handle'        // 问题点处理 — 由 v2_issue_handle_finish 收尾，不参与本逻辑（兜底归类时间型）
+]);
+// 需要产出数据：最后一人退出且无 result → awaiting_close；有 result → completed
+const RESULT_REQUIRED_JOB_TYPES = new Set([
+  'unload', 'unplanned_unload',
+  'load_outbound', 'outbound_stock_op',
+  'inbound_direct', 'inbound_bulk', 'inbound_change_order',
+  'bulk_op', 'pick_direct',
+  'verify_scan', 'load_import', 'pickup_delivery_import'
+]);
+function isTimeOnlyJobType(jobType) {
+  return TIME_ONLY_JOB_TYPES.has(String(jobType || ''));
+}
+function isResultRequiredJobType(jobType) {
+  return RESULT_REQUIRED_JOB_TYPES.has(String(jobType || ''));
+}
+
+// 一次性收尾：当某 job 的 open worker = 0 时调用，按类型决定 completed 或 awaiting_close
+// 已 completed/cancelled 的 job 不动；result_summary/finished_at 视情况写入
+async function autoCloseJobIfNoOpenWorkers(env, jobId, t) {
+  if (!jobId) return null;
+  const closeAt = t || now();
+  const job = await env.DB.prepare(
+    "SELECT id, status, job_type FROM v2_ops_jobs WHERE id=?"
+  ).bind(jobId).first();
+  if (!job) return null;
+  if (job.status === 'completed' || job.status === 'cancelled') return job;
+
+  const openCnt = await env.DB.prepare(
+    "SELECT COUNT(*) AS c FROM v2_ops_job_workers WHERE job_id=? AND left_at=''"
+  ).bind(jobId).first();
+  const openCount = Number((openCnt && openCnt.c) || 0);
+  if (openCount > 0) return job;
+
+  if (isTimeOnlyJobType(job.job_type)) {
+    await env.DB.prepare(`
+      UPDATE v2_ops_jobs
+         SET status='completed', finished_at=?, updated_at=?, active_worker_count=0,
+             result_summary=COALESCE(NULLIF(result_summary,''), '仅记录工时，无数量结果')
+       WHERE id=?
+    `).bind(closeAt, closeAt, jobId).run();
+    return Object.assign({}, job, { status: 'completed', finished_at: closeAt });
+  }
+
+  // 需要产出 / 未识别类型：按 ops_job_results 是否存在分流
+  const resCnt = await env.DB.prepare(
+    "SELECT COUNT(*) AS c FROM v2_ops_job_results WHERE job_id=?"
+  ).bind(jobId).first();
+  const hasResult = Number((resCnt && resCnt.c) || 0) > 0;
+  if (hasResult) {
+    await env.DB.prepare(`
+      UPDATE v2_ops_jobs
+         SET status='completed', finished_at=COALESCE(NULLIF(finished_at,''), ?), updated_at=?, active_worker_count=0
+       WHERE id=? AND status NOT IN ('completed','cancelled')
+    `).bind(closeAt, closeAt, jobId).run();
+    return Object.assign({}, job, { status: 'completed', finished_at: closeAt });
+  }
+  // 无产出 → awaiting_close（等待管理员手动补录）
+  await env.DB.prepare(`
+    UPDATE v2_ops_jobs
+       SET status='awaiting_close', updated_at=?, active_worker_count=0,
+           result_summary=COALESCE(NULLIF(result_summary,''), '待补充产出数据')
+     WHERE id=? AND status NOT IN ('completed','cancelled')
+  `).bind(closeAt, jobId).run();
+  return Object.assign({}, job, { status: 'awaiting_close' });
+}
+
 // 从表中重算某 job 的 active_worker_count
 async function recalcActiveCount(env, jobId, t) {
   const cnt = await env.DB.prepare(
@@ -1386,10 +1464,28 @@ const MIGRATIONS = [
   )`,
   `CREATE INDEX IF NOT EXISTS idx_v2_ob_change_logs_order ON v2_outbound_order_change_logs(order_id, revision_no)`,
   `CREATE INDEX IF NOT EXISTS idx_v2_ob_change_logs_ack ON v2_outbound_order_change_logs(warehouse_ack_required, changed_at)`,
+
+  // ---- v2.20260508a：手动收尾 / 修改产出 / cleanup 标记 / customer 字段 ----
+  `ALTER TABLE v2_ops_jobs ADD COLUMN customer TEXT DEFAULT ''`,
+  `ALTER TABLE v2_ops_jobs ADD COLUMN finished_at TEXT DEFAULT ''`,
+  `ALTER TABLE v2_ops_jobs ADD COLUMN result_summary TEXT DEFAULT ''`,
+  `ALTER TABLE v2_ops_jobs ADD COLUMN manual_finalized INTEGER DEFAULT 0`,
+  `ALTER TABLE v2_ops_jobs ADD COLUMN manual_finalized_by TEXT DEFAULT ''`,
+  `ALTER TABLE v2_ops_jobs ADD COLUMN manual_finalized_at TEXT DEFAULT ''`,
+  `ALTER TABLE v2_ops_jobs ADD COLUMN manual_finalize_reason TEXT DEFAULT ''`,
+  `ALTER TABLE v2_ops_jobs ADD COLUMN result_corrected INTEGER DEFAULT 0`,
+  `ALTER TABLE v2_ops_jobs ADD COLUMN result_corrected_by TEXT DEFAULT ''`,
+  `ALTER TABLE v2_ops_jobs ADD COLUMN result_corrected_at TEXT DEFAULT ''`,
+  `ALTER TABLE v2_ops_jobs ADD COLUMN result_correct_reason TEXT DEFAULT ''`,
+  `ALTER TABLE v2_ops_jobs ADD COLUMN cleanup_note TEXT DEFAULT ''`,
+  `ALTER TABLE v2_ops_job_results ADD COLUMN source TEXT DEFAULT ''`,
+  `ALTER TABLE v2_ops_job_results ADD COLUMN previous_result_id TEXT DEFAULT ''`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_ops_jobs_customer ON v2_ops_jobs(customer) WHERE customer != ''`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_ops_jobs_status_type ON v2_ops_jobs(status, job_type, created_at)`,
 ];
 
 // 每次发布迁移变化时手动 +1（patch 段），冷启动只比对一次字符串即可跳过整段 MIGRATIONS
-const CURRENT_SCHEMA_VERSION = 'v2.20260430h';
+const CURRENT_SCHEMA_VERSION = 'v2.20260508a';
 
 let _migrated = false;
 async function ensureMigrated(db) {
@@ -4938,6 +5034,8 @@ route("v2_inbound_job_finish", async (body, env) => {
     const realCount = await recalcActiveCount(env, job_id, t);
 
     if (leave_only) {
+      // 退件入库等仅工时型：最后一人离开就 completed，不再残留 awaiting_close
+      if (realCount <= 0) await autoCloseJobIfNoOpenWorkers(env, job_id, t);
       return { ok: true, left: true };
     }
 
@@ -5089,6 +5187,7 @@ route("v2_import_delivery_job_finish", async (body, env) => {
     const realCount = await recalcActiveCount(env, job_id, t);
 
     if (leave_only) {
+      if (realCount <= 0) await autoCloseJobIfNoOpenWorkers(env, job_id, t);
       return { ok: true, left: true };
     }
 
@@ -5636,12 +5735,8 @@ route("v2_ops_job_leave", async (body, env) => {
     const realCount = await recalcActiveCount(env, job_id, t);
 
     if (realCount <= 0) {
-      const job = await env.DB.prepare("SELECT status FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
-      if (job && job.status === "working") {
-        await env.DB.prepare(
-          "UPDATE v2_ops_jobs SET status='awaiting_close', updated_at=? WHERE id=?"
-        ).bind(t, job_id).run();
-      }
+      // 仅工时型：直接 completed；需要产出且无 result：awaiting_close
+      await autoCloseJobIfNoOpenWorkers(env, job_id, t);
     }
 
     return { ok: true };
@@ -7068,13 +7163,17 @@ route("v2_bulk_op_job_start", async (body, env) => {
 
       job_id = "JOB-" + uid();
       is_new_job = true;
+      // customer：linkedOb 优先；前端 body.customer 兜底（非系统单时由 001 现场录入）
+      const initCustomer = String((linkedOb && linkedOb.customer) || body.customer || '').trim();
       await env.DB.prepare(`
         INSERT INTO v2_ops_jobs(id, flow_stage, biz_class, job_type, related_doc_type, related_doc_id,
           status, shared_result_json, linked_outbound_order_id,
-          parent_job_id, is_temporary_interrupt, interrupt_type, created_by, created_at, updated_at, active_worker_count)
+          parent_job_id, is_temporary_interrupt, interrupt_type,
+          customer,
+          created_by, created_at, updated_at, active_worker_count)
         VALUES(?,'order_op','bulk','bulk_op','work_order',?,'working',?,?,
-          '',0,'',?,?,?,1)
-      `).bind(job_id, work_order_no, jobMeta, obId, worker_id, t, t).run();
+          '',0,'',?,?,?,?,1)
+      `).bind(job_id, work_order_no, jobMeta, obId, initCustomer, worker_id, t, t).run();
     }
 
     // ---- Phase 3: 创建 worker segment ----
@@ -7144,15 +7243,11 @@ route("v2_bulk_op_job_finish", async (body, env) => {
       return { ok: true, already_completed: true, error: "already_completed", cleaned_open_segments: cleaned, message: "任务已完成" };
     }
 
-    // Leave-only: close segments, recalc, set awaiting_close if no one left
+    // Leave-only: close segments, recalc; bulk_op 是结果型 → 无人后 awaiting_close（autoClose 兜底）
     if (leave_only) {
       await closeAllOpenSegs(env, job_id, worker_id, t, 'leave');
       const leaveCount = await recalcActiveCount(env, job_id, t);
-      if (leaveCount === 0) {
-        await env.DB.prepare(
-          "UPDATE v2_ops_jobs SET status='awaiting_close', updated_at=? WHERE id=? AND status='working'"
-        ).bind(t, job_id).run();
-      }
+      if (leaveCount === 0) await autoCloseJobIfNoOpenWorkers(env, job_id, t);
       return { ok: true, left: true, active_worker_count: leaveCount };
     }
 
@@ -7195,6 +7290,18 @@ route("v2_bulk_op_job_finish", async (body, env) => {
         active_worker_count: realCount };
     }
 
+    // 4. Last person — 客户必填校验（非系统单时）
+    const jobBefore = await env.DB.prepare(
+      "SELECT customer, linked_outbound_order_id FROM v2_ops_jobs WHERE id=?"
+    ).bind(job_id).first();
+    const inCustomer = String(body.customer || "").trim();
+    const isSystemDoc = !!(jobBefore && jobBefore.linked_outbound_order_id);
+    const finalCustomer = inCustomer || (jobBefore && jobBefore.customer) || "";
+    if (!isSystemDoc && !finalCustomer) {
+      return { ok: false, error: "missing_customer",
+        message: "请填写客户名称 / 고객명을 입력하세요" };
+    }
+
     // 4. Last person — save result and complete
     const resultData = {
       packed_sku_count: Number(body.packed_sku_count || 0),
@@ -7208,7 +7315,8 @@ route("v2_bulk_op_job_finish", async (body, env) => {
       pallet_count: Number(body.pallet_count || 0),
       used_forklift: body.used_forklift ? 1 : 0,
       forklift_location_count: Number(body.forklift_location_count || 0),
-      result_note: String(body.result_note || "")
+      result_note: String(body.result_note || ""),
+      customer: finalCustomer
     };
 
     const result_id = "RES-" + uid();
@@ -7220,8 +7328,8 @@ route("v2_bulk_op_job_finish", async (body, env) => {
     // 防御性收口：先关闭所有遗留 open segment，再标记完成
     await closeOpenWorkerSegmentsForJob(env, job_id, t, 'job_completed');
     await env.DB.prepare(
-      "UPDATE v2_ops_jobs SET status='completed', active_worker_count=0, updated_at=? WHERE id=?"
-    ).bind(t, job_id).run();
+      "UPDATE v2_ops_jobs SET status='completed', finished_at=?, active_worker_count=0, customer=COALESCE(NULLIF(?, ''), customer), updated_at=? WHERE id=?"
+    ).bind(t, finalCustomer, t, job_id).run();
 
     // 口径联动：大货操作完成 → 通过强关联回写出库单（首次覆盖 / reopen 累加）
     const finishedJob = await env.DB.prepare(
@@ -7998,6 +8106,244 @@ route("v2_admin_cleanup_completed_open_segments", async (body, env) => {
     affected_job_count: touchedJobIds.size,
     feedback_healed_count: feedbackHealed,
     examples
+  });
+});
+
+// =====================================================
+// 一次性 job status 收尾：pending/working/awaiting_close 但已无 open worker 的，
+// 按 isTimeOnlyJobType 分流；ADMINKEY；支持 dry_run
+// =====================================================
+route("v2_admin_cleanup_job_statuses", async (body, env) => {
+  if (!isAdmin(body, env)) return err("unauthorized_admin_only", 401);
+  const dryRun = body.dry_run === true;
+  const t = now();
+  const rs = await env.DB.prepare(`
+    SELECT id, job_type, status, finished_at, updated_at, created_at
+      FROM v2_ops_jobs
+     WHERE status IN ('pending','working','awaiting_close')
+     ORDER BY created_at ASC
+     LIMIT 5000
+  `).all();
+  const rows = rs.results || [];
+  let checked_count = 0;
+  let completed_time_only_count = 0;
+  let awaiting_close_count = 0;
+  let completed_with_result_count = 0;
+  let kept_active_count = 0;
+  const examples = [];
+  for (const j of rows) {
+    checked_count++;
+    const openCnt = await env.DB.prepare(
+      "SELECT COUNT(*) AS c FROM v2_ops_job_workers WHERE job_id=? AND left_at=''"
+    ).bind(j.id).first();
+    const openCount = Number((openCnt && openCnt.c) || 0);
+    if (openCount > 0) { kept_active_count++; continue; }
+
+    // 取 worker 最后 left_at 作为 finished_at 兜底
+    const lastSeg = await env.DB.prepare(
+      "SELECT left_at FROM v2_ops_job_workers WHERE job_id=? AND left_at!='' ORDER BY left_at DESC LIMIT 1"
+    ).bind(j.id).first();
+    const fallbackFinishedAt = j.finished_at || (lastSeg && lastSeg.left_at) || j.updated_at || j.created_at || t;
+
+    let action = '';
+    if (isTimeOnlyJobType(j.job_type)) {
+      completed_time_only_count++;
+      action = 'completed_time_only';
+      if (!dryRun) {
+        await env.DB.prepare(`
+          UPDATE v2_ops_jobs
+             SET status='completed', finished_at=?, updated_at=?, active_worker_count=0,
+                 result_summary=COALESCE(NULLIF(result_summary,''), '仅记录工时，无数量结果'),
+                 cleanup_note='auto_completed_time_only_no_open_workers'
+           WHERE id=?
+        `).bind(fallbackFinishedAt, t, j.id).run();
+      }
+    } else {
+      // 需要产出 / 未识别类型：按 result 是否存在分流
+      const resCnt = await env.DB.prepare(
+        "SELECT COUNT(*) AS c FROM v2_ops_job_results WHERE job_id=?"
+      ).bind(j.id).first();
+      const hasResult = Number((resCnt && resCnt.c) || 0) > 0;
+      if (hasResult) {
+        completed_with_result_count++;
+        action = 'completed_with_result';
+        if (!dryRun) {
+          await env.DB.prepare(`
+            UPDATE v2_ops_jobs
+               SET status='completed', finished_at=COALESCE(NULLIF(finished_at,''), ?), updated_at=?, active_worker_count=0,
+                   cleanup_note='auto_completed_with_existing_result'
+             WHERE id=?
+          `).bind(fallbackFinishedAt, t, j.id).run();
+        }
+      } else {
+        awaiting_close_count++;
+        action = 'awaiting_close';
+        if (!dryRun) {
+          await env.DB.prepare(`
+            UPDATE v2_ops_jobs
+               SET status='awaiting_close', updated_at=?, active_worker_count=0,
+                   result_summary=COALESCE(NULLIF(result_summary,''), '待补充产出数据'),
+                   cleanup_note='awaiting_manual_result_close'
+             WHERE id=?
+          `).bind(t, j.id).run();
+        }
+      }
+    }
+
+    if (examples.length < 30) {
+      examples.push({ id: j.id, job_type: j.job_type, old_status: j.status, action, finished_at: fallbackFinishedAt });
+    }
+  }
+  return json({
+    ok: true,
+    dry_run: dryRun,
+    checked_count,
+    kept_active_count,
+    completed_time_only_count,
+    awaiting_close_count,
+    completed_with_result_count,
+    examples
+  });
+});
+
+// =====================================================
+// 数据看板：手动补产出并完成（awaiting_close → completed）
+// =====================================================
+route("v2_ops_job_manual_finalize", async (body, env) => {
+  if (!isAuth(body, env)) return err("unauthorized", 401);
+  const job_id = String(body.job_id || "").trim();
+  const reason = String(body.reason || "").trim();
+  const operator = String(body.by || body.operator || "ADMIN").trim();
+  const customer = String(body.customer || "").trim();
+  const result_note = String(body.result_note || "").trim();
+  const result_json_in = body.result_json || {};
+  if (!job_id) return err("missing job_id");
+  if (!reason) return err("missing reason", 400);
+
+  return withIdem(env, body, "v2_ops_job_manual_finalize", async () => {
+    const job = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
+    if (!job) return { ok: false, error: "not_found" };
+    if (job.status === 'completed') return { ok: false, error: "already_completed", message: "任务已完成，请走『修改产出』" };
+    if (job.status === 'cancelled') return { ok: false, error: "cancelled" };
+
+    const openCnt = await env.DB.prepare(
+      "SELECT COUNT(*) AS c FROM v2_ops_job_workers WHERE job_id=? AND left_at=''"
+    ).bind(job_id).first();
+    if (Number((openCnt && openCnt.c) || 0) > 0) {
+      return { ok: false, error: "active_worker_exists_cannot_finalize",
+        message: "仍有人员在岗，请先让所有人退出再补录产出" };
+    }
+
+    const t = now();
+    const result_id = "RES-" + uid();
+    const resultObj = (typeof result_json_in === 'object' && result_json_in) ? result_json_in : {};
+    if (customer) resultObj.customer = customer;
+    if (result_note) resultObj.result_note = result_note;
+    const summary = String(body.result_summary || _summarizeResultObj(resultObj) || '手动补录').slice(0, 200);
+
+    await env.DB.prepare(`
+      INSERT INTO v2_ops_job_results(id, job_id, box_count, pallet_count, remark, result_json, created_by, created_at, source)
+      VALUES(?,?,?,?,?,?,?,?,'manual_finalize')
+    `).bind(
+      result_id, job_id,
+      Number(resultObj.box_count || 0), Number(resultObj.pallet_count || 0),
+      String(resultObj.remark || result_note || ''),
+      JSON.stringify(resultObj),
+      operator, t
+    ).run();
+
+    const sets = [
+      "status='completed'", "finished_at=?", "updated_at=?", "active_worker_count=0",
+      "result_summary=?", "manual_finalized=1", "manual_finalized_by=?",
+      "manual_finalized_at=?", "manual_finalize_reason=?"
+    ];
+    const binds = [t, t, summary, operator, t, reason];
+    if (customer) { sets.push("customer=?"); binds.push(customer); }
+    binds.push(job_id);
+    await env.DB.prepare(
+      "UPDATE v2_ops_jobs SET " + sets.join(', ') + " WHERE id=?"
+    ).bind(...binds).run();
+
+    return { ok: true, job_id, result_id, status: 'completed', summary, finished_at: t };
+  });
+});
+
+// 简单摘要：取常见数量字段累加
+function _summarizeResultObj(r) {
+  if (!r || typeof r !== 'object') return '';
+  const parts = [];
+  const map = [
+    ['box_count', '箱'], ['pallet_count', '托'], ['cbm_count', 'CBM'],
+    ['container_large_count', '大柜'], ['container_small_count', '小柜'],
+    ['operated_box_count', '处理箱'], ['label_count', '标签'],
+    ['reboxed_count', '换箱'], ['repaired_box_count', '修箱'],
+    ['sku_count', 'SKU'], ['packed_box_count', '打包箱']
+  ];
+  for (const [k, l] of map) {
+    if (Number(r[k] || 0) > 0) parts.push(l + ' ' + Number(r[k]));
+  }
+  return parts.join(' / ');
+}
+
+// =====================================================
+// 数据看板：修改已完成 job 的产出（保留历史 / source='manual_correction'）
+// =====================================================
+route("v2_ops_job_result_update", async (body, env) => {
+  if (!isAuth(body, env)) return err("unauthorized", 401);
+  const job_id = String(body.job_id || "").trim();
+  const reason = String(body.reason || "").trim();
+  const operator = String(body.by || body.operator || "ADMIN").trim();
+  const customer = String(body.customer || "").trim();
+  const result_note = String(body.result_note || "").trim();
+  const result_json_in = body.result_json || {};
+  if (!job_id) return err("missing job_id");
+  if (!reason) return err("missing reason", 400);
+
+  return withIdem(env, body, "v2_ops_job_result_update", async () => {
+    const job = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
+    if (!job) return { ok: false, error: "not_found" };
+    if (job.status !== 'completed') {
+      return { ok: false, error: "only_completed_can_correct",
+        message: "仅已完成任务可修改产出，待收尾请走『补充产出并完成』" };
+    }
+
+    const t = now();
+    // 取最新 result 作为 previous_result_id，便于审计
+    const prev = await env.DB.prepare(
+      "SELECT id FROM v2_ops_job_results WHERE job_id=? ORDER BY created_at DESC LIMIT 1"
+    ).bind(job_id).first();
+    const previous_result_id = prev ? prev.id : '';
+
+    const result_id = "RES-" + uid();
+    const resultObj = (typeof result_json_in === 'object' && result_json_in) ? result_json_in : {};
+    if (customer) resultObj.customer = customer;
+    if (result_note) resultObj.result_note = result_note;
+    const summary = String(body.result_summary || _summarizeResultObj(resultObj) || '管理员修正').slice(0, 200);
+
+    await env.DB.prepare(`
+      INSERT INTO v2_ops_job_results(id, job_id, box_count, pallet_count, remark, result_json, created_by, created_at, source, previous_result_id)
+      VALUES(?,?,?,?,?,?,?,?,'manual_correction',?)
+    `).bind(
+      result_id, job_id,
+      Number(resultObj.box_count || 0), Number(resultObj.pallet_count || 0),
+      String(resultObj.remark || result_note || ''),
+      JSON.stringify(resultObj),
+      operator, t,
+      previous_result_id
+    ).run();
+
+    const sets = [
+      "result_summary=?", "result_corrected=1", "result_corrected_by=?",
+      "result_corrected_at=?", "result_correct_reason=?", "updated_at=?"
+    ];
+    const binds = [summary, operator, t, reason, t];
+    if (customer) { sets.push("customer=?"); binds.push(customer); }
+    binds.push(job_id);
+    await env.DB.prepare(
+      "UPDATE v2_ops_jobs SET " + sets.join(', ') + " WHERE id=?"
+    ).bind(...binds).run();
+
+    return { ok: true, job_id, result_id, previous_result_id, summary };
   });
 });
 

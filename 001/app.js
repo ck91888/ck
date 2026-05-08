@@ -3927,6 +3927,28 @@ async function startBulkJob(btnEl) {
       saveActiveJob(res.job_id, res.worker_seg_id);
       // Switch to working state
       _bulkEnterWorkingState(workOrderNo, null);
+
+      // 客户字段：系统单 → 自动带出 + 只读；非系统工单 → 可编辑且必填
+      var custEl = document.getElementById("bulkCustomer");
+      var custReq = document.getElementById("bulkCustomerRequired");
+      var custHint = document.getElementById("bulkCustomerHint");
+      var linkedCustomer = (res.linked_outbound && res.linked_outbound.customer) || '';
+      if (custEl) {
+        if (linkedCustomer) {
+          custEl.value = linkedCustomer;
+          custEl.readOnly = true;
+          custEl.style.background = '#f5f5f5';
+          if (custReq) custReq.style.display = 'none';
+          if (custHint) custHint.style.display = 'none';
+        } else {
+          custEl.value = '';
+          custEl.readOnly = false;
+          custEl.style.background = '';
+          if (custReq) custReq.style.display = '';
+          if (custHint) custHint.style.display = '';
+        }
+      }
+
       // Show linked outbound if available
       var obCard = document.getElementById("bulkLinkedObCard");
       var obBody = document.getElementById("bulkLinkedObBody");
@@ -4007,6 +4029,15 @@ async function bulkLeave(btnEl) {
 
 async function finishBulkJob(btnEl) {
   if (!_activeJobId) { alert("没有进行中的任务 / 진행 중인 작업 없음"); return; }
+  // 客户字段（系统单 readonly 已带出；非系统单必填）
+  var bulkCustomerVal = ((document.getElementById("bulkCustomer") || {}).value || "").trim();
+  var custReq = document.getElementById("bulkCustomerRequired");
+  var isCustomerRequired = !!(custReq && custReq.style.display !== 'none');
+  if (isCustomerRequired && !bulkCustomerVal) {
+    alert("请填写客户名称 / 고객명을 입력하세요");
+    var ce = document.getElementById("bulkCustomer"); if (ce) ce.focus();
+    return;
+  }
   if (!confirm("确认完成本次大货操作？\n이번 대량화물 작업을 완료하시겠습니까?")) return;
   withActionLock('finishBulkJob', btnEl || null, '提交中.../저장중...', async function() {
     // Enter submitting state
@@ -4015,6 +4046,7 @@ async function finishBulkJob(btnEl) {
       action: "v2_bulk_op_job_finish",
       job_id: _activeJobId,
       worker_id: getWorkerId(),
+      customer: bulkCustomerVal,
       packed_sku_count: parseInt(document.getElementById("bulkPackedSku").value) || 0,
       packed_box_count: parseInt(document.getElementById("bulkPackedBox").value) || 0,
       used_carton_large_count: parseInt(document.getElementById("bulkCartonLarge").value) || 0,
@@ -4053,6 +4085,10 @@ async function finishBulkJob(btnEl) {
       // Stay on page, show inline error, don't clear inputs
       _bulkSetSubmitting(false);
       _bulkShowError("请先记录操作产出后再完成 / 작업 산출물을 먼저 기록한 후 완료하세요");
+    } else if (res && res.error === "missing_customer") {
+      _bulkSetSubmitting(false);
+      _bulkShowError("请填写客户名称 / 고객명을 입력하세요");
+      var ce2 = document.getElementById("bulkCustomer"); if (ce2) ce2.focus();
     } else {
       // Other error — stay on page
       _bulkSetSubmitting(false);
