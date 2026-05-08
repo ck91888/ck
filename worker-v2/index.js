@@ -691,6 +691,7 @@ const TIME_ONLY_JOB_TYPES = new Set([
   'qc',                 // 质检
   'inventory',          // 盘点
   'scan_pallet',        // 过机扫描
+  'verify_scan',        // 扫码核对（仅记工时；超过 48h 由 cleanup 自动结束）
   'issue_handle'        // 问题点处理 — 由 v2_issue_handle_finish 收尾，不参与本逻辑（兜底归类时间型）
 ]);
 // 需要产出数据：最后一人退出且无 result → awaiting_close；有 result → completed
@@ -699,8 +700,10 @@ const RESULT_REQUIRED_JOB_TYPES = new Set([
   'load_outbound', 'outbound_stock_op',
   'inbound_direct', 'inbound_bulk', 'inbound_change_order',
   'bulk_op', 'pick_direct',
-  'verify_scan', 'load_import', 'pickup_delivery_import'
+  'load_import', 'pickup_delivery_import'
 ]);
+// 扫码核对超时阈值（毫秒）— 48 小时
+const VERIFY_SCAN_TIMEOUT_MS = 48 * 3600 * 1000;
 function isTimeOnlyJobType(jobType) {
   return TIME_ONLY_JOB_TYPES.has(String(jobType || ''));
 }
@@ -726,12 +729,19 @@ async function autoCloseJobIfNoOpenWorkers(env, jobId, t) {
   if (openCount > 0) return job;
 
   if (isTimeOnlyJobType(job.job_type)) {
+    const defaultSummary = (job.job_type === 'verify_scan')
+      ? '扫码核对：仅记录工时，无数量结果'
+      : '仅记录工时，无数量结果';
     await env.DB.prepare(`
       UPDATE v2_ops_jobs
          SET status='completed', finished_at=?, updated_at=?, active_worker_count=0,
-             result_summary=COALESCE(NULLIF(result_summary,''), '仅记录工时，无数量结果')
+             result_summary=COALESCE(NULLIF(result_summary,''), ?)
        WHERE id=?
-    `).bind(closeAt, closeAt, jobId).run();
+    `).bind(closeAt, closeAt, defaultSummary, jobId).run();
+    // verify_scan 联动：把对应批次推进到 completed（如未关闭）
+    if (job.job_type === 'verify_scan') {
+      await _completeVerifyBatchIfLinked(env, jobId, closeAt, 'auto_complete_via_job');
+    }
     return Object.assign({}, job, { status: 'completed', finished_at: closeAt });
   }
 
@@ -756,6 +766,25 @@ async function autoCloseJobIfNoOpenWorkers(env, jobId, t) {
      WHERE id=? AND status NOT IN ('completed','cancelled')
   `).bind(closeAt, jobId).run();
   return Object.assign({}, job, { status: 'awaiting_close' });
+}
+
+// verify_scan job 关闭时联动其挂的核对批次（v2_verify_batches）→ completed
+// 仅当当前 batch.status 不是 completed/cancelled 才推进，避免覆盖人工标记
+async function _completeVerifyBatchIfLinked(env, jobId, closeAt, source) {
+  if (!jobId) return false;
+  const job = await env.DB.prepare(
+    "SELECT job_type, related_doc_id FROM v2_ops_jobs WHERE id=?"
+  ).bind(jobId).first();
+  if (!job || job.job_type !== 'verify_scan' || !job.related_doc_id) return false;
+  const batch = await env.DB.prepare(
+    "SELECT id, status FROM v2_verify_batches WHERE id=?"
+  ).bind(job.related_doc_id).first();
+  if (!batch) return false;
+  if (batch.status === 'completed' || batch.status === 'cancelled') return false;
+  await env.DB.prepare(
+    "UPDATE v2_verify_batches SET status='completed', completed_at=COALESCE(NULLIF(completed_at,''), ?), completed_by=COALESCE(NULLIF(completed_by,''), ?), updated_at=? WHERE id=?"
+  ).bind(closeAt, source || 'auto', closeAt, batch.id).run();
+  return true;
 }
 
 // 从表中重算某 job 的 active_worker_count
@@ -8117,6 +8146,7 @@ route("v2_admin_cleanup_job_statuses", async (body, env) => {
   if (!isAdmin(body, env)) return err("unauthorized_admin_only", 401);
   const dryRun = body.dry_run === true;
   const t = now();
+  const tMs = Date.parse(t);
   const rs = await env.DB.prepare(`
     SELECT id, job_type, status, finished_at, updated_at, created_at
       FROM v2_ops_jobs
@@ -8130,6 +8160,9 @@ route("v2_admin_cleanup_job_statuses", async (body, env) => {
   let awaiting_close_count = 0;
   let completed_with_result_count = 0;
   let kept_active_count = 0;
+  let scan_verify_completed_count = 0;
+  let scan_verify_timeout_closed_count = 0;
+  let verify_batch_completed_count = 0;
   const examples = [];
   for (const j of rows) {
     checked_count++;
@@ -8137,13 +8170,72 @@ route("v2_admin_cleanup_job_statuses", async (body, env) => {
       "SELECT COUNT(*) AS c FROM v2_ops_job_workers WHERE job_id=? AND left_at=''"
     ).bind(j.id).first();
     const openCount = Number((openCnt && openCnt.c) || 0);
-    if (openCount > 0) { kept_active_count++; continue; }
 
     // 取 worker 最后 left_at 作为 finished_at 兜底
     const lastSeg = await env.DB.prepare(
       "SELECT left_at FROM v2_ops_job_workers WHERE job_id=? AND left_at!='' ORDER BY left_at DESC LIMIT 1"
     ).bind(j.id).first();
     const fallbackFinishedAt = j.finished_at || (lastSeg && lastSeg.left_at) || j.updated_at || j.created_at || t;
+
+    // ===== 扫码核对专项：仅工时 + 48h 强制结束 =====
+    if (j.job_type === 'verify_scan') {
+      const baseMs = Date.parse(j.created_at || j.updated_at || t);
+      const timedOut = Number.isFinite(baseMs) && Number.isFinite(tMs) && (tMs - baseMs >= VERIFY_SCAN_TIMEOUT_MS);
+      // open_worker=0 → 直接 completed；open_worker>0 但已超 48h → 关 segment + completed
+      // open_worker>0 且未超时 → 保留 working
+      if (openCount === 0) {
+        scan_verify_completed_count++;
+        const action = 'scan_verify_completed_time_only';
+        if (!dryRun) {
+          await env.DB.prepare(`
+            UPDATE v2_ops_jobs
+               SET status='completed', finished_at=?, updated_at=?, active_worker_count=0,
+                   result_summary=COALESCE(NULLIF(result_summary,''), '扫码核对：仅记录工时，无数量结果'),
+                   cleanup_note='auto_completed_scan_verify_no_open_workers'
+             WHERE id=?
+          `).bind(fallbackFinishedAt, t, j.id).run();
+          if (await _completeVerifyBatchIfLinked(env, j.id, fallbackFinishedAt, 'cleanup_no_open_workers')) verify_batch_completed_count++;
+        }
+        if (examples.length < 30) examples.push({ id: j.id, job_type: j.job_type, old_status: j.status, action, finished_at: fallbackFinishedAt });
+        continue;
+      }
+      if (timedOut) {
+        scan_verify_timeout_closed_count++;
+        const action = 'scan_verify_timeout_closed_48h';
+        // cutoff 时间：base_time + 48h；若已超过 now 则取 now
+        const cutoffMs = Math.min(tMs, baseMs + VERIFY_SCAN_TIMEOUT_MS);
+        const cutoffIso = new Date(cutoffMs).toISOString();
+        if (!dryRun) {
+          // 关闭所有 open segment，按 joined_at 到 cutoff 计算分钟
+          const openSegs = await env.DB.prepare(
+            "SELECT id, joined_at FROM v2_ops_job_workers WHERE job_id=? AND left_at=''"
+          ).bind(j.id).all();
+          for (const s of (openSegs.results || [])) {
+            const jms = Date.parse(s.joined_at || '');
+            const mins = (Number.isFinite(jms))
+              ? Math.max(0, Math.round((cutoffMs - jms) / 60000 * 10) / 10) : 0;
+            await env.DB.prepare(
+              "UPDATE v2_ops_job_workers SET left_at=?, minutes_worked=?, leave_reason='auto_closed_scan_verify_after_48h' WHERE id=?"
+            ).bind(cutoffIso, mins, s.id).run();
+          }
+          await env.DB.prepare(`
+            UPDATE v2_ops_jobs
+               SET status='completed', finished_at=?, updated_at=?, active_worker_count=0,
+                   result_summary='扫码核对：仅记录工时，超过48小时自动结束',
+                   cleanup_note='auto_closed_scan_verify_after_48h'
+             WHERE id=?
+          `).bind(cutoffIso, t, j.id).run();
+          if (await _completeVerifyBatchIfLinked(env, j.id, cutoffIso, 'cleanup_timeout_48h')) verify_batch_completed_count++;
+        }
+        if (examples.length < 30) examples.push({ id: j.id, job_type: j.job_type, old_status: j.status, action, finished_at: cutoffIso });
+        continue;
+      }
+      // 未超时且仍有人 → 保持 working
+      kept_active_count++;
+      continue;
+    }
+    // ===== 非 verify_scan：仍在岗就跳过 =====
+    if (openCount > 0) { kept_active_count++; continue; }
 
     let action = '';
     if (isTimeOnlyJobType(j.job_type)) {
@@ -8202,6 +8294,9 @@ route("v2_admin_cleanup_job_statuses", async (body, env) => {
     completed_time_only_count,
     awaiting_close_count,
     completed_with_result_count,
+    scan_verify_completed_count,
+    scan_verify_timeout_closed_count,
+    verify_batch_completed_count,
     examples
   });
 });

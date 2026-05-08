@@ -799,6 +799,8 @@ async function openOrderDetail(jobId) {
   var j = res.job || {};
   var html = '';
   // 顶部状态/客户/手动收尾/修正 chip + 操作按钮
+  // 扫码核对（verify_scan）只记工时，不需要补产出（cleanup 会按 48h 规则自动结束）
+  var isVerifyScan = (j.job_type === 'verify_scan');
   var chipHtml = '';
   if (Number(j.manual_finalized) === 1) {
     chipHtml += ' <span class="tag tag-orange" style="background:#fff3e0;color:#e65100;">手动收尾</span>';
@@ -806,14 +808,17 @@ async function openOrderDetail(jobId) {
   if (Number(j.result_corrected) === 1) {
     chipHtml += ' <span class="tag tag-orange" style="background:#fce4ec;color:#ad1457;">产出已修正</span>';
   }
+  if (isVerifyScan && j.cleanup_note === 'auto_closed_scan_verify_after_48h') {
+    chipHtml += ' <span class="tag tag-orange" style="background:#fff3e0;color:#e65100;">自动结束 (48h) / 자동 종료</span>';
+  }
   html += '<div style="margin-bottom:10px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;">';
   html += statusTag(j.status) + chipHtml;
   if (j.customer) html += ' <span style="font-size:13px;color:#1565c0;"><b>客户:</b> ' + esc(j.customer) + '</span>';
-  // 待收尾 → 补录按钮；已完成 → 修改产出按钮
-  if (j.status === 'awaiting_close' || j.status === 'pending' || j.status === 'working') {
+  // 待收尾 → 补录按钮；已完成 → 修改产出按钮（扫码核对均不显示）
+  if (!isVerifyScan && (j.status === 'awaiting_close' || j.status === 'pending' || j.status === 'working')) {
     html += ' <button class="btn-primary" onclick="openManualFinalize(\'' + esc(j.id) + '\')">补充产出并完成 / 결과 입력 후 완료</button>';
   }
-  if (j.status === 'completed') {
+  if (!isVerifyScan && j.status === 'completed') {
     html += ' <button class="btn-secondary" onclick="openResultUpdate(\'' + esc(j.id) + '\')">修改产出数据 / 결과 수정</button>';
   }
   html += '</div>';
