@@ -76,7 +76,8 @@ var _WRITE_ACTIONS = [
   'v2_feedback_delete',
   'v2_issue_mark_accounting_required','v2_issue_mark_accounted',
   'v2_inbound_plan_update','v2_outbound_order_update','v2_outbound_order_ack_change',
-  'v2_outbound_pickup_confirm'
+  'v2_outbound_pickup_confirm',
+  'v2_attachment_delete','v2_outbound_order_mark_material_changed'
 ];
 function _genReqId(action) {
   return action + '_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
@@ -1544,9 +1545,10 @@ async function loadOutboundDetail() {
   var jobs = res.jobs || [];
   var atts = res.attachments || [];
 
-  // Cache order data for printing
+  // Cache order data for printing / 修改弹窗资料管理也复用
   window._currentOutboundOrderCache = o;
   window._currentOutboundLinesCache = lines;
+  window._currentOutboundAttsCache = atts;
 
   var obDisplayNo = o.display_no || o.id;
   var usesStockOp = Number(o.uses_stock_operation) === 1;
@@ -2872,6 +2874,20 @@ function openOutboundEditForm() {
   html += '<div style="grid-column:1/-1;"><label><b>作业说明</b></label><textarea id="ob-edit-instruction" class="input" rows="2">' + esc(o.instruction || '') + '</textarea></div>';
   html += '<div style="grid-column:1/-1;"><label><b>备注</b></label><textarea id="ob-edit-remark" class="input" rows="2">' + esc(o.remark || '') + '</textarea></div>';
   html += '</div>';
+
+  // 出库资料管理区（仅当不在 frozen 状态下 — frozen 已在最上面 return；此处 cancelled 也已 return）
+  html += '<div style="margin-top:14px;border-top:1px solid #eee;padding-top:10px;">';
+  html += '<div style="font-weight:700;margin-bottom:6px;font-size:13px;">出库资料 / 출고 자료';
+  html += ' <span class="muted" style="font-weight:400;font-size:12px;">（删除 / 新增需在保存后才生效）</span>';
+  html += '</div>';
+  html += '<div id="ob-edit-materials"></div>';  // 由 renderOutboundEditMaterials 填充
+  html += '<div style="margin-top:6px;">';
+  html += '<input id="ob-edit-material-input" type="file" multiple accept=".xlsx,.xls,.csv,.pdf,.jpg,.jpeg,.png" style="display:none;" onchange="onOutboundEditMaterialsPicked(this)">';
+  html += '<button type="button" class="btn btn-outline btn-sm" onclick="document.getElementById(\'ob-edit-material-input\').click()">+ 添加出库资料 / 출고 자료 추가</button>';
+  html += '</div>';
+  html += '<div id="ob-edit-pending-materials" style="margin-top:6px;"></div>';  // 待上传列表
+  html += '</div>';
+
   html += '<div style="margin-top:14px;text-align:right;">';
   html += '<button class="btn btn-outline" onclick="closeOutboundEditForm()">取消 / 취소</button> ';
   html += '<button class="btn btn-primary" onclick="submitOutboundEdit(this)">保存 / 저장</button>';
@@ -2879,6 +2895,97 @@ function openOutboundEditForm() {
   var div = document.createElement('div');
   div.innerHTML = html;
   document.body.appendChild(div.firstChild);
+
+  // 资料管理初始状态
+  _obEditMaterialDeleteIds = {};       // { att_id: true } 标记待删除
+  _obEditPendingFiles = [];            // [{file, key}]
+  renderOutboundEditMaterials();
+  renderOutboundEditPending();
+}
+
+// 修改弹窗使用的会话状态（仅在弹窗打开期间有效）
+var _obEditMaterialDeleteIds = {};
+var _obEditPendingFiles = [];
+
+function renderOutboundEditMaterials() {
+  var box = document.getElementById('ob-edit-materials');
+  if (!box) return;
+  var atts = (window._currentOutboundAttsCache || []).filter(function(a) {
+    return a.attachment_category === 'outbound_material';
+  });
+  if (atts.length === 0) {
+    box.innerHTML = '<div class="muted" style="font-size:12px;padding:6px 0;">暂无出库资料 / 출고 자료 없음</div>';
+    return;
+  }
+  var html = '<div style="background:#fafafa;border:1px solid #eee;border-radius:6px;padding:6px 8px;">';
+  atts.forEach(function(att) {
+    var pending = !!_obEditMaterialDeleteIds[att.id];
+    var fn = att.file_name || '--';
+    var url = fileUrl(att.file_key || '');
+    html += '<div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px dashed #eee;font-size:12px;'
+      + (pending ? 'opacity:0.55;text-decoration:line-through;' : '') + '">';
+    html += '<div style="flex:1 1 auto;min-width:0;word-break:break-all;">' + esc(fn);
+    if (att.uploaded_by) html += ' <span class="muted">（' + esc(att.uploaded_by) + '）</span>';
+    if (att.created_at) html += ' <span class="muted">' + esc(fmtTime(att.created_at)) + '</span>';
+    if (pending) html += ' <span class="st" style="background:#ffebee;color:#c62828;margin-left:4px;">待删除</span>';
+    html += '</div>';
+    html += '<a class="btn btn-outline btn-sm" href="' + esc(url) + '" target="_blank" rel="noopener">打开</a>';
+    if (pending) {
+      html += '<button type="button" class="btn btn-outline btn-sm" onclick="cancelOutboundEditMaterialDelete(\'' + esc(att.id) + '\')">撤销</button>';
+    } else {
+      html += '<button type="button" class="btn btn-danger btn-sm" onclick="markOutboundEditMaterialDelete(\'' + esc(att.id) + '\')">删除</button>';
+    }
+    html += '</div>';
+  });
+  html += '</div>';
+  box.innerHTML = html;
+}
+
+function markOutboundEditMaterialDelete(attId) {
+  if (!attId) return;
+  _obEditMaterialDeleteIds[attId] = true;
+  renderOutboundEditMaterials();
+}
+function cancelOutboundEditMaterialDelete(attId) {
+  if (!attId) return;
+  delete _obEditMaterialDeleteIds[attId];
+  renderOutboundEditMaterials();
+}
+
+function onOutboundEditMaterialsPicked(inputEl) {
+  if (!inputEl || !inputEl.files || inputEl.files.length === 0) return;
+  var files = Array.prototype.slice.call(inputEl.files);
+  // 同一弹窗内按 name+size+lastModified 去重，避免重复加入
+  files.forEach(function(f) {
+    var key = (f.name || '') + '|' + (f.size || 0) + '|' + (f.lastModified || 0);
+    var dup = _obEditPendingFiles.some(function(x) { return x.key === key; });
+    if (!dup) _obEditPendingFiles.push({ file: f, key: key });
+  });
+  inputEl.value = ''; // 允许再次选择同一文件
+  renderOutboundEditPending();
+}
+
+function removeOutboundEditPending(idx) {
+  if (idx < 0 || idx >= _obEditPendingFiles.length) return;
+  _obEditPendingFiles.splice(idx, 1);
+  renderOutboundEditPending();
+}
+
+function renderOutboundEditPending() {
+  var box = document.getElementById('ob-edit-pending-materials');
+  if (!box) return;
+  if (_obEditPendingFiles.length === 0) { box.innerHTML = ''; return; }
+  var html = '<div style="background:#fff8e1;border:1px solid #ffe0b2;border-radius:6px;padding:6px 8px;">';
+  html += '<div style="font-size:12px;color:#6d4c00;margin-bottom:4px;">待上传 / 업로드 대기 (' + _obEditPendingFiles.length + ')</div>';
+  _obEditPendingFiles.forEach(function(p, i) {
+    var sizeKb = Math.max(1, Math.round((p.file.size || 0) / 1024));
+    html += '<div style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px;border-bottom:1px dashed #ffe0b2;">';
+    html += '<div style="flex:1 1 auto;min-width:0;word-break:break-all;">' + esc(p.file.name || '') + ' <span class="muted">(' + sizeKb + ' KB)</span></div>';
+    html += '<button type="button" class="btn btn-outline btn-sm" onclick="removeOutboundEditPending(' + i + ')">移除</button>';
+    html += '</div>';
+  });
+  html += '</div>';
+  box.innerHTML = html;
 }
 
 function closeOutboundEditForm(ev) {
@@ -2914,13 +3021,72 @@ async function submitOutboundEdit(btnEl) {
       instruction: (document.getElementById('ob-edit-instruction') || {}).value || '',
       remark: (document.getElementById('ob-edit-remark') || {}).value || ''
     });
-    if (res && res.ok) {
-      alert('已保存（版本 #' + Number(res.revision_no || 0) + '），等待仓库确认 / 저장됨, 창고 확인 대기');
-      closeOutboundEditForm();
-      loadOutboundDetail();
-    } else {
+    // 文字字段保存失败 → 不动附件
+    if (!res || !res.ok) {
       alert('失败/실패: ' + (res ? (res.message || res.error) : 'unknown'));
+      return;
     }
+
+    // 处理出库资料：删除 / 新增 / 通知仓库重新确认
+    var deleteIds = Object.keys(_obEditMaterialDeleteIds || {});
+    var pending = (_obEditPendingFiles || []).slice();
+    var delFails = [], delOks = 0;
+    var upFails = [], upOks = 0;
+
+    if (deleteIds.length > 0) {
+      for (var i = 0; i < deleteIds.length; i++) {
+        var attId = deleteIds[i];
+        try {
+          var dr = await api({ action: 'v2_attachment_delete', id: attId });
+          if (dr && dr.ok) delOks++;
+          else delFails.push(attId + ' (' + ((dr && (dr.message || dr.error)) || 'error') + ')');
+        } catch (e) {
+          delFails.push(attId + ' (' + (e && e.message || 'exception') + ')');
+        }
+      }
+    }
+    if (pending.length > 0) {
+      for (var j = 0; j < pending.length; j++) {
+        var f = pending[j].file;
+        try {
+          var ok = await uploadOutboundMaterial(_currentOutboundId, f);
+          if (ok) upOks++;
+          else upFails.push(f.name || ('文件' + (j + 1)));
+        } catch (e2) {
+          upFails.push((f.name || ('文件' + (j + 1))) + ' (' + (e2 && e2.message || 'exception') + ')');
+        }
+      }
+    }
+
+    // 资料有任何变化 → 显式触发仓库重新确认（即便文字字段 no_change）
+    var materialsTouched = (delOks + upOks) > 0;
+    var revisionNo = Number(res.revision_no || 0);
+    if (materialsTouched) {
+      var summary = '出库资料变更：删除 ' + delOks + ' 个，新增 ' + upOks + ' 个';
+      try {
+        var mr = await api({
+          action: 'v2_outbound_order_mark_material_changed',
+          id: _currentOutboundId,
+          by: by,
+          summary: summary,
+          diff: { material_deleted: delOks, material_added: upOks }
+        });
+        if (mr && mr.ok && mr.revision_no) revisionNo = Number(mr.revision_no);
+      } catch (e3) { /* 即便日志失败，附件已落库；不阻断 */ }
+    }
+
+    var failParts = [];
+    if (delFails.length > 0) failParts.push('删除失败 ' + delFails.length + ' 个');
+    if (upFails.length > 0) failParts.push('上传失败 ' + upFails.length + ' 个');
+    if (failParts.length > 0) {
+      alert('出库单已保存（版本 #' + revisionNo + '）\n但部分资料处理失败：' + failParts.join('，') + '\n请重新进入详情确认 / 상세에서 다시 확인');
+    } else if (res.no_change && !materialsTouched) {
+      alert('未变更 / 변경 없음');
+    } else {
+      alert('保存成功（版本 #' + revisionNo + '）' + (materialsTouched ? '，已通知仓库重新确认 / 창고 재확인 알림' : '，等待仓库确认 / 창고 확인 대기'));
+    }
+    closeOutboundEditForm();
+    loadOutboundDetail();
   });
 }
 

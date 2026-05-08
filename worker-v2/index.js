@@ -5918,6 +5918,93 @@ route("v2_attachment_get", async (body, env) => {
   });
 });
 
+// 删除附件 — 仅协同中心写权限（ADMINKEY/VIEWKEY 共用 isAuth）；
+// 出库资料联动出库单变更：revision_no+1 / warehouse_ack_required=1 / 写 change_log
+route("v2_attachment_delete", async (body, env) => {
+  if (!isAuth(body, env)) return err("unauthorized", 401);
+  const id = String(body.id || "").trim();
+  if (!id) return err("missing id");
+  return withIdem(env, body, "v2_attachment_delete", async () => {
+    const att = await env.DB.prepare("SELECT * FROM v2_attachments WHERE id=?").bind(id).first();
+    if (!att) return { ok: false, error: "not_found", message: "附件不存在或已被删除" };
+
+    // 已 frozen 的出库单不允许删除其资料
+    if (att.related_doc_type === 'outbound_order' && att.attachment_category === 'outbound_material') {
+      const order = await env.DB.prepare(
+        "SELECT id, status FROM v2_outbound_orders WHERE id=?"
+      ).bind(att.related_doc_id).first();
+      const FROZEN = ['shipped', 'completed', 'cancelled'];
+      if (order && FROZEN.indexOf(order.status) !== -1) {
+        return { ok: false, error: "frozen_status_cannot_edit",
+          message: "已出库/完成/取消的出库单不能删除资料：" + order.status };
+      }
+    }
+
+    // 删 R2（失败不阻断 DB 删除——文件孤悬可后续清理；DB 删除失败才视为整体失败）
+    let r2_deleted = false;
+    try {
+      if (att.file_key && env.R2_BUCKET) {
+        await env.R2_BUCKET.delete(att.file_key);
+        r2_deleted = true;
+      }
+    } catch (e) { /* swallow */ }
+
+    await env.DB.prepare("DELETE FROM v2_attachments WHERE id=?").bind(id).run();
+
+    return {
+      ok: true,
+      deleted: true,
+      id,
+      file_key: att.file_key || '',
+      related_doc_type: att.related_doc_type || '',
+      related_doc_id: att.related_doc_id || '',
+      attachment_category: att.attachment_category || '',
+      r2_deleted
+    };
+  });
+});
+
+// 出库资料变化触发仓库重新确认 — revision+1 / warehouse_ack_required=1 / 写 change_log
+// 调用方：客服在修改出库单弹窗里删除/新增了出库资料之后调用本 action 收口
+// summary 例："出库资料变更：删除 1 个，新增 2 个"
+route("v2_outbound_order_mark_material_changed", async (body, env) => {
+  if (!isAuth(body, env)) return err("unauthorized", 401);
+  const id = String(body.id || "").trim();
+  const summary = String(body.summary || "出库资料变更").trim();
+  const by = String(body.by || body.modified_by || "");
+  if (!id) return err("missing id");
+  return withIdem(env, body, "v2_outbound_order_mark_material_changed", async () => {
+    const order = await env.DB.prepare("SELECT id, status, revision_no FROM v2_outbound_orders WHERE id=?").bind(id).first();
+    if (!order) return { ok: false, error: "not_found" };
+    const FROZEN = ['shipped', 'completed', 'cancelled'];
+    if (FROZEN.indexOf(order.status) !== -1) {
+      return { ok: false, error: "frozen_status_cannot_edit",
+        message: "已出库/完成/取消的出库单不能修改：" + order.status };
+    }
+    const t = now();
+    const newRevision = Number(order.revision_no || 0) + 1;
+    await env.DB.prepare(`
+      UPDATE v2_outbound_orders
+         SET revision_no=?, last_modified_by=?, last_modified_at=?,
+             warehouse_ack_required=1, warehouse_ack_by='', warehouse_ack_at='',
+             updated_at=?
+       WHERE id=?
+    `).bind(newRevision, by, t, t, id).run();
+
+    await insertOutboundChangeLog(env, {
+      order_id: id,
+      revision_no: newRevision,
+      change_type: 'material_update',
+      changed_by: by,
+      diff: body.diff || {},
+      summary,
+      t
+    });
+
+    return { ok: true, id, revision_no: newRevision, summary_text: summary };
+  });
+});
+
 // =====================================================
 // FIELD FEEDBACKS — basic CRUD
 // =====================================================
