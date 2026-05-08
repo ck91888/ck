@@ -7812,6 +7812,15 @@ route("v2_admin_recalc_issue_work_minutes", async (body, env) => {
 //   只 close 工时段，不删除原始数据，不创建 ops_job_results
 //   仅 ADMINKEY 允许；OPSKEY/VIEWKEY 拒绝
 // =====================================================
+// UTC ISO → "YYYY-MM-DD HH:mm" KST 显示串
+function _kstFmt(iso) {
+  if (!iso) return '';
+  const ms = Date.parse(iso);
+  if (!Number.isFinite(ms)) return '';
+  const d = new Date(ms + 9 * 3600000);
+  return d.toISOString().slice(0, 16).replace('T', ' ');
+}
+
 route("v2_admin_force_worker_leave", async (body, env) => {
   if (!isAdmin(body, env)) return err("unauthorized_admin_only", 401);
   const job_id = String(body.job_id || "").trim();
@@ -7820,7 +7829,8 @@ route("v2_admin_force_worker_leave", async (body, env) => {
   const reason = String(body.reason || "").trim();
   const operator_name = String(body.operator_name || "").trim();
   const close_mode = String(body.close_mode || "now").trim();
-  const customLeaveAt = String(body.leave_at || "").trim();
+  // 兼容两个字段：force_left_at（推荐）/ leave_at（旧）
+  const customLeaveAt = String(body.force_left_at || body.leave_at || "").trim();
 
   if (!job_id) return err("missing job_id");
   if (!worker_id) return err("missing worker_id");
@@ -7845,7 +7855,7 @@ route("v2_admin_force_worker_leave", async (body, env) => {
     const job = await env.DB.prepare("SELECT id, status, updated_at FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
     let leaveAt = now();
     if (close_mode === "custom") {
-      if (!customLeaveAt) return { ok: false, error: "missing_leave_at", message: "close_mode=custom 时必须传 leave_at" };
+      if (!customLeaveAt) return { ok: false, error: "missing_leave_at", message: "close_mode=custom 时必须传 force_left_at" };
       leaveAt = customLeaveAt;
     } else if (close_mode === "job_completed_at") {
       leaveAt = (job && job.updated_at) ? job.updated_at : now();
@@ -7853,11 +7863,26 @@ route("v2_admin_force_worker_leave", async (body, env) => {
 
     const leaveMs = Date.parse(leaveAt);
     const joinMs = Date.parse(seg.joined_at || "");
-    if (!Number.isFinite(leaveMs)) return { ok: false, error: "invalid_leave_at", message: "leave_at 解析失败：" + leaveAt };
-    if (!Number.isFinite(joinMs)) return { ok: false, error: "invalid_joined_at", message: "joined_at 解析失败：" + (seg.joined_at || '') };
+    if (!Number.isFinite(leaveMs)) {
+      return { ok: false, error: "invalid_leave_at", message: "leave_at 解析失败：" + leaveAt };
+    }
+    if (!Number.isFinite(joinMs)) {
+      return { ok: false, error: "invalid_joined_at", message: "joined_at 解析失败：" + (seg.joined_at || '') };
+    }
+    // 退出时间不能早于开始时间——静默 max(0,...) 会掩盖填错时间
+    if (leaveMs < joinMs) {
+      return {
+        ok: false,
+        error: "force_left_before_joined",
+        message: "强制退出时间不能早于开始时间",
+        joined_at: seg.joined_at || "",
+        joined_at_kst: _kstFmt(seg.joined_at || ""),
+        left_at: leaveAt,
+        left_at_kst: _kstFmt(leaveAt)
+      };
+    }
 
-    // minutes 不允许为负
-    const minutesWorked = Math.max(0, Math.round(((leaveMs - joinMs) / 60000) * 10) / 10);
+    const minutesWorked = Math.round(((leaveMs - joinMs) / 60000) * 10) / 10;
 
     const fullReason = "admin_force_leave: " + reason + " | operator=" + operator_name;
     await env.DB.prepare(
@@ -7884,7 +7909,9 @@ route("v2_admin_force_worker_leave", async (body, env) => {
       worker_name: seg.worker_name || "",
       job_id,
       joined_at: seg.joined_at || "",
+      joined_at_kst: _kstFmt(seg.joined_at || ""),
       left_at: leaveAt,
+      left_at_kst: _kstFmt(leaveAt),
       minutes_worked: minutesWorked
     };
   });

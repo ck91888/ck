@@ -194,6 +194,27 @@ body {
 }
 .modal-card .modal-close:hover { color: #333; }
 
+/* ===== Generic modal-box（强制退出弹窗）===== */
+.modal-box {
+  background: #fff; border-radius: 8px; padding: 18px 20px;
+  width: 100%; max-width: 520px; box-shadow: 0 12px 32px rgba(0,0,0,0.15);
+  max-height: calc(100vh - 80px); overflow-y: auto;
+}
+.modal-box .input,
+.modal-box input.input,
+.modal-box input[type=datetime-local].input {
+  height: 32px; padding: 0 8px; border: 1px solid #d9d9d9; border-radius: 4px;
+  font-size: 13px; background: #fff; box-sizing: border-box;
+}
+.modal-box label { display: block; font-size: 12px; color: #555; margin-bottom: 4px; }
+.modal-box .btn { padding: 0 14px; height: 32px; border-radius: 4px; font-size: 13px; cursor: pointer; }
+.modal-box .btn-primary { background: #1677ff; color: #fff; border: none; }
+.modal-box .btn-primary:hover { background: #4096ff; }
+.modal-box .btn-primary:disabled { background: #b5b5b5; cursor: not-allowed; }
+.modal-box .btn-outline { background: #fff; color: #555; border: 1px solid #d9d9d9; }
+.modal-box .btn-outline:hover { border-color: #1677ff; color: #1677ff; }
+.modal-box .muted { color: #888; }
+
 /* ===== WMS upload area ===== */
 .upload-area {
   border: 2px dashed #d9d9d9; border-radius: 6px; padding: 18px;

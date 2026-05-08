@@ -37,6 +37,49 @@ function fmtTime(isoStr) {
   } catch(e) { return isoStr; }
 }
 
+// 带年的 KST 显示（YYYY-MM-DD HH:mm）— 用于强制退出确认/反馈，避免 05-06 vs 06-05 误读
+function fmtKstFull(isoStr) {
+  if (!isoStr) return "--";
+  try {
+    var d = new Date(isoStr);
+    if (isNaN(d.getTime())) return String(isoStr);
+    var kst = new Date(d.getTime() + 9 * 3600 * 1000);
+    return kst.toISOString().slice(0, 16).replace("T", " ");
+  } catch(e) { return String(isoStr); }
+}
+
+// 当前 KST 时间，格式为 datetime-local 输入需要的 "YYYY-MM-DDTHH:MM"
+function nowKstDatetimeLocal() {
+  var d = new Date(Date.now() + 9 * 3600000);
+  return d.toISOString().slice(0, 16);
+}
+
+// UTC ISO 转成 datetime-local 输入需要的 KST "YYYY-MM-DDTHH:MM"
+function utcIsoToKstDatetimeLocal(isoStr) {
+  if (!isoStr) return "";
+  var d = new Date(isoStr);
+  if (isNaN(d.getTime())) return "";
+  var k = new Date(d.getTime() + 9 * 3600000);
+  return k.toISOString().slice(0, 16);
+}
+
+// datetime-local "YYYY-MM-DDTHH:MM"（按 KST 含义）→ UTC ISO（带秒+毫秒）
+function kstLocalInputToUtcIso(v) {
+  if (!v) return "";
+  var m = String(v).match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/);
+  if (!m) return "";
+  var utcMs = Date.UTC(
+    Number(m[1]),
+    Number(m[2]) - 1,
+    Number(m[3]),
+    Number(m[4]) - 9,
+    Number(m[5]),
+    Number(m[6] || 0)
+  );
+  if (!isFinite(utcMs)) return "";
+  return new Date(utcMs).toISOString();
+}
+
 // 业务预约时间（datetime-local 字符串：expected_ship_at / pickup_time）
 // 直接 T→空格、截到 16 位；不做时区换算
 function formatBusinessLocalDateTime(s) {
@@ -354,76 +397,168 @@ function toggleStaleOnly() {
   renderLiveWorkers();
 }
 
-// 管理员强制退出某员工的工时段
-async function forceLeaveWorker(jobId, workerId, segmentId, workerName, joinedAt, jobStatus, jobUpdatedAt) {
+// 管理员强制退出某员工的工时段 — 选择器化，避免手填 ISO 导致时区/笔误问题
+function forceLeaveWorker(jobId, workerId, segmentId, workerName, joinedAt, jobStatus, jobUpdatedAt) {
   if (!jobId || !workerId) { alert('参数缺失'); return; }
+  // 关掉旧 modal（防止重复打开）
+  var old = document.getElementById('forceLeaveOverlay');
+  if (old) old.parentNode.removeChild(old);
+
   var minutesOpen = minutesSince(joinedAt);
-  var info = '员工：' + (workerName || workerId) + '\n'
-           + '任务：' + jobId + (jobStatus ? '（状态：' + jobStatus + '）' : '') + '\n'
-           + '开始：' + fmtTime(joinedAt) + '\n'
-           + '已持续：' + minutesOpen + ' 分钟';
+  // 默认值：当前 KST，分钟精度
+  var nowLocal = nowKstDatetimeLocal();
+  var jobUpdatedLocal = utcIsoToKstDatetimeLocal(jobUpdatedAt);
 
-  // 选择退出时间
-  var modeOptions = '请选择退出时间口径：\n'
-                  + '1 = 当前时间（默认）\n'
-                  + '2 = 任务完成/最后更新时间' + (jobUpdatedAt ? '（' + fmtTime(jobUpdatedAt) + '）' : '（无）') + '\n'
-                  + '3 = 自定义时间（输入 ISO，如 2026-05-06T18:00:00.000Z）';
-  var modeRaw = prompt(info + '\n\n' + modeOptions, '1');
-  if (modeRaw === null) return;
-  var mode = String(modeRaw || '').trim();
+  var modeJobOptionDisabled = jobUpdatedLocal ? '' : ' disabled';
 
-  var close_mode = 'now';
-  var leave_at = '';
-  if (mode === '2') {
-    if (!jobUpdatedAt) { alert('该任务无更新时间，无法用此口径'); return; }
-    close_mode = 'job_completed_at';
-  } else if (mode === '3') {
-    var custom = prompt('请输入自定义退出时间 (UTC ISO 8601，例 2026-05-06T18:00:00.000Z):', '');
-    if (!custom || !String(custom).trim()) return;
-    close_mode = 'custom';
-    leave_at = String(custom).trim();
+  var html = '';
+  html += '<div class="modal-overlay" id="forceLeaveOverlay" onclick="closeForceLeaveModal(event)">';
+  html += '<div class="modal-box" onclick="event.stopPropagation();" style="max-width:520px;">';
+  html += '<div style="font-size:16px;font-weight:700;margin-bottom:10px;">强制退出 / 강제 퇴장</div>';
+  html += '<div class="muted" style="font-size:12px;line-height:1.6;margin-bottom:8px;">'
+        + '<div>员工 / 직원: <b>' + esc(workerName || workerId) + '</b></div>'
+        + '<div>任务 / 작업: ' + esc(jobId) + (jobStatus ? '（状态: ' + esc(jobStatus) + '）' : '') + '</div>'
+        + '<div>开始 / 시작: ' + esc(fmtKstFull(joinedAt)) + '</div>'
+        + '<div>已持续 / 경과: ' + minutesOpen + ' 分钟 / 분</div>'
+        + '</div>';
+  html += '<div style="display:flex;flex-direction:column;gap:8px;font-size:13px;">';
+
+  html += '<label><input type="radio" name="fl-mode" value="now" checked onchange="onForceLeaveModeChange()"> 当前时间 / 현재 시간</label>';
+  html += '<label' + (modeJobOptionDisabled ? ' style="opacity:0.5;"' : '') + '><input type="radio" name="fl-mode" value="job_completed_at"' + modeJobOptionDisabled + ' onchange="onForceLeaveModeChange()"> 任务最后更新时间 / 작업 마지막 업데이트'
+       + (jobUpdatedLocal ? '（' + esc(fmtKstFull(jobUpdatedAt)) + '）' : '（无 / 없음）') + '</label>';
+  html += '<label><input type="radio" name="fl-mode" value="custom" onchange="onForceLeaveModeChange()"> 自定义韩国时间 / 사용자 지정 (KST)</label>';
+
+  html += '<div><label><b>强制退出时间 / 강제 퇴장 시간</b>'
+       + '<span class="muted" style="font-weight:400;font-size:12px;"> · 韩国时间（自动转 UTC 上传）</span></label>'
+       + '<input id="forceLeaveAt" type="datetime-local" class="input" value="' + esc(nowLocal) + '" style="width:100%;"></div>';
+  html += '<div><label><b>原因 / 사유</b></label>'
+       + '<input id="forceLeaveReason" class="input" placeholder="例：日당 잊고 퇴장 안 함" style="width:100%;"></div>';
+  html += '<div><label><b>操作人 / 작업자</b></label>'
+       + '<input id="forceLeaveOperator" class="input" placeholder="您的姓名/工号" style="width:100%;"></div>';
+  html += '</div>';
+
+  html += '<div style="margin-top:12px;text-align:right;">';
+  html += '<button class="btn btn-outline" onclick="closeForceLeaveModal()">取消 / 취소</button> ';
+  html += '<button class="btn btn-primary" onclick="submitForceLeave(this)" '
+        + 'data-job="' + esc(jobId) + '" data-worker="' + esc(workerId) + '" data-segment="' + esc(segmentId || '') + '" '
+        + 'data-name="' + esc(workerName || '') + '" data-joined="' + esc(joinedAt || '') + '" '
+        + 'data-jobupdated="' + esc(jobUpdatedAt || '') + '">确认 / 확인</button>';
+  html += '</div></div></div>';
+
+  var div = document.createElement('div');
+  div.innerHTML = html;
+  document.body.appendChild(div.firstChild);
+  // 默认 mode=now → 输入框设为 readOnly（仍可手动改 mode 后启用）
+  onForceLeaveModeChange();
+}
+
+function closeForceLeaveModal(ev) {
+  if (ev && ev.target && ev.target.id !== 'forceLeaveOverlay') return;
+  var el = document.getElementById('forceLeaveOverlay');
+  if (el) el.parentNode.removeChild(el);
+}
+
+function onForceLeaveModeChange() {
+  var mode = (document.querySelector('input[name="fl-mode"]:checked') || {}).value || 'now';
+  var input = document.getElementById('forceLeaveAt');
+  if (!input) return;
+  if (mode === 'now') {
+    input.value = nowKstDatetimeLocal();
+    input.readOnly = true;
+    input.style.background = '#f5f5f5';
+  } else if (mode === 'job_completed_at') {
+    var btn = document.querySelector('#forceLeaveOverlay button[data-jobupdated]');
+    var jobUpdated = btn ? btn.getAttribute('data-jobupdated') : '';
+    input.value = utcIsoToKstDatetimeLocal(jobUpdated) || nowKstDatetimeLocal();
+    input.readOnly = true;
+    input.style.background = '#f5f5f5';
+  } else {
+    input.readOnly = false;
+    input.style.background = '';
+    input.focus();
+  }
+}
+
+async function submitForceLeave(btnEl) {
+  var jobId = btnEl.getAttribute('data-job') || '';
+  var workerId = btnEl.getAttribute('data-worker') || '';
+  var segmentId = btnEl.getAttribute('data-segment') || '';
+  var workerName = btnEl.getAttribute('data-name') || '';
+  var joinedAt = btnEl.getAttribute('data-joined') || '';
+
+  var modeEl = document.querySelector('input[name="fl-mode"]:checked');
+  var mode = modeEl ? modeEl.value : 'now';
+  var localValue = (document.getElementById('forceLeaveAt') || {}).value || '';
+  var reason = ((document.getElementById('forceLeaveReason') || {}).value || '').trim();
+  var operator = ((document.getElementById('forceLeaveOperator') || {}).value || '').trim();
+
+  if (!localValue) { alert('请选择退出时间 / 퇴장 시간을 선택하세요'); return; }
+  if (!reason) { alert('请填写强制退出原因 / 사유를 입력하세요'); return; }
+  if (!operator) { alert('请填写操作人 / 작업자를 입력하세요'); return; }
+
+  // KST datetime-local → UTC ISO
+  var leftAtIso = kstLocalInputToUtcIso(localValue);
+  if (!leftAtIso) { alert('退出时间格式无效 / 시간 형식이 올바르지 않습니다'); return; }
+
+  // 早于 joined_at 直接前端拦截
+  if (joinedAt) {
+    var jms = Date.parse(joinedAt);
+    var lms = Date.parse(leftAtIso);
+    if (isFinite(jms) && isFinite(lms) && lms < jms) {
+      alert('强制退出时间不能早于开始时间\n강제 퇴장 시간은 시작 시간보다 빠를 수 없습니다\n开始/시작: '
+            + fmtKstFull(joinedAt) + '\n选择/선택: ' + fmtKstFull(leftAtIso));
+      return;
+    }
   }
 
-  var reason = prompt('请填写强制退出原因（例：日当忘记退出 / 직원 퇴장 누락）:');
-  if (!reason || !reason.trim()) return;
+  // 二次确认 — 全部以 KST 显示
+  var confirmMsg = '确认将 ' + (workerName || workerId) + ' 强制退出？\n'
+                 + (workerName || workerId) + ' 님을 강제 퇴장 처리하시겠습니까?\n\n'
+                 + '退出时间 / 퇴장 시간: ' + fmtKstFull(leftAtIso) + ' (KST)\n'
+                 + '该时间按韩国时间记录 / 한국 시간 기준';
+  if (!confirm(confirmMsg)) return;
 
-  var operator = prompt('您的姓名/工号（操作人）:');
-  if (!operator || !operator.trim()) return;
-
-  if (!confirm('确认强制关闭该员工的工时段？\n此操作会影响人效统计，但不会删除原始记录。')) return;
+  // 后端只收 close_mode=custom + UTC ISO；mode=now/job_completed_at 也走 custom，避免后端再二次取时间产生差异
+  btnEl.disabled = true;
+  btnEl.textContent = '提交中... / 저장중...';
 
   var res = await api({
     action: 'v2_admin_force_worker_leave',
     job_id: jobId,
     worker_id: workerId,
-    segment_id: segmentId || '',
-    leave_at: leave_at,
-    close_mode: close_mode,
-    reason: reason.trim(),
-    operator_name: operator.trim()
+    segment_id: segmentId,
+    leave_at: leftAtIso,
+    close_mode: 'custom',
+    reason: reason,
+    operator_name: operator
   });
 
+  btnEl.disabled = false;
+  btnEl.textContent = '确认 / 확인';
+
   if (res && res.ok) {
-    alert('已强制退出 / 강제 퇴장 완료\n员工：' + (res.worker_name || workerName || workerId)
-        + '\n离开时间：' + fmtTime(res.left_at)
-        + '\n本次工时：' + Number(res.minutes_worked || 0) + ' 分钟');
+    var leftKst = res.left_at_kst || fmtKstFull(res.left_at);
+    alert('已强制退出 / 강제 퇴장 완료\n员工 / 직원：' + (res.worker_name || workerName || workerId)
+        + '\n离开时间 / 퇴장 시간：' + leftKst + ' (KST)'
+        + '\n本次工时 / 작업 시간：' + Number(res.minutes_worked || 0) + ' 分钟 / 분');
+    closeForceLeaveModal();
     loadRealtime();
     loadLiveDocs();
+  } else if (res && res.error === 'force_left_before_joined') {
+    alert('强制退出时间不能早于开始时间 / 강제 퇴장 시간이 시작 시간보다 빠릅니다\n'
+          + (res.message || ''));
   } else if (res && res.error === 'already_closed') {
     alert('该员工已退出 / 已无未关闭参与段：' + (res.message || ''));
+    closeForceLeaveModal();
     loadRealtime();
     loadLiveDocs();
   } else if (res && res.error === 'unauthorized_admin_only') {
     alert('权限不足：仅 ADMINKEY 可执行强制退出');
   } else if (res && (res.error === 'missing_leave_at' || res.error === 'invalid_leave_at' || res.error === 'invalid_joined_at')) {
-    alert('退出时间参数错误（' + res.error + '）：' + (res.message || '请重试或改用"当前时间"模式'));
+    alert('退出时间参数错误（' + res.error + '）：' + (res.message || '请重试'));
   } else {
     var rawMsg = res ? (res.message || res.error || JSON.stringify(res)) : 'unknown';
-    if (typeof rawMsg === 'string' && /is not defined|ReferenceError/i.test(rawMsg)) {
-      alert('强制退出失败：后端变量错误，请刷新后重试或联系开发。\n원인: ' + rawMsg);
-    } else {
-      alert('失败：' + rawMsg);
-    }
+    alert('失败 / 실패：' + rawMsg);
   }
 }
 
