@@ -817,7 +817,9 @@ async function loadIssueList() {
   var res = await api(apiParams);
 
   if (!res || !res.ok) {
-    body.innerHTML = '<div class="card muted">加载失败</div>';
+    try { console.error('v2_issue_list failed', res); } catch (e) {}
+    var errMsg = (res && (res.message || res.error || res.detail)) || 'unknown';
+    body.innerHTML = '<div class="card" style="color:#c62828;">加载失败 / 로딩 실패: ' + esc(String(errMsg)) + '</div>';
     return;
   }
 

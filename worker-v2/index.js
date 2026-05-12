@@ -1831,7 +1831,7 @@ route("v2_issue_list", async (body, env) => {
   const status = String(body.status || "").trim();
   const biz_class = String(body.biz_class || "").trim();
   const sort = String(body.sort || "").trim();
-  // 模糊搜索：customer_q（客户名）/ related_doc_q（任意关联单号字段）
+  // 模糊搜索：customer_q（客户名）/ related_doc_q（关联单号 + 描述 + 摘要）
   const customer_q = String(body.customer_q || body.q_customer || "").trim();
   const related_doc_q = String(body.related_doc_q || body.q_related_doc || "").trim();
   const { limit, offset } = pageParams(body);
@@ -1849,21 +1849,34 @@ route("v2_issue_list", async (body, env) => {
     sql += " AND accounting_required=1 AND accounted=0";
   }
   if (customer_q) {
-    sql += " AND customer LIKE ?";
+    sql += " AND COALESCE(customer,'') LIKE ?";
     binds.push("%" + customer_q + "%");
   }
   if (related_doc_q) {
-    // 现有 issue_tickets 字段口径：related_doc_no / related_doc_id / issue_description / issue_summary
-    sql += " AND (related_doc_no LIKE ? OR related_doc_id LIKE ? OR issue_description LIKE ? OR issue_summary LIKE ?)";
+    // v2_issue_tickets 真实存在的列：related_doc_no / issue_summary / issue_description / customer
+    // 不含 related_doc_id / display_no / title / po_no / wms_work_order_no 等列（写了会 no such column）
+    sql += " AND (COALESCE(related_doc_no,'') LIKE ? OR COALESCE(issue_summary,'') LIKE ? OR COALESCE(issue_description,'') LIKE ?)";
     const kw = "%" + related_doc_q + "%";
-    binds.push(kw, kw, kw, kw);
+    binds.push(kw, kw, kw);
   }
   // 默认 newest_first（002 客服侧看最新）；oldest_first 给需要 FIFO 的视角
   sql += sort === "oldest_first" ? " ORDER BY created_at ASC" : " ORDER BY created_at DESC";
   sql += " LIMIT ? OFFSET ?";
   binds.push(limit, offset);
-  const rs = await env.DB.prepare(sql).bind(...binds).all();
-  return json({ ok: true, items: rs.results || [], limit, offset });
+  try {
+    const rs = await env.DB.prepare(sql).bind(...binds).all();
+    return json({ ok: true, items: rs.results || [], limit, offset });
+  } catch (e) {
+    // 让前端拿到真实错误而不是只看到"加载失败"
+    return json({
+      ok: false,
+      error: "issue_list_failed",
+      detail: "v2_issue_list SQL failed",
+      message: String((e && e.message) || e),
+      sql_preview: sql,
+      bind_count: binds.length
+    }, 500);
+  }
 });
 
 route("v2_issue_detail", async (body, env) => {
