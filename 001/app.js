@@ -1356,6 +1356,11 @@ async function startUnload(btnEl) {
       startJobPoll("unload");
     } else if (res && res.error === "unload_not_allowed_for_status") {
       alert("该入库计划已完成卸货，当前不能继续卸货\n이 입고계획은 이미 하차 완료되어 추가 하차 불가");
+    } else if (res && res.error === "unload_status_repaired") {
+      // 后端自愈过：根据新状态给出确切提示，并刷新候选
+      alert((res.message || "系统已修复该入库单状态，请重新选择 / 상태를 자동 복구했습니다. 다시 선택해주세요"));
+      await loadUnloadCandidates();
+      document.getElementById("unloadPlanSelect").value = "";
     } else if (res && res.error === "unload_status_inconsistent") {
       alert(res.message || "状态异常，请联系管理员");
     } else {

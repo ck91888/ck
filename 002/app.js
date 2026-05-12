@@ -77,7 +77,8 @@ var _WRITE_ACTIONS = [
   'v2_issue_mark_accounting_required','v2_issue_mark_accounted',
   'v2_inbound_plan_update','v2_outbound_order_update','v2_outbound_order_ack_change',
   'v2_outbound_pickup_confirm',
-  'v2_attachment_delete','v2_outbound_order_mark_material_changed'
+  'v2_attachment_delete','v2_outbound_order_mark_material_changed',
+  'v2_inbound_plan_repair_state'
 ];
 function _genReqId(action) {
   return action + '_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
@@ -779,6 +780,23 @@ async function loadDashboard() {
 }
 
 // ===== Issue List =====
+// 状态自愈：客服在入库计划详情页一键修复（unloading/unloading_putting_away/putting_away 但无 active job）
+async function repairInboundPlanStateNow(btnEl, planId) {
+  if (!planId) return;
+  if (!confirm('确认对当前入库计划执行状态自愈？\n현재 입고 계획 상태를 자동 복구합니다.')) return;
+  withActionLock('repairInboundPlanState_' + planId, btnEl || null, '修复中.../복구중...', async function() {
+    var res = await api({ action: 'v2_inbound_plan_repair_state', id: planId, reason: 'detail_page_manual_repair' });
+    if (res && res.ok && res.repaired) {
+      alert('修复完成 / 복구 완료\n旧状态: ' + (res.old_status || '--') + '\n新状态: ' + (res.new_status || '--') + '\n原因: ' + (res.reason || ''));
+    } else if (res && res.ok) {
+      alert('当前状态正常，无需修复 / 정상 상태, 복구 불필요');
+    } else {
+      alert('失败 / 실패: ' + ((res && (res.message || res.error)) || 'unknown'));
+    }
+    loadInboundDetail();
+  });
+}
+
 async function loadIssueList() {
   var body = document.getElementById("issueListBody");
   if (!body) return;
@@ -788,10 +806,14 @@ async function loadIssueList() {
   var biz = document.getElementById("issueFilterBiz").value;
   var acctSel = document.getElementById("issueFilterAccounting");
   var acct = acctSel ? acctSel.value : "";
+  var custQ = ((document.getElementById("issueFilterCustomer") || {}).value || "").trim();
+  var relQ = ((document.getElementById("issueFilterRelatedDoc") || {}).value || "").trim();
   var apiParams = { action: "v2_issue_list", status: status, biz_class: biz };
   if (acct === 'required') apiParams.accounting_required = 1;
   else if (acct === 'unpaid') { apiParams.accounting_required = 1; apiParams.accounted = 0; }
   else if (acct === 'paid') apiParams.accounted = 1;
+  if (custQ) apiParams.customer_q = custQ;
+  if (relQ) apiParams.related_doc_q = relQ;
   var res = await api(apiParams);
 
   if (!res || !res.ok) {
@@ -2272,9 +2294,13 @@ function addIbcLinkObRow() {
   html += '<option value="1">是：先库内操作</option>';
   html += '</select></div>';
   html += '<div><label><b>预计出库时间</b></label><input id="lob-expected-' + seq + '" class="input" type="datetime-local"></div>';
+  html += '<div><label><b>目的地</b></label><input id="lob-destination-' + seq + '" class="input" placeholder="目的地"></div>';
+  html += '<div><label><b>PO号</b></label><input id="lob-po-' + seq + '" class="input" placeholder="PO 号"></div>';
+  html += '<div><label><b>WMS工单号</b></label><input id="lob-wms-' + seq + '" class="input" placeholder="WMS 工单号"></div>';
   html += '<div><label><b>计划箱数</b></label><input id="lob-box-' + seq + '" class="input" type="number" min="0" value="0"></div>';
   html += '<div><label><b>计划托数</b></label><input id="lob-pallet-' + seq + '" class="input" type="number" min="0" value="0"></div>';
   html += '<div style="grid-column:1/-1;"><label><b>出库要求</b></label><textarea id="lob-req-' + seq + '" class="input" rows="2"></textarea></div>';
+  html += '<div style="grid-column:1/-1;"><label><b>作业说明</b></label><textarea id="lob-instr-' + seq + '" class="input" rows="2"></textarea></div>';
   html += '<div style="grid-column:1/-1;"><label><b>备注</b></label><textarea id="lob-remark-' + seq + '" class="input" rows="1"></textarea></div>';
   html += '</div>';
   div.innerHTML = html;
@@ -2298,9 +2324,13 @@ function getIbcLinkObRows() {
       outbound_mode: ((document.getElementById("lob-mode-" + seq) || {}).value || "").trim(),
       uses_stock_operation: Number((document.getElementById("lob-uses-" + seq) || {}).value || 0),
       expected_ship_at: ((document.getElementById("lob-expected-" + seq) || {}).value || "").trim(),
+      destination: ((document.getElementById("lob-destination-" + seq) || {}).value || "").trim(),
+      po_no: ((document.getElementById("lob-po-" + seq) || {}).value || "").trim(),
+      wms_work_order_no: ((document.getElementById("lob-wms-" + seq) || {}).value || "").trim(),
       planned_box_count: Number((document.getElementById("lob-box-" + seq) || {}).value || 0),
       planned_pallet_count: Number((document.getElementById("lob-pallet-" + seq) || {}).value || 0),
       outbound_requirement: ((document.getElementById("lob-req-" + seq) || {}).value || "").trim(),
+      instruction: ((document.getElementById("lob-instr-" + seq) || {}).value || "").trim(),
       remark: ((document.getElementById("lob-remark-" + seq) || {}).value || "").trim()
     });
   }
@@ -2388,9 +2418,13 @@ async function submitInbound(btnEl) {
         outbound_mode: row.outbound_mode,
         uses_stock_operation: row.uses_stock_operation,
         expected_ship_at: row.expected_ship_at,
+        destination: row.destination,
+        po_no: row.po_no,
+        wms_work_order_no: row.wms_work_order_no,
         planned_box_count: row.planned_box_count,
         planned_pallet_count: row.planned_pallet_count,
         outbound_requirement: row.outbound_requirement,
+        instruction: row.instruction,
         remark: row.remark,
         source_inbound_plan_id: planId,
         created_by: getUser()
@@ -2584,6 +2618,26 @@ async function loadInboundDetail() {
     html += '</tbody></table>';
     html += '</div>';
   }
+
+  // --- 状态异常自检：unloading*/putting_away 但无 active 对应 job ---
+  (function() {
+    var needCheck = ['unloading','unloading_putting_away','putting_away'].indexOf(p.status) !== -1;
+    if (!needCheck) return;
+    var activeJobTypes = (p.status === 'putting_away')
+      ? ['inbound_direct','inbound_bulk','inbound_change_order']
+      : ['unload'];
+    var hasActive = jobs.some(function(j) {
+      return activeJobTypes.indexOf(j.job_type) !== -1
+        && ['pending','working','awaiting_close'].indexOf(j.status) !== -1;
+    });
+    if (hasActive) return;
+    html += '<div class="card" style="border-left:4px solid #c62828;background:#fff8f6;">';
+    html += '<div style="font-weight:700;color:#c62828;">⚠ 当前入库单状态异常：显示为 ' + esc(inboundStatusLabel(p.status)) + '，但无活跃任务</div>';
+    html += '<div class="muted" style="font-size:12px;margin-top:4px;">계획 상태가 작업 진행 중으로 표시되지만 활성 작업이 없습니다</div>';
+    html += '<div style="margin-top:8px;">';
+    html += '<button class="btn btn-danger btn-sm" onclick="repairInboundPlanStateNow(this, \'' + esc(p.id) + '\')">自动修复状态 / 상태 자동 복구</button>';
+    html += '</div></div>';
+  })();
 
   // --- Plan lines ---
   var unloadNotDone002 = (p.status === 'unloading' || p.status === 'unloading_putting_away');

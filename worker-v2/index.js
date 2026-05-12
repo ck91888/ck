@@ -768,6 +768,128 @@ async function autoCloseJobIfNoOpenWorkers(env, jobId, t) {
   return Object.assign({}, job, { status: 'awaiting_close' });
 }
 
+// 入库计划状态自愈：unloading/unloading_putting_away/putting_away 等需要 active job
+// 的状态，若实际没有 active job，根据现存记录推回到一个一致状态。返回 {repaired, old_status, new_status, reason}
+async function repairInboundPlanWorkState(env, planId, reason) {
+  if (!planId) return { repaired: false };
+  const plan = await env.DB.prepare(
+    "SELECT id, display_no, status FROM v2_inbound_plans WHERE id=?"
+  ).bind(planId).first();
+  if (!plan) return { repaired: false, error: "plan_not_found" };
+  const oldStatus = plan.status;
+  // 仅修复需要 active job 但缺失的几种状态
+  const repairTargets = ['unloading', 'unloading_putting_away', 'putting_away'];
+  if (repairTargets.indexOf(oldStatus) === -1) {
+    return { repaired: false, old_status: oldStatus, new_status: oldStatus, reason: 'no_repair_needed' };
+  }
+
+  // 查 active unload / putaway job
+  const activeUnload = await env.DB.prepare(
+    `SELECT id FROM v2_ops_jobs
+       WHERE related_doc_type='inbound_plan' AND related_doc_id=?
+         AND job_type='unload' AND status IN ('pending','working','awaiting_close')
+       LIMIT 1`
+  ).bind(planId).first();
+  const activePutaway = await env.DB.prepare(
+    `SELECT id FROM v2_ops_jobs
+       WHERE related_doc_type='inbound_plan' AND related_doc_id=?
+         AND job_type IN ('inbound_direct','inbound_bulk','inbound_change_order')
+         AND status IN ('pending','working','awaiting_close')
+       LIMIT 1`
+  ).bind(planId).first();
+  const hasUnloadCompleted = await env.DB.prepare(
+    `SELECT id FROM v2_ops_jobs
+       WHERE related_doc_type='inbound_plan' AND related_doc_id=?
+         AND job_type='unload' AND status='completed'
+       LIMIT 1`
+  ).bind(planId).first();
+  const hasPutawayCompleted = await env.DB.prepare(
+    `SELECT id FROM v2_ops_jobs
+       WHERE related_doc_type='inbound_plan' AND related_doc_id=?
+         AND job_type IN ('inbound_direct','inbound_bulk','inbound_change_order')
+         AND status='completed'
+       LIMIT 1`
+  ).bind(planId).first();
+
+  // 所有要求业务是否完成
+  let allBizDone = false;
+  try {
+    const tasks = await listInboundPlanBizTasks(env, planId);
+    if (tasks && tasks.length > 0) {
+      allBizDone = tasks.every(t => t.status === 'completed');
+    }
+  } catch (e) { /* ignore */ }
+
+  let newStatus = oldStatus;
+  let repairReason = reason || '';
+
+  if (oldStatus === 'unloading') {
+    if (activeUnload) return { repaired: false, old_status: oldStatus, new_status: oldStatus, reason: 'active_unload_present' };
+    // unloading 但无 active unload
+    if (allBizDone) {
+      newStatus = 'completed';
+      repairReason = 'all_biz_done_repaired_to_completed';
+    } else if (activePutaway) {
+      newStatus = 'putting_away';
+      repairReason = 'unload_missing_but_putaway_active';
+    } else if (hasUnloadCompleted) {
+      newStatus = 'arrived_pending_putaway';
+      repairReason = 'unload_missing_repaired_to_arrived_pending_putaway';
+    } else {
+      newStatus = 'pending';
+      repairReason = 'unload_status_without_job_repaired_to_pending';
+    }
+  } else if (oldStatus === 'unloading_putting_away') {
+    if (activeUnload) return { repaired: false, old_status: oldStatus, new_status: oldStatus, reason: 'active_unload_present' };
+    if (allBizDone) {
+      newStatus = 'completed';
+      repairReason = 'all_biz_done_repaired_to_completed';
+    } else if (activePutaway) {
+      newStatus = 'putting_away';
+      repairReason = 'unload_missing_with_active_putaway';
+    } else if (hasUnloadCompleted || hasPutawayCompleted) {
+      newStatus = 'arrived_pending_putaway';
+      repairReason = 'unload_missing_repaired_to_arrived_pending_putaway';
+    } else {
+      newStatus = 'pending';
+      repairReason = 'unload_putaway_status_without_jobs_repaired_to_pending';
+    }
+  } else if (oldStatus === 'putting_away') {
+    if (activePutaway) return { repaired: false, old_status: oldStatus, new_status: oldStatus, reason: 'active_putaway_present' };
+    if (allBizDone) {
+      newStatus = 'completed';
+      repairReason = 'all_biz_done_repaired_to_completed';
+    } else {
+      newStatus = 'arrived_pending_putaway';
+      repairReason = 'putaway_missing_repaired_to_arrived_pending_putaway';
+    }
+  }
+
+  if (newStatus === oldStatus) {
+    return { repaired: false, old_status: oldStatus, new_status: oldStatus, reason: 'no_change' };
+  }
+
+  const t = now();
+  const sets = ["status=?", "updated_at=?"];
+  const binds = [newStatus, t];
+  if (newStatus === 'completed') {
+    sets.push("manual_completed_at=COALESCE(NULLIF(manual_completed_at,''), ?)");
+    binds.push(t);
+  }
+  binds.push(planId);
+  await env.DB.prepare(
+    "UPDATE v2_inbound_plans SET " + sets.join(', ') + " WHERE id=?"
+  ).bind(...binds).run();
+
+  return {
+    repaired: true,
+    old_status: oldStatus,
+    new_status: newStatus,
+    reason: repairReason,
+    display_no: plan.display_no || ''
+  };
+}
+
 // verify_scan job 关闭时联动其挂的核对批次（v2_verify_batches）→ completed
 // 仅当当前 batch.status 不是 completed/cancelled 才推进，避免覆盖人工标记
 async function _completeVerifyBatchIfLinked(env, jobId, closeAt, source) {
@@ -1709,6 +1831,9 @@ route("v2_issue_list", async (body, env) => {
   const status = String(body.status || "").trim();
   const biz_class = String(body.biz_class || "").trim();
   const sort = String(body.sort || "").trim();
+  // 模糊搜索：customer_q（客户名）/ related_doc_q（任意关联单号字段）
+  const customer_q = String(body.customer_q || body.q_customer || "").trim();
+  const related_doc_q = String(body.related_doc_q || body.q_related_doc || "").trim();
   const { limit, offset } = pageParams(body);
   let sql = "SELECT * FROM v2_issue_tickets WHERE 1=1";
   const binds = [];
@@ -1722,6 +1847,16 @@ route("v2_issue_list", async (body, env) => {
     sql += " AND accounted=1";
   } else if (body.accounted === 0 || body.accounted === '0') {
     sql += " AND accounting_required=1 AND accounted=0";
+  }
+  if (customer_q) {
+    sql += " AND customer LIKE ?";
+    binds.push("%" + customer_q + "%");
+  }
+  if (related_doc_q) {
+    // 现有 issue_tickets 字段口径：related_doc_no / related_doc_id / issue_description / issue_summary
+    sql += " AND (related_doc_no LIKE ? OR related_doc_id LIKE ? OR issue_description LIKE ? OR issue_summary LIKE ?)";
+    const kw = "%" + related_doc_q + "%";
+    binds.push(kw, kw, kw, kw);
   }
   // 默认 newest_first（002 客服侧看最新）；oldest_first 给需要 FIFO 的视角
   sql += sort === "oldest_first" ? " ORDER BY created_at ASC" : " ORDER BY created_at DESC";
@@ -3791,9 +3926,32 @@ route("v2_inbound_plan_ops_candidates", async (body, env) => {
   const rs = binds.length > 0 ? await stmt.bind(...binds).all() : await stmt.all();
   const rows = rs.results || [];
 
+  // 候选自愈：unload 场景下，若 plan 状态为 unloading/unloading_putting_away 但无
+  // active unload job → 调 repair；若仍不是 unload 可继续状态则跳过
+  if (scene === 'unload') {
+    for (const p of rows) {
+      if (p.status === 'unloading' || p.status === 'unloading_putting_away') {
+        const hasActive = await env.DB.prepare(
+          `SELECT id FROM v2_ops_jobs
+             WHERE related_doc_type='inbound_plan' AND related_doc_id=?
+               AND job_type='unload' AND status IN ('pending','working','awaiting_close') LIMIT 1`
+        ).bind(p.id).first();
+        if (!hasActive) {
+          const r = await repairInboundPlanWorkState(env, p.id, 'candidates_auto_repair');
+          if (r && r.repaired) {
+            p.status = r.new_status;
+            p._repair_reason = r.reason;
+          }
+        }
+      }
+    }
+  }
+
   // 按 biz_classes_json 与 biz_task 过滤，仅返回该 biz 仍未完成的计划
   const items = [];
   for (const p of rows) {
+    // 修复后若不再属于 unload 候选状态 → 跳过
+    if (scene === 'unload' && ['pending','unloading','unloading_putting_away'].indexOf(p.status) === -1) continue;
     if (required_biz_class) {
       await ensureInboundPlanBizTasks(env, p);
       const biz_classes = extractPlanBizClasses(p);
@@ -4626,7 +4784,27 @@ route("v2_unload_job_start", async (body, env) => {
     } else {
       const plan2 = await env.DB.prepare("SELECT status FROM v2_inbound_plans WHERE id=?").bind(plan_id).first();
       if (plan2 && (plan2.status === 'unloading' || plan2.status === 'unloading_putting_away')) {
-        return { ok: false, error: "unload_status_inconsistent", message: "状态为卸货中但无活跃卸货任务，请联系管理员检查" };
+        // 自愈：状态为卸货中但无 active unload job — 推回到一致状态
+        const repair = await repairInboundPlanWorkState(env, plan_id, 'start_unload_detected_missing_active_job');
+        if (repair && repair.repaired && repair.new_status === 'pending') {
+          // 修复后允许重新开始卸货：fall through 创建新 job
+        } else if (repair && repair.repaired) {
+          return {
+            ok: false,
+            error: "unload_status_repaired",
+            repaired: true,
+            old_status: repair.old_status,
+            new_status: repair.new_status,
+            reason: repair.reason,
+            message: ({
+              arrived_pending_putaway: '系统已修复：卸货已完成，等待理货 / 하차 완료, 입고 정리 대기',
+              putting_away: '系统已修复：理货进行中，无需重新卸货 / 입고 정리 진행 중',
+              completed: '系统已修复：该入库单已完成 / 입고가 완료되었습니다'
+            }[repair.new_status]) || '系统已自动修复该入库单状态，请重新选择 / 상태를 자동 복구했습니다. 다시 선택해주세요'
+          };
+        } else {
+          return { ok: false, error: "unload_status_inconsistent", message: "状态为卸货中但无活跃卸货任务，请联系管理员检查" };
+        }
       }
       job_id = "JOB-" + uid();
       is_new_job = true;
@@ -8142,6 +8320,71 @@ route("v2_admin_cleanup_completed_open_segments", async (body, env) => {
 // 一次性 job status 收尾：pending/working/awaiting_close 但已无 open worker 的，
 // 按 isTimeOnlyJobType 分流；ADMINKEY；支持 dry_run
 // =====================================================
+// 协同中心：单条入库计划状态自愈
+route("v2_inbound_plan_repair_state", async (body, env) => {
+  if (!isAuth(body, env)) return err("unauthorized", 401);
+  const id = String(body.id || "").trim();
+  if (!id) return err("missing id");
+  return withIdem(env, body, "v2_inbound_plan_repair_state", async () => {
+    const r = await repairInboundPlanWorkState(env, id, String(body.reason || 'manual_repair'));
+    if (!r) return { ok: false, error: "not_found" };
+    return { ok: true, ...r };
+  });
+});
+
+// 一次性扫描所有 unloading/unloading_putting_away/putting_away 入库计划，无 active job 的修复
+route("v2_admin_cleanup_inbound_plan_states", async (body, env) => {
+  if (!isAdmin(body, env)) return err("unauthorized_admin_only", 401);
+  const dryRun = body.dry_run === true;
+  const rs = await env.DB.prepare(`
+    SELECT id, display_no, status
+      FROM v2_inbound_plans
+     WHERE status IN ('unloading','unloading_putting_away','putting_away')
+     ORDER BY created_at ASC
+     LIMIT 5000
+  `).all();
+  const rows = rs.results || [];
+  let checked = 0, repaired = 0, kept = 0;
+  const examples = [];
+  for (const p of rows) {
+    checked++;
+    // 干跑：先模拟（不写库）：实际还是会被 repairInboundPlanWorkState 写入
+    // 简化：dryRun 时跳过 helper，直接探测应转目标
+    if (dryRun) {
+      const hasActiveUnload = await env.DB.prepare(
+        `SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type='unload' AND status IN ('pending','working','awaiting_close') LIMIT 1`
+      ).bind(p.id).first();
+      const hasActivePutaway = await env.DB.prepare(
+        `SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type IN ('inbound_direct','inbound_bulk','inbound_change_order') AND status IN ('pending','working','awaiting_close') LIMIT 1`
+      ).bind(p.id).first();
+      if (p.status === 'unloading' && !hasActiveUnload) {
+        repaired++;
+        if (examples.length < 30) examples.push({ id: p.id, display_no: p.display_no, old_status: p.status, would_repair: true });
+      } else if (p.status === 'unloading_putting_away' && !hasActiveUnload) {
+        repaired++;
+        if (examples.length < 30) examples.push({ id: p.id, display_no: p.display_no, old_status: p.status, would_repair: true });
+      } else if (p.status === 'putting_away' && !hasActivePutaway) {
+        repaired++;
+        if (examples.length < 30) examples.push({ id: p.id, display_no: p.display_no, old_status: p.status, would_repair: true });
+      } else {
+        kept++;
+      }
+      continue;
+    }
+    const r = await repairInboundPlanWorkState(env, p.id, 'cleanup_inbound_states');
+    if (r && r.repaired) {
+      repaired++;
+      if (examples.length < 30) examples.push({
+        id: p.id, display_no: p.display_no,
+        old_status: r.old_status, new_status: r.new_status, reason: r.reason
+      });
+    } else {
+      kept++;
+    }
+  }
+  return json({ ok: true, dry_run: dryRun, checked_count: checked, repaired_count: repaired, kept_count: kept, examples });
+});
+
 route("v2_admin_cleanup_job_statuses", async (body, env) => {
   if (!isAdmin(body, env)) return err("unauthorized_admin_only", 401);
   const dryRun = body.dry_run === true;
