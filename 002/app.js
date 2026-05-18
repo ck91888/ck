@@ -2010,6 +2010,9 @@ function printOutboundOrder() {
     '.qr-label{font-size:10px;color:#666;margin-top:2px;line-height:1.3;}' +
     '.info-grid{display:grid;grid-template-columns:1fr 1fr;gap:4px 24px;font-size:13px;margin-bottom:14px;}' +
     '.info-grid .label{font-weight:700;}' +
+    '.section{margin:8px 0 12px;font-size:13px;}' +
+    '.section .label{font-weight:700;display:block;margin-bottom:3px;}' +
+    '.text-block{white-space:pre-wrap;line-height:1.6;border:1px solid #ddd;padding:6px 10px;border-radius:3px;background:#fafafa;min-height:1.6em;}' +
     'table{width:100%;border-collapse:collapse;font-size:12px;margin-bottom:14px;}' +
     'th,td{border:1px solid #333;padding:5px 6px;text-align:left;}' +
     'th{background:#eee;font-weight:700;}' +
@@ -2041,8 +2044,22 @@ function printOutboundOrder() {
       (o.destination ? '<div><span class="label">目的地：</span>' + esc(o.destination) + '</div>' : '') +
       (o.po_no ? '<div><span class="label">PO号/발주번호：</span>' + esc(o.po_no) + '</div>' : '') +
       (o.wms_work_order_no ? '<div><span class="label">WMS工单号：</span>' + esc(o.wms_work_order_no) + '</div>' : '') +
+      (o.expected_ship_at ? '<div><span class="label">预计出库时间：</span>' + esc(o.expected_ship_at) + '</div>' : '') +
       '<div><span class="label">提出人：</span>' + esc(o.created_by || '') + '</div>' +
-      (o.instruction ? '<div style="grid-column:1/-1;"><span class="label">作业说明：</span>' + esc(o.instruction) + '</div>' : '') +
+    '</div>' +
+
+    // 出库要求 / 作业说明 / 备注（独立 section，保留换行，空也显示 --）
+    '<div class="section">' +
+      '<span class="label">出库要求：</span>' +
+      '<div class="text-block">' + esc(o.outbound_requirement || '--') + '</div>' +
+    '</div>' +
+    '<div class="section">' +
+      '<span class="label">作业说明：</span>' +
+      '<div class="text-block">' + esc(o.instruction || '--') + '</div>' +
+    '</div>' +
+    '<div class="section">' +
+      '<span class="label">备注：</span>' +
+      '<div class="text-block">' + esc(o.remark || '--') + '</div>' +
     '</div>' +
 
     // Box/pallet counts
