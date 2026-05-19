@@ -3758,6 +3758,13 @@ route("v2_inbound_plan_list", async (body, env) => {
   const attCountByPlan = {};
   for (const r of attRows) attCountByPlan[r.plan_id] = Number(r.c || 0);
 
+  // 5) 物理卸货是否完成（同一 plan 仅一次卸货 → 任意 unload job completed = 卸货已完成）
+  const unloadDoneRows = await batchSelectInGlobal(env,
+    "SELECT related_doc_id AS plan_id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND job_type='unload' AND status='completed' AND related_doc_id IN (PLACEHOLDER) GROUP BY related_doc_id",
+    planIds);
+  const unloadDoneByPlan = {};
+  for (const r of unloadDoneRows) unloadDoneByPlan[r.plan_id] = 1;
+
   // ===== 装配 + 后置过滤 =====
   const items = [];
   for (const p of rows) {
@@ -3770,6 +3777,11 @@ route("v2_inbound_plan_list", async (body, env) => {
       if (biz_classes.indexOf(required_biz_class) === -1) continue;
       if (pending.indexOf(required_biz_class) === -1) continue;
     }
+    // 卸货完成口径：(a) 有 completed unload job  或  (b) 整单 status 已越过卸货阶段
+    const postUnloadStatuses = ['arrived_pending_putaway','putting_away','partially_completed','completed'];
+    const unload_completed = unloadDoneByPlan[p.id]
+      ? 1
+      : (postUnloadStatuses.indexOf(p.status) !== -1 ? 1 : 0);
     items.push({
       ...p,
       biz_classes,
@@ -3777,6 +3789,7 @@ route("v2_inbound_plan_list", async (body, env) => {
       completed_biz_classes: completed,
       pending_biz_classes: pending,
       missing_biz_classes: pending,
+      unload_completed,
       line_summary: linesByPlan[p.id] || {},
       related_outbound_count: linkedObByPlan[p.id] || 0,
       attachment_count: attCountByPlan[p.id] || 0
@@ -3856,6 +3869,28 @@ route("v2_inbound_plan_detail", async (body, env) => {
   const completed_biz_classes = biz_tasks.filter(x => x.status === 'completed').map(x => x.biz_class);
   const pending_biz_classes = biz_tasks.filter(x => x.status !== 'completed').map(x => x.biz_class);
 
+  // 物理卸货摘要：一张计划只允许一次到仓卸货（按 plan_id 聚合 unload 类 job）
+  const unloadJobs = enrichedJobs.filter(j => j.job_type === 'unload');
+  const completedUnloadJobs = unloadJobs.filter(j => j.status === 'completed');
+  const activeUnloadJobs = unloadJobs.filter(j => ['pending','working','awaiting_close'].indexOf(j.status) !== -1);
+  let unload_status_text = 'pending'; // pending / unloading / completed
+  if (completedUnloadJobs.length > 0) unload_status_text = 'completed';
+  else if (activeUnloadJobs.length > 0) unload_status_text = 'unloading';
+  // 取最后一次完成的卸货 job 作为代表
+  const lastCompletedUnload = completedUnloadJobs.length > 0
+    ? completedUnloadJobs.reduce((m, j) => (!m || (j.completed_at && j.completed_at > m.completed_at) ? j : m), null)
+    : null;
+  const unload_summary = {
+    status: unload_status_text,
+    completed: unload_status_text === 'completed',
+    job_id: lastCompletedUnload ? lastCompletedUnload.id : (activeUnloadJobs[0] ? activeUnloadJobs[0].id : ''),
+    worker_names: lastCompletedUnload ? (lastCompletedUnload.worker_names_text || '') : '',
+    completed_at: lastCompletedUnload ? (lastCompletedUnload.completed_at || '') : '',
+    total_minutes: lastCompletedUnload ? Math.round(lastCompletedUnload.total_minutes_worked || 0) : 0,
+    result_lines: lastCompletedUnload ? (lastCompletedUnload.result_lines || []) : [],
+    diff_note: lastCompletedUnload ? (lastCompletedUnload.diff_note || '') : ''
+  };
+
   // P1-4：关联出库单（source_inbound_plan_id 反查）
   const linkedObRs = await env.DB.prepare(
     "SELECT id, display_no, status, customer, biz_class, outbound_mode, expected_ship_at, planned_box_count, planned_pallet_count, order_date, uses_stock_operation FROM v2_outbound_orders WHERE source_inbound_plan_id=? ORDER BY created_at ASC"
@@ -3869,6 +3904,7 @@ route("v2_inbound_plan_detail", async (body, env) => {
     completed_biz_classes,
     pending_biz_classes,
     missing_biz_classes: pending_biz_classes,
+    unload_summary,
     lines: planLines.results || [],
     jobs: enrichedJobs,
     attachments: atts.results || [],
@@ -3961,11 +3997,12 @@ route("v2_inbound_plan_ops_candidates", async (body, env) => {
   }
 
   // 按 biz_classes_json 与 biz_task 过滤，仅返回该 biz 仍未完成的计划
+  // 注意：unload 场景代表"整张计划的物理卸货"，与业务类型无关 —— 不按 biz_class 过滤
   const items = [];
   for (const p of rows) {
     // 修复后若不再属于 unload 候选状态 → 跳过
     if (scene === 'unload' && ['pending','unloading','unloading_putting_away'].indexOf(p.status) === -1) continue;
-    if (required_biz_class) {
+    if (scene !== 'unload' && required_biz_class) {
       await ensureInboundPlanBizTasks(env, p);
       const biz_classes = extractPlanBizClasses(p);
       if (biz_classes.indexOf(required_biz_class) === -1) {
@@ -4772,6 +4809,17 @@ route("v2_unload_job_start", async (body, env) => {
 
     const plan = await env.DB.prepare("SELECT status FROM v2_inbound_plans WHERE id=?").bind(plan_id).first();
     if (!plan) return { ok: false, error: "plan not found" };
+    // 已经卸过货的状态：不允许再次创建卸货任务（除非管理员强制重开）
+    const unloadDoneStatuses = ['arrived_pending_putaway', 'putting_away', 'partially_completed', 'completed'];
+    const forceReopen = body.force_reopen === true;
+    if (unloadDoneStatuses.indexOf(plan.status) !== -1 && !forceReopen) {
+      return {
+        ok: false,
+        error: "unload_already_completed",
+        current_status: plan.status,
+        message: "该入库计划已完成卸货，请进入对应业务类型入库操作 / 이 입고계획은 하차가 완료되어 해당 업무 입고 작업으로 진입하세요"
+      };
+    }
     const unloadAllowed = ['pending', 'unloading', 'unloading_putting_away'];
     if (unloadAllowed.indexOf(plan.status) === -1) {
       return { ok: false, error: "unload_not_allowed_for_status", message: "当前状态不可继续卸货 / 현재 상태에서 하차 불가", current_status: plan.status };
@@ -4979,20 +5027,13 @@ route("v2_unload_job_finish", async (body, env) => {
         ).bind(cargoSummary || "现场无单卸货", t, plan_id).run();
         return { ok: true, result_id, dynamic_plan: true, plan_id };
       } else {
-        // Check if inbound (putaway) jobs are currently active for this plan
-        const activeInboundJob = await env.DB.prepare(
-          "SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type IN ('inbound_direct','inbound_bulk','inbound_change_order') AND status IN ('pending','working') LIMIT 1"
-        ).bind(plan_id).first();
-        if (activeInboundJob) {
-          // Parallel: inbound still running → putting_away
-          await env.DB.prepare(
-            "UPDATE v2_inbound_plans SET status='putting_away', updated_at=? WHERE id=?"
-          ).bind(t, plan_id).run();
-        } else {
-          await env.DB.prepare(
-            "UPDATE v2_inbound_plans SET status='arrived_pending_putaway', updated_at=? WHERE id=?"
-          ).bind(t, plan_id).run();
-        }
+        // 物理卸货已完成 → 由 recalcInboundPlanCompletion 综合 biz_task 完成度 + active 入库任务
+        // 推断整单状态：completed / partially_completed / putting_away / arrived_pending_putaway
+        // 不再按业务类型分别要求卸货 —— 一次卸货代表整张 plan 的物理卸货完成
+        await ensureInboundPlanBizTasks(env, await env.DB.prepare(
+          "SELECT id, status, biz_class, biz_classes_json, source_type FROM v2_inbound_plans WHERE id=?"
+        ).bind(plan_id).first());
+        await recalcInboundPlanCompletion(env, plan_id, t);
       }
     }
 
@@ -8396,6 +8437,114 @@ route("v2_admin_cleanup_inbound_plan_states", async (body, env) => {
     }
   }
   return json({ ok: true, dry_run: dryRun, checked_count: checked, repaired_count: repaired, kept_count: kept, examples });
+});
+
+// 卸货范围修正：处理"多业务类型 plan 被分别要求卸货" 历史脏数据
+// 规则：一张计划只需一次到仓卸货；卸完即整单进入业务入库阶段
+// 扫描所有 plan，遇到以下情况修复：
+//   (a) 已有 completed unload job，但 plan.status 仍是 pending/unloading/unloading_putting_away
+//       → 根据 biz_task 完成度回算（completed/partially_completed/putting_away/arrived_pending_putaway）
+//   (b) plan 有多 biz_classes，存在某 biz 已 completed，但 plan.status 没体现 partially_completed/completed
+//       → 回算
+// 干跑模式 dry_run=true 仅返回 would_repair examples，不写库
+route("v2_admin_cleanup_inbound_unload_scope", async (body, env) => {
+  if (!isAdmin(body, env)) return err("unauthorized_admin_only", 401);
+  const dryRun = body.dry_run === true;
+  const t = now();
+  // 扫描所有非 cancelled / 非 completed / 非 return_session 计划
+  const rs = await env.DB.prepare(`
+    SELECT id, display_no, status, biz_class, biz_classes_json, source_type, updated_at
+      FROM v2_inbound_plans
+     WHERE status NOT IN ('cancelled')
+       AND (source_type IS NULL OR source_type != 'return_session')
+     ORDER BY created_at ASC
+     LIMIT 10000
+  `).all();
+  const rows = rs.results || [];
+  let checked_count = 0, repaired_count = 0, kept_count = 0;
+  const examples = [];
+
+  for (const p of rows) {
+    checked_count++;
+
+    const biz_classes = extractPlanBizClasses(p);
+    if (biz_classes.length === 0) { kept_count++; continue; }
+
+    // 已完成的 unload job 数 + 各 biz_task 状态
+    const unloadDone = await env.DB.prepare(
+      "SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type='unload' AND status='completed' LIMIT 1"
+    ).bind(p.id).first();
+    const activeUnload = await env.DB.prepare(
+      "SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type='unload' AND status IN ('pending','working','awaiting_close') LIMIT 1"
+    ).bind(p.id).first();
+    const activePutaway = await env.DB.prepare(
+      "SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type IN ('inbound_direct','inbound_bulk','inbound_change_order') AND status IN ('pending','working','awaiting_close') LIMIT 1"
+    ).bind(p.id).first();
+
+    // 确保 biz_task 行齐全
+    if (!dryRun) await ensureInboundPlanBizTasks(env, p);
+    const tasks = await listInboundPlanBizTasks(env, p.id);
+    const completedCnt = tasks.filter(x => x.status === 'completed').length;
+    const taskCnt = tasks.length;
+    const allCompleted = (taskCnt > 0 && completedCnt === taskCnt);
+    const someCompleted = (completedCnt > 0 && completedCnt < taskCnt);
+
+    // 推断目标状态
+    let target = p.status;
+    if (activeUnload) {
+      target = activePutaway ? 'unloading_putting_away' : 'unloading';
+    } else if (unloadDone || ['arrived_pending_putaway','putting_away','partially_completed','completed'].indexOf(p.status) !== -1) {
+      // 物理卸货已完成
+      if (allCompleted) target = 'completed';
+      else if (someCompleted) target = 'partially_completed';
+      else if (activePutaway) target = 'putting_away';
+      else target = 'arrived_pending_putaway';
+    } else {
+      target = 'pending';
+    }
+
+    if (target === p.status) { kept_count++; continue; }
+
+    if (dryRun) {
+      repaired_count++;
+      if (examples.length < 50) examples.push({
+        id: p.id, display_no: p.display_no, biz_classes,
+        old_status: p.status, would_set_status: target,
+        unload_done: !!unloadDone, active_unload: !!activeUnload, active_putaway: !!activePutaway,
+        biz_task_completed: completedCnt, biz_task_total: taskCnt
+      });
+      continue;
+    }
+
+    const sets = ["status=?", "updated_at=?"];
+    const binds = [target, t];
+    if (target === 'completed') {
+      sets.push("manual_completed_at=COALESCE(NULLIF(manual_completed_at,''), ?)");
+      binds.push(t);
+    }
+    binds.push(p.id);
+    await env.DB.prepare(
+      "UPDATE v2_inbound_plans SET " + sets.join(', ') + " WHERE id=?"
+    ).bind(...binds).run();
+    repaired_count++;
+    if (examples.length < 50) examples.push({
+      id: p.id, display_no: p.display_no, biz_classes,
+      old_status: p.status, new_status: target,
+      unload_done: !!unloadDone, biz_task_completed: completedCnt, biz_task_total: taskCnt
+    });
+
+    // 审计日志
+    await env.DB.prepare(`
+      INSERT INTO v2_admin_cleanup_logs(id, operator, action_type, target_job_id, target_worker_id, reason, detail_json, created_at)
+      VALUES(?, ?, 'cleanup_inbound_unload_scope', '', '', ?, ?, ?)
+    `).bind("CLN-" + uid(), String(body.operator || 'admin'),
+            'plan_status: ' + p.status + ' -> ' + target,
+            JSON.stringify({ plan_id: p.id, display_no: p.display_no, biz_classes,
+                            unload_done: !!unloadDone, biz_task_completed: completedCnt, biz_task_total: taskCnt }),
+            t).run();
+  }
+
+  return json({ ok: true, dry_run: dryRun, checked_count, repaired_count, kept_count, examples });
 });
 
 route("v2_admin_cleanup_job_statuses", async (body, env) => {

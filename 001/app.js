@@ -1194,7 +1194,10 @@ async function loadInboundCandidates() {
   var opts = '<option value="">-- 选择系统候选单 / 시스템 후보 선택 --</option>';
   if (res && res.ok && res.items) {
     res.items.forEach(function(p) {
-      opts += '<option value="' + esc(p.id) + '" data-display-no="' + esc(p.display_no || '') + '">[' + esc(p.display_no || p.id) + '] ' + esc(p.customer) + ' - ' + esc(p.cargo_summary) + '</option>';
+      // 状态提示：partially_completed/arrived_pending_putaway 等 → 显示"卸货已完成"
+      var unloadDone = ['arrived_pending_putaway','putting_away','partially_completed'].indexOf(p.status) !== -1;
+      var unloadTag = unloadDone ? ' [已卸货/하차완료]' : '';
+      opts += '<option value="' + esc(p.id) + '" data-display-no="' + esc(p.display_no || '') + '">[' + esc(p.display_no || p.id) + ']' + unloadTag + ' ' + esc(p.customer) + ' - ' + esc(p.cargo_summary) + '</option>';
     });
   }
   sel.innerHTML = opts;
@@ -1354,6 +1357,10 @@ async function startUnload(btnEl) {
       var jobRes = await api({ action: "v2_ops_job_detail", job_id: res.job_id });
       if (jobRes && jobRes.ok) showUnloadWorking(jobRes.job);
       startJobPoll("unload");
+    } else if (res && res.error === "unload_already_completed") {
+      alert((res.message || "该入库计划已完成卸货，请进入对应业务类型入库操作\n이 입고계획은 하차 완료, 해당 업무 입고로 진입하세요"));
+      await loadUnloadCandidates();
+      document.getElementById("unloadPlanSelect").value = "";
     } else if (res && res.error === "unload_not_allowed_for_status") {
       alert("该入库计划已完成卸货，当前不能继续卸货\n이 입고계획은 이미 하차 완료되어 추가 하차 불가");
     } else if (res && res.error === "unload_status_repaired") {

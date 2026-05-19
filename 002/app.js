@@ -2192,7 +2192,13 @@ async function loadInboundList() {
     var missing = p.missing_biz_classes || p.pending_biz_classes || [];
     if (bizArr.length > 1 && missing.length > 0 && p.status !== 'completed' && p.status !== 'cancelled') {
       var missText = missing.map(function(b) { return inboundBizTaskLabel(b); }).join('、');
-      html += '<div style="font-size:12px;color:#c62828;background:#ffebee;border-left:3px solid #c62828;padding:3px 6px;margin-top:4px;">⚠️ 未完成入库类型 / 미완료 입고 유형: ' + esc(missText) + '</div>';
+      // 卸货已完成？（避免现场以为"换单未完成 = 还要再卸货"）
+      var unloadTagText = '';
+      if (Number(p.unload_completed || 0) === 1
+          || ['arrived_pending_putaway','putting_away','partially_completed'].indexOf(p.status) !== -1) {
+        unloadTagText = '<span style="background:#1b5e20;color:#fff;font-size:11px;padding:1px 6px;border-radius:3px;margin-right:6px;">卸货已完成 / 하차 완료</span>';
+      }
+      html += '<div style="font-size:12px;color:#c62828;background:#ffebee;border-left:3px solid #c62828;padding:3px 6px;margin-top:4px;">' + unloadTagText + '⚠️ 待完成入库类型 / 미완료 입고 유형: ' + esc(missText) + '</div>';
     }
     html += '</div>';
   });
@@ -2595,6 +2601,42 @@ async function loadInboundDetail() {
       html += '</tr>';
     });
     html += '</tbody></table>';
+    html += '</div>';
+  }
+
+  // --- 到仓卸货状态卡片（plan 级别，仅一次卸货） ---
+  if (!isReturnSession) {
+    var us = res.unload_summary || null;
+    var unloadDone = us && us.completed;
+    var unloadingNow = us && us.status === 'unloading';
+    var unloadTitleColor = unloadDone ? '#1b5e20' : (unloadingNow ? '#ef6c00' : '#c62828');
+    var unloadStateText = unloadDone ? '已卸货 / 하차 완료'
+                        : (unloadingNow ? '卸货中 / 하차 중' : '未卸货 / 미하차');
+    html += '<div class="card">';
+    html += '<div class="card-title" style="display:flex;align-items:center;gap:8px;">到仓卸货状态 / 도착 하차 상태';
+    html += '<span style="font-size:11px;color:#fff;background:' + unloadTitleColor + ';padding:2px 6px;border-radius:3px;">' + esc(unloadStateText) + '</span>';
+    html += '</div>';
+    if (us && unloadDone) {
+      html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px;font-size:13px;">';
+      html += '<div><b>卸货完成时间 / 하차 완료시간:</b> ' + esc(us.completed_at ? fmtTime(us.completed_at) : '--') + '</div>';
+      html += '<div><b>卸货人员 / 하차 작업자:</b> ' + esc(us.worker_names || '--') + '</div>';
+      html += '<div><b>累计工时(分钟) / 작업시간:</b> ' + (us.total_minutes ? us.total_minutes : '--') + '</div>';
+      var resLines = us.result_lines || [];
+      if (resLines.length > 0) {
+        var resParts = resLines.map(function(r) {
+          return esc(unitTypeLabel(r.unit_type) + ' ' + (r.actual_qty || 0));
+        }).join(' / ');
+        html += '<div style="grid-column:1/-1;"><b>卸货结果 / 하차 결과:</b> ' + resParts + '</div>';
+      }
+      if (us.diff_note) {
+        html += '<div style="grid-column:1/-1;"><b>差异说明 / 차이 비고:</b> ' + esc(us.diff_note) + '</div>';
+      }
+      html += '</div>';
+    } else if (us && unloadingNow) {
+      html += '<div class="muted" style="font-size:12px;">卸货正在进行中，结果待提交</div>';
+    } else {
+      html += '<div class="muted" style="font-size:12px;">尚未开始到仓卸货 / 도착 하차 미진행</div>';
+    }
     html += '</div>';
   }
 
