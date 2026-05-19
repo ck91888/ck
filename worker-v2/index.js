@@ -5620,6 +5620,138 @@ route("v2_inbound_plan_force_complete", async (body, env) => {
 });
 
 // =====================================================
+// 入库计划：批量把 partially_completed 强制设为 completed
+//   - 仅 ADMINKEY；不产生现场工时；幂等
+//   - 跳过条件：active inbound/unload job 存在 / 已 completed / 已 cancelled
+//   - 业务类型 biz_task 全部 admin_force_complete；写 force_completed_*
+//   - 关联出库单：仅统计已有 source_inbound_plan_id=plan.id 数量；不重复生成
+//     （现系统出库单只在入库计划创建时通过 auto_create_outbound / link_ob 生成，
+//      没有"完成时再生成"语义，所以本路由不补生成；如未生成请到协同中心手工创建）
+// =====================================================
+route("v2_admin_force_complete_partial_inbounds", async (body, env) => {
+  if (!isAdmin(body, env)) return err("unauthorized_admin_only", 401);
+  const dryRun = body.dry_run === true;
+  const reason = String(body.reason || "历史多业务类型入库残留，管理员批量设为已入库").trim();
+  const operator = String(body.operator_name || body.created_by || "ADMIN").trim();
+
+  // 兼容多种历史拼写
+  const targetStatuses = ['partially_completed', 'partial_completed', 'partially_done'];
+  const placeholder = targetStatuses.map(() => '?').join(',');
+  const rs = await env.DB.prepare(
+    "SELECT * FROM v2_inbound_plans WHERE status IN (" + placeholder + ") ORDER BY created_at ASC LIMIT 10000"
+  ).bind(...targetStatuses).all();
+  const rows = rs.results || [];
+
+  let checked_count = 0;
+  let completed_count = 0;
+  let skipped_active_job_count = 0;
+  let generated_outbound_count = 0;
+  let already_linked_outbound_count = 0;
+  const examples = [];
+  const t = now();
+
+  for (const plan of rows) {
+    checked_count++;
+
+    // active job 探测
+    const activeJob = await env.DB.prepare(
+      "SELECT id, job_type FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND status IN ('pending','working','awaiting_close') LIMIT 1"
+    ).bind(plan.id).first();
+    if (activeJob) {
+      skipped_active_job_count++;
+      if (examples.length < 50) examples.push({
+        display_no: plan.display_no,
+        plan_id: plan.id,
+        old_status: plan.status,
+        new_status: plan.status,
+        skipped_reason: "active_job: " + activeJob.job_type + " #" + activeJob.id
+      });
+      continue;
+    }
+
+    // 已存在的关联出库单（幂等判定）
+    const linkedRs = await env.DB.prepare(
+      "SELECT id, display_no FROM v2_outbound_orders WHERE source_inbound_plan_id=?"
+    ).bind(plan.id).all();
+    const linkedRows = linkedRs.results || [];
+    already_linked_outbound_count += linkedRows.length;
+
+    // dry-run 模式：只汇报
+    if (dryRun) {
+      await ensureInboundPlanBizTasks(env, plan);
+      const tasks = await listInboundPlanBizTasks(env, plan.id);
+      const pendingBiz = tasks.filter(x => x.status !== 'completed').map(x => x.biz_class);
+      completed_count++;
+      if (examples.length < 50) examples.push({
+        display_no: plan.display_no,
+        plan_id: plan.id,
+        old_status: plan.status,
+        new_status: 'completed',
+        would_complete_biz_tasks: pendingBiz,
+        existing_linked_outbound_count: linkedRows.length
+      });
+      continue;
+    }
+
+    // 实跑：补 biz_task + 写 force_completed_*
+    await ensureInboundPlanBizTasks(env, plan);
+    const tasksBefore = await listInboundPlanBizTasks(env, plan.id);
+    const pendingBiz = tasksBefore.filter(x => x.status !== 'completed').map(x => x.biz_class);
+
+    await env.DB.prepare(`
+      UPDATE v2_inbound_plan_biz_tasks
+         SET status='completed',
+             completed_at=?,
+             completed_by=?,
+             worker_names=COALESCE(NULLIF(worker_names,''), ?),
+             total_minutes=COALESCE(total_minutes, 0),
+             completion_source='admin_force_complete',
+             completion_note=?,
+             updated_at=?
+       WHERE plan_id=? AND status!='completed'
+    `).bind(t, operator, operator, reason, t, plan.id).run();
+
+    await env.DB.prepare(
+      "UPDATE v2_inbound_plans SET status='completed', updated_at=?, force_completed=1, force_completed_by=?, force_completed_at=?, force_complete_reason=?, manual_completed_by=COALESCE(NULLIF(manual_completed_by,''), ?), manual_completed_at=COALESCE(NULLIF(manual_completed_at,''), ?) WHERE id=?"
+    ).bind(t, operator, t, reason, operator, t, plan.id).run();
+
+    completed_count++;
+
+    await env.DB.prepare(`
+      INSERT INTO v2_admin_cleanup_logs(id, operator, action_type, target_job_id, target_worker_id, reason, detail_json, created_at)
+      VALUES(?, ?, 'force_complete_partial_inbound', '', '', ?, ?, ?)
+    `).bind("CLN-" + uid(), operator, reason,
+            JSON.stringify({
+              plan_id: plan.id, display_no: plan.display_no,
+              old_status: plan.status,
+              completed_biz_tasks: pendingBiz,
+              existing_linked_outbound_count: linkedRows.length
+            }),
+            t).run();
+
+    if (examples.length < 50) examples.push({
+      display_no: plan.display_no,
+      plan_id: plan.id,
+      old_status: plan.status,
+      new_status: 'completed',
+      completed_biz_tasks: pendingBiz,
+      existing_linked_outbound_count: linkedRows.length
+    });
+  }
+
+  return json({
+    ok: true,
+    dry_run: dryRun,
+    checked_count,
+    completed_count,
+    skipped_active_job_count,
+    generated_outbound_count, // 现系统无"完成时再生成出库单"语义，恒 0
+    already_linked_outbound_count,
+    examples
+  });
+});
+
+// =====================================================
 // 入库计划/出库作业单：协同中心导出 CSV（最大 10000 行）
 // =====================================================
 const _STATUS_LABEL_ZH = {
