@@ -301,6 +301,86 @@ select { cursor: pointer; }
   margin-left: 4px;
 }
 
+/* ===== Sticky 顶部容器（header + tabs + actions）===== */
+.sticky-top-shell {
+  position: sticky;
+  top: 0;
+  z-index: 1000;
+  background: #f5f5f5;
+  margin: -16px -16px 12px -16px;   /* 抵消 body padding 让 sticky 紧贴顶部 */
+  padding: 12px 16px 0 16px;
+  border-bottom: 1px solid #e0e0e0;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.04);
+}
+.sticky-top-shell .c-header,
+.sticky-top-shell .tab-bar,
+.sticky-top-shell .actions-bar { margin-bottom: 8px; }
+.sticky-top-shell .actions-bar:last-child,
+.sticky-top-shell .tab-bar:last-child { margin-bottom: 0; padding-bottom: 6px; }
+
+/* 列表筛选栏也粘顶（top 由 JS 写入 --sticky-top-height 变量） */
+.filter-bar {
+  position: sticky;
+  top: var(--sticky-top-height, 140px);
+  z-index: 990;
+  background: #f5f5f5;
+  padding: 10px 0;
+  margin-bottom: 8px;
+  border-bottom: 1px solid #eee;
+}
+
+/* ===== 分页条 ===== */
+.pager-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  margin: 8px 0;
+  background: #fff;
+  border: 1px solid #eee;
+  border-radius: 8px;
+  flex-wrap: wrap;
+}
+.pager-info { color: #666; font-size: 13px; font-weight: 600; }
+.pager-actions {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+}
+.pager-actions select {
+  height: 30px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  padding: 0 8px;
+  background: #fff;
+  font-size: 12px;
+}
+.pager-actions .btn { padding: 4px 10px; font-size: 12px; }
+.pager-actions .btn[disabled] { opacity: 0.45; cursor: not-allowed; }
+
+/* ===== 移动端适配 ===== */
+@media (max-width: 700px) {
+  body { padding: 10px; }
+  .sticky-top-shell {
+    margin: -10px -10px 10px -10px;
+    padding: 8px 10px 0 10px;
+  }
+  .c-header { flex-wrap: wrap; gap: 6px; }
+  .c-header .title { font-size: 18px; }
+  .tab-bar { overflow-x: auto; white-space: nowrap; }
+  .tab-bar button { padding: 8px 12px; font-size: 12px; }
+  .actions-bar { padding-bottom: 4px; }
+  .filter-bar {
+    top: var(--sticky-top-height, 120px);
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    white-space: nowrap;
+    padding: 8px 0;
+  }
+  .filter-bar select, .filter-bar input { min-width: 100px; }
+  .pager-bar { flex-direction: column; align-items: flex-start; gap: 6px; padding: 8px; }
+  .pager-actions { width: 100%; justify-content: flex-start; }
+}
+
 /* Page visibility */
 .page { display: none; }
 .page.active { display: block; }

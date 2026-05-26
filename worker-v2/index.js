@@ -515,6 +515,17 @@ function pageParams(body) {
   return { limit, offset };
 }
 
+// 列表分页元信息：所有 list 接口统一在 return json 时附加
+// 用法：return json({ ok:true, items, ...pageMeta(total, limit, offset) })
+function pageMeta(total, limit, offset) {
+  const _total = Math.max(0, Number(total) || 0);
+  const _limit = Math.max(1, Number(limit) || 50);
+  const _offset = Math.max(0, Number(offset) || 0);
+  const page = Math.floor(_offset / _limit) + 1;
+  const page_count = Math.max(1, Math.ceil(_total / _limit));
+  return { total: _total, limit: _limit, offset: _offset, page, page_count };
+}
+
 // ===== Idempotency helper =====
 // 用法：
 //   route("v2_xxx_create", async (body, env) => {
@@ -1835,37 +1846,40 @@ route("v2_issue_list", async (body, env) => {
   const customer_q = String(body.customer_q || body.q_customer || "").trim();
   const related_doc_q = String(body.related_doc_q || body.q_related_doc || "").trim();
   const { limit, offset } = pageParams(body);
-  let sql = "SELECT * FROM v2_issue_tickets WHERE 1=1";
+  // 构造 WHERE 子句（COUNT 与 SELECT 共用，binds 也共用顺序）
+  let where = " WHERE 1=1";
   const binds = [];
-  if (status) { sql += " AND status=?"; binds.push(status); }
-  if (biz_class) { sql += " AND biz_class=?"; binds.push(biz_class); }
+  if (status) { where += " AND status=?"; binds.push(status); }
+  if (biz_class) { where += " AND biz_class=?"; binds.push(biz_class); }
   // P1-6：记帐筛选
   if (body.accounting_required === 1 || body.accounting_required === '1') {
-    sql += " AND accounting_required=1";
+    where += " AND accounting_required=1";
   }
   if (body.accounted === 1 || body.accounted === '1') {
-    sql += " AND accounted=1";
+    where += " AND accounted=1";
   } else if (body.accounted === 0 || body.accounted === '0') {
-    sql += " AND accounting_required=1 AND accounted=0";
+    where += " AND accounting_required=1 AND accounted=0";
   }
   if (customer_q) {
-    sql += " AND COALESCE(customer,'') LIKE ?";
+    where += " AND COALESCE(customer,'') LIKE ?";
     binds.push("%" + customer_q + "%");
   }
   if (related_doc_q) {
     // v2_issue_tickets 真实存在的列：related_doc_no / issue_summary / issue_description / customer
-    // 不含 related_doc_id / display_no / title / po_no / wms_work_order_no 等列（写了会 no such column）
-    sql += " AND (COALESCE(related_doc_no,'') LIKE ? OR COALESCE(issue_summary,'') LIKE ? OR COALESCE(issue_description,'') LIKE ?)";
+    where += " AND (COALESCE(related_doc_no,'') LIKE ? OR COALESCE(issue_summary,'') LIKE ? OR COALESCE(issue_description,'') LIKE ?)";
     const kw = "%" + related_doc_q + "%";
     binds.push(kw, kw, kw);
   }
-  // 默认 newest_first（002 客服侧看最新）；oldest_first 给需要 FIFO 的视角
-  sql += sort === "oldest_first" ? " ORDER BY created_at ASC" : " ORDER BY created_at DESC";
-  sql += " LIMIT ? OFFSET ?";
-  binds.push(limit, offset);
+  const orderBy = sort === "oldest_first" ? " ORDER BY created_at ASC" : " ORDER BY created_at DESC";
+  const countSql = "SELECT COUNT(*) AS c FROM v2_issue_tickets" + where;
+  const listSql = "SELECT * FROM v2_issue_tickets" + where + orderBy + " LIMIT ? OFFSET ?";
   try {
-    const rs = await env.DB.prepare(sql).bind(...binds).all();
-    return json({ ok: true, items: rs.results || [], limit, offset });
+    const countRow = binds.length > 0
+      ? await env.DB.prepare(countSql).bind(...binds).first()
+      : await env.DB.prepare(countSql).first();
+    const total = Number((countRow && countRow.c) || 0);
+    const rs = await env.DB.prepare(listSql).bind(...binds, limit, offset).all();
+    return json({ ok: true, items: rs.results || [], ...pageMeta(total, limit, offset) });
   } catch (e) {
     // 让前端拿到真实错误而不是只看到"加载失败"
     return json({
@@ -1873,7 +1887,7 @@ route("v2_issue_list", async (body, env) => {
       error: "issue_list_failed",
       detail: "v2_issue_list SQL failed",
       message: String((e && e.message) || e),
-      sql_preview: sql,
+      sql_preview: listSql,
       bind_count: binds.length
     }, 500);
   }
@@ -2444,30 +2458,33 @@ route("v2_outbound_order_list", async (body, env) => {
   const usesStockRaw = String(body.uses_stock_operation == null ? "" : body.uses_stock_operation).trim();
   const hasMaterialRaw = String(body.has_material == null ? "" : body.has_material).trim();
   const { limit, offset } = pageParams(body);
-  let sql = "SELECT * FROM v2_outbound_orders WHERE 1=1";
-  const binds = [];
   // 按 date_basis 选择字段：expected_ship_at 派生 date_key（非空时取其日期，否则 fallback order_date）
   const _dateExpr = (date_basis === 'order_date')
     ? "order_date"
     : "(CASE WHEN expected_ship_at IS NOT NULL AND expected_ship_at != '' THEN substr(expected_ship_at,1,10) ELSE order_date END)";
-  if (start) { sql += " AND " + _dateExpr + ">=?"; binds.push(start); }
-  if (end)   { sql += " AND " + _dateExpr + "<=?"; binds.push(end); }
-  if (status) { sql += " AND status=?"; binds.push(status); }
-  else { sql += " AND status != 'cancelled'"; } // 默认"全部状态"排除已取消，仅当显式筛 cancelled 才返回
-  if (accounted === "1") { sql += " AND accounted=1"; }
-  else if (accounted === "0") { sql += " AND (accounted IS NULL OR accounted=0)"; }
-  if (biz_class) { sql += " AND biz_class=?"; binds.push(biz_class); }
-  if (customer_keyword) { sql += " AND customer LIKE ?"; binds.push('%' + customer_keyword + '%'); }
-  if (usesStockRaw === "1") { sql += " AND uses_stock_operation=1"; }
-  else if (usesStockRaw === "0") { sql += " AND (uses_stock_operation IS NULL OR uses_stock_operation=0)"; }
+  let where = " WHERE 1=1";
+  const binds = [];
+  if (start) { where += " AND " + _dateExpr + ">=?"; binds.push(start); }
+  if (end)   { where += " AND " + _dateExpr + "<=?"; binds.push(end); }
+  if (status) { where += " AND status=?"; binds.push(status); }
+  else { where += " AND status != 'cancelled'"; } // 默认"全部状态"排除已取消，仅当显式筛 cancelled 才返回
+  if (accounted === "1") { where += " AND accounted=1"; }
+  else if (accounted === "0") { where += " AND (accounted IS NULL OR accounted=0)"; }
+  if (biz_class) { where += " AND biz_class=?"; binds.push(biz_class); }
+  if (customer_keyword) { where += " AND customer LIKE ?"; binds.push('%' + customer_keyword + '%'); }
+  if (usesStockRaw === "1") { where += " AND uses_stock_operation=1"; }
+  else if (usesStockRaw === "0") { where += " AND (uses_stock_operation IS NULL OR uses_stock_operation=0)"; }
   if (hasMaterialRaw === "1") {
-    sql += " AND EXISTS (SELECT 1 FROM v2_attachments a WHERE a.related_doc_type='outbound_order' AND a.related_doc_id=v2_outbound_orders.id AND a.attachment_category='outbound_material')";
+    where += " AND EXISTS (SELECT 1 FROM v2_attachments a WHERE a.related_doc_type='outbound_order' AND a.related_doc_id=v2_outbound_orders.id AND a.attachment_category='outbound_material')";
   } else if (hasMaterialRaw === "0") {
-    sql += " AND NOT EXISTS (SELECT 1 FROM v2_attachments a WHERE a.related_doc_type='outbound_order' AND a.related_doc_id=v2_outbound_orders.id AND a.attachment_category='outbound_material')";
+    where += " AND NOT EXISTS (SELECT 1 FROM v2_attachments a WHERE a.related_doc_type='outbound_order' AND a.related_doc_id=v2_outbound_orders.id AND a.attachment_category='outbound_material')";
   }
-  sql += " ORDER BY " + _dateExpr + " DESC, created_at DESC LIMIT ? OFFSET ?";
-  binds.push(limit, offset);
-  const rs = await env.DB.prepare(sql).bind(...binds).all();
+  const countRow = binds.length > 0
+    ? await env.DB.prepare("SELECT COUNT(*) AS c FROM v2_outbound_orders" + where).bind(...binds).first()
+    : await env.DB.prepare("SELECT COUNT(*) AS c FROM v2_outbound_orders" + where).first();
+  const total = Number((countRow && countRow.c) || 0);
+  const listSql = "SELECT * FROM v2_outbound_orders" + where + " ORDER BY " + _dateExpr + " DESC, created_at DESC LIMIT ? OFFSET ?";
+  const rs = await env.DB.prepare(listSql).bind(...binds, limit, offset).all();
   const items = rs.results || [];
   // 注入 material_count（CHUNK=80 防 D1 too many SQL variables）
   if (items.length > 0) {
@@ -2498,7 +2515,7 @@ route("v2_outbound_order_list", async (body, env) => {
       }
     }
   }
-  return json({ ok: true, items, limit, offset });
+  return json({ ok: true, items, ...pageMeta(total, limit, offset) });
 });
 
 route("v2_outbound_order_detail", async (body, env) => {
@@ -3692,17 +3709,17 @@ route("v2_inbound_plan_list", async (body, env) => {
   const { limit, offset } = pageParams(body);
 
   // 排除退件入库会话：return_session 不属于正式入库计划口径
-  let sql = "SELECT * FROM v2_inbound_plans WHERE source_type != 'return_session'";
+  let where = " WHERE source_type != 'return_session'";
   const binds = [];
-  if (start) { sql += " AND plan_date>=?"; binds.push(start); }
-  if (end) { sql += " AND plan_date<=?"; binds.push(end); }
-  if (status) { sql += " AND status=?"; binds.push(status); }
-  else { sql += " AND status != 'cancelled'"; } // 默认"全部状态"排除已取消，仅当显式筛 cancelled 才返回
-  if (accounted === "1") { sql += " AND accounted=1"; }
-  else if (accounted === "0") { sql += " AND (accounted IS NULL OR accounted=0)"; }
+  if (start) { where += " AND plan_date>=?"; binds.push(start); }
+  if (end) { where += " AND plan_date<=?"; binds.push(end); }
+  if (status) { where += " AND status=?"; binds.push(status); }
+  else { where += " AND status != 'cancelled'"; } // 默认"全部状态"排除已取消，仅当显式筛 cancelled 才返回
+  if (accounted === "1") { where += " AND accounted=1"; }
+  else if (accounted === "0") { where += " AND (accounted IS NULL OR accounted=0)"; }
   // 业务分类筛选：兼容 (a) biz_classes_json 包含 (b) v2_inbound_plan_biz_tasks 存在 (c) 旧数据 plan.biz_class
   if (biz_class_filter && VALID_BIZ.indexOf(biz_class_filter) !== -1) {
-    sql += " AND ("
+    where += " AND ("
         +    "biz_class=?"
         +    " OR biz_classes_json LIKE ?"
         +    " OR EXISTS (SELECT 1 FROM v2_inbound_plan_biz_tasks t WHERE t.plan_id=v2_inbound_plans.id AND t.biz_class=?)"
@@ -3711,15 +3728,18 @@ route("v2_inbound_plan_list", async (body, env) => {
   }
   // 客户名模糊搜索
   if (customer_keyword) {
-    sql += " AND customer LIKE ?";
+    where += " AND customer LIKE ?";
     binds.push('%' + customer_keyword + '%');
   }
-  sql += " ORDER BY plan_date DESC, created_at DESC LIMIT ? OFFSET ?";
-  binds.push(limit, offset);
-  const rs = await env.DB.prepare(sql).bind(...binds).all();
+  // 注：required_biz_class 只在 001 执行端使用、不参与协同中心分页；后置过滤在 JS 中完成，
+  //     COUNT 仅按 WHERE 子句口径，对协同中心场景准确，对 001 候选场景不显示 pager 不影响业务。
+  const countRow = await env.DB.prepare("SELECT COUNT(*) AS c FROM v2_inbound_plans" + where).bind(...binds).first();
+  const total = Number((countRow && countRow.c) || 0);
+  const listSql = "SELECT * FROM v2_inbound_plans" + where + " ORDER BY plan_date DESC, created_at DESC LIMIT ? OFFSET ?";
+  const rs = await env.DB.prepare(listSql).bind(...binds, limit, offset).all();
   const rows = rs.results || [];
 
-  if (rows.length === 0) return json({ ok: true, items: [], limit, offset });
+  if (rows.length === 0) return json({ ok: true, items: [], ...pageMeta(total, limit, offset) });
 
   // ===== 批量 enrichment（消除 N+1）=====
   const planIds = rows.map(p => p.id);
@@ -3802,7 +3822,7 @@ route("v2_inbound_plan_list", async (body, env) => {
       inbound_material_count: materialCountByPlan[p.id] || 0
     });
   }
-  return json({ ok: true, items, limit, offset });
+  return json({ ok: true, items, ...pageMeta(total, limit, offset) });
 });
 
 route("v2_inbound_plan_detail", async (body, env) => {
@@ -6570,14 +6590,17 @@ route("v2_feedback_list", async (body, env) => {
   const feedback_type = String(body.feedback_type || "").trim();
   const status = String(body.status || "").trim();
   const { limit, offset } = pageParams(body);
-  let sql = "SELECT * FROM v2_field_feedbacks WHERE 1=1";
+  let where = " WHERE 1=1";
   const binds = [];
-  if (feedback_type) { sql += " AND feedback_type=?"; binds.push(feedback_type); }
-  if (status) { sql += " AND status=?"; binds.push(status); }
-  sql += " ORDER BY created_at DESC LIMIT ? OFFSET ?";
-  binds.push(limit, offset);
-  const rs = await env.DB.prepare(sql).bind(...binds).all();
-  return json({ ok: true, items: rs.results || [], limit, offset });
+  if (feedback_type) { where += " AND feedback_type=?"; binds.push(feedback_type); }
+  if (status) { where += " AND status=?"; binds.push(status); }
+  const countRow = binds.length > 0
+    ? await env.DB.prepare("SELECT COUNT(*) AS c FROM v2_field_feedbacks" + where).bind(...binds).first()
+    : await env.DB.prepare("SELECT COUNT(*) AS c FROM v2_field_feedbacks" + where).first();
+  const total = Number((countRow && countRow.c) || 0);
+  const listSql = "SELECT * FROM v2_field_feedbacks" + where + " ORDER BY created_at DESC LIMIT ? OFFSET ?";
+  const rs = await env.DB.prepare(listSql).bind(...binds, limit, offset).all();
+  return json({ ok: true, items: rs.results || [], ...pageMeta(total, limit, offset) });
 });
 
 route("v2_feedback_detail", async (body, env) => {
@@ -7818,23 +7841,25 @@ route("v2_order_ops_job_list", async (body, env) => {
   const start = String(body.start_date || "").trim();
   const end = String(body.end_date || "").trim();
   const job_type = String(body.job_type || "").trim();
+  const { limit, offset } = pageParams(body);
 
-  // TODO(分页): 当前硬编码 LIMIT 200，与其他 v2_*_list 不同。
-  //   后续如需"加载更多"，改用 pageParams(body) + LIMIT ? OFFSET ?，
-  //   并调整下方 jobIds 关联查询为按页内 ids 关联。
-  let sql = "SELECT * FROM v2_ops_jobs WHERE flow_stage='order_op'";
+  let where = " WHERE flow_stage='order_op'";
   const binds = [];
-  if (job_type) { sql += " AND job_type=?"; binds.push(job_type); }
+  if (job_type) { where += " AND job_type=?"; binds.push(job_type); }
   // created_at 为 UTC ISO；按 KST 日历日筛选
   const _stR = kstDayRangeUtc(start);
   const _enR = kstDayRangeUtc(end);
-  if (_stR) { sql += " AND created_at>=?"; binds.push(_stR.startUtc); }
-  if (_enR) { sql += " AND created_at<?";  binds.push(_enR.endUtc); }
-  sql += " ORDER BY created_at DESC LIMIT 200";
-  const stmt = env.DB.prepare(sql);
-  const rs = binds.length > 0 ? await stmt.bind(...binds).all() : await stmt.all();
+  if (_stR) { where += " AND created_at>=?"; binds.push(_stR.startUtc); }
+  if (_enR) { where += " AND created_at<?";  binds.push(_enR.endUtc); }
+  // COUNT（同 WHERE）+ 分页 SELECT
+  const countRow = binds.length > 0
+    ? await env.DB.prepare("SELECT COUNT(*) AS c FROM v2_ops_jobs" + where).bind(...binds).first()
+    : await env.DB.prepare("SELECT COUNT(*) AS c FROM v2_ops_jobs" + where).first();
+  const total = Number((countRow && countRow.c) || 0);
+  const listSql = "SELECT * FROM v2_ops_jobs" + where + " ORDER BY created_at DESC LIMIT ? OFFSET ?";
+  const rs = await env.DB.prepare(listSql).bind(...binds, limit, offset).all();
   const jobs = rs.results || [];
-  if (jobs.length === 0) return json({ ok: true, items: [] });
+  if (jobs.length === 0) return json({ ok: true, items: [], ...pageMeta(total, limit, offset) });
 
   const jobIds = jobs.map(j => j.id);
   const placeholders = jobIds.map(() => '?').join(',');
@@ -7888,7 +7913,7 @@ route("v2_order_ops_job_list", async (body, env) => {
     };
   });
 
-  return json({ ok: true, items });
+  return json({ ok: true, items, ...pageMeta(total, limit, offset) });
 });
 
 // =====================================================
@@ -9169,21 +9194,23 @@ route("v2_verify_batch_list", async (body, env) => {
   const end_date = String(body.end_date || "").trim();
 
   const { limit, offset } = pageParams(body);
-  let sql = "SELECT * FROM v2_verify_batches WHERE 1=1";
+  let where = " WHERE 1=1";
   const binds = [];
-  if (status) { sql += " AND status=?"; binds.push(status); }
-  if (customer_name) { sql += " AND customer_name LIKE ?"; binds.push('%' + customer_name + '%'); }
+  if (status) { where += " AND status=?"; binds.push(status); }
+  if (customer_name) { where += " AND customer_name LIKE ?"; binds.push('%' + customer_name + '%'); }
   // created_at 为 UTC ISO；按 KST 日历日筛选
   const _stR2 = kstDayRangeUtc(start_date);
   const _enR2 = kstDayRangeUtc(end_date);
-  if (_stR2) { sql += " AND created_at >= ?"; binds.push(_stR2.startUtc); }
-  if (_enR2) { sql += " AND created_at < ?";  binds.push(_enR2.endUtc); }
-  sql += " ORDER BY created_at DESC LIMIT ? OFFSET ?";
-  binds.push(limit, offset);
-
-  const rs = await env.DB.prepare(sql).bind(...binds).all();
+  if (_stR2) { where += " AND created_at >= ?"; binds.push(_stR2.startUtc); }
+  if (_enR2) { where += " AND created_at < ?";  binds.push(_enR2.endUtc); }
+  const countRow = binds.length > 0
+    ? await env.DB.prepare("SELECT COUNT(*) AS c FROM v2_verify_batches" + where).bind(...binds).first()
+    : await env.DB.prepare("SELECT COUNT(*) AS c FROM v2_verify_batches" + where).first();
+  const total = Number((countRow && countRow.c) || 0);
+  const listSql = "SELECT * FROM v2_verify_batches" + where + " ORDER BY created_at DESC LIMIT ? OFFSET ?";
+  const rs = await env.DB.prepare(listSql).bind(...binds, limit, offset).all();
   const batches = rs.results || [];
-  if (batches.length === 0) return json({ ok: true, items: [], limit, offset });
+  if (batches.length === 0) return json({ ok: true, items: [], ...pageMeta(total, limit, offset) });
 
   // 批量聚合 scan_logs：ok 数 / 异常数
   const ids = batches.map(b => b.id);
@@ -9205,7 +9232,7 @@ route("v2_verify_batch_list", async (body, env) => {
       abnormal_count: Number(s.abnormal_count || 0)
     };
   });
-  return json({ ok: true, items, limit, offset });
+  return json({ ok: true, items, ...pageMeta(total, limit, offset) });
 });
 
 // 3) 批次详情（按"条码对应计划箱数"出每行状态 + 聚合异常）

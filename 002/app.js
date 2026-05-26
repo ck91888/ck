@@ -126,6 +126,78 @@ function fileUrl(fileKey) {
   return V2_API + "/file?key=" + encodeURIComponent(fileKey);
 }
 
+// ===== 列表分页统一 state =====
+// 每个 tab 一份；筛选条件变化必须先 resetPager(key) 再 load*()。
+var _listPager = {
+  issue:     { page: 1, limit: 50, total: 0 },
+  outbound:  { page: 1, limit: 50, total: 0 },
+  inbound:   { page: 1, limit: 50, total: 0 },
+  feedback:  { page: 1, limit: 50, total: 0 },
+  check:     { page: 1, limit: 50, total: 0 },
+  order_ops: { page: 1, limit: 50, total: 0 }
+};
+function getPager(key) {
+  if (!_listPager[key]) _listPager[key] = { page: 1, limit: 50, total: 0 };
+  return _listPager[key];
+}
+function getOffset(key) {
+  var p = getPager(key);
+  return Math.max(0, (Number(p.page || 1) - 1) * Number(p.limit || 50));
+}
+function resetPager(key) {
+  var p = getPager(key);
+  p.page = 1;
+}
+function setPagerLimit(key, limit) {
+  var p = getPager(key);
+  p.limit = Math.max(1, Number(limit) || 50);
+  p.page = 1;
+}
+function goPagerPage(key, page, reloadFnName) {
+  var p = getPager(key);
+  var fn = (typeof reloadFnName === 'function') ? reloadFnName : window[reloadFnName];
+  if (typeof fn !== 'function') return;
+  var maxPage = Math.max(1, Math.ceil((Number(p.total) || 0) / Math.max(1, Number(p.limit) || 50)));
+  p.page = Math.min(Math.max(1, Number(page) || 1), maxPage);
+  fn();
+}
+// 渲染分页条；res 应包含 total / limit / offset / page / page_count（后端已统一返回）
+function renderPager(key, res, reloadFnName) {
+  var p = getPager(key);
+  if (res && typeof res === 'object') {
+    if (res.total != null) p.total = Number(res.total) || 0;
+    if (res.limit != null) p.limit = Math.max(1, Number(res.limit) || p.limit || 50);
+    if (res.page != null) p.page = Math.max(1, Number(res.page) || 1);
+    else if (res.offset != null) p.page = Math.floor((Number(res.offset) || 0) / p.limit) + 1;
+  }
+  var pageCount = Math.max(1, Math.ceil((p.total || 0) / Math.max(1, p.limit || 50)));
+  if (p.page > pageCount) p.page = pageCount;
+  var infoText = '共 ' + p.total + ' 条 · 第 ' + p.page + ' / ' + pageCount + ' 页';
+  var prevDis = p.page <= 1 ? ' disabled' : '';
+  var nextDis = p.page >= pageCount ? ' disabled' : '';
+  var html = '<div class="pager-bar">';
+  html += '<div class="pager-info">' + esc(infoText) + '</div>';
+  html += '<div class="pager-actions">';
+  html += '<select onchange="setPagerLimit(\'' + esc(key) + '\', this.value); ' + reloadFnName + '();">';
+  [20, 50, 100].forEach(function(n) {
+    html += '<option value="' + n + '"' + (Number(p.limit) === n ? ' selected' : '') + '>每页 ' + n + ' 条</option>';
+  });
+  html += '</select>';
+  html += '<button class="btn btn-outline btn-sm"' + prevDis + ' onclick="goPagerPage(\'' + esc(key) + '\',1,\'' + reloadFnName + '\')">首页</button>';
+  html += '<button class="btn btn-outline btn-sm"' + prevDis + ' onclick="goPagerPage(\'' + esc(key) + '\',' + (p.page - 1) + ',\'' + reloadFnName + '\')">上一页</button>';
+  html += '<button class="btn btn-outline btn-sm"' + nextDis + ' onclick="goPagerPage(\'' + esc(key) + '\',' + (p.page + 1) + ',\'' + reloadFnName + '\')">下一页</button>';
+  html += '<button class="btn btn-outline btn-sm"' + nextDis + ' onclick="goPagerPage(\'' + esc(key) + '\',' + pageCount + ',\'' + reloadFnName + '\')">末页</button>';
+  html += '</div></div>';
+  return html;
+}
+
+// Sticky 顶部高度：随 c-header / tab-bar / actions-bar 行高变化动态计算
+function updateStickyVars() {
+  var shell = document.querySelector('.sticky-top-shell');
+  var h = shell ? shell.offsetHeight : 0;
+  document.documentElement.style.setProperty('--sticky-top-height', h + 'px');
+}
+
 function kstToday() {
   var d = new Date(Date.now() + 9 * 3600 * 1000);
   return d.toISOString().slice(0, 10);
@@ -187,6 +259,7 @@ function showMain() {
   document.getElementById("userBadge").textContent = userName || "(未设置)";
   applyLang();
   goTab("home");
+  setTimeout(updateStickyVars, 0);
   // 首次进入且未设置显示名时，提示设置
   if (!userName) {
     setTimeout(promptUserName, 500);
@@ -292,6 +365,8 @@ function applyLang() {
       el.textContent = L(key);
     }
   });
+  // 语言切换后 tab/按钮字宽变化 → 重算 sticky 高度
+  if (typeof updateStickyVars === 'function') setTimeout(updateStickyVars, 0);
 }
 
 // ===== Status/Biz helpers =====
@@ -587,7 +662,8 @@ function goTab(tab, btn) {
   // Show corresponding view（goView 内部会自动 updateActionsBarByView）
   goView(tab);
 
-  // Load data
+  // Load data — 不在 goTab 重置 pager，保持"列表→详情→返回仍在原页"
+  // 重置发生在 filter onchange/onclick 时（reset + load）
   if (tab === "home") loadDashboard();
   if (tab === "issue") loadIssueList();
   if (tab === "outbound") loadOutboundList();
@@ -620,6 +696,13 @@ function goView(name) {
   var el = document.getElementById("view-" + name);
   if (el) el.style.display = "";
   updateActionsBarByView(name);
+  // 视图切换后顶部高度可能变化（如显示/隐藏 + 新建按钮），重算 sticky-top
+  setTimeout(updateStickyVars, 0);
+}
+
+// resize 时重新计算 sticky 容器高度（手机旋转/换行等）
+if (typeof window !== 'undefined') {
+  window.addEventListener('resize', function() { setTimeout(updateStickyVars, 0); });
 }
 
 // TODO(分页 — list 接口能力盘点 2026-04-27):
@@ -808,7 +891,9 @@ async function loadIssueList() {
   var acct = acctSel ? acctSel.value : "";
   var custQ = ((document.getElementById("issueFilterCustomer") || {}).value || "").trim();
   var relQ = ((document.getElementById("issueFilterRelatedDoc") || {}).value || "").trim();
-  var apiParams = { action: "v2_issue_list", status: status, biz_class: biz };
+  var _ibPager = getPager('issue');
+  var apiParams = { action: "v2_issue_list", status: status, biz_class: biz,
+                    limit: _ibPager.limit, offset: getOffset('issue') };
   if (acct === 'required') apiParams.accounting_required = 1;
   else if (acct === 'unpaid') { apiParams.accounting_required = 1; apiParams.accounted = 0; }
   else if (acct === 'paid') apiParams.accounted = 1;
@@ -824,8 +909,9 @@ async function loadIssueList() {
   }
 
   var items = res.items || [];
+  var pagerHtml = renderPager('issue', res, 'loadIssueList');
   if (items.length === 0) {
-    body.innerHTML = '<div class="card muted">' + L("no_data") + '</div>';
+    body.innerHTML = pagerHtml + '<div class="card muted">' + L("no_data") + '</div>';
     return;
   }
 
@@ -852,7 +938,7 @@ async function loadIssueList() {
     html += '</div>';
   });
   html += '</div>';
-  body.innerHTML = html;
+  body.innerHTML = pagerHtml + html + pagerHtml;
 }
 
 // ===== Issue Create =====
@@ -1216,6 +1302,7 @@ async function loadOutboundList() {
   var customer_keyword = custEl ? (custEl.value || '').trim() : "";
 
   var res;
+  var _obPager = getPager('outbound');
   try {
     res = await api({
       action: "v2_outbound_order_list",
@@ -1226,7 +1313,8 @@ async function loadOutboundList() {
       customer_keyword: customer_keyword,
       uses_stock_operation: uses_stock_operation,
       has_material: has_material,
-      limit: 50
+      limit: _obPager.limit,
+      offset: getOffset('outbound')
     });
   } finally {
     if (btn) btn.disabled = false;
@@ -1238,8 +1326,9 @@ async function loadOutboundList() {
   }
 
   var items = res.items || [];
+  var pagerHtml = renderPager('outbound', res, 'loadOutboundList');
   if (items.length === 0) {
-    body.innerHTML = '<div class="card muted">' + L("no_data") + '</div>';
+    body.innerHTML = pagerHtml + '<div class="card muted">' + L("no_data") + '</div>';
     return;
   }
 
@@ -1312,7 +1401,7 @@ async function loadOutboundList() {
     html += '</div>';
   });
   html += '</div>';
-  body.innerHTML = html;
+  body.innerHTML = pagerHtml + html + pagerHtml;
 }
 
 // ===== Outbound Export =====
@@ -2196,13 +2285,15 @@ async function loadInboundList() {
   var customer_keyword = custEl ? (custEl.value || '').trim() : "";
 
   var res;
+  var _inPager = getPager('inbound');
   try {
     res = await api({
       action: "v2_inbound_plan_list",
       start_date: start, end_date: end, status: status, accounted: accounted,
       biz_class: biz_class,
       customer_keyword: customer_keyword,
-      limit: 50
+      limit: _inPager.limit,
+      offset: getOffset('inbound')
     });
   } finally {
     if (btn) btn.disabled = false;
@@ -2214,8 +2305,9 @@ async function loadInboundList() {
   }
 
   var items = (res.items || []).filter(function(p) { return p.source_type !== 'return_session'; });
+  var pagerHtml = renderPager('inbound', res, 'loadInboundList');
   if (items.length === 0) {
-    body.innerHTML = '<div class="card muted">' + L("no_data") + '</div>';
+    body.innerHTML = pagerHtml + '<div class="card muted">' + L("no_data") + '</div>';
     return;
   }
   // plan_date 倒序，同日按 created_at 倒序（最新计划在上）
@@ -2290,7 +2382,7 @@ async function loadInboundList() {
     html += '</div>';
   });
   html += '</div>';
-  body.innerHTML = html;
+  body.innerHTML = pagerHtml + html + pagerHtml;
 }
 
 // ===== Inbound Export =====
@@ -3924,7 +4016,12 @@ async function loadFeedbackList() {
 
   var fbType = (document.getElementById("fbFilterType") || {}).value || "";
   var fbStatus = (document.getElementById("fbFilterStatus") || {}).value || "";
-  var res = await api({ action: "v2_feedback_list", feedback_type: fbType, status: fbStatus });
+  var _fbPager = getPager('feedback');
+  var res = await api({
+    action: "v2_feedback_list",
+    feedback_type: fbType, status: fbStatus,
+    limit: _fbPager.limit, offset: getOffset('feedback')
+  });
 
   if (!res || !res.ok) {
     body.innerHTML = '<div class="card muted">' + L("error") + '</div>';
@@ -3932,8 +4029,9 @@ async function loadFeedbackList() {
   }
 
   var items = res.items || [];
+  var pagerHtml = renderPager('feedback', res, 'loadFeedbackList');
   if (items.length === 0) {
-    body.innerHTML = '<div class="card muted">' + L("no_data") + '</div>';
+    body.innerHTML = pagerHtml + '<div class="card muted">' + L("no_data") + '</div>';
     return;
   }
 
@@ -3952,7 +4050,7 @@ async function loadFeedbackList() {
     html += '</div>';
   });
   html += '</div>';
-  body.innerHTML = html;
+  body.innerHTML = pagerHtml + html + pagerHtml;
 }
 
 function openFeedbackDetail(id) {
@@ -4257,7 +4355,12 @@ async function loadOrderOpsList() {
   var start = (document.getElementById("orderOpsStartDate") || {}).value || "";
   var end = (document.getElementById("orderOpsEndDate") || {}).value || "";
 
-  var res = await api({ action: "v2_order_ops_job_list", job_type: job_type, start_date: start, end_date: end });
+  var _opPager = getPager('order_ops');
+  var res = await api({
+    action: "v2_order_ops_job_list",
+    job_type: job_type, start_date: start, end_date: end,
+    limit: _opPager.limit, offset: getOffset('order_ops')
+  });
   if (searchBtn) { searchBtn.disabled = false; searchBtn.textContent = btnText; }
   if (!res || !res.ok) {
     body.innerHTML = '<span class="muted">' + L("no_data") + '</span>';
@@ -4265,8 +4368,9 @@ async function loadOrderOpsList() {
   }
 
   var items = res.items || [];
+  var pagerHtml = renderPager('order_ops', res, 'loadOrderOpsList');
   if (items.length === 0) {
-    body.innerHTML = '<span class="muted">' + L("no_data") + '</span>';
+    body.innerHTML = pagerHtml + '<span class="muted">' + L("no_data") + '</span>';
     return;
   }
 
@@ -4318,7 +4422,7 @@ async function loadOrderOpsList() {
   });
 
   html += '</tbody></table>';
-  body.innerHTML = html;
+  body.innerHTML = pagerHtml + html + pagerHtml;
 }
 
 function openOrderOpsDetail(id) {
@@ -4589,14 +4693,20 @@ async function loadVerifyList() {
   body.innerHTML = '<span class="muted">加载中...</span>';
   var status = (document.getElementById("checkFilterStatus") || {}).value || "";
   var customer = (document.getElementById("checkFilterCustomer") || {}).value || "";
-  var res = await api({ action: "v2_verify_batch_list", status: status, customer_name: customer });
+  var _chPager = getPager('check');
+  var res = await api({
+    action: "v2_verify_batch_list",
+    status: status, customer_name: customer,
+    limit: _chPager.limit, offset: getOffset('check')
+  });
   if (!res || !res.ok) { body.innerHTML = '<span class="muted">加载失败</span>'; return; }
   var items = res.items || [];
+  var pagerHtml = renderPager('check', res, 'loadVerifyList');
   if (items.length === 0) {
-    body.innerHTML = '<div class="card"><span class="muted">暂无批次</span></div>';
+    body.innerHTML = pagerHtml + '<div class="card"><span class="muted">暂无批次</span></div>';
     return;
   }
-  var html = '<div class="card"><div class="card-title">核对批次 <span class="count">共 ' + items.length + ' 条</span></div>';
+  var html = '<div class="card"><div class="card-title">核对批次 <span class="count">共 ' + Number(res.total || items.length) + ' 条</span></div>';
   items.forEach(function(b) {
     var diff = (b.planned_qty || 0) - (b.scanned_ok_count || 0);
     html += '<div class="list-item" onclick="openVerifyBatch(\'' + esc(b.id) + '\')">' +
@@ -4614,7 +4724,7 @@ async function loadVerifyList() {
     '</div>';
   });
   html += '</div>';
-  body.innerHTML = html;
+  body.innerHTML = pagerHtml + html + pagerHtml;
 }
 
 function verifyStatusLabel(s) {

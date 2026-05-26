@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>协同中心 V2 / 협업센터</title>
-  <link rel="stylesheet" href="style.css?v=20260526a-inbound-materials">
+  <link rel="stylesheet" href="style.css?v=20260526b-pagination-sticky">
 </head>
 <body>
 
@@ -22,36 +22,39 @@
 <!-- Main -->
 <div id="page-main" class="page">
 
-  <!-- Header -->
-  <div class="c-header">
-    <div>
-      <div class="title" id="mainTitle">协同中心</div>
-      <div class="sub" id="mainSub">入库计划 · 出库作业 · 问题点沟通 · 核对异常</div>
+  <!-- Sticky 顶部：标题 + Tab + 新建按钮（滚动时常驻顶部） -->
+  <div class="sticky-top-shell">
+    <!-- Header -->
+    <div class="c-header">
+      <div>
+        <div class="title" id="mainTitle">协同中心</div>
+        <div class="sub" id="mainSub">入库计划 · 出库作业 · 问题点沟通 · 核对异常</div>
+      </div>
+      <div class="c-header-right">
+        <button class="lang-btn" id="langBtn" onclick="toggleLang()">한국어</button>
+        <span class="user-badge" id="userBadge" onclick="promptUserName()" style="cursor:pointer;" title="点击修改显示名">--</span>
+        <button class="btn btn-outline btn-sm" id="logoutBtn" onclick="doLogout()">退出</button>
+      </div>
     </div>
-    <div class="c-header-right">
-      <button class="lang-btn" id="langBtn" onclick="toggleLang()">한국어</button>
-      <span class="user-badge" id="userBadge" onclick="promptUserName()" style="cursor:pointer;" title="点击修改显示名">--</span>
-      <button class="btn btn-outline btn-sm" id="logoutBtn" onclick="doLogout()">退出</button>
+
+    <!-- Tabs -->
+    <div class="tab-bar" id="mainTabs">
+      <button class="active" onclick="goTab('home',this)" data-tab="home">今日看板</button>
+      <button onclick="goTab('issue',this)" data-tab="issue">问题点沟通</button>
+      <button onclick="goTab('outbound',this)" data-tab="outbound">出库作业单</button>
+      <button onclick="goTab('inbound',this)" data-tab="inbound">入库计划</button>
+      <button onclick="goTab('feedback',this)" data-tab="feedback">现场反馈</button>
+      <button onclick="goTab('check',this)" data-tab="check">核对中心</button>
+      <button onclick="goTab('order_ops',this)" data-tab="order_ops">按单操作</button>
     </div>
-  </div>
 
-  <!-- Tabs -->
-  <div class="tab-bar" id="mainTabs">
-    <button class="active" onclick="goTab('home',this)" data-tab="home">今日看板</button>
-    <button onclick="goTab('issue',this)" data-tab="issue">问题点沟通</button>
-    <button onclick="goTab('outbound',this)" data-tab="outbound">出库作业单</button>
-    <button onclick="goTab('inbound',this)" data-tab="inbound">入库计划</button>
-    <button onclick="goTab('feedback',this)" data-tab="feedback">现场反馈</button>
-    <button onclick="goTab('check',this)" data-tab="check">核对中心</button>
-    <button onclick="goTab('order_ops',this)" data-tab="order_ops">按单操作</button>
-  </div>
-
-  <!-- Actions -->
-  <div class="actions-bar" id="actionsBar">
-    <button onclick="goView('issue_create')" id="btnNewIssue" style="display:none;">+ 新建问题点</button>
-    <button onclick="goView('outbound_create')" id="btnNewOutbound" style="display:none;">+ 出库作业单</button>
-    <button onclick="goView('inbound_create')" id="btnNewInbound" style="display:none;">+ 入库计划</button>
-    <button onclick="goView('check_create')" id="btnNewCheck" style="display:none;">+ 新建核对批次</button>
+    <!-- Actions -->
+    <div class="actions-bar" id="actionsBar">
+      <button onclick="goView('issue_create')" id="btnNewIssue" style="display:none;">+ 新建问题点</button>
+      <button onclick="goView('outbound_create')" id="btnNewOutbound" style="display:none;">+ 出库作业单</button>
+      <button onclick="goView('inbound_create')" id="btnNewInbound" style="display:none;">+ 入库计划</button>
+      <button onclick="goView('check_create')" id="btnNewCheck" style="display:none;">+ 新建核对批次</button>
+    </div>
   </div>
 
   <!-- Dashboard -->
@@ -62,7 +65,7 @@
   <!-- Issue list -->
   <div id="view-issue" class="view" style="display:none;">
     <div class="filter-bar">
-      <select id="issueFilterStatus" onchange="loadIssueList()">
+      <select id="issueFilterStatus" onchange="resetPager('issue'); loadIssueList()">
         <option value="">全部状态</option>
         <option value="pending">待处理</option>
         <option value="processing">处理中</option>
@@ -71,14 +74,14 @@
         <option value="completed">已完成</option>
         <option value="cancelled">已取消</option>
       </select>
-      <select id="issueFilterBiz" onchange="loadIssueList()">
+      <select id="issueFilterBiz" onchange="resetPager('issue'); loadIssueList()">
         <option value="">全部分类</option>
         <option value="direct_ship">代发</option>
         <option value="bulk">大货</option>
         <option value="return">退件</option>
         <option value="import">进口</option>
       </select>
-      <select id="issueFilterAccounting" onchange="loadIssueList()">
+      <select id="issueFilterAccounting" onchange="resetPager('issue'); loadIssueList()">
         <option value="">全部记帐状态</option>
         <option value="required">需记帐</option>
         <option value="unpaid">需记帐·未记帐</option>
@@ -86,11 +89,11 @@
       </select>
       <input id="issueFilterCustomer" type="text" placeholder="客户搜索 / 고객 검색"
              style="height:28px;padding:0 8px;border:1px solid #ddd;border-radius:4px;font-size:13px;min-width:140px;"
-             onkeyup="if(event.key==='Enter') loadIssueList();">
+             onkeyup="if(event.key==='Enter'){ resetPager('issue'); loadIssueList(); }">
       <input id="issueFilterRelatedDoc" type="text" placeholder="入库/出库/PO/WMS 单号"
              style="height:28px;padding:0 8px;border:1px solid #ddd;border-radius:4px;font-size:13px;min-width:170px;"
-             onkeyup="if(event.key==='Enter') loadIssueList();">
-      <button class="btn btn-outline btn-sm" onclick="loadIssueList()">刷新 / 검색</button>
+             onkeyup="if(event.key==='Enter'){ resetPager('issue'); loadIssueList(); }">
+      <button class="btn btn-outline btn-sm" onclick="resetPager('issue'); loadIssueList()">刷新 / 검색</button>
     </div>
     <div id="issueListBody"></div>
   </div>
@@ -137,7 +140,7 @@
       <span class="filter-label"><b>预计出库日期 / 예상 출고일</b></span>
       <input type="date" id="obFilterStart">
       <input type="date" id="obFilterEnd">
-      <select id="obFilterStatus" onchange="loadOutboundList()">
+      <select id="obFilterStatus" onchange="resetPager('outbound'); loadOutboundList()">
         <option value="">全部状态</option>
         <option value="pending_issue">待下发</option>
         <option value="issued">已下发</option>
@@ -151,30 +154,30 @@
         <option value="reopen_pending">待再操作</option>
         <option value="cancelled">已取消 / 취소됨</option>
       </select>
-      <select id="obFilterBizClass" onchange="loadOutboundList()">
+      <select id="obFilterBizClass" onchange="resetPager('outbound'); loadOutboundList()">
         <option value="" data-i18n="filter_biz_class">业务分类(全部)</option>
         <option value="direct_ship" data-i18n="biz_direct_ship">代发</option>
         <option value="bulk" data-i18n="biz_bulk">大货</option>
         <option value="return" data-i18n="biz_return">退件</option>
       </select>
-      <input type="text" id="obFilterCustomer" placeholder="客户名搜索 / 고객명 검색" style="min-width:160px;" onkeydown="if(event.key==='Enter')loadOutboundList()">
-      <select id="obFilterUsesStockOp" onchange="loadOutboundList()">
+      <input type="text" id="obFilterCustomer" placeholder="客户名搜索 / 고객명 검색" style="min-width:160px;" onkeydown="if(event.key==='Enter'){ resetPager('outbound'); loadOutboundList(); }">
+      <select id="obFilterUsesStockOp" onchange="resetPager('outbound'); loadOutboundList()">
         <option value="" data-i18n="filter_uses_stock_op">是否库内操作(全部)</option>
         <option value="1" data-i18n="uses_stock_operation_yes">是</option>
         <option value="0" data-i18n="uses_stock_operation_no">否</option>
       </select>
-      <select id="obFilterHasMaterial" onchange="loadOutboundList()">
+      <select id="obFilterHasMaterial" onchange="resetPager('outbound'); loadOutboundList()">
         <option value="" data-i18n="filter_has_material">资料状态(全部)</option>
         <option value="1" data-i18n="outbound_material_uploaded">资料已上传</option>
         <option value="0" data-i18n="outbound_material_missing">无资料</option>
       </select>
       <span class="filter-label" data-i18n="account_filter">是否记帐</span>
-      <select id="outboundFilterAccounted" onchange="loadOutboundList()">
+      <select id="outboundFilterAccounted" onchange="resetPager('outbound'); loadOutboundList()">
         <option value="" data-i18n="account_all">全部记帐状态</option>
         <option value="0" data-i18n="accounted_no">未记帐</option>
         <option value="1" data-i18n="accounted_yes">已记帐</option>
       </select>
-      <button class="btn btn-outline btn-sm" id="obQueryBtn" onclick="loadOutboundList()">查询</button>
+      <button class="btn btn-outline btn-sm" id="obQueryBtn" onclick="resetPager('outbound'); loadOutboundList()">查询</button>
       <button class="btn btn-outline btn-sm" id="obExportBtn" onclick="exportOutboundOrders(this)">导出出库单 CSV / 출고 작업단 CSV 내보내기</button>
     </div>
     <div id="outboundListBody"></div>
@@ -281,7 +284,7 @@
       <span class="filter-label"><b>计划日期 / 입고계획일</b></span>
       <input type="date" id="ibFilterStart">
       <input type="date" id="ibFilterEnd">
-      <select id="ibFilterStatus" onchange="loadInboundList()">
+      <select id="ibFilterStatus" onchange="resetPager('inbound'); loadInboundList()">
         <option value="">全部状态</option>
         <option value="pending">未到货</option>
         <option value="unloading">卸货中</option>
@@ -293,21 +296,21 @@
         <option value="completed">已完成</option>
         <option value="cancelled">已取消 / 취소됨</option>
       </select>
-      <select id="ibFilterBizClass" onchange="loadInboundList()">
+      <select id="ibFilterBizClass" onchange="resetPager('inbound'); loadInboundList()">
         <option value="">业务分类(全部)</option>
         <option value="direct_ship">代发 / 직배송</option>
         <option value="bulk">大货 / 대량화물</option>
         <option value="return">退件 / 반품</option>
         <option value="change_order">换单 / 송장교체</option>
       </select>
-      <input type="text" id="ibFilterCustomer" placeholder="客户名搜索 / 고객명 검색" style="min-width:160px;" onkeydown="if(event.key==='Enter')loadInboundList()">
+      <input type="text" id="ibFilterCustomer" placeholder="客户名搜索 / 고객명 검색" style="min-width:160px;" onkeydown="if(event.key==='Enter'){ resetPager('inbound'); loadInboundList(); }">
       <span class="filter-label" data-i18n="account_filter">是否记帐</span>
-      <select id="inboundFilterAccounted" onchange="loadInboundList()">
+      <select id="inboundFilterAccounted" onchange="resetPager('inbound'); loadInboundList()">
         <option value="" data-i18n="account_all">全部记帐状态</option>
         <option value="0" data-i18n="accounted_no">未记帐</option>
         <option value="1" data-i18n="accounted_yes">已记帐</option>
       </select>
-      <button class="btn btn-outline btn-sm" id="ibQueryBtn" onclick="loadInboundList()">查询</button>
+      <button class="btn btn-outline btn-sm" id="ibQueryBtn" onclick="resetPager('inbound'); loadInboundList()">查询</button>
       <button class="btn btn-outline btn-sm" id="ibExportBtn" onclick="exportInboundPlans(this)">导出入库计划 CSV / 입고 계획 CSV 내보내기</button>
     </div>
     <div id="inboundListBody"></div>
@@ -400,20 +403,20 @@
   <!-- Feedback list -->
   <div id="view-feedback" class="view" style="display:none;">
     <div class="filter-bar">
-      <select id="fbFilterType" onchange="loadFeedbackList()">
+      <select id="fbFilterType" onchange="resetPager('feedback'); loadFeedbackList()">
         <option value="">全部类型</option>
         <option value="unplanned_unload">计划外卸货</option>
         <option value="unload_no_doc">无单卸货(旧)</option>
         <option value="general">一般反馈</option>
       </select>
-      <select id="fbFilterStatus" onchange="loadFeedbackList()">
+      <select id="fbFilterStatus" onchange="resetPager('feedback'); loadFeedbackList()">
         <option value="">全部状态</option>
         <option value="field_working">现场卸货中</option>
         <option value="unloaded_pending_info">待补充信息</option>
         <option value="converted">已转正</option>
         <option value="open">待处理(旧)</option>
       </select>
-      <button class="btn btn-outline btn-sm" onclick="loadFeedbackList()">刷新</button>
+      <button class="btn btn-outline btn-sm" onclick="resetPager('feedback'); loadFeedbackList()">刷新</button>
     </div>
     <div id="feedbackListBody"></div>
   </div>
@@ -427,15 +430,15 @@
   <!-- Check center: 扫码核对批次管理 -->
   <div id="view-check" class="view" style="display:none;">
     <div class="filter-bar">
-      <select id="checkFilterStatus" onchange="loadVerifyList()">
+      <select id="checkFilterStatus" onchange="resetPager('check'); loadVerifyList()">
         <option value="">全部状态</option>
         <option value="pending">待核对</option>
         <option value="verifying">核对中</option>
         <option value="completed">已完成</option>
         <option value="cancelled">已作废</option>
       </select>
-      <input type="text" id="checkFilterCustomer" placeholder="客户名（模糊）">
-      <button class="btn btn-outline btn-sm" onclick="loadVerifyList()">刷新</button>
+      <input type="text" id="checkFilterCustomer" placeholder="客户名（模糊）" onkeydown="if(event.key==='Enter'){ resetPager('check'); loadVerifyList(); }">
+      <button class="btn btn-outline btn-sm" onclick="resetPager('check'); loadVerifyList()">刷新</button>
     </div>
     <div id="checkListBody"><span class="muted">加载中...</span></div>
   </div>
@@ -495,7 +498,7 @@
         </select>
         <input type="date" id="orderOpsStartDate">
         <input type="date" id="orderOpsEndDate">
-        <button id="orderOpsSearchBtn" class="btn btn-primary btn-sm" onclick="loadOrderOpsList()" data-i18n="order_ops_search">查询</button>
+        <button id="orderOpsSearchBtn" class="btn btn-primary btn-sm" onclick="resetPager('order_ops'); loadOrderOpsList()" data-i18n="order_ops_search">查询</button>
       </div>
       <div id="orderOpsListBody"><span class="muted" data-i18n="loading">加载中...</span></div>
     </div>
@@ -529,6 +532,6 @@
   onVerifyFilePick / 表格导出流程。
 -->
 <script src="../shared/xlsx.full.min.js"></script>
-<script src="app.js?v=20260526a-inbound-materials"></script>
+<script src="app.js?v=20260526b-pagination-sticky"></script>
 </body>
 </html>
