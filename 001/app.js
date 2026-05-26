@@ -1317,6 +1317,13 @@ async function resolveInboundCode(btnEl) {
       _ibResolvedKind = '';
       if (resultEl) resultEl.innerHTML = '<div style="background:#ffebee;border-radius:6px;padding:8px;color:#c62828;">✗ ' + esc(res.message) + '</div>';
       if (extFields) extFields.style.display = 'none';
+    } else if (res.kind === 'plan_deleted') {
+      _ibResolvedKind = '';
+      _ibResolvedPlanId = '';
+      _ibResolvedPlan = null;
+      if (resultEl) resultEl.innerHTML = '<div style="background:#ffebee;border:1px solid #c62828;border-radius:6px;padding:10px;color:#c62828;font-weight:700;">⛔ 该入库计划已删除，请联系办公室<br>삭제된 입고계획입니다. 사무실에 문의하세요.</div>';
+      if (extFields) extFields.style.display = 'none';
+      alert('该入库计划已删除，请联系办公室\n삭제된 입고계획입니다. 사무실에 문의하세요.');
     }
   } finally {
     if (btnEl) { btnEl.disabled = false; btnEl.textContent = '识别单号 / 번호 인식'; }
@@ -1502,6 +1509,10 @@ function startUnloadScan() {
       async function(decoded) {
         stopUnloadScan();
         var res = await api({ action: "v2_inbound_plan_find_by_code", code: decoded });
+        if (res && res.error === 'plan_deleted') {
+          alert((res.message || '该入库计划已删除，请联系办公室') + (res.display_no ? '\n单号: ' + res.display_no : ''));
+          return;
+        }
         if (res && res.ok && res.plan) {
           var sel = document.getElementById("unloadPlanSelect");
           sel.value = res.plan.id;

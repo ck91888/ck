@@ -2320,8 +2320,8 @@ async function loadInboundList() {
   var html = '<div class="card">';
   items.forEach(function(p) {
     var dynTag = '';
-    if (p.source_type === 'from_feedback') {
-      dynTag = '<span style="background:#8e24aa;color:#fff;font-size:10px;padding:1px 4px;border-radius:2px;margin-right:4px;">反馈转正</span>';
+    if (p.source_type === 'from_feedback' || p.source_type === 'field_feedback' || p.source_feedback_id) {
+      dynTag = '<span style="background:#8e24aa;color:#fff;font-size:10px;padding:1px 4px;border-radius:2px;margin-right:4px;" title="该入库计划由现场反馈转正生成">现场反馈转正 / 현장피드백 전환</span>';
     } else if (p.source_type === 'field_dynamic') {
       dynTag = '<span style="background:#ff9800;color:#fff;font-size:10px;padding:1px 4px;border-radius:2px;margin-right:4px;">动态</span>';
     }
@@ -2743,7 +2743,7 @@ async function loadInboundDetail() {
   var isReturnSession = (p.source_type === 'return_session');
   var html = '<div class="card">';
   html += '<div style="font-size:16px;font-weight:700;margin-bottom:10px;">';
-  if (isFromFeedback) html += '<span style="background:#8e24aa;color:#fff;font-size:11px;padding:2px 6px;border-radius:3px;margin-right:6px;">反馈转正</span>';
+  if (isFromFeedback) html += '<span style="background:#8e24aa;color:#fff;font-size:11px;padding:2px 6px;border-radius:3px;margin-right:6px;" title="该入库计划由现场反馈转正生成">现场反馈转正 / 현장피드백 전환</span>';
   else if (isDynamic) html += '<span style="background:#ff9800;color:#fff;font-size:11px;padding:2px 6px;border-radius:3px;margin-right:6px;">旧动态单</span>';
   else if (isExternal) html += '<span style="background:#2196f3;color:#fff;font-size:11px;padding:2px 6px;border-radius:3px;margin-right:6px;">外部WMS入库</span>';
   else if (isReturnSession) html += '<span style="background:#f39c12;color:#fff;font-size:11px;padding:2px 6px;border-radius:3px;margin-right:6px;">退件入库会话</span>';
@@ -3106,7 +3106,25 @@ async function loadInboundDetail() {
   if (p.status === "cancelled") {
     html += '<button class="btn btn-danger" style="background:#c62828;border-color:#c62828;" onclick="deleteInboundPlan(this)">🗑 ' + L("delete_inbound") + '</button>';
   }
+  // 现场反馈转正单 → 暴露"删除误转正入库单"入口（仅未被删除时显示；VIEWKEY 后端会拦截）
+  var planFromFeedback = (p.source_type === 'from_feedback') || (p.source_type === 'field_feedback') || !!p.source_feedback_id;
+  if (planFromFeedback && Number(p.is_deleted || 0) !== 1) {
+    html += ' <button class="btn btn-danger" style="background:#c62828;border-color:#c62828;" onclick="deleteConvertedFeedbackInbound(this)" title="该入库计划由现场反馈转正生成，可删除回滚">🗑 删除误转正入库单 / 오전환 입고계획 삭제</button>';
+  }
   html += '</div>';
+
+  // 已被软删除：详情顶部插入醒目 banner
+  if (Number(p.is_deleted || 0) === 1) {
+    var delBanner = '<div class="card" style="border-left:4px solid #c62828;background:#fff8f6;">'
+      + '<div style="font-weight:700;color:#c62828;font-size:14px;">⚠ 该入库计划已删除 / 삭제됨</div>'
+      + '<div class="muted" style="font-size:12px;margin-top:4px;">'
+      + '原因 / 사유：' + esc(p.delete_reason || '--') + '<br>'
+      + '操作人 / 작업자：' + esc(p.deleted_by || '--') + ' · ' + esc(p.deleted_at ? fmtTime(p.deleted_at) : '--')
+      + '</div>'
+      + '<div class="muted" style="font-size:12px;margin-top:4px;">已从列表/看板/导出中隐藏；执行系统扫码会提示"已删除"。历史工时仍保留。</div>'
+      + '</div>';
+    html = delBanner + html;
+  }
 
   body.innerHTML = html;
 }
@@ -3703,6 +3721,69 @@ async function deleteInboundMaterial(attId, btnEl) {
     } else {
       alert('删除失败 / 삭제 실패: ' + (res ? (res.message || res.error) : 'unknown'));
     }
+  });
+}
+
+// ===== 删除"现场反馈转正"误入库（软删除回滚）=====
+// 入口：详情页"删除误转正入库单"按钮；prompt 二次确认必须输入 DELETE
+async function deleteConvertedFeedbackInbound(btnEl) {
+  if (!_currentInboundId) return;
+  var p = window._currentInboundPlan || {};
+  var isFromFeedback = (p.source_type === 'from_feedback') || (p.source_type === 'field_feedback') || !!p.source_feedback_id;
+  if (!isFromFeedback) {
+    alert('该入库计划不是现场反馈转正单 / 현장 피드백 전환건이 아닙니다');
+    return;
+  }
+  if (Number(p.accounted || 0) === 1) {
+    alert('已记帐入库计划不能直接删除\n请先取消记帐或由管理员处理\n이미 기장된 입고계획은 직접 삭제 불가');
+    return;
+  }
+  // 危险提示：列出影响范围
+  var impacts = [];
+  if (Number(p.related_outbound_count || 0) > 0) impacts.push('关联出库单 ' + Number(p.related_outbound_count) + ' 张');
+  var jobsCache = (window._currentInboundPlanCache && window._currentInboundPlanCache._jobsCount) || 0;
+  // 用 res 缓存里的 jobs 数（在 loadInboundDetail 中我们没保存，简化用一句提示）
+  // 二次确认 DELETE 输入
+  var msg = '该入库计划由"现场反馈转正"生成。\n'
+          + '如果原本已有正式入库计划，可删除这张误转正入库单。\n'
+          + '删除后该单不再出现在入库计划列表、数据看板、导出 CSV 中。\n'
+          + (impacts.length > 0 ? ('注意：' + impacts.join('，') + '\n') : '')
+          + '\n현장 피드백에서 전환된 입고계획입니다.\n'
+          + '기존 정식 입고계획이 있는 경우 이 오전환 입고계획을 삭제할 수 있습니다.\n'
+          + '삭제 후 목록/대시보드/CSV에서 제외됩니다.\n'
+          + '\n请输入 DELETE 确认删除 / DELETE 를 입력해 확인하세요：';
+  var typed = prompt(msg, '');
+  if (typed === null) return; // 取消
+  if (String(typed).trim() !== 'DELETE') {
+    alert('未输入 DELETE，已取消删除 / DELETE 미입력, 삭제 취소됨');
+    return;
+  }
+  var reason = prompt('删除原因（必填）/ 삭제 사유 (필수)：', '误转正入库计划，已有正式单');
+  if (reason === null) return;
+  reason = String(reason).trim();
+  if (!reason) { alert('请填写删除原因 / 사유를 입력하세요'); return; }
+  withActionLock('deleteConvertedFeedbackInbound', btnEl || null, '删除中.../삭제 중...', async function() {
+    var res = await api({
+      action: 'v2_inbound_plan_delete_converted_feedback',
+      id: _currentInboundId,
+      by: getUser() || '',
+      reason: reason
+    });
+    if (res && res.ok) {
+      alert('已删除误转正入库单 / 오전환 입고계획 삭제 완료'
+          + (res.feedback_updated ? '\n（源现场反馈也已标记删除，避免再次转正）' : ''));
+      _currentInboundId = null;
+      goTab('inbound');
+      loadInboundList();
+      return;
+    }
+    var em = (res && (res.message || res.error)) || 'unknown';
+    var hint = '';
+    if (res && res.error === 'accounted_plan_cannot_delete') hint = '\n请先取消记帐';
+    if (res && res.error === 'active_job_exists') hint = '\n请先让现场结束/离开任务';
+    if (res && res.error === 'not_from_feedback') hint = '\n仅"现场反馈转正"的入库计划才能用此入口删除';
+    if (res && res.error === 'already_deleted') hint = '\n该单此前已被删除';
+    alert('删除失败 / 삭제 실패：' + em + hint);
   });
 }
 

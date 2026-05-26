@@ -1644,10 +1644,21 @@ const MIGRATIONS = [
   `ALTER TABLE v2_ops_job_results ADD COLUMN previous_result_id TEXT DEFAULT ''`,
   `CREATE INDEX IF NOT EXISTS idx_v2_ops_jobs_customer ON v2_ops_jobs(customer) WHERE customer != ''`,
   `CREATE INDEX IF NOT EXISTS idx_v2_ops_jobs_status_type ON v2_ops_jobs(status, job_type, created_at)`,
+
+  // ---- v2.20260526c：入库计划 + 现场反馈 软删除（误转正回滚） ----
+  `ALTER TABLE v2_inbound_plans ADD COLUMN is_deleted INTEGER DEFAULT 0`,
+  `ALTER TABLE v2_inbound_plans ADD COLUMN deleted_at TEXT DEFAULT ''`,
+  `ALTER TABLE v2_inbound_plans ADD COLUMN deleted_by TEXT DEFAULT ''`,
+  `ALTER TABLE v2_inbound_plans ADD COLUMN delete_reason TEXT DEFAULT ''`,
+  `ALTER TABLE v2_field_feedbacks ADD COLUMN is_deleted INTEGER DEFAULT 0`,
+  `ALTER TABLE v2_field_feedbacks ADD COLUMN deleted_at TEXT DEFAULT ''`,
+  `ALTER TABLE v2_field_feedbacks ADD COLUMN deleted_by TEXT DEFAULT ''`,
+  `ALTER TABLE v2_field_feedbacks ADD COLUMN delete_reason TEXT DEFAULT ''`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_inbound_is_deleted ON v2_inbound_plans(is_deleted, status)`,
 ];
 
 // 每次发布迁移变化时手动 +1（patch 段），冷启动只比对一次字符串即可跳过整段 MIGRATIONS
-const CURRENT_SCHEMA_VERSION = 'v2.20260508a';
+const CURRENT_SCHEMA_VERSION = 'v2.20260526c';
 
 let _migrated = false;
 async function ensureMigrated(db) {
@@ -1766,23 +1777,27 @@ route("v2_dashboard_summary", async (body, env) => {
     env.DB.prepare(
       `SELECT COUNT(*) AS c FROM v2_inbound_plans
         WHERE source_type != 'return_session'
+          AND COALESCE(is_deleted,0)=0
           AND status IN ('pending','unloading','unloading_putting_away','arrived_pending_putaway','putting_away','partially_completed')`
     ).first(),
     env.DB.prepare(
       `SELECT * FROM v2_inbound_plans
         WHERE source_type != 'return_session'
+          AND COALESCE(is_deleted,0)=0
           AND status IN ('pending','unloading','unloading_putting_away','arrived_pending_putaway','putting_away','partially_completed')
         ORDER BY plan_date ASC, created_at ASC LIMIT 3`
     ).all(),
 
-    // ---- feedbacks（现场反馈进行中）----
+    // ---- feedbacks（现场反馈进行中；软删除/转正回滚的反馈不统计）----
     env.DB.prepare(
       `SELECT COUNT(*) AS c FROM v2_field_feedbacks
-        WHERE status IN ('field_working','unloaded_pending_info')`
+        WHERE status IN ('field_working','unloaded_pending_info')
+          AND COALESCE(is_deleted,0)=0`
     ).first(),
     env.DB.prepare(
       `SELECT * FROM v2_field_feedbacks
         WHERE status IN ('field_working','unloaded_pending_info')
+          AND COALESCE(is_deleted,0)=0
         ORDER BY created_at ASC LIMIT 3`
     ).all(),
 
@@ -1791,7 +1806,8 @@ route("v2_dashboard_summary", async (body, env) => {
       `SELECT * FROM v2_inbound_plans
         WHERE plan_date>=? AND plan_date<=?
           AND source_type != 'return_session'
-          AND status NOT IN ('completed','cancelled')
+          AND COALESCE(is_deleted,0)=0
+          AND status NOT IN ('completed','cancelled','deleted')
         ORDER BY plan_date ASC, created_at ASC`
     ).bind(first, last).all()
   ]);
@@ -3709,7 +3725,8 @@ route("v2_inbound_plan_list", async (body, env) => {
   const { limit, offset } = pageParams(body);
 
   // 排除退件入库会话：return_session 不属于正式入库计划口径
-  let where = " WHERE source_type != 'return_session'";
+  // 软删除单：列表/导出永远排除（即便用户显式筛 cancelled 也不显示 deleted）
+  let where = " WHERE source_type != 'return_session' AND COALESCE(is_deleted,0)=0";
   const binds = [];
   if (start) { where += " AND plan_date>=?"; binds.push(start); }
   if (end) { where += " AND plan_date<=?"; binds.push(end); }
@@ -3945,13 +3962,25 @@ route("v2_inbound_plan_find_by_code", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
   const code = String(body.code || "").trim();
   if (!code) return err("missing code");
-  // Prefer display_no, fallback to id
+  // 先查"是否存在但已被软删除"——给现场一个友好提示，而不是笼统的 not_found
+  const probeSel = "SELECT id, display_no, status, is_deleted FROM v2_inbound_plans WHERE (display_no=? OR id=?) ORDER BY created_at DESC LIMIT 1";
+  const probe = await env.DB.prepare(probeSel).bind(code, code).first();
+  if (probe && Number(probe.is_deleted || 0) === 1) {
+    return json({
+      ok: false,
+      error: "plan_deleted",
+      message: "该入库计划已删除，请联系办公室\n삭제된 입고계획입니다. 사무실에 문의하세요.",
+      plan_id: probe.id,
+      display_no: probe.display_no || ''
+    }, 404);
+  }
+  // Prefer display_no, fallback to id（仍保留 cancelled 排除以兼容老语义）
   let row = await env.DB.prepare(
-    "SELECT id, display_no, status, customer, cargo_summary, biz_class, biz_classes_json, source_type, manual_completed_at, manual_completed_by, updated_at FROM v2_inbound_plans WHERE display_no=? AND status!='cancelled'"
+    "SELECT id, display_no, status, customer, cargo_summary, biz_class, biz_classes_json, source_type, manual_completed_at, manual_completed_by, updated_at FROM v2_inbound_plans WHERE display_no=? AND status!='cancelled' AND COALESCE(is_deleted,0)=0"
   ).bind(code).first();
   if (!row) {
     row = await env.DB.prepare(
-      "SELECT id, display_no, status, customer, cargo_summary, biz_class, biz_classes_json, source_type, manual_completed_at, manual_completed_by, updated_at FROM v2_inbound_plans WHERE id=? AND status!='cancelled'"
+      "SELECT id, display_no, status, customer, cargo_summary, biz_class, biz_classes_json, source_type, manual_completed_at, manual_completed_by, updated_at FROM v2_inbound_plans WHERE id=? AND status!='cancelled' AND COALESCE(is_deleted,0)=0"
     ).bind(code).first();
   }
   if (!row) return err("not found", 404);
@@ -3989,7 +4018,7 @@ route("v2_inbound_plan_ops_candidates", async (body, env) => {
   }
 
   let sql = `SELECT id, display_no, external_inbound_no, customer, cargo_summary, status, biz_class, biz_classes_json, plan_date, source_type, manual_completed_at, manual_completed_by, updated_at
-    FROM v2_inbound_plans WHERE status IN ${statusFilter} AND source_type != 'return_session'`;
+    FROM v2_inbound_plans WHERE status IN ${statusFilter} AND source_type != 'return_session' AND COALESCE(is_deleted,0)=0`;
   const binds = [];
   if (keyword) {
     sql += " AND (display_no LIKE ? OR external_inbound_no LIKE ? OR customer LIKE ?)";
@@ -4059,14 +4088,23 @@ route("v2_inbound_resolve_code", async (body, env) => {
   const biz_class = String(body.biz_class || "").trim();
   if (!code) return err("missing code");
 
+  // 先探测：是否存在但已被软删除（"误转正回滚"产物）→ 现场扫码给清晰提示
+  const probeDel = await env.DB.prepare(
+    "SELECT id, display_no, is_deleted FROM v2_inbound_plans WHERE (display_no=? OR external_inbound_no=? OR id=?) AND COALESCE(is_deleted,0)=1 ORDER BY created_at DESC LIMIT 1"
+  ).bind(code, code, code).first();
+  if (probeDel) {
+    return json({ ok: true, kind: 'plan_deleted',
+      message: '该入库计划已删除，请联系办公室\n삭제된 입고계획입니다. 사무실에 문의하세요.',
+      plan_id: probeDel.id, display_no: probeDel.display_no || '' });
+  }
   // Try to find system plan by display_no, external_inbound_no, or id
   const SEL = "SELECT id, display_no, external_inbound_no, status, customer, cargo_summary, biz_class, biz_classes_json, plan_date, source_type, manual_completed_at, manual_completed_by, updated_at FROM v2_inbound_plans";
-  let plan = await env.DB.prepare(SEL + " WHERE display_no=? AND status!='cancelled'").bind(code).first();
+  let plan = await env.DB.prepare(SEL + " WHERE display_no=? AND status!='cancelled' AND COALESCE(is_deleted,0)=0").bind(code).first();
   if (!plan) {
-    plan = await env.DB.prepare(SEL + " WHERE external_inbound_no=? AND status!='cancelled' ORDER BY created_at DESC LIMIT 1").bind(code).first();
+    plan = await env.DB.prepare(SEL + " WHERE external_inbound_no=? AND status!='cancelled' AND COALESCE(is_deleted,0)=0 ORDER BY created_at DESC LIMIT 1").bind(code).first();
   }
   if (!plan) {
-    plan = await env.DB.prepare(SEL + " WHERE id=? AND status!='cancelled'").bind(code).first();
+    plan = await env.DB.prepare(SEL + " WHERE id=? AND status!='cancelled' AND COALESCE(is_deleted,0)=0").bind(code).first();
   }
 
   if (!plan) {
@@ -4130,7 +4168,7 @@ route("v2_inbound_plan_list_upcoming", async (body, env) => {
   const first = dates[0];
   const last = dates[dates.length - 1];
   const rs = await env.DB.prepare(
-    "SELECT * FROM v2_inbound_plans WHERE plan_date>=? AND plan_date<=? AND status NOT IN ('completed','cancelled') AND source_type != 'return_session' ORDER BY plan_date ASC, created_at ASC"
+    "SELECT * FROM v2_inbound_plans WHERE plan_date>=? AND plan_date<=? AND status NOT IN ('completed','cancelled','deleted') AND source_type != 'return_session' AND COALESCE(is_deleted,0)=0 ORDER BY plan_date ASC, created_at ASC"
   ).bind(first, last).all();
   return json({ ok: true, items: rs.results || [], dates });
 });
@@ -4338,6 +4376,86 @@ route("v2_inbound_plan_delete", async (body, env) => {
     deleted.plan = (planRs.meta && planRs.meta.changes) || 0;
 
     return { ok: true, id, deleted };
+  });
+});
+
+// ===== 入库计划：删除"现场反馈转正"误入库（软删除）=====
+// 用途：仓库现场没识别出已有正式入库计划 → 走了"反馈 → 转正"路径产生重复入库单 → 此处回滚
+// 与 v2_inbound_plan_delete 不同：
+//   - 接受 ops 历史存在（保留工时不丢，仅把入库计划本身打 deleted）
+//   - 不接受非 from_feedback 来源
+//   - 已记帐默认拒绝（accounted_plan_cannot_delete）
+//   - 联动把源 v2_field_feedbacks 标记为 cancelled+deleted（避免被再次转正）
+route("v2_inbound_plan_delete_converted_feedback", async (body, env) => {
+  if (!isAuth(body, env)) return err("unauthorized", 401);
+  const id = String(body.id || body.inbound_plan_id || "").trim();
+  const by = String(body.by || body.operator || "").trim();
+  const reason = String(body.reason || "").trim();
+  if (!id) return err("missing id");
+
+  return withIdem(env, body, "v2_inbound_plan_delete_converted_feedback", async () => {
+    const plan = await env.DB.prepare("SELECT * FROM v2_inbound_plans WHERE id=?").bind(id).first();
+    if (!plan) return { ok: false, error: "not_found", message: "入库计划不存在" };
+    if (Number(plan.is_deleted || 0) === 1) {
+      return { ok: false, error: "already_deleted", message: "该入库计划已被删除" };
+    }
+    // 来源校验：必须是现场反馈转正
+    const isFromFeedback = (plan.source_type === 'from_feedback')
+                        || (plan.source_type === 'field_feedback')
+                        || !!plan.source_feedback_id;
+    if (!isFromFeedback) {
+      return { ok: false, error: "not_from_feedback",
+        message: '仅"现场反馈转正"的入库计划才能用此入口删除，请走标准取消/删除流程' };
+    }
+    // 已记帐拦截：默认不允许；管理员需先取消记帐
+    if (Number(plan.accounted || 0) === 1) {
+      return { ok: false, error: "accounted_plan_cannot_delete",
+        message: "已记帐入库计划不能直接删除，请先取消记帐或由管理员处理" };
+    }
+    // 在制作业 → 拒（保护现场正在进行的任务）
+    const activeJob = await env.DB.prepare(
+      "SELECT id, job_type FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND status IN ('pending','working','awaiting_close') LIMIT 1"
+    ).bind(id).first();
+    if (activeJob) {
+      return { ok: false, error: "active_job_exists",
+        message: "仍有进行中的现场任务（" + (activeJob.job_type || '') + "），请先让现场结束/离开后再删除" };
+    }
+
+    const t = now();
+    // 1) 软删除入库计划本身
+    await env.DB.prepare(
+      `UPDATE v2_inbound_plans
+          SET is_deleted=1, deleted_at=?, deleted_by=?, delete_reason=?,
+              status='deleted', updated_at=?
+        WHERE id=?`
+    ).bind(t, by, reason || '误转正入库单，回滚', t, id).run();
+
+    // 2) 联动源现场反馈：标记 deleted+cancelled，清理转正关联，避免被再次转正
+    let feedback_updated = 0;
+    const fbId = plan.source_feedback_id || '';
+    if (fbId) {
+      const fbRow = await env.DB.prepare("SELECT id, status FROM v2_field_feedbacks WHERE id=?").bind(fbId).first();
+      if (fbRow) {
+        await env.DB.prepare(
+          `UPDATE v2_field_feedbacks
+              SET status='cancelled', is_deleted=1, deleted_at=?, deleted_by=?,
+                  delete_reason='误转正入库计划已删除' || (CASE WHEN ?='' THEN '' ELSE '：'||? END),
+                  inbound_plan_id='', updated_at=?
+            WHERE id=?`
+        ).bind(t, by, reason, reason, t, fbId).run();
+        feedback_updated = 1;
+      }
+    }
+
+    return {
+      ok: true,
+      id,
+      deleted_at: t,
+      deleted_by: by,
+      delete_reason: reason,
+      source_feedback_id: fbId,
+      feedback_updated
+    };
   });
 });
 
@@ -5818,7 +5936,7 @@ route("v2_inbound_plan_export", async (body, env) => {
   if (!Number.isFinite(limit) || limit <= 0) limit = 5000;
   if (limit > 10000) limit = 10000;
 
-  let sql = "SELECT * FROM v2_inbound_plans WHERE source_type != 'return_session'";
+  let sql = "SELECT * FROM v2_inbound_plans WHERE source_type != 'return_session' AND COALESCE(is_deleted,0)=0";
   const binds = [];
   if (start) { sql += " AND plan_date>=?"; binds.push(start); }
   if (end) { sql += " AND plan_date<=?"; binds.push(end); }
@@ -6590,7 +6708,8 @@ route("v2_feedback_list", async (body, env) => {
   const feedback_type = String(body.feedback_type || "").trim();
   const status = String(body.status || "").trim();
   const { limit, offset } = pageParams(body);
-  let where = " WHERE 1=1";
+  // 软删除的反馈（如误转正回滚）一律不显示
+  let where = " WHERE COALESCE(is_deleted,0)=0";
   const binds = [];
   if (feedback_type) { where += " AND feedback_type=?"; binds.push(feedback_type); }
   if (status) { where += " AND status=?"; binds.push(status); }
