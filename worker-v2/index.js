@@ -3757,6 +3757,12 @@ route("v2_inbound_plan_list", async (body, env) => {
     planIds);
   const attCountByPlan = {};
   for (const r of attRows) attCountByPlan[r.plan_id] = Number(r.c || 0);
+  // 4b) 入库明细资料计数（attachment_category='inbound_material'）
+  const matRows = await batchSelectInGlobal(env,
+    "SELECT related_doc_id AS plan_id, COUNT(*) AS c FROM v2_attachments WHERE related_doc_type='inbound_plan' AND attachment_category='inbound_material' AND related_doc_id IN (PLACEHOLDER) GROUP BY related_doc_id",
+    planIds);
+  const materialCountByPlan = {};
+  for (const r of matRows) materialCountByPlan[r.plan_id] = Number(r.c || 0);
 
   // 5) 物理卸货是否完成（同一 plan 仅一次卸货 → 任意 unload job completed = 卸货已完成）
   const unloadDoneRows = await batchSelectInGlobal(env,
@@ -3792,7 +3798,8 @@ route("v2_inbound_plan_list", async (body, env) => {
       unload_completed,
       line_summary: linesByPlan[p.id] || {},
       related_outbound_count: linkedObByPlan[p.id] || 0,
-      attachment_count: attCountByPlan[p.id] || 0
+      attachment_count: attCountByPlan[p.id] || 0,
+      inbound_material_count: materialCountByPlan[p.id] || 0
     });
   }
   return json({ ok: true, items, limit, offset });
@@ -3908,6 +3915,7 @@ route("v2_inbound_plan_detail", async (body, env) => {
     lines: planLines.results || [],
     jobs: enrichedJobs,
     attachments: atts.results || [],
+    inbound_materials: (atts.results || []).filter(a => a.attachment_category === 'inbound_material'),
     linked_outbound_orders: linkedObRs.results || []
   });
 });
@@ -5841,6 +5849,17 @@ route("v2_inbound_plan_export", async (body, env) => {
     planIds);
   const attByPlan = {};
   for (const r of attRows) attByPlan[r.plan_id] = Number(r.c || 0);
+  // 入库明细资料：数量 + 文件名（attachment_category='inbound_material'）
+  const matFileRows = await batchSelectInGlobal(env,
+    `SELECT related_doc_id AS plan_id, file_name FROM v2_attachments
+       WHERE related_doc_type='inbound_plan' AND attachment_category='inbound_material'
+         AND related_doc_id IN (PLACEHOLDER) ORDER BY created_at ASC`,
+    planIds);
+  const materialFilesByPlan = {};
+  for (const r of matFileRows) {
+    if (!materialFilesByPlan[r.plan_id]) materialFilesByPlan[r.plan_id] = [];
+    materialFilesByPlan[r.plan_id].push(r.file_name || '');
+  }
   // 入库实际数量来源是 v2_inbound_plan_lines（按 unit_type='carton'/'pallet' 分行）
   // v2_inbound_plans 主表无 actual_box_count / actual_pallet_count 字段
   const planLineRows = await batchSelectInGlobal(env,
@@ -5907,6 +5926,8 @@ route("v2_inbound_plan_export", async (body, env) => {
       记账时间: p.accounted_at ? fmtKst(p.accounted_at) : '',
       关联出库单数量: linkedNos.length,
       关联出库单号: linkedNos.join('；'),
+      入库明细数量: (materialFilesByPlan[p.id] || []).length,
+      入库明细文件名: (materialFilesByPlan[p.id] || []).join('；'),
       附件数量: attByPlan[p.id] || 0,
       是否手动完成: Number(p.force_completed || 0) === 1 ? '是' : '否',
       手动完成人: p.force_completed_by || '',
@@ -6335,6 +6356,30 @@ route("v2_ops_job_resume", async (body, env) => {
 // =====================================================
 // ATTACHMENTS
 // =====================================================
+// 入库/出库资料的统一类型/大小白名单（图片类附件如车辆/卸货照片走另一通道）
+const ATTACHMENT_MAX_BYTES = 20 * 1024 * 1024; // 20MB
+const ATTACHMENT_MATERIAL_MIME = {
+  "application/pdf": 1,
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": 1,
+  "application/vnd.ms-excel": 1,
+  "text/csv": 1,
+  "image/jpeg": 1,
+  "image/png": 1
+};
+const ATTACHMENT_MATERIAL_EXT = ["pdf","xlsx","xls","csv","jpg","jpeg","png"];
+function _isMaterialCategory(cat) {
+  return cat === "outbound_material" || cat === "inbound_material";
+}
+function _materialFileAllowed(file) {
+  const name = String(file && file.name || "").toLowerCase();
+  const dot = name.lastIndexOf(".");
+  const ext = dot >= 0 ? name.slice(dot + 1) : "";
+  const mime = String(file && file.type || "").toLowerCase();
+  if (ATTACHMENT_MATERIAL_MIME[mime]) return true;
+  if (ATTACHMENT_MATERIAL_EXT.indexOf(ext) !== -1) return true;
+  return false;
+}
+
 route("v2_attachment_upload", async (body, env, request) => {
   if (!request) return err("upload requires multipart POST");
   const formData = await request.formData();
@@ -6348,6 +6393,16 @@ route("v2_attachment_upload", async (body, env, request) => {
   const related_doc_id = formData.get("related_doc_id") || "";
   const attachment_category = formData.get("attachment_category") || "";
   const uploaded_by = formData.get("uploaded_by") || "";
+
+  // 资料类附件（入库/出库明细）的类型 + 大小校验
+  if (_isMaterialCategory(attachment_category)) {
+    if (!_materialFileAllowed(file)) {
+      return err("unsupported_file_type: 仅支持 PDF / Excel / CSV / 图片文件 (PDF, Excel, CSV, image)", 400);
+    }
+    if (file.size && file.size > ATTACHMENT_MAX_BYTES) {
+      return err("file_too_large: 单文件最大 20MB / 단일 파일 최대 20MB", 400);
+    }
+  }
 
   const id = "ATT-" + uid();
   const fileKey = `v2/${related_doc_type}/${related_doc_id}/${id}-${file.name}`;

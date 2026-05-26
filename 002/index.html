@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>协同中心 V2 / 협업센터</title>
-  <link rel="stylesheet" href="style.css?v=20260506b">
+  <link rel="stylesheet" href="style.css?v=20260526a-inbound-materials">
 </head>
 <body>
 
@@ -364,6 +364,13 @@
         <label>备注</label>
         <textarea id="ibc-remark" rows="2"></textarea>
       </div>
+      <!-- 入库明细资料（PDF / Excel / CSV / 图片） -->
+      <div class="form-group">
+        <label>入库明细 / 입고 명세</label>
+        <input id="ibc-materials" type="file" multiple accept=".xlsx,.xls,.csv,.pdf,.jpg,.jpeg,.png" onchange="onIbcMaterialsChange(this)">
+        <div class="muted" style="font-size:12px;margin-top:4px;">支持 Excel / PDF / CSV / 图片，单文件不超过 20MB（可分多次选择，文件会累加而不是覆盖）/ 다회 선택 시 누적 추가</div>
+        <div id="ibcMaterialsList" style="margin-top:6px;"></div>
+      </div>
       <!-- Plan lines -->
       <div class="card-title mt-10" id="ibcLinesTitle">货物明细</div>
       <table class="line-table" id="ibcLinesTable">
@@ -522,6 +529,6 @@
   onVerifyFilePick / 表格导出流程。
 -->
 <script src="../shared/xlsx.full.min.js"></script>
-<script src="app.js?v=20260518a-outbound-print-requirement"></script>
+<script src="app.js?v=20260526a-inbound-materials"></script>
 </body>
 </html>

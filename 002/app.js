@@ -1546,6 +1546,89 @@ async function uploadOutboundMaterial(orderId, file) {
   return resp && resp.ok;
 }
 
+// 入库明细文件上传 helper（与出库资料对称；后端会做类型/大小校验）
+async function uploadInboundMaterial(planId, file) {
+  var fd = new FormData();
+  fd.append("file", file);
+  fd.append("related_doc_type", "inbound_plan");
+  fd.append("related_doc_id", planId);
+  fd.append("attachment_category", "inbound_material");
+  fd.append("uploaded_by", getUser() || "");
+  var resp = await uploadFile(fd);
+  return resp; // 返回完整 resp，让调用方区分 ok / 类型限制等
+}
+
+// 入库明细的类型/大小前端校验（与后端 ATTACHMENT_MATERIAL_* 对齐）
+var IB_MATERIAL_MAX_BYTES = 20 * 1024 * 1024;
+var IB_MATERIAL_ALLOWED_EXT = ['pdf','xlsx','xls','csv','jpg','jpeg','png'];
+function _ibMaterialAllowed(file) {
+  if (!file) return false;
+  var name = (file.name || '').toLowerCase();
+  var dot = name.lastIndexOf('.');
+  var ext = dot >= 0 ? name.slice(dot + 1) : '';
+  if (IB_MATERIAL_ALLOWED_EXT.indexOf(ext) !== -1) return true;
+  var mime = (file.type || '').toLowerCase();
+  if (mime === 'application/pdf') return true;
+  if (mime === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') return true;
+  if (mime === 'application/vnd.ms-excel') return true;
+  if (mime === 'text/csv') return true;
+  if (mime === 'image/jpeg' || mime === 'image/png') return true;
+  return false;
+}
+
+// ===== 入库创建表单的附件累积（与 oc-materials 对称）=====
+var _ibCreateMaterials = [];
+function _ibcMaterialsKey(f) {
+  return (f && f.name || '') + '|' + (f && f.size || 0) + '|' + (f && f.lastModified || 0);
+}
+function _renderIbcMaterialsList() {
+  var box = document.getElementById('ibcMaterialsList');
+  if (!box) return;
+  if (_ibCreateMaterials.length === 0) {
+    box.innerHTML = '<div class="muted" style="font-size:12px;">尚未选择任何文件 / 파일 미선택</div>';
+    return;
+  }
+  var html = '<div style="font-size:12px;margin-top:4px;">已选文件 / 선택된 파일 (' + _ibCreateMaterials.length + ')：</div>';
+  html += '<ul style="font-size:12px;margin:4px 0 0 0;padding-left:18px;list-style:disc;">';
+  _ibCreateMaterials.forEach(function(f, idx) {
+    var sizeKb = Math.round(((f && f.size) || 0) / 1024);
+    html += '<li style="margin:2px 0;">' + esc(f.name || '?') + ' <span class="muted">(' + sizeKb + ' KB)</span> '
+         + '<a href="javascript:void(0);" onclick="removeIbcMaterial(' + idx + ')" style="color:#c62828;">移除 / 제거</a></li>';
+  });
+  html += '</ul>';
+  box.innerHTML = html;
+}
+function onIbcMaterialsChange(inputEl) {
+  if (!inputEl || !inputEl.files) return;
+  var seen = {};
+  _ibCreateMaterials.forEach(function(f) { seen[_ibcMaterialsKey(f)] = 1; });
+  var newFiles = Array.prototype.slice.call(inputEl.files);
+  var rejected = [];
+  for (var i = 0; i < newFiles.length; i++) {
+    var f = newFiles[i];
+    if (!_ibMaterialAllowed(f)) { rejected.push(f.name + '（类型不支持）'); continue; }
+    if (f.size && f.size > IB_MATERIAL_MAX_BYTES) { rejected.push(f.name + '（>20MB）'); continue; }
+    var key = _ibcMaterialsKey(f);
+    if (seen[key]) continue;
+    _ibCreateMaterials.push(f);
+    seen[key] = 1;
+  }
+  inputEl.value = ''; // 允许再次选同名文件
+  _renderIbcMaterialsList();
+  if (rejected.length > 0) {
+    alert('仅支持 PDF、Excel、CSV、图片文件，单文件 ≤20MB\n다음 파일은 제외되었습니다:\n' + rejected.join('\n'));
+  }
+}
+function removeIbcMaterial(idx) {
+  if (idx < 0 || idx >= _ibCreateMaterials.length) return;
+  _ibCreateMaterials.splice(idx, 1);
+  _renderIbcMaterialsList();
+}
+function clearIbcMaterials() {
+  _ibCreateMaterials = [];
+  _renderIbcMaterialsList();
+}
+
 // ===== Outbound Detail =====
 function openOutboundDetail(id) {
   _currentOutboundId = id;
@@ -2179,6 +2262,10 @@ async function loadInboundList() {
     if (Number(p.related_outbound_count || 0) > 0) {
       ibMeta += ' · 关联出库 ' + Number(p.related_outbound_count) + ' 单';
     }
+    var matCount = Number(p.inbound_material_count || 0);
+    if (matCount > 0) {
+      ibMeta += ' · <span style="background:#e3f2fd;color:#1565c0;padding:1px 6px;border-radius:3px;font-size:11px;">入库明细 ' + matCount + '</span>';
+    }
     if (p.accounted == 1 && (p.accounted_by || p.accounted_at)) {
       ibMeta += ' · ' + L("accounted_by_short") + ': ' + esc(p.accounted_by || "") + (p.accounted_at ? ' ' + esc(fmtTime(p.accounted_at)) : '');
     }
@@ -2430,6 +2517,22 @@ async function submitInbound(btnEl) {
     var planId = ibRes.id;
     var planDispNo = ibRes.display_no || planId;
 
+    // 第一步.5：上传入库明细资料（计划创建成功后再上传，related_doc_id=planId）
+    var matFailed = [];
+    var matFiles = _ibCreateMaterials.slice(0);
+    if (matFiles.length > 0 && planId) {
+      for (var mi = 0; mi < matFiles.length; mi++) {
+        try {
+          var mr = await uploadInboundMaterial(planId, matFiles[mi]);
+          if (!(mr && mr.ok)) {
+            matFailed.push((matFiles[mi].name || '?') + (mr && mr.message ? ' - ' + mr.message : ''));
+          }
+        } catch (eUp) {
+          matFailed.push((matFiles[mi].name || '?') + ' (' + (eUp && eUp.message || 'exception') + ')');
+        }
+      }
+    }
+
     // 第二步：循环创建关联出库单
     var createdObs = [];
     var failedObs = [];
@@ -2462,6 +2565,12 @@ async function submitInbound(btnEl) {
     }
 
     var msg = "已创建入库计划 / 입고 계획 생성: " + planDispNo;
+    if (matFiles.length > 0) {
+      msg += "\n入库明细 / 입고 명세: 上传 " + (matFiles.length - matFailed.length) + "/" + matFiles.length;
+    }
+    if (matFailed.length > 0) {
+      msg += "\n部分明细上传失败 / 일부 자료 업로드 실패:\n" + matFailed.join("\n");
+    }
     if (createdObs.length > 0) msg += "\n关联出库 / 연결된 출고 (" + createdObs.length + "): " + createdObs.join(", ");
     if (failedObs.length > 0) msg += "\n出库创建失败 / 출고 생성 실패:\n" + failedObs.join("\n");
     alert(msg);
@@ -2473,6 +2582,9 @@ async function submitInbound(btnEl) {
     document.getElementById("ibc-purpose").value = "";
     document.getElementById("ibc-remark").value = "";
     document.getElementById("ibcLinesBody").innerHTML = "";
+    var ibcMatEl = document.getElementById("ibc-materials");
+    if (ibcMatEl) ibcMatEl.value = "";
+    clearIbcMaterials();
     if (linkOb) linkOb.checked = false;
     var panel = document.getElementById("ibcLinkObPanel");
     if (panel) panel.style.display = "none";
@@ -2525,6 +2637,8 @@ async function loadInboundDetail() {
   var lines = res.lines || [];
   var jobs = res.jobs || [];
   var atts = res.attachments || [];
+  // 缓存 atts 给修改弹窗资料管理用
+  window._currentInboundAttsCache = atts;
   // 缓存 plan 给 printIbQr / 二维码 A4 单据使用
   window._currentInboundPlanCache = p;
   window._currentInboundPretty = p.display_no || p.id;
@@ -2780,11 +2894,49 @@ async function loadInboundDetail() {
     html += '</div>';
   }
 
-  // --- Attachments ---
-  if (atts.length > 0) {
-    html += '<div class="card"><div class="card-title">' + L("attachments") + ' (' + atts.length + ')</div>';
+  // --- 入库明细资料（attachment_category = 'inbound_material'） ---
+  var inboundMaterials = (res.inbound_materials && res.inbound_materials.length)
+    ? res.inbound_materials
+    : atts.filter(function(a) { return a.attachment_category === 'inbound_material'; });
+  html += '<div class="card"><div class="card-title">入库明细 / 입고 명세 (' + inboundMaterials.length + ')</div>';
+  if (inboundMaterials.length === 0) {
+    html += '<div class="muted">暂无入库明细 / 입고 명세 없음</div>';
+  } else {
+    html += '<table class="line-table"><thead><tr><th>文件名 / 파일명</th><th>上传人 / 업로더</th><th>时间 / 시간</th><th>操作 / 작업</th></tr></thead><tbody>';
+    inboundMaterials.forEach(function(att) {
+      var url = fileUrl(att.file_key);
+      var ct = (att.content_type || '').toLowerCase();
+      var fn = (att.file_name || '').toLowerCase();
+      var isPdf = ct.indexOf('pdf') !== -1 || fn.endsWith('.pdf');
+      var isImg = ct.indexOf('image/') === 0;
+      var openLabel = (isPdf || isImg) ? '打开/打印 / 열기·인쇄' : '下载 / 다운로드';
+      html += '<tr>';
+      html += '<td style="word-break:break-all;">' + esc(att.file_name || '--') + '</td>';
+      html += '<td>' + esc(att.uploaded_by || '--') + '</td>';
+      html += '<td>' + esc(att.created_at ? fmtTime(att.created_at) : '--') + '</td>';
+      html += '<td style="white-space:nowrap;">';
+      html += '<a class="btn btn-outline btn-sm" href="' + esc(url) + '" download="' + esc(att.file_name || '') + '">下载 / 다운로드</a> ';
+      html += '<a class="btn btn-outline btn-sm" href="' + esc(url) + '" target="_blank" rel="noopener">' + esc(openLabel) + '</a> ';
+      html += '<button type="button" class="btn btn-danger btn-sm" onclick="deleteInboundMaterial(\'' + esc(att.id) + '\', this)">删除 / 삭제</button>';
+      html += '</td>';
+      html += '</tr>';
+    });
+    html += '</tbody></table>';
+  }
+  // 详情页追加上传
+  html += '<div style="margin-top:8px;">';
+  html += '<input id="ib-detail-material-input" type="file" multiple accept=".xlsx,.xls,.csv,.pdf,.jpg,.jpeg,.png" style="display:none;" onchange="uploadInboundMaterialsFromDetail(this)">';
+  html += '<button class="btn btn-outline btn-sm" onclick="document.getElementById(\'ib-detail-material-input\').click()">+ 入库明细 / 입고 명세 추가</button>';
+  html += '<span class="muted" style="margin-left:8px;font-size:12px;">支持 PDF / Excel / CSV / 图片，单文件 ≤20MB</span>';
+  html += '</div>';
+  html += '</div>';
+
+  // --- 其它附件（车辆/卸货照片等非 inbound_material） ---
+  var otherAtts = atts.filter(function(a) { return a.attachment_category !== 'inbound_material'; });
+  if (otherAtts.length > 0) {
+    html += '<div class="card"><div class="card-title">' + L("attachments") + ' (' + otherAtts.length + ')</div>';
     html += '<div class="att-grid">';
-    atts.forEach(function(att) {
+    otherAtts.forEach(function(att) {
       if (att.content_type && att.content_type.startsWith("image/")) {
         html += '<img class="att-thumb" src="' + esc(fileUrl(att.file_key)) + '" onclick="showLightbox(\'' + esc(fileUrl(att.file_key)) + '\')">';
       }
@@ -2897,6 +3049,20 @@ function openInboundEditForm() {
   html += '<div style="grid-column:1/-1;"><label><b>货物概要</b></label><input id="ib-edit-cargo" class="input" value="' + esc(p.cargo_summary || '') + '"></div>';
   html += '<div style="grid-column:1/-1;"><label><b>备注</b></label><textarea id="ib-edit-remark" class="input" rows="2">' + esc(p.remark || '') + '</textarea></div>';
   html += '</div>';
+
+  // 入库明细资料管理（标记删除 + 新增；保存后才执行）
+  html += '<div style="margin-top:14px;border-top:1px solid #eee;padding-top:10px;">';
+  html += '<div style="font-weight:700;margin-bottom:6px;font-size:13px;">入库明细 / 입고 명세';
+  html += ' <span class="muted" style="font-weight:400;font-size:12px;">（删除 / 新增需在保存后才生效）</span>';
+  html += '</div>';
+  html += '<div id="ib-edit-materials"></div>';
+  html += '<div style="margin-top:6px;">';
+  html += '<input id="ib-edit-material-input" type="file" multiple accept=".xlsx,.xls,.csv,.pdf,.jpg,.jpeg,.png" style="display:none;" onchange="onInboundEditMaterialsPicked(this)">';
+  html += '<button type="button" class="btn btn-outline btn-sm" onclick="document.getElementById(\'ib-edit-material-input\').click()">+ 入库明细 / 입고 명세 추가</button>';
+  html += '</div>';
+  html += '<div id="ib-edit-pending-materials" style="margin-top:6px;"></div>';
+  html += '</div>';
+
   html += '<div style="margin-top:14px;text-align:right;">';
   html += '<button class="btn btn-outline" onclick="closeInboundEditForm()">取消</button> ';
   html += '<button class="btn btn-primary" onclick="submitInboundEdit(this)">保存</button>';
@@ -2904,6 +3070,98 @@ function openInboundEditForm() {
   var div = document.createElement('div');
   div.innerHTML = html;
   document.body.appendChild(div.firstChild);
+
+  // 资料管理初始状态
+  _ibEditMaterialDeleteIds = {};
+  _ibEditPendingFiles = [];
+  renderInboundEditMaterials();
+  renderInboundEditPending();
+}
+
+// ===== 入库修改弹窗 — 资料管理（与出库 obEdit 对称）=====
+var _ibEditMaterialDeleteIds = {};
+var _ibEditPendingFiles = [];
+
+function renderInboundEditMaterials() {
+  var box = document.getElementById('ib-edit-materials');
+  if (!box) return;
+  var atts = ((window._currentInboundAttsCache || []) || []).filter(function(a) {
+    return a.attachment_category === 'inbound_material';
+  });
+  if (atts.length === 0) {
+    box.innerHTML = '<div class="muted" style="font-size:12px;padding:6px 0;">暂无入库明细 / 입고 명세 없음</div>';
+    return;
+  }
+  var html = '<div style="background:#fafafa;border:1px solid #eee;border-radius:6px;padding:6px 8px;">';
+  atts.forEach(function(att) {
+    var pending = !!_ibEditMaterialDeleteIds[att.id];
+    var fn = att.file_name || '--';
+    var url = fileUrl(att.file_key || '');
+    html += '<div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px dashed #eee;font-size:12px;'
+      + (pending ? 'opacity:0.55;text-decoration:line-through;' : '') + '">';
+    html += '<div style="flex:1 1 auto;min-width:0;word-break:break-all;">' + esc(fn);
+    if (att.uploaded_by) html += ' <span class="muted">（' + esc(att.uploaded_by) + '）</span>';
+    if (att.created_at) html += ' <span class="muted">' + esc(fmtTime(att.created_at)) + '</span>';
+    if (pending) html += ' <span class="st" style="background:#ffebee;color:#c62828;margin-left:4px;">待删除</span>';
+    html += '</div>';
+    html += '<a class="btn btn-outline btn-sm" href="' + esc(url) + '" target="_blank" rel="noopener">打开</a>';
+    if (pending) {
+      html += '<button type="button" class="btn btn-outline btn-sm" onclick="cancelInboundEditMaterialDelete(\'' + esc(att.id) + '\')">撤销</button>';
+    } else {
+      html += '<button type="button" class="btn btn-danger btn-sm" onclick="markInboundEditMaterialDelete(\'' + esc(att.id) + '\')">删除</button>';
+    }
+    html += '</div>';
+  });
+  html += '</div>';
+  box.innerHTML = html;
+}
+function markInboundEditMaterialDelete(attId) {
+  if (!attId) return;
+  _ibEditMaterialDeleteIds[attId] = true;
+  renderInboundEditMaterials();
+}
+function cancelInboundEditMaterialDelete(attId) {
+  if (!attId) return;
+  delete _ibEditMaterialDeleteIds[attId];
+  renderInboundEditMaterials();
+}
+function onInboundEditMaterialsPicked(inputEl) {
+  if (!inputEl || !inputEl.files || inputEl.files.length === 0) return;
+  var files = Array.prototype.slice.call(inputEl.files);
+  var rejected = [];
+  files.forEach(function(f) {
+    if (!_ibMaterialAllowed(f)) { rejected.push(f.name + '（类型不支持）'); return; }
+    if (f.size && f.size > IB_MATERIAL_MAX_BYTES) { rejected.push(f.name + '（>20MB）'); return; }
+    var key = (f.name || '') + '|' + (f.size || 0) + '|' + (f.lastModified || 0);
+    var dup = _ibEditPendingFiles.some(function(x) { return x.key === key; });
+    if (!dup) _ibEditPendingFiles.push({ file: f, key: key });
+  });
+  inputEl.value = '';
+  renderInboundEditPending();
+  if (rejected.length > 0) {
+    alert('仅支持 PDF、Excel、CSV、图片文件，单文件 ≤20MB\n다음 파일은 제외되었습니다:\n' + rejected.join('\n'));
+  }
+}
+function removeInboundEditPending(idx) {
+  if (idx < 0 || idx >= _ibEditPendingFiles.length) return;
+  _ibEditPendingFiles.splice(idx, 1);
+  renderInboundEditPending();
+}
+function renderInboundEditPending() {
+  var box = document.getElementById('ib-edit-pending-materials');
+  if (!box) return;
+  if (_ibEditPendingFiles.length === 0) { box.innerHTML = ''; return; }
+  var html = '<div style="background:#fff8e1;border:1px solid #ffe0b2;border-radius:6px;padding:6px 8px;">';
+  html += '<div style="font-size:12px;color:#6d4c00;margin-bottom:4px;">待上传 / 업로드 대기 (' + _ibEditPendingFiles.length + ')</div>';
+  _ibEditPendingFiles.forEach(function(p, i) {
+    var sizeKb = Math.max(1, Math.round((p.file.size || 0) / 1024));
+    html += '<div style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px;border-bottom:1px dashed #ffe0b2;">';
+    html += '<div style="flex:1 1 auto;min-width:0;word-break:break-all;">' + esc(p.file.name || '') + ' <span class="muted">(' + sizeKb + ' KB)</span></div>';
+    html += '<button type="button" class="btn btn-outline btn-sm" onclick="removeInboundEditPending(' + i + ')">移除</button>';
+    html += '</div>';
+  });
+  html += '</div>';
+  box.innerHTML = html;
 }
 
 function closeInboundEditForm(ev) {
@@ -2930,13 +3188,52 @@ async function submitInboundEdit(btnEl) {
       cargo_summary: (document.getElementById('ib-edit-cargo') || {}).value || '',
       remark: (document.getElementById('ib-edit-remark') || {}).value || ''
     });
-    if (res && res.ok) {
-      alert('已保存 / 저장됨');
-      closeInboundEditForm();
-      loadInboundDetail();
-    } else {
+    if (!res || !res.ok) {
       alert('失败/실패: ' + (res ? (res.message || res.error) : 'unknown'));
+      return;
     }
+
+    // 资料：删除 / 新增
+    var deleteIds = Object.keys(_ibEditMaterialDeleteIds || {});
+    var pending = (_ibEditPendingFiles || []).slice();
+    var delFails = [], delOks = 0;
+    var upFails = [], upOks = 0;
+    if (deleteIds.length > 0) {
+      for (var i = 0; i < deleteIds.length; i++) {
+        var attId = deleteIds[i];
+        try {
+          var dr = await api({ action: 'v2_attachment_delete', id: attId });
+          if (dr && dr.ok) delOks++;
+          else delFails.push(attId + ' (' + ((dr && (dr.message || dr.error)) || 'error') + ')');
+        } catch (e) {
+          delFails.push(attId + ' (' + (e && e.message || 'exception') + ')');
+        }
+      }
+    }
+    if (pending.length > 0) {
+      for (var j = 0; j < pending.length; j++) {
+        var f = pending[j].file;
+        try {
+          var ur = await uploadInboundMaterial(_currentInboundId, f);
+          if (ur && ur.ok) upOks++;
+          else upFails.push((f.name || ('文件' + (j + 1))) + (ur && ur.message ? ' - ' + ur.message : ''));
+        } catch (e2) {
+          upFails.push((f.name || ('文件' + (j + 1))) + ' (' + (e2 && e2.message || 'exception') + ')');
+        }
+      }
+    }
+
+    var failParts = [];
+    if (delFails.length > 0) failParts.push('删除失败 ' + delFails.length + ' 个');
+    if (upFails.length > 0) failParts.push('上传失败 ' + upFails.length + ' 个');
+    if (failParts.length > 0) {
+      alert('入库计划已保存\n但部分入库明细处理失败：' + failParts.join('，') + '\n请重新进入详情确认');
+    } else {
+      var touchedMsg = (delOks + upOks > 0) ? ('（资料 删除' + delOks + ' / 新增' + upOks + '）') : '';
+      alert('已保存 / 저장됨' + touchedMsg);
+    }
+    closeInboundEditForm();
+    loadInboundDetail();
   });
 }
 
@@ -3265,6 +3562,54 @@ async function submitPickupEdit(btnEl) {
       loadOutboundDetail();
     } else {
       alert('失败/실패: ' + (res ? (res.message || res.error) : 'unknown'));
+    }
+  });
+}
+
+// ===== 入库明细：详情页追加上传 / 删除 =====
+async function uploadInboundMaterialsFromDetail(inputEl) {
+  if (!inputEl || !inputEl.files || inputEl.files.length === 0) return;
+  if (!_currentInboundId) { alert('未选中入库计划 / 입고 계획 미선택'); return; }
+  var files = Array.prototype.slice.call(inputEl.files);
+  var rejected = [];
+  var okFiles = [];
+  for (var i = 0; i < files.length; i++) {
+    var f = files[i];
+    if (!_ibMaterialAllowed(f)) { rejected.push(f.name + '（类型不支持）'); continue; }
+    if (f.size && f.size > IB_MATERIAL_MAX_BYTES) { rejected.push(f.name + '（>20MB）'); continue; }
+    okFiles.push(f);
+  }
+  inputEl.value = '';
+  if (rejected.length > 0) {
+    alert('仅支持 PDF、Excel、CSV、图片文件，单文件 ≤20MB\n다음 파일은 제외되었습니다:\n' + rejected.join('\n'));
+  }
+  if (okFiles.length === 0) return;
+  var fails = [];
+  for (var k = 0; k < okFiles.length; k++) {
+    try {
+      var resp = await uploadInboundMaterial(_currentInboundId, okFiles[k]);
+      if (!(resp && resp.ok)) {
+        fails.push((okFiles[k].name || '?') + (resp && resp.message ? ' - ' + resp.message : ''));
+      }
+    } catch (e) {
+      fails.push((okFiles[k].name || '?') + ' (' + (e && e.message || 'exception') + ')');
+    }
+  }
+  if (fails.length > 0) {
+    alert('部分上传失败 / 일부 업로드 실패:\n' + fails.join('\n'));
+  }
+  loadInboundDetail();
+}
+
+async function deleteInboundMaterial(attId, btnEl) {
+  if (!attId) return;
+  if (!confirm('确认删除该入库明细？\n삭제하시겠습니까?')) return;
+  withActionLock('deleteInboundMaterial:' + attId, btnEl || null, '删除中.../삭제 중...', async function() {
+    var res = await api({ action: 'v2_attachment_delete', id: attId });
+    if (res && res.ok) {
+      loadInboundDetail();
+    } else {
+      alert('删除失败 / 삭제 실패: ' + (res ? (res.message || res.error) : 'unknown'));
     }
   });
 }

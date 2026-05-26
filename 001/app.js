@@ -863,6 +863,42 @@ function renderOutboundOrderRemarks(o) {
   return html;
 }
 
+// 入库明细资料只读渲染（仓库端只需要查看/下载/打开；不可删除）
+function renderInboundMaterialsReadonly(planData) {
+  var atts = (planData && planData.inbound_materials)
+    ? planData.inbound_materials
+    : ((planData && planData.attachments) || []).filter(function(a) {
+        return a && a.attachment_category === 'inbound_material';
+      });
+  if (!atts || atts.length === 0) {
+    return '<div class="card"><div class="card-title">入库明细 / 입고 명세</div>'
+      + '<div class="muted" style="font-size:12px;">暂无入库明细 / 입고 명세 없음</div></div>';
+  }
+  var html = '<div class="card"><div class="card-title">入库明细 / 입고 명세 (' + atts.length + ')</div>';
+  html += '<table class="mini-table" style="width:100%;font-size:12px;">';
+  html += '<thead><tr><th style="text-align:left;">文件名 / 파일명</th><th>操作 / 작업</th></tr></thead><tbody>';
+  atts.forEach(function(att) {
+    var url = att.file_key ? fileUrl(att.file_key) : '';
+    var fn = (att.file_name || '').toLowerCase();
+    var ct = (att.content_type || '').toLowerCase();
+    var isPdf = ct.indexOf('pdf') !== -1 || fn.endsWith('.pdf');
+    var isImg = ct.indexOf('image/') === 0;
+    var openLabel = (isPdf || isImg) ? '打开/打印 / 열기' : '下载 / 다운로드';
+    html += '<tr>';
+    html += '<td style="word-break:break-all;">' + esc(att.file_name || '--') + '</td>';
+    html += '<td style="white-space:nowrap;text-align:right;">';
+    if (url) {
+      html += '<a class="btn btn-outline btn-sm" href="' + esc(url) + '" download="' + esc(att.file_name || '') + '">下载 / 다운로드</a> ';
+      html += '<a class="btn btn-outline btn-sm" href="' + esc(url) + '" target="_blank" rel="noopener">' + esc(openLabel) + '</a>';
+    } else {
+      html += '<span class="muted">--</span>';
+    }
+    html += '</td></tr>';
+  });
+  html += '</tbody></table></div>';
+  return html;
+}
+
 // ===== 卸货页辅助（自 001/patch.js 合并） =====
 function planNo(plan) { return (plan && (plan.display_no || plan.id)) || ''; }
 
@@ -888,14 +924,18 @@ function renderUnloadPlanCard(planData, displayNo) {
       renderInboundPlanRemark(p);
   }
   if (area) {
+    var inner = '';
     if (lines.length > 0) {
       var tbl = '<table class="mini-table"><tr><th>类型/유형</th><th>计划/계획</th></tr>';
       lines.forEach(function(ln) { tbl += '<tr><td>' + unitLabel(ln.unit_type) + '</td><td>' + ln.planned_qty + '</td></tr>'; });
       tbl += '</table>';
-      area.innerHTML = tbl;
+      inner = tbl;
     } else {
-      area.innerHTML = '<span class="muted">无明细 / 명세 없음</span>';
+      inner = '<span class="muted">无明细 / 명세 없음</span>';
     }
+    // 仓库端：入库明细资料（只读，下载/打开）
+    inner += renderInboundMaterialsReadonly(planData);
+    area.innerHTML = inner;
   }
 }
 
@@ -1807,6 +1847,8 @@ async function loadInboundPlanInfo(planId) {
     var html = '<div><b>' + esc(p.display_no || p.id) + '</b> · ' + esc(p.customer || '--') + '</div>';
     html += '<div>' + esc(p.cargo_summary || '--') + '</div>';
     html += renderInboundPlanRemark(p);
+    // 仓库端：入库明细资料（只读，下载/打开） — 直接嵌入 plan info 卡片下方
+    html += renderInboundMaterialsReadonly(res);
     infoEl.innerHTML = html;
   }
   // Build result lines form
