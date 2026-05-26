@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>协同中心 V2 / 협업센터</title>
-  <link rel="stylesheet" href="style.css?v=20260526c-delete-converted-inbound">
+  <link rel="stylesheet" href="style.css?v=20260526d-date-only">
 </head>
 <body>
 
@@ -238,9 +238,9 @@
         <textarea id="oc-instruction" rows="3"></textarea>
       </div>
       <div class="form-group">
-        <label data-i18n="expected_ship_at"><b>预计出库时间 / 예상 출고 시간</b> <span style="color:#c62828;">*</span></label>
-        <input id="oc-expected-ship-at" type="datetime-local">
-        <div class="muted" style="font-size:12px;margin-top:4px;">即正式预计出库时间；不填则按今日归档。</div>
+        <label data-i18n="expected_ship_at"><b>预计出库日期 / 출고 예정일</b> <span style="color:#c62828;">*</span></label>
+        <input id="oc-expected-ship-at" type="date">
+        <div class="muted" style="font-size:12px;margin-top:4px;">仅选日期（不带小时分钟）；不填则按今日归档 / 날짜만 선택</div>
       </div>
       <div class="form-group">
         <label data-i18n="outbound_requirement">出库要求 / 출고 요구사항</label>
@@ -356,8 +356,9 @@
         <input id="ibc-cargo" type="text" placeholder="简要描述货物">
       </div>
       <div class="form-group">
-        <label>预计到达</label>
-        <input id="ibc-arrival" type="text" placeholder="如：下午2点、晚班到达">
+        <label>预计到达日期 / 입고 예정일</label>
+        <input id="ibc-arrival" type="date">
+        <div class="muted" style="font-size:12px;margin-top:4px;">仅选日期（不带小时分钟）/ 날짜만 선택</div>
       </div>
       <div class="form-group">
         <label>用途</label>
@@ -532,6 +533,6 @@
   onVerifyFilePick / 表格导出流程。
 -->
 <script src="../shared/xlsx.full.min.js"></script>
-<script src="app.js?v=20260526c-delete-converted-inbound"></script>
+<script src="app.js?v=20260526d-date-only"></script>
 </body>
 </html>

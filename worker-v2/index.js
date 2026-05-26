@@ -79,7 +79,7 @@ const OUTBOUND_FIELD_LABELS = {
   remark:                 { zh: '备注',           ko: '비고' },
   planned_box_count:      { zh: '计划箱数',       ko: '계획 박스' },
   planned_pallet_count:   { zh: '计划托数',       ko: '계획 팔레트' },
-  expected_ship_at:       { zh: '预计出库时间',   ko: '예상 출고시간' },
+  expected_ship_at:       { zh: '预计出库日期',   ko: '출고 예정일' },
   outbound_requirement:   { zh: '出库要求',       ko: '출고 요구사항' },
   uses_stock_operation:   { zh: '是否库内操作',   ko: '창고 내 작업 여부' },
   pickup_vehicle_no:      { zh: '车牌',           ko: '차번' },
@@ -503,6 +503,31 @@ function isOpsKey(body, env) {
 // isOpsAuth = ADMINKEY | VIEWKEY | OPSKEY（ops 接口用）
 function isOpsAuth(body, env) {
   return isAuth(body, env) || isOpsKey(body, env);
+}
+
+// "只取日期"归一化：支持 YYYY-MM-DD / YYYY/MM/DD / datetime-local (YYYY-MM-DDTHH:MM) / ISO 等
+// 设计原则：
+//   - 优先按 KST 解析（仓库业务日历日 = KST 自然日）
+//   - 输入若已是 YYYY-MM-DD 直接返回；datetime-local 仅截前 10 位（已是本地含义）
+//   - 仅 ISO UTC 或带 Z 才走 +9 小时换算
+//   - 解析失败的兜底：截前 10 位
+function normalizeDateOnly(v) {
+  if (v == null) return '';
+  const s = String(v).trim();
+  if (!s) return '';
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  if (/^\d{4}\/\d{2}\/\d{2}$/.test(s)) return s.replace(/\//g, '-');
+  // datetime-local 格式 YYYY-MM-DDTHH:MM(:SS)，无时区信息 → 直接截前 10 位（已是 KST 文本）
+  if (/^\d{4}-\d{2}-\d{2}T/.test(s) && !/[zZ]$/.test(s) && !/[+\-]\d{2}:?\d{2}$/.test(s.slice(11))) {
+    return s.slice(0, 10);
+  }
+  // ISO / 带时区 → 转 KST 日期
+  const d = new Date(s);
+  if (!isNaN(d.getTime())) {
+    const k = new Date(d.getTime() + 9 * 3600000);
+    return k.toISOString().slice(0, 10);
+  }
+  return s.slice(0, 10);
 }
 
 // 列表分页参数：默认 limit=50，最大 200；offset 默认 0
@@ -2405,16 +2430,14 @@ route("v2_outbound_order_create", async (body, env) => {
     if (!outbound_mode || !VALID_MODES.includes(outbound_mode)) return { ok: false, error: "invalid outbound_mode" };
     const id = "OB-" + uid();
     const t = now();
-    // order_date 派生口径：客服 expected_ship_at 是真业务排单日期；
-    // body.order_date 优先（admin/调试覆盖）→ expected_ship_at 日期 → 今日
-    const _esa = String(body.expected_ship_at || "").trim();
-    const _esaDate = _esa.length >= 10 ? _esa.slice(0, 10) : "";
+    // 预计出库 → 统一存"只日期" YYYY-MM-DD（即便客户传旧格式 datetime-local 也归一）
+    const expected_ship_at = normalizeDateOnly(body.expected_ship_at);
+    const _esaDate = expected_ship_at; // 已是 YYYY-MM-DD 或 ''
     const order_date = String(body.order_date || _esaDate || kstToday());
     const display_no = await nextOutboundDisplayNo(env, order_date);
     // 库内操作型：初始状态 operation_reserved；普通：pending_issue
     const initStatus = uses_stock_operation === 1 ? 'operation_reserved' : 'pending_issue';
     const initStockOpStatus = uses_stock_operation === 1 ? 'reserved' : '';
-    const expected_ship_at = _esa;
     const outbound_requirement = String(body.outbound_requirement || "").trim();
     const source_inbound_plan_id = String(body.source_inbound_plan_id || "").trim();
     await env.DB.prepare(`
@@ -2707,7 +2730,7 @@ route("v2_outbound_order_update_ship_plan", async (body, env) => {
         message: "当前状态（" + cur + "）不允许更新出库计划 / 현재 상태에서는 출고 계획을 업데이트할 수 없습니다" };
     }
     const VALID_MODES = ['warehouse_dispatch','customer_pickup','milk_express','milk_pallet','container_pickup'];
-    const expected_ship_at = String(body.expected_ship_at || "").trim();
+    const expected_ship_at = normalizeDateOnly(body.expected_ship_at);
     const outbound_mode = String(body.outbound_mode || "").trim();
     const destination = String(body.destination || "").trim();
     const outbound_requirement = String(body.outbound_requirement || "").trim();
@@ -2819,6 +2842,9 @@ route("v2_outbound_order_update", async (body, env) => {
       const v = body[k];
       if (k.startsWith('planned_') || k === 'uses_stock_operation') {
         binds.push(Number(v || 0));
+      } else if (k === 'expected_ship_at') {
+        // 预计出库 → 只存日期
+        binds.push(normalizeDateOnly(v));
       } else {
         binds.push(String(v == null ? '' : v));
       }
@@ -3394,7 +3420,7 @@ route("v2_inbound_plan_create", async (body, env) => {
       id, plan_date,
       customer, biz_class, biz_classes_json,
       String(body.cargo_summary || ""),
-      String(body.expected_arrival || ""),
+      normalizeDateOnly(body.expected_arrival),
       String(body.purpose || ""),
       String(body.remark || ""),
       created_by, t, t, display_no
@@ -4224,7 +4250,7 @@ route("v2_inbound_plan_update", async (body, env) => {
       String(body.customer || plan.customer),
       biz_class, biz_classes_json,
       String(body.cargo_summary != null ? body.cargo_summary : (plan.cargo_summary || "")),
-      String(body.expected_arrival != null ? body.expected_arrival : (plan.expected_arrival || "")),
+      normalizeDateOnly(body.expected_arrival != null ? body.expected_arrival : (plan.expected_arrival || "")),
       String(body.purpose != null ? body.purpose : (plan.purpose || "")),
       String(body.remark != null ? body.remark : (plan.remark || "")),
       t, id
@@ -4520,7 +4546,7 @@ route("v2_inbound_dynamic_finalize", async (body, env) => {
     const biz_class = bizNorm.primary || String(body.biz_class || plan.biz_class || "").trim();
     const biz_classes_json = bizNorm.list.length > 0 ? JSON.stringify(bizNorm.list) : (plan.biz_classes_json || '[]');
     const cargo_summary = String(body.cargo_summary || plan.cargo_summary || "").trim();
-    const expected_arrival = String(body.expected_arrival || plan.expected_arrival || "").trim();
+    const expected_arrival = normalizeDateOnly(body.expected_arrival || plan.expected_arrival || "");
     const purpose = String(body.purpose || plan.purpose || "").trim();
     const remark = String(body.remark || plan.remark || "").trim();
 
@@ -4861,7 +4887,7 @@ route("v2_feedback_finalize_to_inbound", async (body, env) => {
     const biz_class = bizNorm.primary || String(body.biz_class || "").trim();
     const biz_classes_json = bizNorm.list.length > 0 ? JSON.stringify(bizNorm.list) : '[]';
     const cargo_summary = String(body.cargo_summary || "").trim();
-    const expected_arrival = String(body.expected_arrival || "").trim();
+    const expected_arrival = normalizeDateOnly(body.expected_arrival);
     const purpose = String(body.purpose || "").trim();
     const remark = String(body.remark || "").trim();
     const created_by = String(body.created_by || "").trim();
@@ -6051,7 +6077,7 @@ route("v2_inbound_plan_export", async (body, env) => {
       入库类型执行状态明细: taskDetail,
       货物摘要: p.cargo_summary || '',
       用途: p.purpose || '',
-      预计到达: p.expected_arrival || '',
+      预计到达日期: normalizeDateOnly(p.expected_arrival),
       备注: p.remark || '',
       创建人: p.created_by || '',
       创建时间: fmtKst(p.created_at),
@@ -6159,7 +6185,7 @@ route("v2_outbound_order_export", async (body, env) => {
     return {
       出库单号: o.display_no || o.id,
       作业单日期: o.order_date || '',
-      预计出库时间: fmtBusinessDateTime(o.expected_ship_at),
+      预计出库日期: normalizeDateOnly(o.expected_ship_at),
       客户: o.customer || '',
       状态: _statusLabelZh(o.status),
       业务分类: _BIZ_LABEL_ZH[o.biz_class] || o.biz_class || '',
@@ -6775,7 +6801,7 @@ route("v2_feedback_convert_to_inbound", async (body, env) => {
   `).bind(
     id, plan_date, customer, biz_class, biz_classes_json,
     String(body.cargo_summary || fb.title || ""),
-    String(body.expected_arrival || ""),
+    normalizeDateOnly(body.expected_arrival),
     String(body.purpose || ""),
     String(body.remark || fb.content || ""),
     feedback_id, created_by, t, t, display_no
@@ -10149,7 +10175,7 @@ route("v2_dashboard_order_export", async (body, env) => {
     const ob_uses_stock_operation = (ob_for_fields && Number(ob_for_fields.uses_stock_operation) === 1) ? 1 : 0;
     const ob_outbound_status = (ob_for_fields && ob_for_fields.status) || '';
     // expected_ship_at 是 datetime-local 文本（已是本地预约时间），不做 +9 换算，仅 T→空格
-    const ob_expected_ship_at = fmtBusinessDateTime(ob_for_fields && ob_for_fields.expected_ship_at);
+    const ob_expected_ship_at = normalizeDateOnly(ob_for_fields && ob_for_fields.expected_ship_at);
     const ob_outbound_requirement = (ob_for_fields && ob_for_fields.outbound_requirement) || '';
     const ob_instruction = (ob_for_fields && ob_for_fields.instruction) || '';
     const ob_remark = (ob_for_fields && ob_for_fields.remark) || '';

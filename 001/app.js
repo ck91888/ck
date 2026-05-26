@@ -2340,7 +2340,7 @@ var OUTBOUND_FIELD_LABELS_001 = {
   remark:                 { zh: '备注',           ko: '비고' },
   planned_box_count:      { zh: '计划箱数',       ko: '계획 박스' },
   planned_pallet_count:   { zh: '计划托数',       ko: '계획 팔레트' },
-  expected_ship_at:       { zh: '预计出库时间',   ko: '예상 출고시간' },
+  expected_ship_at:       { zh: '预计出库日期',   ko: '출고 예정일' },
   outbound_requirement:   { zh: '出库要求',       ko: '출고 요구사항' },
   uses_stock_operation:   { zh: '是否库内操作',   ko: '창고 내 작업 여부' },
   pickup_vehicle_no:      { zh: '车牌',           ko: '차번' },
@@ -2361,9 +2361,14 @@ function obFieldLabel001(field) {
 function obFieldDisplayValue001(field, val) {
   if (val == null || val === '') return '--';
   if (field === 'uses_stock_operation') return Number(val) === 1 ? '是 / 예' : '否 / 아니오';
-  if (field === 'expected_ship_at' || field === 'pickup_time') {
-    var s = String(val).replace('T', ' ');
-    return s.length >= 16 ? s.slice(0, 16) : s;
+  // expected_ship_at 改为"只日期"；pickup_time 仍保留小时分钟
+  if (field === 'expected_ship_at') {
+    var s = String(val);
+    return s.length >= 10 ? s.slice(0, 10) : s;
+  }
+  if (field === 'pickup_time') {
+    var s2 = String(val).replace('T', ' ');
+    return s2.length >= 16 ? s2.slice(0, 16) : s2;
   }
   return String(val);
 }

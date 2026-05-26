@@ -104,8 +104,8 @@ var LANG = {
     outbound_material_uploaded: "资料已上传",
     outbound_material_missing: "无资料",
     update_ship_plan: "更新出库计划",
-    update_ship_plan_hint: "仓库已完成库内操作，请更新预计出库时间和出库要求",
-    expected_ship_at: "预计出库时间",
+    update_ship_plan_hint: "仓库已完成库内操作，请更新预计出库日期和出库要求",
+    expected_ship_at: "预计出库日期",
     outbound_requirement: "出库要求",
     outbound_stock_op: "库内操作",
     upload_failed_after_create: "出库单已创建，但资料上传失败，请进入详情补传",
@@ -135,7 +135,7 @@ var LANG = {
     // Priority i18n 已删除：UI 改为 FIFO 模式，不再展示优先级
     // Inbound
     cargo_summary: "货物摘要",
-    expected_arrival: "预计到达",
+    expected_arrival: "预计到达日期",
     purpose: "用途",
     plan_date: "计划日期",
     // Outbound
@@ -359,8 +359,8 @@ var LANG = {
     outbound_material_uploaded: "자료 업로드 완료",
     outbound_material_missing: "자료 없음",
     update_ship_plan: "출고 계획 업데이트",
-    update_ship_plan_hint: "창고 작업이 완료되었습니다. 예상 출고 시간과 출고 요구사항을 업데이트하세요",
-    expected_ship_at: "예상 출고 시간",
+    update_ship_plan_hint: "창고 작업이 완료되었습니다. 출고 예정일과 출고 요구사항을 업데이트하세요",
+    expected_ship_at: "출고 예정일",
     outbound_requirement: "출고 요구사항",
     outbound_stock_op: "창고 재고 작업",
     upload_failed_after_create: "출고단은 생성되었으나 자료 업로드에 실패했습니다. 상세 페이지에서 다시 업로드하세요",
@@ -387,7 +387,7 @@ var LANG = {
     job_type_inbound_change_order: "송장교체 입고",
     // priority_* 已删除（FIFO 모드）
     cargo_summary: "화물 요약",
-    expected_arrival: "예상 도착",
+    expected_arrival: "입고 예정일",
     purpose: "용도",
     plan_date: "계획 날짜",
     order_date: "작업단 날짜",

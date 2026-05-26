@@ -460,7 +460,7 @@ var OUTBOUND_FIELD_LABELS_FE = {
   remark:                 { zh: '备注',           ko: '비고' },
   planned_box_count:      { zh: '计划箱数',       ko: '계획 박스' },
   planned_pallet_count:   { zh: '计划托数',       ko: '계획 팔레트' },
-  expected_ship_at:       { zh: '预计出库时间',   ko: '예상 출고시간' },
+  expected_ship_at:       { zh: '预计出库日期',   ko: '출고 예정일' },
   outbound_requirement:   { zh: '出库要求',       ko: '출고 요구사항' },
   uses_stock_operation:   { zh: '是否库内操作',   ko: '창고 내 작업 여부' },
   pickup_vehicle_no:      { zh: '车牌',           ko: '차번' },
@@ -483,9 +483,9 @@ function obFieldDisplayValue(field, val) {
   if (field === 'uses_stock_operation') return Number(val) === 1 ? '是 / 예' : '否 / 아니오';
   if (field === 'biz_class') return bizLabel(String(val));
   if (field === 'outbound_mode') return outModeLabel(String(val));
-  if (field === 'expected_ship_at' || field === 'pickup_time') {
-    return formatBusinessLocalDateTime(String(val));
-  }
+  // expected_ship_at 改为"只日期"；pickup_time 仍保留日期+时间
+  if (field === 'expected_ship_at') return dateOnly(String(val)) || '--';
+  if (field === 'pickup_time') return formatBusinessLocalDateTime(String(val));
   return String(val);
 }
 
@@ -641,11 +641,35 @@ function fmtTime(isoStr) {
   } catch(e) { return String(isoStr); }
 }
 
-// 业务预约时间（datetime-local 字符串：expected_ship_at / pickup_time）
+// 业务预约时间（datetime-local 字符串：pickup_time 等仍带 HH:MM 的字段）
 // 直接 T→空格、截到 16 位；不做时区换算（这类字段不是 UTC ISO）
 function formatBusinessLocalDateTime(s) {
   if (!s) return '--';
   return String(s).replace('T', ' ').slice(0, 16);
+}
+
+// "只取日期"归一化（前端版）— expected_ship_at / expected_arrival 等"只选日期"字段共用
+//   - YYYY-MM-DD → 原样返回
+//   - YYYY/MM/DD → 横线化
+//   - datetime-local (YYYY-MM-DDTHH:MM) → 直接截前 10 位（已是 KST 文本）
+//   - ISO/带时区 → 转 KST 后取日期
+//   - 解析失败 → 截前 10 位兜底
+//   - 空 → ''（调用方按需自己回填 '--'）
+function dateOnly(v) {
+  if (v == null) return '';
+  var s = String(v).trim();
+  if (!s) return '';
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  if (/^\d{4}\/\d{2}\/\d{2}$/.test(s)) return s.replace(/\//g, '-');
+  if (/^\d{4}-\d{2}-\d{2}T/.test(s) && !/[zZ]$/.test(s) && !/[+\-]\d{2}:?\d{2}$/.test(s.slice(11))) {
+    return s.slice(0, 10);
+  }
+  var d = new Date(s);
+  if (!isNaN(d.getTime())) {
+    var k = new Date(d.getTime() + 9 * 3600000);
+    return k.toISOString().slice(0, 10);
+  }
+  return s.slice(0, 10);
 }
 
 // ===== Navigation =====
@@ -1364,7 +1388,7 @@ async function loadOutboundList() {
     // 优先显示预计出库时间；为空 fallback 到作业单日期
     var dateLabel = '';
     if (o.expected_ship_at) {
-      dateLabel = '预计出库：' + esc(formatBusinessLocalDateTime(o.expected_ship_at));
+      dateLabel = '预计出库日期：' + esc(dateOnly(o.expected_ship_at) || '--');
     } else {
       dateLabel = '作业单日期：' + esc(o.order_date || '--');
     }
@@ -1773,7 +1797,7 @@ async function loadOutboundDetail() {
   if (o.po_no) html += '<div class="detail-field"><b>' + L("po_no") + ':</b> ' + esc(o.po_no) + '</div>';
   if (o.wms_work_order_no) html += '<div class="detail-field"><b>' + L("wms_work_order_no") + ':</b> ' + esc(o.wms_work_order_no) + '</div>';
   html += '<div class="detail-field"><b>' + L("outbound_mode") + ':</b> ' + esc(outModeLabel(o.outbound_mode)) + '</div>';
-  if (o.expected_ship_at) html += '<div class="detail-field"><b>' + L("expected_ship_at") + ':</b> ' + esc(formatBusinessLocalDateTime(o.expected_ship_at)) + '</div>';
+  if (o.expected_ship_at) html += '<div class="detail-field"><b>' + L("expected_ship_at") + ':</b> ' + esc(dateOnly(o.expected_ship_at) || '--') + '</div>';
   // 出库要求 / 作业说明 / 备注 — 始终显示（无则 --，库内操作型尤其依赖这三项）
   html += '<div class="detail-section"><b>' + L("outbound_requirement") + ':</b>'
        + (o.outbound_requirement ? '<div class="remark-block">' + esc(o.outbound_requirement) + '</div>' : ' --')
@@ -2065,7 +2089,7 @@ function openShipPlanForm() {
   html += '<div class="card" id="ob-shipplan-card">';
   html += '<div class="card-title">' + esc(L("update_ship_plan")) + '</div>';
   html += '<div class="form-group"><label>' + esc(L("expected_ship_at")) + '</label>';
-  html += '<input id="sp-expected-ship-at" type="datetime-local" value="' + esc(o.expected_ship_at || "") + '"></div>';
+  html += '<input id="sp-expected-ship-at" type="date" value="' + esc(dateOnly(o.expected_ship_at || "")) + '"></div>';
   html += '<div class="form-group"><label>' + esc(L("outbound_mode")) + '</label>';
   html += '<select id="sp-outbound-mode">';
   html += '<option value="">--</option>';
@@ -2216,7 +2240,7 @@ function printOutboundOrder() {
       (o.destination ? '<div><span class="label">目的地：</span>' + esc(o.destination) + '</div>' : '') +
       (o.po_no ? '<div><span class="label">PO号/발주번호：</span>' + esc(o.po_no) + '</div>' : '') +
       (o.wms_work_order_no ? '<div><span class="label">WMS工单号：</span>' + esc(o.wms_work_order_no) + '</div>' : '') +
-      (o.expected_ship_at ? '<div><span class="label">预计出库时间：</span>' + esc(o.expected_ship_at) + '</div>' : '') +
+      (o.expected_ship_at ? '<div><span class="label">预计出库日期 / 출고 예정일：</span>' + esc(dateOnly(o.expected_ship_at)) + '</div>' : '') +
       '<div><span class="label">提出人：</span>' + esc(o.created_by || '') + '</div>' +
     '</div>' +
 
@@ -2340,7 +2364,7 @@ async function loadInboundList() {
     }
     html += ' ' + esc(p.display_no || p.id) + ' · ' + esc(p.customer || "--") + ' · ' + esc(p.cargo_summary || "");
     html += '</div>';
-    var ibMeta = esc(p.plan_date || "") + ' · ' + esc(p.expected_arrival || "") + ' · ' + esc(fmtTime(p.created_at));
+    var ibMeta = esc(p.plan_date || "") + ' · ' + esc(dateOnly(p.expected_arrival) || "") + ' · ' + esc(fmtTime(p.created_at));
     // line summary：箱/托/件 — 仅显示有数量的项
     var lineSum = p.line_summary || {};
     var lineParts = [];
@@ -2497,7 +2521,7 @@ function addIbcLinkObRow() {
   html += '<option value="0">否：普通出库</option>';
   html += '<option value="1">是：先库内操作</option>';
   html += '</select></div>';
-  html += '<div><label><b>预计出库时间</b></label><input id="lob-expected-' + seq + '" class="input" type="datetime-local"></div>';
+  html += '<div><label><b>预计出库日期 / 출고 예정일</b></label><input id="lob-expected-' + seq + '" class="input" type="date"></div>';
   html += '<div><label><b>目的地</b></label><input id="lob-destination-' + seq + '" class="input" placeholder="目的地"></div>';
   html += '<div><label><b>PO号</b></label><input id="lob-po-' + seq + '" class="input" placeholder="PO 号"></div>';
   html += '<div><label><b>WMS工单号</b></label><input id="lob-wms-' + seq + '" class="input" placeholder="WMS 工单号"></div>';
@@ -2767,7 +2791,7 @@ async function loadInboundDetail() {
   html += '<div><b>' + L("plan_date") + ':</b> ' + esc(p.plan_date) + '</div>';
   html += '<div><b>' + L("customer") + ':</b> ' + esc(p.customer) + '</div>';
   html += '<div><b>' + L("cargo_summary") + ':</b> ' + esc(p.cargo_summary) + '</div>';
-  html += '<div><b>' + L("expected_arrival") + ':</b> ' + esc(p.expected_arrival) + '</div>';
+  html += '<div><b>' + L("expected_arrival") + ':</b> ' + esc(dateOnly(p.expected_arrival) || '--') + '</div>';
   if (p.purpose) html += '<div style="grid-column:1/-1;"><b>' + L("purpose") + ':</b> ' + esc(p.purpose) + '</div>';
   // 备注 — 始终显示（保留换行；无则 --）
   var pRemarkFull = pickRemarkText(p);
@@ -2802,7 +2826,7 @@ async function loadInboundDetail() {
       html += '<td>' + esc(ob.customer || '--') + '</td>';
       html += '<td>' + (ob.biz_class ? '<span class="biz-tag biz-' + esc(ob.biz_class) + '">' + esc(bizLabel(ob.biz_class)) + '</span>' : '--') + '</td>';
       html += '<td>' + esc(outModeLabel(ob.outbound_mode) || '--') + '</td>';
-      html += '<td>' + esc(ob.expected_ship_at ? formatBusinessLocalDateTime(ob.expected_ship_at) : '--') + '</td>';
+      html += '<td>' + esc(ob.expected_ship_at ? dateOnly(ob.expected_ship_at) : '--') + '</td>';
       html += '<td>' + Number(ob.planned_box_count || 0) + '/' + Number(ob.planned_pallet_count || 0) + '</td>';
       html += '</tr>';
     });
@@ -3043,7 +3067,7 @@ async function loadInboundDetail() {
     html += '<div><label><b>' + L("customer") + '</b></label><input id="dynCustomer" class="input" value="' + esc(p.customer === '待补充' ? '' : p.customer) + '" placeholder="客户名称"></div>';
     html += '<div><label><b>' + L("biz_class") + '</b></label><select id="dynBiz" class="input"><option value="">--</option><option value="direct_ship"' + (p.biz_class === 'direct_ship' ? ' selected' : '') + '>' + bizLabel('direct_ship') + '</option><option value="bulk"' + (p.biz_class === 'bulk' ? ' selected' : '') + '>' + bizLabel('bulk') + '</option><option value="return"' + (p.biz_class === 'return' ? ' selected' : '') + '>' + bizLabel('return') + '</option><option value="change_order"' + (p.biz_class === 'change_order' ? ' selected' : '') + '>' + bizLabel('change_order') + '</option><option value="import"' + (p.biz_class === 'import' ? ' selected' : '') + '>' + bizLabel('import') + '</option></select></div>';
     html += '<div style="grid-column:1/-1;"><label><b>' + L("cargo_summary") + '</b></label><input id="dynCargo" class="input" value="' + esc(p.cargo_summary) + '"></div>';
-    html += '<div><label><b>' + L("expected_arrival") + '</b></label><input id="dynArrival" class="input" value="' + esc(p.expected_arrival) + '"></div>';
+    html += '<div><label><b>' + L("expected_arrival") + '</b></label><input id="dynArrival" class="input" type="date" value="' + esc(dateOnly(p.expected_arrival)) + '"></div>';
     html += '<div><label><b>' + L("purpose") + '</b></label><input id="dynPurpose" class="input" value="' + esc(p.purpose) + '"></div>';
     html += '<div style="grid-column:1/-1;"><label><b>' + L("remark") + '</b></label><input id="dynRemark" class="input" value="' + esc(p.remark) + '"></div>';
     html += '</div>';
@@ -3154,7 +3178,7 @@ function openInboundEditForm() {
   html += '<label style="margin-right:14px;"><input type="checkbox" class="ib-edit-biz" value="return"' + bizCheck('return') + '> 退件 / 반품</label>';
   html += '<label style="margin-right:14px;"><input type="checkbox" class="ib-edit-biz" value="change_order"' + bizCheck('change_order') + '> 换单 / 송장교체</label>';
   html += '</div></div>';
-  html += '<div><label><b>预计到达</b></label><input id="ib-edit-arrival" class="input" value="' + esc(p.expected_arrival || '') + '"></div>';
+  html += '<div><label><b>预计到达日期 / 입고 예정일</b></label><input id="ib-edit-arrival" class="input" type="date" value="' + esc(dateOnly(p.expected_arrival || '')) + '"></div>';
   html += '<div><label><b>入库目的</b></label><input id="ib-edit-purpose" class="input" value="' + esc(p.purpose || '') + '"></div>';
   html += '<div style="grid-column:1/-1;"><label><b>货物概要</b></label><input id="ib-edit-cargo" class="input" value="' + esc(p.cargo_summary || '') + '"></div>';
   html += '<div style="grid-column:1/-1;"><label><b>备注</b></label><textarea id="ib-edit-remark" class="input" rows="2">' + esc(p.remark || '') + '</textarea></div>';
@@ -3386,7 +3410,7 @@ function openOutboundEditForm() {
   html += '<option value="0"' + usesSel(0) + '>否：普通出库</option>';
   html += '<option value="1"' + usesSel(1) + '>是：先库内操作</option>';
   html += '</select></div>';
-  html += '<div><label><b>预计出库时间</b></label><input id="ob-edit-expected" class="input" type="datetime-local" value="' + esc(o.expected_ship_at || '') + '"></div>';
+  html += '<div><label><b>预计出库日期 / 출고 예정일</b></label><input id="ob-edit-expected" class="input" type="date" value="' + esc(dateOnly(o.expected_ship_at || '')) + '"></div>';
   html += '<div><label><b>目的地</b></label><input id="ob-edit-destination" class="input" value="' + esc(o.destination || '') + '"></div>';
   html += '<div><label><b>PO号</b></label><input id="ob-edit-po" class="input" value="' + esc(o.po_no || '') + '"></div>';
   html += '<div><label><b>WMS工单号</b></label><input id="ob-edit-wms" class="input" value="' + esc(o.wms_work_order_no || '') + '"></div>';
@@ -3910,7 +3934,7 @@ function printIbQr() {
       '<div><span class="label">入库单号：</span>' + esc(displayNo) + '</div>' +
       '<div><span class="label">货物摘要：</span>' + esc(plan.cargo_summary || '') + '</div>' +
       '<div><span class="label">计划日期：</span>' + esc(plan.plan_date || '') + '</div>' +
-      '<div><span class="label">预计到达：</span>' + esc(plan.expected_arrival || '--') + '</div>' +
+      '<div><span class="label">预计到达日期 / 입고 예정일：</span>' + esc(dateOnly(plan.expected_arrival) || '--') + '</div>' +
       '<div><span class="label">客户：</span>' + esc(plan.customer || '') + '</div>' +
       '<div><span class="label">提出人：</span>' + esc(plan.created_by || '') + '</div>' +
       '<div><span class="label">业务分类：</span>' + esc(bizText) + '</div>' +
@@ -4219,7 +4243,7 @@ async function loadFeedbackDetail() {
     html += '<div><label><b>' + L("biz_class") + '</b></label><select id="fb-conv-biz" class="input"><option value="">--</option><option value="direct_ship">' + bizLabel("direct_ship") + '</option><option value="bulk">' + bizLabel("bulk") + '</option><option value="return">' + bizLabel("return") + '</option><option value="change_order">' + bizLabel("change_order") + '</option><option value="import">' + bizLabel("import") + '</option></select></div>';
     var defaultCargo = feedbackResultLines.map(function(r) { return unitTypeLabel(r.unit_type) + ' ' + (r.actual_qty || 0); }).join(' / ');
     html += '<div style="grid-column:1/-1;"><label><b>' + L("cargo_summary") + '</b></label><input id="fb-conv-cargo" class="input" value="' + esc(defaultCargo || fb.title || '') + '"></div>';
-    html += '<div><label><b>' + L("expected_arrival") + '</b></label><input id="fb-conv-arrival" class="input" placeholder="预计到达"></div>';
+    html += '<div><label><b>' + L("expected_arrival") + '</b></label><input id="fb-conv-arrival" class="input" type="date"></div>';
     html += '<div><label><b>' + L("purpose") + '</b></label><input id="fb-conv-purpose" class="input" placeholder="入库目的"></div>';
     html += '<div style="grid-column:1/-1;"><label><b>' + L("remark") + '</b></label><input id="fb-conv-remark" class="input" value="' + esc(fb.remark || '') + '"></div>';
     html += '</div>';

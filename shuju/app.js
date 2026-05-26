@@ -752,7 +752,7 @@ async function exportOrders(btn) {
       实际板数: r.actual_pallet_count || 0,
       是否库内操作: (r.uses_stock_operation === 1 || r.uses_stock_operation === '1') ? '是' : '否',
       出库单状态: r.outbound_status || '',
-      预计出库时间: r.expected_ship_at || '',
+      预计出库日期: String(r.expected_ship_at || '').slice(0, 10),
       出库要求: r.outbound_requirement || '',
       出库作业说明: r.ob_instruction || '',
       出库备注: r.ob_remark || '',
