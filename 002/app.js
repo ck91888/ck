@@ -2307,6 +2307,10 @@ async function loadInboundList() {
   var biz_class = bizSel ? bizSel.value : "";
   var custEl = document.getElementById("ibFilterCustomer");
   var customer_keyword = custEl ? (custEl.value || '').trim() : "";
+  var unloadFromEl = document.getElementById("ibFilterUnloadDoneFrom");
+  var unloadToEl = document.getElementById("ibFilterUnloadDoneTo");
+  var unload_done_date_from = unloadFromEl ? unloadFromEl.value : "";
+  var unload_done_date_to = unloadToEl ? unloadToEl.value : "";
 
   var res;
   var _inPager = getPager('inbound');
@@ -2316,6 +2320,8 @@ async function loadInboundList() {
       start_date: start, end_date: end, status: status, accounted: accounted,
       biz_class: biz_class,
       customer_keyword: customer_keyword,
+      unload_done_date_from: unload_done_date_from,
+      unload_done_date_to: unload_done_date_to,
       limit: _inPager.limit,
       offset: getOffset('inbound')
     });
@@ -2375,6 +2381,9 @@ async function loadInboundList() {
       if (q > 0) lineParts.push(unitTypeLabel(ut) + ' ' + (Number.isInteger(q) ? q : q.toFixed(1)));
     }
     if (lineParts.length > 0) ibMeta += ' · ' + lineParts.join(' / ');
+    if (p.unload_completed_at) {
+      ibMeta += ' · 卸货完成 ' + esc(fmtTime(p.unload_completed_at));
+    }
     if (Number(p.related_outbound_count || 0) > 0) {
       ibMeta += ' · 关联出库 ' + Number(p.related_outbound_count) + ' 单';
     }
@@ -2420,6 +2429,10 @@ async function exportInboundPlans(btnEl) {
   var biz_class = bizSel ? bizSel.value : '';
   var custEl = document.getElementById('ibFilterCustomer');
   var customer_keyword = custEl ? (custEl.value || '').trim() : '';
+  var unloadFromEl = document.getElementById('ibFilterUnloadDoneFrom');
+  var unloadToEl = document.getElementById('ibFilterUnloadDoneTo');
+  var unload_done_date_from = unloadFromEl ? unloadFromEl.value : '';
+  var unload_done_date_to = unloadToEl ? unloadToEl.value : '';
   var origText = btnEl ? btnEl.textContent : '';
   if (btnEl) { btnEl.disabled = true; btnEl.textContent = '导出中... / 내보내는 중...'; }
   try {
@@ -2427,6 +2440,8 @@ async function exportInboundPlans(btnEl) {
       action: 'v2_inbound_plan_export',
       start_date: start, end_date: end, status: status, accounted: accounted,
       biz_class: biz_class, customer_keyword: customer_keyword,
+      unload_done_date_from: unload_done_date_from,
+      unload_done_date_to: unload_done_date_to,
       limit: 10000
     });
     if (!res || !res.ok) {

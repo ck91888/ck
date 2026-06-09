@@ -1680,10 +1680,15 @@ const MIGRATIONS = [
   `ALTER TABLE v2_field_feedbacks ADD COLUMN deleted_by TEXT DEFAULT ''`,
   `ALTER TABLE v2_field_feedbacks ADD COLUMN delete_reason TEXT DEFAULT ''`,
   `CREATE INDEX IF NOT EXISTS idx_v2_inbound_is_deleted ON v2_inbound_plans(is_deleted, status)`,
+
+  // ---- v2.20260609a：入库计划冗余字段：卸货完成时间/卸货完成人（用于"按卸货完成日期搜索"） ----
+  `ALTER TABLE v2_inbound_plans ADD COLUMN unload_completed_at TEXT DEFAULT ''`,
+  `ALTER TABLE v2_inbound_plans ADD COLUMN unload_completed_by TEXT DEFAULT ''`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_inbound_plans_unload_completed_at ON v2_inbound_plans(unload_completed_at)`,
 ];
 
 // 每次发布迁移变化时手动 +1（patch 段），冷启动只比对一次字符串即可跳过整段 MIGRATIONS
-const CURRENT_SCHEMA_VERSION = 'v2.20260526c';
+const CURRENT_SCHEMA_VERSION = 'v2.20260609a';
 
 let _migrated = false;
 async function ensureMigrated(db) {
@@ -3747,6 +3752,9 @@ route("v2_inbound_plan_list", async (body, env) => {
   // 协同中心筛选：biz_class 仅按"包含该业务"过滤（含 legacy + json + biz_task）；customer_keyword 模糊搜索
   const biz_class_filter = String(body.biz_class || "").trim();
   const customer_keyword = String(body.customer_keyword || "").trim();
+  // 卸货完成日期（KST 自然日 → UTC 范围 [from, toExclusive)）
+  const unload_done_from = String(body.unload_done_date_from || "").trim();
+  const unload_done_to = String(body.unload_done_date_to || "").trim();
   const VALID_BIZ = ['direct_ship','bulk','return'];
   const { limit, offset } = pageParams(body);
 
@@ -3760,6 +3768,15 @@ route("v2_inbound_plan_list", async (body, env) => {
   else { where += " AND status != 'cancelled'"; } // 默认"全部状态"排除已取消，仅当显式筛 cancelled 才返回
   if (accounted === "1") { where += " AND accounted=1"; }
   else if (accounted === "0") { where += " AND (accounted IS NULL OR accounted=0)"; }
+  // 卸货完成日期筛选（KST 日历日 → UTC ISO 字段 unload_completed_at 半开区间）
+  if (unload_done_from) {
+    const r = kstDayRangeUtc(unload_done_from);
+    if (r) { where += " AND unload_completed_at >= ?"; binds.push(r.startUtc); }
+  }
+  if (unload_done_to) {
+    const r = kstDayRangeUtc(unload_done_to);
+    if (r) { where += " AND unload_completed_at < ?"; binds.push(r.endUtc); }
+  }
   // 业务分类筛选：兼容 (a) biz_classes_json 包含 (b) v2_inbound_plan_biz_tasks 存在 (c) 旧数据 plan.biz_class
   if (biz_class_filter && VALID_BIZ.indexOf(biz_class_filter) !== -1) {
     where += " AND ("
@@ -5194,11 +5211,32 @@ route("v2_unload_job_finish", async (body, env) => {
         }
         // Build cargo summary from result
         const cargoSummary = result_lines.map(rl => (rl.unit_type || "") + " " + (rl.actual_qty || 0)).join(" / ");
+        // 动态计划：同样写入 unload_completed_at / unload_completed_by，方便协同中心按卸货完成日期搜索
+        const _wkRows = await env.DB.prepare(
+          "SELECT DISTINCT worker_name FROM v2_ops_job_workers WHERE job_id=? AND worker_name != ''"
+        ).bind(job_id).all();
+        const _names = (_wkRows.results || []).map(w => w.worker_name).filter(Boolean);
+        const _namesText = _names.length ? _names.join(", ") : (worker_id || "");
         await env.DB.prepare(
-          "UPDATE v2_inbound_plans SET status='unloaded_pending_info', cargo_summary=?, updated_at=? WHERE id=?"
-        ).bind(cargoSummary || "现场无单卸货", t, plan_id).run();
+          "UPDATE v2_inbound_plans SET status='unloaded_pending_info', cargo_summary=?, unload_completed_at=COALESCE(NULLIF(unload_completed_at,''), ?), unload_completed_by=COALESCE(NULLIF(unload_completed_by,''), ?), updated_at=? WHERE id=?"
+        ).bind(cargoSummary || "现场无单卸货", t, _namesText, t, plan_id).run();
         return { ok: true, result_id, dynamic_plan: true, plan_id };
       } else {
+        // 物理卸货已完成 → 冗余字段 unload_completed_at/_by 写入入库计划主表，
+        // 供协同中心"按卸货完成日期搜索"的索引扫描；仅在首次写入时落地（避免重复完成覆盖）
+        const planRow2 = await env.DB.prepare(
+          "SELECT unload_completed_at FROM v2_inbound_plans WHERE id=?"
+        ).bind(plan_id).first();
+        if (!planRow2 || !planRow2.unload_completed_at) {
+          const workerRows = await env.DB.prepare(
+            "SELECT DISTINCT worker_name FROM v2_ops_job_workers WHERE job_id=? AND worker_name != ''"
+          ).bind(job_id).all();
+          const names = (workerRows.results || []).map(w => w.worker_name).filter(Boolean);
+          const namesText = names.length ? names.join(", ") : (worker_id || "");
+          await env.DB.prepare(
+            "UPDATE v2_inbound_plans SET unload_completed_at=?, unload_completed_by=?, updated_at=? WHERE id=?"
+          ).bind(t, namesText, t, plan_id).run();
+        }
         // 物理卸货已完成 → 由 recalcInboundPlanCompletion 综合 biz_task 完成度 + active 入库任务
         // 推断整单状态：completed / partially_completed / putting_away / arrived_pending_putaway
         // 不再按业务类型分别要求卸货 —— 一次卸货代表整张 plan 的物理卸货完成
@@ -5957,6 +5995,8 @@ route("v2_inbound_plan_export", async (body, env) => {
   const accounted = String(body.accounted == null ? "" : body.accounted).trim();
   const biz_class_filter = String(body.biz_class || "").trim();
   const customer_keyword = String(body.customer_keyword || "").trim();
+  const unload_done_from = String(body.unload_done_date_from || "").trim();
+  const unload_done_to = String(body.unload_done_date_to || "").trim();
   const VALID_BIZ = ['direct_ship','bulk','return','change_order'];
   let limit = parseInt(body.limit, 10);
   if (!Number.isFinite(limit) || limit <= 0) limit = 5000;
@@ -5970,6 +6010,14 @@ route("v2_inbound_plan_export", async (body, env) => {
   else { sql += " AND status != 'cancelled'"; }
   if (accounted === "1") { sql += " AND accounted=1"; }
   else if (accounted === "0") { sql += " AND (accounted IS NULL OR accounted=0)"; }
+  if (unload_done_from) {
+    const r = kstDayRangeUtc(unload_done_from);
+    if (r) { sql += " AND unload_completed_at >= ?"; binds.push(r.startUtc); }
+  }
+  if (unload_done_to) {
+    const r = kstDayRangeUtc(unload_done_to);
+    if (r) { sql += " AND unload_completed_at < ?"; binds.push(r.endUtc); }
+  }
   if (biz_class_filter && VALID_BIZ.indexOf(biz_class_filter) !== -1) {
     sql += " AND ("
         +    "biz_class=?"
@@ -6078,6 +6126,8 @@ route("v2_inbound_plan_export", async (body, env) => {
       货物摘要: p.cargo_summary || '',
       用途: p.purpose || '',
       预计到达日期: normalizeDateOnly(p.expected_arrival),
+      卸货完成时间: p.unload_completed_at ? fmtKst(p.unload_completed_at) : '',
+      卸货人员: p.unload_completed_by || '',
       备注: p.remark || '',
       创建人: p.created_by || '',
       创建时间: fmtKst(p.created_at),
@@ -8902,6 +8952,56 @@ route("v2_admin_cleanup_inbound_unload_scope", async (body, env) => {
   }
 
   return json({ ok: true, dry_run: dryRun, checked_count, repaired_count, kept_count, examples });
+});
+
+// 把历史入库计划的 unload_completed_at / unload_completed_by 从已完成的 unload job 回填
+// — 仅处理 unload_completed_at 为空、且存在 status='completed' 的 unload job 的 plan
+// — 取最后一个 completed unload job 的 updated_at 作为完成时间
+route("v2_admin_backfill_inbound_unload_completed_at", async (body, env) => {
+  if (!isAdmin(body, env)) return err("unauthorized_admin_only", 401);
+  const dryRun = body.dry_run === true;
+  const t = now();
+  const rs = await env.DB.prepare(`
+    SELECT id, display_no, status FROM v2_inbound_plans
+     WHERE (unload_completed_at IS NULL OR unload_completed_at='')
+       AND (source_type IS NULL OR source_type != 'return_session')
+       AND COALESCE(is_deleted,0)=0
+     ORDER BY created_at ASC
+     LIMIT 10000
+  `).all();
+  const rows = rs.results || [];
+  let checked_count = 0, updated_count = 0;
+  const examples = [];
+  for (const p of rows) {
+    checked_count++;
+    // 取最后一个 completed unload job（更精确的"卸货完成时间"= updated_at）
+    const job = await env.DB.prepare(
+      "SELECT id, updated_at FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type='unload' AND status='completed' ORDER BY updated_at DESC LIMIT 1"
+    ).bind(p.id).first();
+    if (!job) continue;
+    // 汇总工人名（卸货人员）
+    const wkRs = await env.DB.prepare(
+      "SELECT DISTINCT worker_name FROM v2_ops_job_workers WHERE job_id=? AND worker_name != ''"
+    ).bind(job.id).all();
+    const names = (wkRs.results || []).map(w => w.worker_name).filter(Boolean);
+    const namesText = names.join(", ");
+    const finishedAt = job.updated_at || t;
+    if (dryRun) {
+      updated_count++;
+      if (examples.length < 50) examples.push({
+        id: p.id, display_no: p.display_no, would_set_unload_completed_at: finishedAt, would_set_unload_completed_by: namesText
+      });
+      continue;
+    }
+    await env.DB.prepare(
+      "UPDATE v2_inbound_plans SET unload_completed_at=?, unload_completed_by=?, updated_at=? WHERE id=?"
+    ).bind(finishedAt, namesText, t, p.id).run();
+    updated_count++;
+    if (examples.length < 50) examples.push({
+      id: p.id, display_no: p.display_no, unload_completed_at: finishedAt, unload_completed_by: namesText
+    });
+  }
+  return json({ ok: true, dry_run: dryRun, checked_count, updated_count, examples });
 });
 
 route("v2_admin_cleanup_job_statuses", async (body, env) => {

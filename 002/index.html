@@ -284,6 +284,9 @@
       <span class="filter-label"><b>计划日期 / 입고계획일</b></span>
       <input type="date" id="ibFilterStart">
       <input type="date" id="ibFilterEnd">
+      <span class="filter-label"><b>卸货完成日期 / 하차 완료일</b></span>
+      <input type="date" id="ibFilterUnloadDoneFrom" onchange="resetPager('inbound'); loadInboundList()">
+      <input type="date" id="ibFilterUnloadDoneTo" onchange="resetPager('inbound'); loadInboundList()">
       <select id="ibFilterStatus" onchange="resetPager('inbound'); loadInboundList()">
         <option value="">全部状态</option>
         <option value="pending">未到货</option>
@@ -533,6 +536,6 @@
   onVerifyFilePick / 表格导出流程。
 -->
 <script src="../shared/xlsx.full.min.js"></script>
-<script src="app.js?v=20260526d-date-only"></script>
+<script src="app.js?v=20260609a-unload-done-date"></script>
 </body>
 </html>
