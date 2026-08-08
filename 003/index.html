@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" content="#102a43">
   <title>耗材与物品管理 / 소모품·비품 관리</title>
-  <link rel="stylesheet" href="style.css?v=20260808a">
+  <link rel="stylesheet" href="style.css?v=20260808c">
 </head>
 <body>
 
@@ -70,15 +70,74 @@
     </div>
   </header>
 
-  <nav class="main-tabs" id="mainTabs">
+  <nav class="main-tabs role-tabs" id="adminTabs">
     <button class="active" data-view="dashboard" onclick="goView('dashboard',this)"><span>⌂</span><b data-i18n="dashboard">总览</b></button>
     <button data-view="materials" onclick="goView('materials',this)"><span>▤</span><b data-i18n="materials">耗材</b></button>
     <button data-view="assets" onclick="goView('assets',this)"><span>▣</span><b data-i18n="assets">仓库物品</b></button>
+    <button data-view="purchasing" onclick="goView('purchasing',this)"><span>◇</span><b data-i18n="purchasing">采购到货</b></button>
     <button data-view="ledger" onclick="goView('ledger',this)"><span>↕</span><b data-i18n="ledger">出入记录</b></button>
     <button id="settingsTabBtn" data-view="settings" onclick="goView('settings',this)"><span>⚙</span><b data-i18n="settings">基础设置</b></button>
   </nav>
 
+  <nav class="main-tabs role-tabs field-tabs hidden" id="fieldTabs">
+    <button class="active" data-view="field-home" onclick="goView('field-home',this)"><span>⌂</span><b data-i18n="workbench">工作台</b></button>
+    <button data-view="materials" onclick="goView('materials',this)"><span>▤</span><b data-i18n="materials">耗材</b></button>
+    <button data-view="assets" onclick="goView('assets',this)"><span>▣</span><b data-i18n="field_assets">物品</b></button>
+    <button data-view="receiving" onclick="goView('receiving',this)"><span>▥</span><b data-i18n="receiving">收货</b></button>
+    <button data-view="ledger" onclick="goView('ledger',this)"><span>↕</span><b data-i18n="my_records">我的记录</b></button>
+  </nav>
+
   <main class="app-main">
+    <section id="view-field-home" class="view">
+      <div class="field-hero">
+        <div>
+          <span class="field-kicker" data-i18n="field_mode">现场端</span>
+          <h1><span data-i18n="hello">你好</span>，<span id="fieldOperatorName">--</span></h1>
+          <p data-i18n="field_ready">请选择要办理的现场操作</p>
+        </div>
+        <div class="field-today">
+          <small data-i18n="my_today_records">我今日操作</small>
+          <b id="fieldTodayCount">--</b>
+        </div>
+      </div>
+      <div class="field-action-grid">
+        <button class="field-action scan" onclick="openScanner()">
+          <span class="field-action-icon">▣</span>
+          <span><b data-i18n="scan_to_operate">扫描耗材或物品</b><small data-i18n="scan_to_operate_sub">扫码后直接领用、消耗或归还</small></span>
+          <i>›</i>
+        </button>
+        <button class="field-action material" onclick="goView('materials')">
+          <span class="field-action-icon">▤</span>
+          <span><b data-i18n="material_work">耗材操作</b><small data-i18n="material_work_sub">搜索并办理领用、消耗、退回</small></span>
+          <i>›</i>
+        </button>
+        <button class="field-action asset" onclick="goView('assets')">
+          <span class="field-action-icon">▣</span>
+          <span><b data-i18n="asset_work">物品操作</b><small data-i18n="asset_work_sub">领用、归还或调拨仓库物品</small></span>
+          <i>›</i>
+        </button>
+        <button class="field-action request" onclick="openPurchaseRequest()">
+          <span class="field-action-icon">◇</span>
+          <span><b data-i18n="request_purchase">申请采购</b><small data-i18n="request_purchase_sub">选择耗材和数量后直接提交采购</small></span>
+          <i>›</i>
+        </button>
+        <button class="field-action receive" onclick="goView('receiving')">
+          <span class="field-action-icon">▥</span>
+          <span><b data-i18n="arrival_receiving">到货收货</b><small data-i18n="arrival_receiving_sub">扫描快递单或办理供应商送货</small></span>
+          <i>›</i>
+        </button>
+        <button class="field-action record" onclick="goView('ledger')">
+          <span class="field-action-icon">↕</span>
+          <span><b data-i18n="my_records">我的记录</b><small data-i18n="my_records_sub">只查看本人提交的操作</small></span>
+          <i>›</i>
+        </button>
+      </div>
+      <div class="panel field-recent-panel">
+        <div class="panel-head"><h2 data-i18n="my_recent_activity">我的最近操作</h2><button class="btn mini soft" onclick="loadFieldHome()">↻</button></div>
+        <div id="fieldRecentActivity" class="activity-list"><div class="empty" data-i18n="loading">加载中...</div></div>
+      </div>
+    </section>
+
     <section id="view-dashboard" class="view active">
       <div id="dashboardStats" class="stat-grid"></div>
       <div class="panel">
@@ -100,7 +159,7 @@
           <option value="active" data-i18n="active">启用</option>
           <option value="inactive" data-i18n="inactive">停用</option>
         </select>
-        <label class="check-label"><input id="lowStockOnly" type="checkbox" onchange="loadMaterials()"><span data-i18n="only_low">只看库存预警</span></label>
+        <label class="check-label admin-only"><input id="lowStockOnly" type="checkbox" onchange="loadMaterials()"><span data-i18n="only_low">只看库存预警</span></label>
       </div>
       <div id="materialList" class="card-list"></div>
     </section>
@@ -187,14 +246,58 @@
       </form>
     </section>
 
+    <section id="view-purchasing" class="view">
+      <div id="purchaseStats" class="stat-grid purchase-stat-grid"></div>
+      <div class="toolbar">
+        <div class="search-group"><input id="purchaseSearch" data-i18n-placeholder="purchase_search" placeholder="搜索采购单、快递单、供应商" onkeydown="if(event.key==='Enter')loadPurchasing()"><button onclick="loadPurchasing()">⌕</button></div>
+        <select id="purchaseStatus" onchange="loadPurchasing()">
+          <option value="" data-i18n="all_statuses">全部状态</option>
+          <option value="requested" data-i18n="status_requested">待采购</option>
+          <option value="purchasing" data-i18n="status_purchasing">采购中</option>
+          <option value="shipped" data-i18n="status_shipped">已发货待收货</option>
+          <option value="partial_received" data-i18n="status_partial">部分到货</option>
+          <option value="completed" data-i18n="status_completed">全部到货</option>
+          <option value="cancelled" data-i18n="status_cancelled">已取消</option>
+        </select>
+        <label class="check-label"><input id="purchaseDiffOnly" type="checkbox" onchange="loadPurchasing()"><span data-i18n="only_discrepancy">只看有差异</span></label>
+        <button class="btn primary" onclick="openPurchaseRequest()">＋ <span data-i18n="new_purchase_request">新建采购申请</span></button>
+      </div>
+      <div id="purchaseList" class="purchase-list"></div>
+    </section>
+
+    <section id="view-purchase-detail" class="view">
+      <button class="back-link inline" onclick="goView('purchasing')">‹ <span data-i18n="back">返回</span></button>
+      <div id="purchaseDetail"></div>
+    </section>
+
+    <section id="view-receiving" class="view">
+      <div class="receiving-hero">
+        <div><span class="field-kicker" data-i18n="receiving_desk">收货工作台</span><h1 data-i18n="arrival_receiving">到货收货</h1><p data-i18n="receiving_hint">扫描快递面单，或从待到货列表选择供应商送货</p></div>
+        <button class="btn success receive-scan-btn" onclick="openReceivingScanner()">▣ <span data-i18n="scan_tracking">扫描快递单号</span></button>
+      </div>
+      <div class="manual-tracking panel">
+        <div class="search-group"><input id="trackingLookupInput" data-i18n-placeholder="tracking_or_shipment" placeholder="输入快递单号或系统到货单号" onkeydown="if(event.key==='Enter')lookupShipmentManual()"><button onclick="lookupShipmentManual()" data-i18n="query">查询</button></div>
+      </div>
+      <div class="receiving-columns">
+        <div class="panel"><div class="panel-head"><h2 data-i18n="pending_express">待收快递</h2><button class="btn mini soft" onclick="loadReceiving()">↻</button></div><div id="pendingExpressList" class="receiving-list"></div></div>
+        <div class="panel"><div class="panel-head"><h2 data-i18n="pending_supplier">待收供应商送货</h2></div><div id="pendingSupplierList" class="receiving-list"></div></div>
+      </div>
+    </section>
+
+    <section id="view-receipt-detail" class="view">
+      <button class="back-link inline" onclick="goView('receiving')">‹ <span data-i18n="back">返回</span></button>
+      <div id="receiptDetail"></div>
+    </section>
+
     <section id="view-ledger" class="view">
       <div class="panel">
+        <div class="panel-head ledger-title-row"><h2 id="ledgerTitle" data-i18n="ledger">出入记录</h2></div>
         <div class="filter-row ledger-filter">
           <select id="ledgerKind" onchange="loadLedger()"><option value="" data-i18n="all_records">全部记录</option><option value="material" data-i18n="material_records">耗材记录</option><option value="asset" data-i18n="asset_records">物品记录</option></select>
-          <input id="ledgerSearch" data-i18n-placeholder="search" placeholder="搜索名称、编号或人员" onkeydown="if(event.key==='Enter')loadLedger()">
+          <input id="ledgerSearch" class="admin-only" data-i18n-placeholder="search" placeholder="搜索名称、编号或人员" onkeydown="if(event.key==='Enter')loadLedger()">
           <input id="ledgerStart" type="date"><input id="ledgerEnd" type="date">
           <button class="btn primary" onclick="loadLedger()" data-i18n="query">查询</button>
-          <button class="btn soft" onclick="exportLedgerCsv()" data-i18n="export_csv">导出 CSV</button>
+          <button class="btn soft admin-only" onclick="exportLedgerCsv()" data-i18n="export_csv">导出 CSV</button>
         </div>
         <div id="ledgerList" class="table-wrap"></div>
       </div>
@@ -263,6 +366,62 @@
   </form>
 </div>
 
+<div id="purchaseRequestModal" class="modal hidden" onclick="if(event.target===this)closeModal('purchaseRequestModal')">
+  <form class="modal-card wide" onsubmit="submitPurchaseRequest(event)">
+    <div class="modal-head"><h2 data-i18n="new_purchase_request">新建采购申请</h2><button type="button" onclick="closeModal('purchaseRequestModal')">×</button></div>
+    <div class="form-grid compact">
+      <label><span data-i18n="warehouse">仓库</span><input id="prWarehouse" list="warehouseList" required></label>
+      <label><span data-i18n="urgency">紧急程度</span><select id="prUrgency"><option value="normal" data-i18n="normal">普通</option><option value="urgent" data-i18n="urgent">紧急</option></select></label>
+    </div>
+    <label><span data-i18n="request_reason">申请原因</span><input id="prReason" required></label>
+    <div class="line-picker">
+      <input id="prMaterialInput" list="purchaseMaterialList" data-i18n-placeholder="choose_material" placeholder="输入耗材编号或选择耗材">
+      <input id="prMaterialQty" type="number" min="0.01" step="0.01" value="1" aria-label="数量">
+      <button class="btn soft" type="button" onclick="addPurchaseRequestLine()">＋ <span data-i18n="add_line">添加</span></button>
+    </div>
+    <div id="prLineEditor" class="line-editor"><div class="empty" data-i18n="add_material_hint">请先添加需要采购的耗材</div></div>
+    <label><span data-i18n="note">备注</span><textarea id="prNote" rows="2"></textarea></label>
+    <div class="form-actions"><button type="button" class="btn soft" onclick="closeModal('purchaseRequestModal')" data-i18n="cancel">取消</button><button type="submit" class="btn primary" data-i18n="submit_request">提交申请</button></div>
+  </form>
+</div>
+
+<div id="purchaseOrderModal" class="modal hidden" onclick="if(event.target===this)closeModal('purchaseOrderModal')">
+  <form class="modal-card wide" onsubmit="submitPurchaseOrder(event)">
+    <div class="modal-head"><h2 data-i18n="purchase_ordering">采购下单</h2><button type="button" onclick="closeModal('purchaseOrderModal')">×</button></div>
+    <input id="poOrderId" type="hidden">
+    <div class="form-grid">
+      <label><span data-i18n="supplier">供应商</span><input id="poSupplier"></label>
+      <label><span data-i18n="purchase_channel">采购渠道</span><input id="poChannel" placeholder="Coupang / 1688 / 国内采购"></label>
+      <label><span data-i18n="platform_order_no">平台订单号</span><input id="poPlatformNo"></label>
+      <label><span data-i18n="expected_date">预计到货日期</span><input id="poExpectedDate" type="date"></label>
+    </div>
+    <div class="section-label" data-i18n="ordered_items">实际采购明细</div>
+    <div id="poLineEditor" class="line-editor"></div>
+    <label><span data-i18n="note">备注</span><textarea id="poNote" rows="2"></textarea></label>
+    <div class="form-actions"><button type="button" class="btn soft" onclick="closeModal('purchaseOrderModal')" data-i18n="cancel">取消</button><button type="submit" class="btn primary" data-i18n="save_purchase">保存采购结果</button></div>
+  </form>
+</div>
+
+<div id="shipmentModal" class="modal hidden" onclick="if(event.target===this)closeModal('shipmentModal')">
+  <form class="modal-card wide" onsubmit="submitShipment(event)">
+    <div class="modal-head"><h2 data-i18n="register_shipment">登记发货/送货</h2><button type="button" onclick="closeModal('shipmentModal')">×</button></div>
+    <input id="shOrderId" type="hidden">
+    <div class="delivery-switch" id="deliverySwitch">
+      <label><input type="radio" name="deliveryMethod" value="express" checked onchange="toggleDeliveryMethod()"><span data-i18n="express_delivery">快递发货</span></label>
+      <label><input type="radio" name="deliveryMethod" value="supplier" onchange="toggleDeliveryMethod()"><span data-i18n="supplier_delivery">供应商送货</span></label>
+    </div>
+    <div class="form-grid">
+      <label id="trackingField"><span data-i18n="tracking_no">快递单号</span><input id="shTracking"></label>
+      <label><span data-i18n="supplier">供应商</span><input id="shSupplier"></label>
+      <label><span data-i18n="expected_date">预计到货日期</span><input id="shExpectedDate" type="date"></label>
+    </div>
+    <div class="section-label" data-i18n="shipment_items">本批发货明细</div>
+    <div id="shLineEditor" class="line-editor"></div>
+    <label><span data-i18n="note">备注</span><textarea id="shNote" rows="2"></textarea></label>
+    <div class="form-actions"><button type="button" class="btn soft" onclick="closeModal('shipmentModal')" data-i18n="cancel">取消</button><button type="submit" class="btn primary" data-i18n="confirm_shipment">确认登记</button></div>
+  </form>
+</div>
+
 <div id="scannerModal" class="modal hidden" onclick="if(event.target===this)closeScanner()">
   <div class="modal-card small">
     <div class="modal-head"><h2 data-i18n="scan_title">扫描耗材或物品二维码</h2><button type="button" onclick="closeScanner()">×</button></div>
@@ -273,12 +432,24 @@
   </div>
 </div>
 
+<div id="receivingScannerModal" class="modal hidden" onclick="if(event.target===this)closeReceivingScanner()">
+  <div class="modal-card small">
+    <div class="modal-head"><h2 data-i18n="scan_tracking">扫描快递单号</h2><button type="button" onclick="closeReceivingScanner()">×</button></div>
+    <div id="receivingReader" class="reader"></div>
+    <button id="receivingScanBtn" class="btn success full" onclick="startReceivingScan()" data-i18n="start_scan">开始扫描</button>
+    <div class="manual-code-row"><input id="manualTrackingCode" data-i18n-placeholder="tracking_or_shipment" placeholder="输入快递单号或系统到货单号" onkeydown="if(event.key==='Enter')lookupShipmentFromScanner()"><button class="btn soft" onclick="lookupShipmentFromScanner()" data-i18n="query">查询</button></div>
+    <div id="receivingScannerError" class="form-error"></div>
+  </div>
+</div>
+
 <div id="toast" class="toast"></div>
 <input id="assetPhotoInput" type="file" accept="image/*" capture="environment" class="hidden" onchange="uploadAssetPhoto(this)">
+<input id="arrivalPhotoInput" type="file" accept="image/*" capture="environment" class="hidden" onchange="uploadArrivalPhoto(this)">
+<datalist id="purchaseMaterialList"></datalist>
 
 <script src="../shared/html5-qrcode.min.js"></script>
 <script src="../shared/qrcode.min.js"></script>
-<script src="config.js?v=20260808a"></script>
-<script src="app.js?v=20260808a"></script>
+<script src="config.js?v=20260808c"></script>
+<script src="app.js?v=20260808c"></script>
 </body>
 </html>

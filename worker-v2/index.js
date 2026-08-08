@@ -1830,10 +1830,138 @@ const MIGRATIONS = [
     ON v2_003_asset_txns(action_type, created_at)`,
   `CREATE INDEX IF NOT EXISTS idx_v2_003_atxn_operator_time
     ON v2_003_asset_txns(operator_id, created_at)`,
+
+  // ---- v2.20260808b：003 采购申请、发货与到货收货 ----
+  `CREATE TABLE IF NOT EXISTS v2_003_purchase_orders (
+    id TEXT PRIMARY KEY,
+    order_no TEXT DEFAULT '',
+    status TEXT DEFAULT 'requested',
+    urgency TEXT DEFAULT 'normal',
+    warehouse_name TEXT DEFAULT '',
+    request_reason TEXT DEFAULT '',
+    requested_by_id TEXT DEFAULT '',
+    requested_by_name TEXT DEFAULT '',
+    purchaser_name TEXT DEFAULT '',
+    supplier TEXT DEFAULT '',
+    purchase_channel TEXT DEFAULT '',
+    platform_order_no TEXT DEFAULT '',
+    expected_date TEXT DEFAULT '',
+    currency TEXT DEFAULT 'KRW',
+    total_amount REAL DEFAULT 0,
+    note TEXT DEFAULT '',
+    has_discrepancy INTEGER DEFAULT 0,
+    closed_reason TEXT DEFAULT '',
+    created_at TEXT,
+    updated_at TEXT
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_003_po_no
+    ON v2_003_purchase_orders(order_no) WHERE order_no != ''`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_003_po_status_time
+    ON v2_003_purchase_orders(status, updated_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_003_po_requester
+    ON v2_003_purchase_orders(requested_by_id, created_at)`,
+
+  `CREATE TABLE IF NOT EXISTS v2_003_purchase_order_lines (
+    id TEXT PRIMARY KEY,
+    order_id TEXT DEFAULT '',
+    material_id TEXT DEFAULT '',
+    requested_qty REAL DEFAULT 0,
+    ordered_qty REAL DEFAULT 0,
+    received_qty REAL DEFAULT 0,
+    unit_cost REAL DEFAULT 0,
+    note TEXT DEFAULT '',
+    created_at TEXT,
+    updated_at TEXT
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_003_pol_order_material
+    ON v2_003_purchase_order_lines(order_id, material_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_003_pol_material
+    ON v2_003_purchase_order_lines(material_id, created_at)`,
+
+  `CREATE TABLE IF NOT EXISTS v2_003_purchase_shipments (
+    id TEXT PRIMARY KEY,
+    shipment_no TEXT DEFAULT '',
+    order_id TEXT DEFAULT '',
+    delivery_method TEXT DEFAULT 'express',
+    tracking_no TEXT DEFAULT '',
+    supplier TEXT DEFAULT '',
+    expected_date TEXT DEFAULT '',
+    status TEXT DEFAULT 'pending',
+    received_at TEXT DEFAULT '',
+    received_by TEXT DEFAULT '',
+    note TEXT DEFAULT '',
+    created_by TEXT DEFAULT '',
+    created_at TEXT,
+    updated_at TEXT
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_003_shipment_no
+    ON v2_003_purchase_shipments(shipment_no) WHERE shipment_no != ''`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_003_shipment_tracking
+    ON v2_003_purchase_shipments(tracking_no) WHERE tracking_no != ''`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_003_shipment_status_method
+    ON v2_003_purchase_shipments(status, delivery_method, expected_date)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_003_shipment_order
+    ON v2_003_purchase_shipments(order_id, created_at)`,
+
+  `CREATE TABLE IF NOT EXISTS v2_003_purchase_shipment_items (
+    id TEXT PRIMARY KEY,
+    shipment_id TEXT DEFAULT '',
+    order_line_id TEXT DEFAULT '',
+    material_id TEXT DEFAULT '',
+    expected_qty REAL DEFAULT 0,
+    received_qty REAL DEFAULT 0,
+    created_at TEXT,
+    updated_at TEXT
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_003_psi_shipment_line
+    ON v2_003_purchase_shipment_items(shipment_id, order_line_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_003_psi_material
+    ON v2_003_purchase_shipment_items(material_id, created_at)`,
+
+  `CREATE TABLE IF NOT EXISTS v2_003_purchase_receipts (
+    id TEXT PRIMARY KEY,
+    receipt_no TEXT DEFAULT '',
+    shipment_id TEXT DEFAULT '',
+    order_id TEXT DEFAULT '',
+    delivery_method TEXT DEFAULT '',
+    tracking_no TEXT DEFAULT '',
+    has_discrepancy INTEGER DEFAULT 0,
+    discrepancy_note TEXT DEFAULT '',
+    received_by_id TEXT DEFAULT '',
+    received_by_name TEXT DEFAULT '',
+    warehouse_name TEXT DEFAULT '',
+    received_at TEXT,
+    created_at TEXT
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_003_receipt_no
+    ON v2_003_purchase_receipts(receipt_no) WHERE receipt_no != ''`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_003_receipt_shipment
+    ON v2_003_purchase_receipts(shipment_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_003_receipt_order_time
+    ON v2_003_purchase_receipts(order_id, received_at)`,
+
+  `CREATE TABLE IF NOT EXISTS v2_003_purchase_receipt_items (
+    id TEXT PRIMARY KEY,
+    receipt_id TEXT DEFAULT '',
+    shipment_item_id TEXT DEFAULT '',
+    order_line_id TEXT DEFAULT '',
+    material_id TEXT DEFAULT '',
+    expected_qty REAL DEFAULT 0,
+    received_qty REAL DEFAULT 0,
+    difference_qty REAL DEFAULT 0,
+    warehouse_name TEXT DEFAULT '',
+    location_code TEXT DEFAULT '',
+    note TEXT DEFAULT '',
+    created_at TEXT
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_003_pri_receipt
+    ON v2_003_purchase_receipt_items(receipt_id, material_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_003_pri_material_time
+    ON v2_003_purchase_receipt_items(material_id, created_at)`,
 ];
 
 // 每次发布迁移变化时手动 +1（patch 段），冷启动只比对一次字符串即可跳过整段 MIGRATIONS
-const CURRENT_SCHEMA_VERSION = 'v2.20260808a';
+const CURRENT_SCHEMA_VERSION = 'v2.20260808b';
 
 let _migrated = false;
 async function ensureMigrated(db) {
@@ -11315,7 +11443,7 @@ route('v2_003_asset_action', async (body, env) => {
   const action = v003Text(body.action_type, 30);
   const allowed = ['assign', 'return', 'transfer', 'repair_start', 'repair_done', 'retire', 'lost'];
   if (!allowed.includes(action)) return err('invalid_action_type');
-  if (!['assign', 'return'].includes(action) && !isAdmin(body, env)) return err('unauthorized_admin_only', 401);
+  if (!['assign', 'return', 'transfer'].includes(action) && !isAdmin(body, env)) return err('unauthorized_admin_only', 401);
   const id = v003Text(body.asset_id, 100);
   const op = v003RequireOperator(body);
   if (!id) return err('missing_asset_id');
@@ -11343,6 +11471,7 @@ route('v2_003_asset_action', async (body, env) => {
         keeperName = '';
         status = 'available';
       } else if (action === 'transfer') {
+        if (!isAdmin(body, env) && item.keeper_id && item.keeper_id !== op.id) throw new Error('not_current_keeper');
         if (!warehouse) throw new Error('warehouse_required');
       } else if (action === 'repair_start') {
         status = 'repair';
@@ -11405,12 +11534,16 @@ route('v2_003_ledger_list', async (body, env) => {
   const { limit, offset } = pageParams(body);
   const kind = v003Text(body.kind, 20);
   const search = v003Text(body.search, 120);
+  const fieldRequest = !isAdmin(body, env) && isOpsKey(body, env);
+  const fieldOperatorId = fieldRequest ? v003Text(body.operator_id, 80) : '';
+  if (fieldRequest && !fieldOperatorId) return err('operator_required');
   const action = v003Text(body.txn_type || body.action_type, 30);
   const startRange = kstDayRangeUtc(v003Text(body.start_date, 10));
   const endRange = kstDayRangeUtc(v003Text(body.end_date, 10));
 
   async function materialRows() {
     const where = ['1=1']; const binds = [];
+    if (fieldRequest) { where.push('t.operator_id=?'); binds.push(fieldOperatorId); }
     if (search) { where.push('(m.material_code LIKE ? OR m.name_zh LIKE ? OR t.operator_name LIKE ? OR t.recipient_name LIKE ?)'); for (let i=0;i<4;i++) binds.push('%'+search+'%'); }
     if (action) { where.push('t.txn_type=?'); binds.push(action); }
     if (startRange) { where.push('t.created_at>=?'); binds.push(startRange.startUtc); }
@@ -11431,6 +11564,7 @@ route('v2_003_ledger_list', async (body, env) => {
 
   async function assetRows() {
     const where = ['1=1']; const binds = [];
+    if (fieldRequest) { where.push('t.operator_id=?'); binds.push(fieldOperatorId); }
     if (search) { where.push('(a.asset_code LIKE ? OR a.name_zh LIKE ? OR t.operator_name LIKE ? OR t.to_keeper_name LIKE ?)'); for (let i=0;i<4;i++) binds.push('%'+search+'%'); }
     if (action) { where.push('t.action_type=?'); binds.push(action); }
     if (startRange) { where.push('t.created_at>=?'); binds.push(startRange.startUtc); }
@@ -11438,7 +11572,7 @@ route('v2_003_ledger_list', async (body, env) => {
     const w = 'WHERE ' + where.join(' AND ');
     const [count, rows] = await Promise.all([
       env.DB.prepare(`SELECT COUNT(*) AS c FROM v2_003_asset_txns t JOIN v2_003_assets a ON a.id=t.asset_id ${w}`).bind(...binds).first(),
-      env.DB.prepare(`SELECT 'asset' AS kind, t.id, t.created_at, t.action_type,
+      env.DB.prepare(`SELECT 'asset' AS kind, t.id, t.created_at, t.action_type, t.status_after,
         a.id AS item_id, a.asset_code AS item_code, a.name_zh AS item_name, '' AS unit,
         0 AS qty_delta, 0 AS qty_before, 0 AS qty_after, t.operator_id, t.operator_name,
         t.to_keeper_id AS recipient_id, t.to_keeper_name AS recipient_name,
@@ -11463,6 +11597,460 @@ route('v2_003_ledger_list', async (body, env) => {
     .sort((x, y) => String(y.created_at).localeCompare(String(x.created_at)))
     .slice(0, limit);
   return json({ ok: true, items, ...pageMeta(m.total + a.total, limit, offset) });
+});
+
+// =====================================================
+// 003 - Purchasing & receiving / 采购与到货
+// =====================================================
+function v003HumanNo(prefix) {
+  const day = kstToday().replace(/-/g, '');
+  return String(prefix || 'NO') + '-' + day + '-' + crypto.randomUUID().slice(0, 6).toUpperCase();
+}
+
+function v003Lines(value, max = 60) {
+  return Array.isArray(value) ? value.slice(0, max) : [];
+}
+
+function v003PurchaseStatus(status) {
+  const allowed = ['requested', 'purchasing', 'shipped', 'partial_received', 'completed', 'cancelled'];
+  return allowed.includes(String(status || '')) ? String(status) : '';
+}
+
+async function v003PurchaseDetail(env, orderId) {
+  const order = await env.DB.prepare('SELECT * FROM v2_003_purchase_orders WHERE id=?').bind(orderId).first();
+  if (!order) return null;
+  const [lines, shipments, shipmentItems, attachments, receipts] = await Promise.all([
+    env.DB.prepare(`SELECT l.*, m.material_code, m.name_zh, m.name_ko, m.spec, m.unit,
+        COALESCE((SELECT SUM(si.expected_qty) FROM v2_003_purchase_shipment_items si
+          JOIN v2_003_purchase_shipments s ON s.id=si.shipment_id
+          WHERE si.order_line_id=l.id AND s.status!='cancelled'),0) AS scheduled_qty
+      FROM v2_003_purchase_order_lines l
+      JOIN v2_003_materials m ON m.id=l.material_id
+      WHERE l.order_id=? ORDER BY m.category, m.name_zh`).bind(orderId).all(),
+    env.DB.prepare(`SELECT s.*,
+        (SELECT COUNT(*) FROM v2_003_purchase_shipment_items si WHERE si.shipment_id=s.id) AS item_count,
+        (SELECT COUNT(*) FROM v2_attachments a WHERE a.related_doc_type='material_shipment'
+          AND a.related_doc_id=s.id AND a.attachment_category='arrival_photo') AS photo_count
+      FROM v2_003_purchase_shipments s WHERE s.order_id=? ORDER BY s.created_at DESC`).bind(orderId).all(),
+    env.DB.prepare(`SELECT si.*, m.material_code, m.name_zh, m.name_ko, m.spec, m.unit
+      FROM v2_003_purchase_shipment_items si
+      JOIN v2_003_materials m ON m.id=si.material_id
+      WHERE si.shipment_id IN (SELECT id FROM v2_003_purchase_shipments WHERE order_id=?)
+      ORDER BY m.category, m.name_zh`).bind(orderId).all(),
+    env.DB.prepare(`SELECT * FROM v2_attachments
+      WHERE related_doc_type='material_shipment'
+        AND related_doc_id IN (SELECT id FROM v2_003_purchase_shipments WHERE order_id=?)
+      ORDER BY created_at DESC`).bind(orderId).all(),
+    env.DB.prepare(`SELECT * FROM v2_003_purchase_receipts WHERE order_id=? ORDER BY received_at DESC`)
+      .bind(orderId).all()
+  ]);
+  return {
+    order,
+    lines: lines.results || [],
+    shipments: shipments.results || [],
+    shipment_items: shipmentItems.results || [],
+    attachments: attachments.results || [],
+    receipts: receipts.results || []
+  };
+}
+
+route('v2_003_purchase_summary', async (body, env) => {
+  if (!isAdmin(body, env)) return err('unauthorized_admin_only', 401);
+  const [requested, purchasing, waiting, partial, discrepancy, completed] = await Promise.all([
+    env.DB.prepare("SELECT COUNT(*) AS c FROM v2_003_purchase_orders WHERE status='requested'").first(),
+    env.DB.prepare("SELECT COUNT(*) AS c FROM v2_003_purchase_orders WHERE status='purchasing'").first(),
+    env.DB.prepare("SELECT COUNT(*) AS c FROM v2_003_purchase_orders WHERE status='shipped'").first(),
+    env.DB.prepare("SELECT COUNT(*) AS c FROM v2_003_purchase_orders WHERE status='partial_received'").first(),
+    env.DB.prepare("SELECT COUNT(*) AS c FROM v2_003_purchase_orders WHERE has_discrepancy=1 AND status!='cancelled'").first(),
+    env.DB.prepare("SELECT COUNT(*) AS c FROM v2_003_purchase_orders WHERE status='completed'").first()
+  ]);
+  return json({ ok: true, summary: {
+    requested: Number(requested && requested.c) || 0,
+    purchasing: Number(purchasing && purchasing.c) || 0,
+    waiting: Number(waiting && waiting.c) || 0,
+    partial: Number(partial && partial.c) || 0,
+    discrepancy: Number(discrepancy && discrepancy.c) || 0,
+    completed: Number(completed && completed.c) || 0
+  }});
+});
+
+route('v2_003_purchase_order_list', async (body, env) => {
+  if (!isAdmin(body, env)) return err('unauthorized_admin_only', 401);
+  const { limit, offset } = pageParams(body);
+  const status = v003PurchaseStatus(body.status);
+  const search = v003Text(body.search, 120);
+  const where = ['1=1'];
+  const binds = [];
+  if (status) { where.push('o.status=?'); binds.push(status); }
+  if (String(body.discrepancy_only || '') === '1') where.push('o.has_discrepancy=1');
+  if (search) {
+    where.push(`(o.order_no LIKE ? OR o.requested_by_name LIKE ? OR o.purchaser_name LIKE ?
+      OR o.supplier LIKE ? OR o.platform_order_no LIKE ?
+      OR EXISTS (SELECT 1 FROM v2_003_purchase_shipments s WHERE s.order_id=o.id AND s.tracking_no LIKE ?))`);
+    for (let i = 0; i < 6; i++) binds.push('%' + search + '%');
+  }
+  const w = 'WHERE ' + where.join(' AND ');
+  const [count, rows] = await Promise.all([
+    env.DB.prepare(`SELECT COUNT(*) AS c FROM v2_003_purchase_orders o ${w}`).bind(...binds).first(),
+    env.DB.prepare(`SELECT o.*,
+        COALESCE((SELECT SUM(l.requested_qty) FROM v2_003_purchase_order_lines l WHERE l.order_id=o.id),0) AS requested_total,
+        COALESCE((SELECT SUM(l.ordered_qty) FROM v2_003_purchase_order_lines l WHERE l.order_id=o.id),0) AS ordered_total,
+        COALESCE((SELECT SUM(l.received_qty) FROM v2_003_purchase_order_lines l WHERE l.order_id=o.id),0) AS received_total,
+        (SELECT COUNT(*) FROM v2_003_purchase_order_lines l WHERE l.order_id=o.id) AS line_count,
+        (SELECT COUNT(*) FROM v2_003_purchase_order_lines l WHERE l.order_id=o.id
+          AND l.ordered_qty>0 AND l.received_qty>=l.ordered_qty) AS completed_line_count,
+        (SELECT COUNT(*) FROM v2_003_purchase_shipments s WHERE s.order_id=o.id AND s.status='pending') AS pending_shipment_count
+      FROM v2_003_purchase_orders o ${w}
+      ORDER BY CASE o.status WHEN 'requested' THEN 0 WHEN 'partial_received' THEN 1 WHEN 'shipped' THEN 2
+        WHEN 'purchasing' THEN 3 WHEN 'completed' THEN 4 ELSE 5 END, o.updated_at DESC
+      LIMIT ? OFFSET ?`).bind(...binds, limit, offset).all()
+  ]);
+  return json({ ok: true, items: rows.results || [], ...pageMeta(count && count.c, limit, offset) });
+});
+
+route('v2_003_purchase_order_detail', async (body, env) => {
+  if (!isAdmin(body, env)) return err('unauthorized_admin_only', 401);
+  const id = v003Text(body.id, 100);
+  if (!id) return err('missing_id');
+  const detail = await v003PurchaseDetail(env, id);
+  if (!detail) return err('not_found', 404);
+  return json({ ok: true, ...detail });
+});
+
+route('v2_003_purchase_request_create', async (body, env) => {
+  if (!isAdmin(body, env) && !isOpsKey(body, env)) return err('unauthorized', 401);
+  const op = v003RequireOperator(body);
+  if (!op) return err('operator_required');
+  const input = v003Lines(body.lines);
+  if (!input.length) return err('purchase_lines_required');
+  const seen = new Set();
+  const lines = [];
+  for (const raw of input) {
+    const materialId = v003Text(raw && raw.material_id, 100);
+    const qty = v003Number(raw && raw.requested_qty, NaN);
+    if (!materialId || seen.has(materialId) || !Number.isFinite(qty) || qty <= 0) return err('invalid_purchase_line');
+    seen.add(materialId);
+    const material = await env.DB.prepare("SELECT id FROM v2_003_materials WHERE id=? AND status='active'")
+      .bind(materialId).first();
+    if (!material) return err('material_not_found');
+    lines.push({ material_id: materialId, requested_qty: qty, note: v003Text(raw.note, 500) });
+  }
+  return withIdem(env, body, 'v2_003_purchase_request_create', async () => {
+    const orderId = v003Id('PO');
+    const orderNo = v003HumanNo('CG');
+    const t = now();
+    const urgency = ['normal', 'urgent'].includes(String(body.urgency)) ? String(body.urgency) : 'normal';
+    const statements = [env.DB.prepare(`INSERT INTO v2_003_purchase_orders
+      (id, order_no, status, urgency, warehouse_name, request_reason, requested_by_id, requested_by_name,
+       purchaser_name, supplier, purchase_channel, platform_order_no, expected_date, currency, total_amount,
+       note, has_discrepancy, closed_reason, created_at, updated_at)
+      VALUES(?,?,'requested',?,?,?,?,?,'','','','','','KRW',0,?,0,'',?,?)`)
+      .bind(orderId, orderNo, urgency, v003Text(body.warehouse_name, 80), v003Text(body.request_reason, 500),
+        op.id, op.name, v003Text(body.note, 1000), t, t)];
+    for (const line of lines) {
+      statements.push(env.DB.prepare(`INSERT INTO v2_003_purchase_order_lines
+        (id, order_id, material_id, requested_qty, ordered_qty, received_qty, unit_cost, note, created_at, updated_at)
+        VALUES(?,?,?,?,0,0,0,?,?,?)`)
+        .bind(v003Id('POL'), orderId, line.material_id, line.requested_qty, line.note, t, t));
+    }
+    await env.DB.batch(statements);
+    return { ok: true, id: orderId, order_no: orderNo };
+  });
+});
+
+route('v2_003_purchase_order_update', async (body, env) => {
+  if (!isAdmin(body, env)) return err('unauthorized_admin_only', 401);
+  const id = v003Text(body.id, 100);
+  const op = v003RequireOperator(body) || { id: 'ADMIN', name: '管理员' };
+  const order = await env.DB.prepare('SELECT * FROM v2_003_purchase_orders WHERE id=?').bind(id).first();
+  if (!order) return err('not_found', 404);
+  if (['completed', 'cancelled'].includes(order.status)) return err('purchase_order_closed');
+  const existingRs = await env.DB.prepare(`SELECT l.*,
+      COALESCE((SELECT SUM(si.expected_qty) FROM v2_003_purchase_shipment_items si
+        JOIN v2_003_purchase_shipments s ON s.id=si.shipment_id
+        WHERE si.order_line_id=l.id AND s.status!='cancelled'),0) AS scheduled_qty
+    FROM v2_003_purchase_order_lines l WHERE l.order_id=?`).bind(id).all();
+  const existing = existingRs.results || [];
+  const changes = new Map(v003Lines(body.lines).map(x => [v003Text(x && x.id, 100), x]));
+  let total = 0;
+  let orderedCount = 0;
+  const t = now();
+  const statements = [];
+  for (const line of existing) {
+    const raw = changes.get(line.id) || {};
+    const orderedQty = v003Number(raw.ordered_qty, line.ordered_qty || line.requested_qty);
+    const unitCost = Math.max(0, v003Number(raw.unit_cost, line.unit_cost));
+    if (!Number.isFinite(orderedQty) || orderedQty < 0 || orderedQty < v003Number(line.scheduled_qty)) {
+      return err('ordered_qty_below_shipped');
+    }
+    if (orderedQty > 0) orderedCount++;
+    total += orderedQty * unitCost;
+    statements.push(env.DB.prepare(`UPDATE v2_003_purchase_order_lines
+      SET ordered_qty=?, unit_cost=?, note=?, updated_at=? WHERE id=? AND order_id=?`)
+      .bind(orderedQty, unitCost, v003Text(raw.note != null ? raw.note : line.note, 500), t, line.id, id));
+  }
+  if (!orderedCount) return err('ordered_qty_required');
+  statements.push(env.DB.prepare(`UPDATE v2_003_purchase_orders SET status='purchasing', purchaser_name=?,
+      supplier=?, purchase_channel=?, platform_order_no=?, expected_date=?, currency=?, total_amount=?, note=?, updated_at=?
+      WHERE id=?`)
+    .bind(op.name, v003Text(body.supplier, 160), v003Text(body.purchase_channel, 100),
+      v003Text(body.platform_order_no, 160), normalizeDateOnly(body.expected_date),
+      v003Text(body.currency || 'KRW', 12) || 'KRW', Math.round(total * 100) / 100,
+      v003Text(body.note != null ? body.note : order.note, 1000), t, id));
+  await env.DB.batch(statements);
+  return json({ ok: true, id, status: 'purchasing', total_amount: Math.round(total * 100) / 100 });
+});
+
+route('v2_003_purchase_shipment_create', async (body, env) => {
+  if (!isAdmin(body, env)) return err('unauthorized_admin_only', 401);
+  const orderId = v003Text(body.order_id, 100);
+  const method = ['express', 'supplier'].includes(String(body.delivery_method)) ? String(body.delivery_method) : '';
+  const tracking = v003Text(body.tracking_no, 180);
+  if (!method) return err('delivery_method_required');
+  if (method === 'express' && !tracking) return err('tracking_no_required');
+  const order = await env.DB.prepare('SELECT * FROM v2_003_purchase_orders WHERE id=?').bind(orderId).first();
+  if (!order) return err('not_found', 404);
+  if (['completed', 'cancelled'].includes(order.status)) return err('purchase_order_closed');
+  if (tracking) {
+    const duplicate = await env.DB.prepare('SELECT id FROM v2_003_purchase_shipments WHERE tracking_no=? LIMIT 1')
+      .bind(tracking).first();
+    if (duplicate) return err('duplicate_tracking_no');
+  }
+  const lineRs = await env.DB.prepare(`SELECT l.*,
+      COALESCE((SELECT SUM(si.expected_qty) FROM v2_003_purchase_shipment_items si
+        JOIN v2_003_purchase_shipments s ON s.id=si.shipment_id
+        WHERE si.order_line_id=l.id AND s.status!='cancelled'),0) AS scheduled_qty
+    FROM v2_003_purchase_order_lines l WHERE l.order_id=?`).bind(orderId).all();
+  const lineMap = new Map((lineRs.results || []).map(x => [x.id, x]));
+  const rawItems = v003Lines(body.items);
+  const items = [];
+  const seen = new Set();
+  for (const raw of rawItems) {
+    const lineId = v003Text(raw && raw.order_line_id, 100);
+    const qty = v003Number(raw && raw.expected_qty, NaN);
+    const line = lineMap.get(lineId);
+    if (!line || seen.has(lineId) || !Number.isFinite(qty) || qty <= 0) return err('invalid_shipment_line');
+    if (v003Number(line.scheduled_qty) + qty > v003Number(line.ordered_qty) + 0.0001) return err('shipment_qty_exceeds_ordered');
+    seen.add(lineId);
+    items.push({ line_id: lineId, material_id: line.material_id, qty });
+  }
+  if (!items.length) return err('shipment_lines_required');
+  return withIdem(env, body, 'v2_003_purchase_shipment_create', async () => {
+    const shipmentId = v003Id('SHP');
+    const shipmentNo = v003HumanNo(method === 'express' ? 'KD' : 'SC');
+    const op = v003RequireOperator(body) || { id: 'ADMIN', name: '管理员' };
+    const t = now();
+    const statements = [env.DB.prepare(`INSERT INTO v2_003_purchase_shipments
+      (id, shipment_no, order_id, delivery_method, tracking_no, supplier, expected_date, status,
+       received_at, received_by, note, created_by, created_at, updated_at)
+      VALUES(?,?,?,?,?,?,?,'pending','','',?,?,?,?)`)
+      .bind(shipmentId, shipmentNo, orderId, method, tracking,
+        v003Text(body.supplier || order.supplier, 160), normalizeDateOnly(body.expected_date),
+        v003Text(body.note, 1000), op.name, t, t)];
+    for (const item of items) {
+      statements.push(env.DB.prepare(`INSERT INTO v2_003_purchase_shipment_items
+        (id, shipment_id, order_line_id, material_id, expected_qty, received_qty, created_at, updated_at)
+        VALUES(?,?,?,?,?,0,?,?)`)
+        .bind(v003Id('PSI'), shipmentId, item.line_id, item.material_id, item.qty, t, t));
+    }
+    statements.push(env.DB.prepare(`UPDATE v2_003_purchase_orders
+      SET status=CASE WHEN status='partial_received' THEN status ELSE 'shipped' END, updated_at=? WHERE id=?`)
+      .bind(t, orderId));
+    await env.DB.batch(statements);
+    return { ok: true, id: shipmentId, shipment_no: shipmentNo };
+  });
+});
+
+async function v003ReceivingDetail(env, shipment) {
+  const [items, attachments, receipt] = await Promise.all([
+    env.DB.prepare(`SELECT si.*, l.unit_cost, l.requested_qty, l.ordered_qty, l.received_qty AS order_received_qty,
+        m.material_code, m.name_zh, m.name_ko, m.spec, m.unit, m.warehouse_name, m.location_code
+      FROM v2_003_purchase_shipment_items si
+      JOIN v2_003_purchase_order_lines l ON l.id=si.order_line_id
+      JOIN v2_003_materials m ON m.id=si.material_id
+      WHERE si.shipment_id=? ORDER BY m.category, m.name_zh`).bind(shipment.id).all(),
+    env.DB.prepare(`SELECT * FROM v2_attachments WHERE related_doc_type='material_shipment'
+      AND related_doc_id=? ORDER BY created_at DESC`).bind(shipment.id).all(),
+    env.DB.prepare('SELECT * FROM v2_003_purchase_receipts WHERE shipment_id=?').bind(shipment.id).first()
+  ]);
+  return { shipment, items: items.results || [], attachments: attachments.results || [], receipt: receipt || null };
+}
+
+route('v2_003_receiving_pending', async (body, env) => {
+  if (!isAdmin(body, env) && !isOpsKey(body, env)) return err('unauthorized', 401);
+  const method = ['express', 'supplier'].includes(String(body.delivery_method)) ? String(body.delivery_method) : '';
+  const binds = [];
+  let where = "WHERE s.status='pending'";
+  if (method) { where += ' AND s.delivery_method=?'; binds.push(method); }
+  const rows = await env.DB.prepare(`SELECT s.*, o.order_no, o.warehouse_name, o.urgency,
+      (SELECT COUNT(*) FROM v2_003_purchase_shipment_items si WHERE si.shipment_id=s.id) AS item_count,
+      (SELECT COUNT(*) FROM v2_attachments a WHERE a.related_doc_type='material_shipment'
+        AND a.related_doc_id=s.id AND a.attachment_category='arrival_photo') AS photo_count
+    FROM v2_003_purchase_shipments s JOIN v2_003_purchase_orders o ON o.id=s.order_id
+    ${where} ORDER BY CASE o.urgency WHEN 'urgent' THEN 0 ELSE 1 END,
+      CASE WHEN s.expected_date='' THEN 1 ELSE 0 END, s.expected_date, s.created_at`).bind(...binds).all();
+  return json({ ok: true, items: rows.results || [] });
+});
+
+route('v2_003_receiving_lookup', async (body, env) => {
+  if (!isAdmin(body, env) && !isOpsKey(body, env)) return err('unauthorized', 401);
+  const code = v003Text(body.code, 180);
+  if (!code) return err('missing_code');
+  const shipment = await env.DB.prepare(`SELECT s.*, o.order_no, o.warehouse_name AS requested_warehouse,
+      o.requested_by_name, o.purchaser_name, o.purchase_channel, o.platform_order_no
+    FROM v2_003_purchase_shipments s JOIN v2_003_purchase_orders o ON o.id=s.order_id
+    WHERE s.tracking_no=? OR s.shipment_no=? LIMIT 1`).bind(code, code).first();
+  if (!shipment) return err('shipment_not_found', 404);
+  const detail = await v003ReceivingDetail(env, shipment);
+  return json({ ok: true, ...detail });
+});
+
+route('v2_003_receipt_confirm', async (body, env) => {
+  if (!isAdmin(body, env) && !isOpsKey(body, env)) return err('unauthorized', 401);
+  const shipmentId = v003Text(body.shipment_id, 100);
+  const op = v003RequireOperator(body);
+  if (!shipmentId) return err('missing_shipment_id');
+  if (!op) return err('operator_required');
+  const shipment = await env.DB.prepare(`SELECT s.*, o.order_no, o.supplier AS order_supplier
+    FROM v2_003_purchase_shipments s JOIN v2_003_purchase_orders o ON o.id=s.order_id WHERE s.id=?`)
+    .bind(shipmentId).first();
+  if (!shipment) return err('shipment_not_found', 404);
+  if (shipment.status !== 'pending') {
+    const receipt = await env.DB.prepare('SELECT id, receipt_no FROM v2_003_purchase_receipts WHERE shipment_id=?')
+      .bind(shipmentId).first();
+    return json({ ok: true, duplicate: true, receipt: receipt || null, shipment_status: shipment.status });
+  }
+  if (shipment.delivery_method === 'supplier') {
+    const photo = await env.DB.prepare(`SELECT id FROM v2_attachments WHERE related_doc_type='material_shipment'
+      AND related_doc_id=? AND attachment_category='arrival_photo' LIMIT 1`).bind(shipmentId).first();
+    if (!photo) return err('arrival_photo_required');
+  }
+  const itemRs = await env.DB.prepare(`SELECT si.*, l.unit_cost, m.current_qty, m.stock_version,
+      m.warehouse_name AS current_warehouse, m.location_code AS current_location
+    FROM v2_003_purchase_shipment_items si
+    JOIN v2_003_purchase_order_lines l ON l.id=si.order_line_id
+    JOIN v2_003_materials m ON m.id=si.material_id WHERE si.shipment_id=?`).bind(shipmentId).all();
+  const shipmentItems = itemRs.results || [];
+  if (!shipmentItems.length) return err('shipment_lines_required');
+  const rawMap = new Map(v003Lines(body.items).map(x => [v003Text(x && x.shipment_item_id, 100), x]));
+  const receiptItems = [];
+  let hasDiscrepancy = false;
+  for (const item of shipmentItems) {
+    const raw = rawMap.get(item.id);
+    if (!raw) return err('receipt_lines_incomplete');
+    const qty = v003Number(raw.received_qty, NaN);
+    if (!Number.isFinite(qty) || qty < 0 || qty > 1000000000) return err('invalid_received_qty');
+    const warehouse = v003Text(raw.warehouse_name || body.warehouse_name || item.current_warehouse, 80);
+    const location = v003Text(raw.location_code || body.location_code || item.current_location, 80);
+    if (qty > 0 && (!warehouse || !location)) return err('putaway_location_required');
+    const difference = Math.round((qty - v003Number(item.expected_qty)) * 10000) / 10000;
+    if (Math.abs(difference) > 0.0001) hasDiscrepancy = true;
+    receiptItems.push({
+      ...item,
+      received_qty: qty,
+      difference_qty: difference,
+      warehouse_name: warehouse,
+      location_code: location,
+      note: v003Text(raw.note, 500)
+    });
+  }
+  const discrepancyNote = v003Text(body.discrepancy_note, 1000);
+  if (discrepancyNote) hasDiscrepancy = true;
+  const receiptId = v003Id('REC');
+  const receiptNo = v003HumanNo('SH');
+  const t = now();
+  const statements = [];
+  statements.push(env.DB.prepare(`INSERT INTO v2_003_purchase_receipts
+    (id, receipt_no, shipment_id, order_id, delivery_method, tracking_no, has_discrepancy,
+     discrepancy_note, received_by_id, received_by_name, warehouse_name, received_at, created_at)
+    SELECT ?,?,?,?,?,?,?,?,?,?,?,?,? FROM v2_003_purchase_shipments s
+    WHERE s.id=? AND s.status='pending'
+      AND NOT EXISTS (SELECT 1 FROM v2_003_purchase_receipts r WHERE r.shipment_id=s.id)`)
+    .bind(receiptId, receiptNo, shipmentId, shipment.order_id, shipment.delivery_method, shipment.tracking_no,
+      hasDiscrepancy ? 1 : 0, discrepancyNote, op.id, op.name, v003Text(body.warehouse_name, 80), t, t, shipmentId));
+  for (const item of receiptItems) {
+    const receiptItemId = v003Id('RCI');
+    statements.push(env.DB.prepare(`INSERT INTO v2_003_purchase_receipt_items
+      (id, receipt_id, shipment_item_id, order_line_id, material_id, expected_qty, received_qty,
+       difference_qty, warehouse_name, location_code, note, created_at)
+      SELECT ?,?,?,?,?,?,?,?,?,?,?,? WHERE EXISTS
+        (SELECT 1 FROM v2_003_purchase_receipts WHERE id=? AND shipment_id=?)`)
+      .bind(receiptItemId, receiptId, item.id, item.order_line_id, item.material_id, item.expected_qty,
+        item.received_qty, item.difference_qty, item.warehouse_name, item.location_code, item.note, t,
+        receiptId, shipmentId));
+    statements.push(env.DB.prepare(`UPDATE v2_003_purchase_shipment_items SET received_qty=?, updated_at=?
+      WHERE id=? AND EXISTS (SELECT 1 FROM v2_003_purchase_receipts WHERE id=?)`)
+      .bind(item.received_qty, t, item.id, receiptId));
+    if (item.received_qty > 0) {
+      statements.push(env.DB.prepare(`UPDATE v2_003_materials SET current_qty=current_qty+?,
+        warehouse_name=?, location_code=?, unit_cost=?, supplier=?, stock_version=stock_version+1,
+        updated_by=?, updated_at=? WHERE id=?
+        AND EXISTS (SELECT 1 FROM v2_003_purchase_receipts WHERE id=?)`)
+        .bind(item.received_qty, item.warehouse_name, item.location_code, Math.max(0, v003Number(item.unit_cost)),
+          v003Text(shipment.supplier || shipment.order_supplier, 160), op.name, t, item.material_id, receiptId));
+      statements.push(env.DB.prepare(`INSERT INTO v2_003_material_txns
+        (id, material_id, txn_type, qty_delta, qty_before, qty_after, warehouse_name, location_code,
+         recipient_id, recipient_name, purpose, related_doc_no, unit_cost, supplier, note,
+         operator_id, operator_name, created_at)
+        SELECT ?,m.id,'purchase_inbound',?,m.current_qty-?,m.current_qty,?,?,?,?,?,?,?,?,?,?,?,?
+        FROM v2_003_materials m WHERE m.id=?
+          AND EXISTS (SELECT 1 FROM v2_003_purchase_receipts WHERE id=?)`)
+        .bind(v003Id('MTX'), item.received_qty, item.received_qty, item.warehouse_name, item.location_code,
+          '', '', '采购到货', receiptNo, Math.max(0, v003Number(item.unit_cost)),
+          v003Text(shipment.supplier || shipment.order_supplier, 160), item.note, op.id, op.name, t,
+          item.material_id, receiptId));
+    }
+  }
+  statements.push(env.DB.prepare(`UPDATE v2_003_purchase_order_lines SET
+    received_qty=COALESCE((SELECT SUM(ri.received_qty) FROM v2_003_purchase_receipt_items ri
+      WHERE ri.order_line_id=v2_003_purchase_order_lines.id),0), updated_at=?
+    WHERE order_id=? AND EXISTS (SELECT 1 FROM v2_003_purchase_receipts WHERE id=?)`)
+    .bind(t, shipment.order_id, receiptId));
+  statements.push(env.DB.prepare(`UPDATE v2_003_purchase_shipments SET status=?, received_at=?, received_by=?, updated_at=?
+    WHERE id=? AND status='pending' AND EXISTS (SELECT 1 FROM v2_003_purchase_receipts WHERE id=?)`)
+    .bind(hasDiscrepancy ? 'discrepancy' : 'received', t, op.name, t, shipmentId, receiptId));
+  statements.push(env.DB.prepare(`UPDATE v2_003_purchase_orders SET
+    has_discrepancy=CASE WHEN ?=1 THEN 1 ELSE has_discrepancy END,
+    status=CASE
+      WHEN (SELECT COALESCE(SUM(received_qty),0) FROM v2_003_purchase_order_lines WHERE order_id=id)
+        >= (SELECT COALESCE(SUM(ordered_qty),0) FROM v2_003_purchase_order_lines WHERE order_id=id)
+       AND (SELECT COALESCE(SUM(ordered_qty),0) FROM v2_003_purchase_order_lines WHERE order_id=id)>0
+       AND NOT EXISTS (SELECT 1 FROM v2_003_purchase_order_lines WHERE order_id=id AND ordered_qty<=0)
+      THEN 'completed' ELSE 'partial_received' END,
+    updated_at=? WHERE id=? AND EXISTS (SELECT 1 FROM v2_003_purchase_receipts WHERE id=?)`)
+    .bind(hasDiscrepancy ? 1 : 0, t, shipment.order_id, receiptId));
+  const results = await env.DB.batch(statements);
+  if (!v003Changes(results[0])) {
+    const existing = await env.DB.prepare('SELECT id, receipt_no FROM v2_003_purchase_receipts WHERE shipment_id=?')
+      .bind(shipmentId).first();
+    return json({ ok: true, duplicate: true, receipt: existing || null });
+  }
+  const updatedOrder = await env.DB.prepare('SELECT status, has_discrepancy FROM v2_003_purchase_orders WHERE id=?')
+    .bind(shipment.order_id).first();
+  return json({ ok: true, id: receiptId, receipt_no: receiptNo, has_discrepancy: hasDiscrepancy,
+    order_status: updatedOrder && updatedOrder.status });
+});
+
+route('v2_003_purchase_order_close', async (body, env) => {
+  if (!isAdmin(body, env)) return err('unauthorized_admin_only', 401);
+  const id = v003Text(body.id, 100);
+  const mode = String(body.mode || '');
+  const reason = v003Text(body.reason, 1000);
+  if (!reason) return err('close_reason_required');
+  const order = await env.DB.prepare('SELECT * FROM v2_003_purchase_orders WHERE id=?').bind(id).first();
+  if (!order) return err('not_found', 404);
+  if (['completed', 'cancelled'].includes(order.status)) return json({ ok: true, id, status: order.status });
+  const status = mode === 'cancel' ? 'cancelled' : 'completed';
+  const t = now();
+  const statements = [env.DB.prepare(`UPDATE v2_003_purchase_orders SET status=?,
+    has_discrepancy=CASE WHEN ?='completed' THEN 1 ELSE has_discrepancy END,
+    closed_reason=?, updated_at=? WHERE id=?`).bind(status, status, reason, t, id)];
+  if (status === 'cancelled') {
+    statements.push(env.DB.prepare("UPDATE v2_003_purchase_shipments SET status='cancelled', updated_at=? WHERE order_id=? AND status='pending'")
+      .bind(t, id));
+  }
+  await env.DB.batch(statements);
+  return json({ ok: true, id, status });
 });
 
 // =====================================================
@@ -11540,16 +12128,26 @@ export default {
 async function handleMultipartUpload(formData, env) {
   try {
     await ensureMigrated(env.DB);
+    if (!formData) return err("invalid multipart form");
     const k = formData.get("k") || "";
     if (!isOpsAuth({ k }, env)) return err("unauthorized", 401);
 
     const file = formData.get("file");
     if (!file) return err("missing file");
 
-    const related_doc_type = formData.get("related_doc_type") || "";
-    const related_doc_id = formData.get("related_doc_id") || "";
-    const attachment_category = formData.get("attachment_category") || "";
-    const uploaded_by = formData.get("uploaded_by") || "";
+    const related_doc_type = v003Text(formData.get("related_doc_type"), 80);
+    const related_doc_id = v003Text(formData.get("related_doc_id"), 120);
+    const attachment_category = v003Text(formData.get("attachment_category"), 80);
+    const uploaded_by = v003Text(formData.get("uploaded_by"), 120);
+    if (!related_doc_type || !related_doc_id) return err("missing attachment target");
+    if (attachment_category === 'arrival_photo') {
+      if (related_doc_type !== 'material_shipment') return err('invalid_arrival_photo_target');
+      if (!String(file.type || '').startsWith('image/')) return err('image_required');
+      if (Number(file.size) > 15 * 1024 * 1024) return err('file_too_large');
+      const shipment = await env.DB.prepare("SELECT id FROM v2_003_purchase_shipments WHERE id=? AND status='pending'")
+        .bind(related_doc_id).first();
+      if (!shipment) return err('shipment_not_pending');
+    }
 
     const id = "ATT-" + uid();
     const fileKey = `v2/${related_doc_type}/${related_doc_id}/${id}-${file.name}`;
