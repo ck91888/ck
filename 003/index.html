@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" content="#102a43">
   <title>耗材与物品管理 / 소모품·비품 관리</title>
-  <link rel="stylesheet" href="style.css?v=20260808c">
+  <link rel="stylesheet" href="style.css?v=20260808d">
 </head>
 <body>
 
@@ -73,7 +73,7 @@
   <nav class="main-tabs role-tabs" id="adminTabs">
     <button class="active" data-view="dashboard" onclick="goView('dashboard',this)"><span>⌂</span><b data-i18n="dashboard">总览</b></button>
     <button data-view="materials" onclick="goView('materials',this)"><span>▤</span><b data-i18n="materials">耗材</b></button>
-    <button data-view="assets" onclick="goView('assets',this)"><span>▣</span><b data-i18n="assets">仓库物品</b></button>
+    <button data-view="assets" onclick="goView('assets',this)"><span>▣</span><b data-i18n="assets">物品</b></button>
     <button data-view="purchasing" onclick="goView('purchasing',this)"><span>◇</span><b data-i18n="purchasing">采购到货</b></button>
     <button data-view="ledger" onclick="goView('ledger',this)"><span>↕</span><b data-i18n="ledger">出入记录</b></button>
     <button id="settingsTabBtn" data-view="settings" onclick="goView('settings',this)"><span>⚙</span><b data-i18n="settings">基础设置</b></button>
@@ -113,7 +113,7 @@
         </button>
         <button class="field-action asset" onclick="goView('assets')">
           <span class="field-action-icon">▣</span>
-          <span><b data-i18n="asset_work">物品操作</b><small data-i18n="asset_work_sub">领用、归还或调拨仓库物品</small></span>
+          <span><b data-i18n="asset_work">物品操作</b><small data-i18n="asset_work_sub">领用、归还或转移物品</small></span>
           <i>›</i>
         </button>
         <button class="field-action request" onclick="openPurchaseRequest()">
@@ -144,12 +144,31 @@
         <div class="panel-head"><h2 data-i18n="recent_activity">最近动态</h2><button class="btn mini soft" onclick="loadDashboard()">↻</button></div>
         <div id="recentActivity" class="activity-list"><div class="empty" data-i18n="loading">加载中...</div></div>
       </div>
+      <div class="panel department-panel">
+        <div class="panel-head department-head">
+          <div><h2 data-i18n="department_usage">部门耗材统计</h2><p data-i18n="department_usage_hint">按部门、耗材和单位分别统计领用、消耗与退回</p></div>
+          <div class="department-filters">
+            <select id="usageDepartment" onchange="loadDepartmentUsage()">
+              <option value="" data-i18n="all_departments">全部部门</option>
+              <option value="代发" data-i18n="department_direct">代发</option>
+              <option value="大货" data-i18n="department_bulk">大货</option>
+              <option value="进口" data-i18n="department_import">进口</option>
+            </select>
+            <input id="usageStart" type="date" onchange="loadDepartmentUsage()">
+            <input id="usageEnd" type="date" onchange="loadDepartmentUsage()">
+            <button class="btn mini soft" onclick="loadDepartmentUsage()">↻</button>
+          </div>
+        </div>
+        <div id="departmentUsageSummary" class="department-summary"></div>
+        <div id="departmentUsageTable" class="table-wrap"><div class="empty" data-i18n="loading">加载中...</div></div>
+      </div>
     </section>
 
     <section id="view-materials" class="view">
       <div class="toolbar">
         <div class="search-group"><input id="materialSearch" data-i18n-placeholder="search" placeholder="搜索名称、编号或条码" onkeydown="if(event.key==='Enter')loadMaterials()"><button onclick="loadMaterials()">⌕</button></div>
         <button class="btn soft" onclick="openScanner()">▣ <span data-i18n="scan_item">扫码查找</span></button>
+        <button class="btn soft admin-only" onclick="openMaterialImport()">⇧ <span data-i18n="bulk_import">表格批量导入</span></button>
         <button id="addMaterialBtn" class="btn primary admin-only" onclick="openMaterialForm()">＋ <span data-i18n="add_material">新增耗材</span></button>
       </div>
       <div class="filter-row">
@@ -182,8 +201,7 @@
           <label><span data-i18n="category">分类</span><input id="mfCategory" list="materialCategoryList" required></label>
           <label><span data-i18n="spec">规格</span><input id="mfSpec"></label>
           <label><span data-i18n="unit">单位</span><input id="mfUnit" list="materialUnitList" required></label>
-          <label><span data-i18n="warehouse">仓库</span><input id="mfWarehouse" list="warehouseList"></label>
-          <label><span data-i18n="location">位置/货位</span><input id="mfLocation" list="locationList"></label>
+          <label><span data-i18n="storage_location">存放位置/货位（可选）</span><input id="mfLocation" list="locationList"></label>
           <label id="mfOpeningWrap"><span data-i18n="opening_qty">期初库存</span><input id="mfOpening" type="number" min="0" step="0.01" value="0"></label>
           <label><span data-i18n="min_stock">最低库存</span><input id="mfMin" type="number" min="0" step="0.01" value="0"></label>
           <label><span data-i18n="cost">单价</span><input id="mfCost" type="number" min="0" step="0.01"></label>
@@ -234,8 +252,7 @@
           <label><span data-i18n="brand">品牌</span><input id="afBrand"></label>
           <label><span data-i18n="model">型号</span><input id="afModel"></label>
           <label><span data-i18n="serial_no">序列号</span><input id="afSerial"></label>
-          <label><span data-i18n="warehouse">仓库</span><input id="afWarehouse" list="warehouseList"></label>
-          <label><span data-i18n="location">位置/货位</span><input id="afLocation" list="locationList"></label>
+          <label><span data-i18n="storage_location">存放位置/货位（可选）</span><input id="afLocation" list="locationList"></label>
           <label><span data-i18n="purchase_date">购买日期</span><input id="afPurchaseDate" type="date"></label>
           <label><span data-i18n="purchase_cost">采购价格</span><input id="afCost" type="number" min="0" step="0.01"></label>
           <label><span data-i18n="supplier">供应商</span><input id="afSupplier"></label>
@@ -294,6 +311,7 @@
         <div class="panel-head ledger-title-row"><h2 id="ledgerTitle" data-i18n="ledger">出入记录</h2></div>
         <div class="filter-row ledger-filter">
           <select id="ledgerKind" onchange="loadLedger()"><option value="" data-i18n="all_records">全部记录</option><option value="material" data-i18n="material_records">耗材记录</option><option value="asset" data-i18n="asset_records">物品记录</option></select>
+          <select id="ledgerDepartment" class="admin-only" onchange="loadLedger()"><option value="" data-i18n="all_departments">全部部门</option><option value="代发" data-i18n="department_direct">代发</option><option value="大货" data-i18n="department_bulk">大货</option><option value="进口" data-i18n="department_import">进口</option></select>
           <input id="ledgerSearch" class="admin-only" data-i18n-placeholder="search" placeholder="搜索名称、编号或人员" onkeydown="if(event.key==='Enter')loadLedger()">
           <input id="ledgerStart" type="date"><input id="ledgerEnd" type="date">
           <button class="btn primary" onclick="loadLedger()" data-i18n="query">查询</button>
@@ -305,7 +323,7 @@
 
     <section id="view-settings" class="view">
       <div class="panel">
-        <div class="panel-head"><h2 data-i18n="locations">仓库与位置</h2><button class="btn primary" onclick="openLocationModal()">＋ <span data-i18n="add_location">新增位置</span></button></div>
+        <div class="panel-head"><h2 data-i18n="locations">存放位置</h2><button class="btn primary" onclick="openLocationModal()">＋ <span data-i18n="add_location">新增位置</span></button></div>
         <div id="locationListBody" class="settings-list"></div>
       </div>
     </section>
@@ -315,7 +333,6 @@
 <datalist id="materialCategoryList"></datalist>
 <datalist id="assetCategoryList"></datalist>
 <datalist id="materialUnitList"></datalist>
-<datalist id="warehouseList"></datalist>
 <datalist id="locationList"></datalist>
 
 <div id="materialTxnModal" class="modal hidden" onclick="if(event.target===this)closeModal('materialTxnModal')">
@@ -330,6 +347,7 @@
     </div>
     <div id="mtPeopleFields">
       <label><span data-i18n="recipient">领用人</span><input id="mtRecipient"></label>
+      <label><span data-i18n="department">使用部门</span><select id="mtDepartment" required><option value="" data-i18n="choose_department">请选择部门</option><option value="代发" data-i18n="department_direct">代发</option><option value="大货" data-i18n="department_bulk">大货</option><option value="进口" data-i18n="department_import">进口</option></select></label>
       <label><span data-i18n="purpose">用途</span><input id="mtPurpose"></label>
     </div>
     <label><span data-i18n="related_doc">关联单号/任务</span><input id="mtDoc"></label>
@@ -344,9 +362,9 @@
     <input id="aaAssetId" type="hidden"><input id="aaType" type="hidden">
     <div id="aaItemInfo" class="modal-item-info"></div>
     <div id="aaKeeperFields"><label><span data-i18n="recipient">领用人</span><input id="aaKeeper"></label></div>
+    <div id="aaDepartmentFields"><label><span data-i18n="department">使用部门</span><select id="aaDepartment" required><option value="" data-i18n="choose_department">请选择部门</option><option value="代发" data-i18n="department_direct">代发</option><option value="大货" data-i18n="department_bulk">大货</option><option value="进口" data-i18n="department_import">进口</option></select></label></div>
     <div id="aaLocationFields" class="form-grid compact">
-      <label><span data-i18n="warehouse">仓库</span><input id="aaWarehouse" list="warehouseList"></label>
-      <label><span data-i18n="location">位置/货位</span><input id="aaLocation" list="locationList"></label>
+      <label><span data-i18n="storage_location">存放位置/货位</span><input id="aaLocation" list="locationList"></label>
     </div>
     <label><span data-i18n="related_doc">关联单号/任务</span><input id="aaDoc"></label>
     <label><span data-i18n="note">备注</span><textarea id="aaNote" rows="3"></textarea></label>
@@ -358,7 +376,6 @@
   <form class="modal-card small" onsubmit="saveLocation(event)">
     <div class="modal-head"><h2 data-i18n="add_location">新增位置</h2><button type="button" onclick="closeModal('locationModal')">×</button></div>
     <input id="locId" type="hidden">
-    <label><span data-i18n="warehouse">仓库</span><input id="locWarehouse" required></label>
     <label><span data-i18n="location_code">位置编码</span><input id="locCode" required></label>
     <label><span data-i18n="location_name">位置名称</span><input id="locName"></label>
     <label class="check-label"><input id="locActive" type="checkbox" checked><span data-i18n="active">启用</span></label>
@@ -369,10 +386,7 @@
 <div id="purchaseRequestModal" class="modal hidden" onclick="if(event.target===this)closeModal('purchaseRequestModal')">
   <form class="modal-card wide" onsubmit="submitPurchaseRequest(event)">
     <div class="modal-head"><h2 data-i18n="new_purchase_request">新建采购申请</h2><button type="button" onclick="closeModal('purchaseRequestModal')">×</button></div>
-    <div class="form-grid compact">
-      <label><span data-i18n="warehouse">仓库</span><input id="prWarehouse" list="warehouseList" required></label>
-      <label><span data-i18n="urgency">紧急程度</span><select id="prUrgency"><option value="normal" data-i18n="normal">普通</option><option value="urgent" data-i18n="urgent">紧急</option></select></label>
-    </div>
+    <label><span data-i18n="urgency">紧急程度</span><select id="prUrgency"><option value="normal" data-i18n="normal">普通</option><option value="urgent" data-i18n="urgent">紧急</option></select></label>
     <label><span data-i18n="request_reason">申请原因</span><input id="prReason" required></label>
     <div class="line-picker">
       <input id="prMaterialInput" list="purchaseMaterialList" data-i18n-placeholder="choose_material" placeholder="输入耗材编号或选择耗材">
@@ -383,6 +397,21 @@
     <label><span data-i18n="note">备注</span><textarea id="prNote" rows="2"></textarea></label>
     <div class="form-actions"><button type="button" class="btn soft" onclick="closeModal('purchaseRequestModal')" data-i18n="cancel">取消</button><button type="submit" class="btn primary" data-i18n="submit_request">提交申请</button></div>
   </form>
+</div>
+
+<div id="materialImportModal" class="modal hidden" onclick="if(event.target===this)closeMaterialImport()">
+  <div class="modal-card wide">
+    <div class="modal-head"><h2 data-i18n="bulk_import_materials">批量导入耗材</h2><button type="button" onclick="closeMaterialImport()">×</button></div>
+    <div class="import-guide">
+      <div><b data-i18n="import_step_1">1. 下载模板并填写耗材</b><small data-i18n="import_update_hint">耗材编号或条码与现有记录一致时更新资料；期初库存只对新建耗材生效。</small></div>
+      <button class="btn soft" type="button" onclick="downloadMaterialTemplate()">↓ <span data-i18n="download_template">下载 Excel 模板</span></button>
+    </div>
+    <label class="file-drop" for="materialImportInput"><b data-i18n="choose_spreadsheet">选择 Excel 或 CSV 文件</b><small>.xlsx / .xls / .csv，最多 300 行</small></label>
+    <input id="materialImportInput" class="hidden" type="file" accept=".xlsx,.xls,.csv" onchange="readMaterialImport(this)">
+    <div id="materialImportStatus" class="import-status"><span data-i18n="import_waiting">尚未选择文件</span></div>
+    <div id="materialImportPreview" class="import-preview"></div>
+    <div class="form-actions"><button type="button" class="btn soft" onclick="closeMaterialImport()" data-i18n="cancel">取消</button><button id="confirmMaterialImportBtn" type="button" class="btn primary" onclick="confirmMaterialImport()" disabled data-i18n="confirm_import">确认批量导入</button></div>
+  </div>
 </div>
 
 <div id="purchaseOrderModal" class="modal hidden" onclick="if(event.target===this)closeModal('purchaseOrderModal')">
@@ -447,9 +476,10 @@
 <input id="arrivalPhotoInput" type="file" accept="image/*" capture="environment" class="hidden" onchange="uploadArrivalPhoto(this)">
 <datalist id="purchaseMaterialList"></datalist>
 
+<script src="../shared/xlsx.full.min.js"></script>
 <script src="../shared/html5-qrcode.min.js"></script>
 <script src="../shared/qrcode.min.js"></script>
-<script src="config.js?v=20260808c"></script>
-<script src="app.js?v=20260808c"></script>
+<script src="config.js?v=20260808d"></script>
+<script src="app.js?v=20260808d"></script>
 </body>
 </html>

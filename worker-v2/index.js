@@ -1958,10 +1958,20 @@ const MIGRATIONS = [
     ON v2_003_purchase_receipt_items(receipt_id, material_id)`,
   `CREATE INDEX IF NOT EXISTS idx_v2_003_pri_material_time
     ON v2_003_purchase_receipt_items(material_id, created_at)`,
+
+  // ---- v2.20260808c：003 部门归属、部门消耗统计 ----
+  `ALTER TABLE v2_003_material_txns ADD COLUMN department TEXT DEFAULT ''`,
+  `ALTER TABLE v2_003_assets ADD COLUMN keeper_department TEXT DEFAULT ''`,
+  `ALTER TABLE v2_003_asset_txns ADD COLUMN from_department TEXT DEFAULT ''`,
+  `ALTER TABLE v2_003_asset_txns ADD COLUMN to_department TEXT DEFAULT ''`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_003_mtxn_department_time
+    ON v2_003_material_txns(department, txn_type, created_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_003_asset_keeper_department
+    ON v2_003_assets(keeper_department, status)`,
 ];
 
 // 每次发布迁移变化时手动 +1（patch 段），冷启动只比对一次字符串即可跳过整段 MIGRATIONS
-const CURRENT_SCHEMA_VERSION = 'v2.20260808b';
+const CURRENT_SCHEMA_VERSION = 'v2.20260808c';
 
 let _migrated = false;
 async function ensureMigrated(db) {
@@ -11041,6 +11051,29 @@ function v003RequireOperator(body) {
   return op;
 }
 
+const V003_DEPARTMENTS = ['代发', '大货', '进口'];
+
+function v003Department(value) {
+  const department = v003Text(value, 20);
+  return V003_DEPARTMENTS.includes(department) ? department : '';
+}
+
+// 003 现场端按用户要求不再使用访问码。现场权限只对 003 的明确白名单接口开放，
+// 并且每个请求都必须带当前工牌解析出的操作人信息；管理员接口仍只认 ADMINKEY。
+function v003IsPublicField(body) {
+  if (String(body.k || '').trim()) return false;
+  const op = v003RequireOperator(body);
+  return !!(op && /^(EMP-|DA-|DAF-)/.test(op.id) && op.name);
+}
+
+function v003CanField(body, env) {
+  return isAdmin(body, env) || isOpsKey(body, env) || v003IsPublicField(body);
+}
+
+function v003CanRead(body, env) {
+  return isOpsAuth(body, env) || v003IsPublicField(body);
+}
+
 async function v003NextCode(env, tableName, fieldName, prefix) {
   const day = kstToday().replace(/-/g, '');
   const base = prefix + '-' + day + '-';
@@ -11103,21 +11136,21 @@ route('v2_003_dashboard', async (body, env) => {
 });
 
 route('v2_003_location_list', async (body, env) => {
-  if (!isOpsAuth(body, env)) return err('unauthorized', 401);
+  if (!v003CanRead(body, env)) return err('unauthorized', 401);
   const includeInactive = isAdmin(body, env) && String(body.include_inactive || '') === '1';
   const rs = await env.DB.prepare(
     `SELECT * FROM v2_003_locations ${includeInactive ? '' : 'WHERE active=1'}
-     ORDER BY warehouse_name, location_code`
+     ORDER BY location_code, location_name`
   ).all();
   return json({ ok: true, items: rs.results || [] });
 });
 
 route('v2_003_location_save', async (body, env) => {
   if (!isAdmin(body, env)) return err('unauthorized_admin_only', 401);
-  const warehouse = v003Text(body.warehouse_name, 80);
+  const warehouse = '';
   const code = v003Text(body.location_code, 80);
   const name = v003Text(body.location_name, 120);
-  if (!warehouse || !code) return err('warehouse_and_location_required');
+  if (!code) return err('location_required');
   const active = String(body.active) === '0' || body.active === false ? 0 : 1;
   const id = v003Text(body.id, 100);
   const op = v003RequireOperator(body) || { id: 'ADMIN', name: '管理员' };
@@ -11138,11 +11171,10 @@ route('v2_003_location_save', async (body, env) => {
 });
 
 route('v2_003_material_list', async (body, env) => {
-  if (!isOpsAuth(body, env)) return err('unauthorized', 401);
+  if (!v003CanRead(body, env)) return err('unauthorized', 401);
   const { limit, offset } = pageParams(body);
   const search = v003Text(body.search, 120);
   const category = v003Text(body.category, 80);
-  const warehouse = v003Text(body.warehouse_name, 80);
   let status = v003Text(body.status, 30);
   const lowOnly = String(body.low_stock_only || '') === '1';
   if (!isAdmin(body, env)) status = 'active';
@@ -11153,7 +11185,6 @@ route('v2_003_material_list', async (body, env) => {
     for (let i = 0; i < 5; i++) binds.push('%' + search + '%');
   }
   if (category) { where.push('category=?'); binds.push(category); }
-  if (warehouse) { where.push('warehouse_name=?'); binds.push(warehouse); }
   if (status) { where.push('status=?'); binds.push(status); }
   if (lowOnly) where.push("status='active' AND min_qty>0 AND current_qty<=min_qty");
   const sqlWhere = 'WHERE ' + where.join(' AND ');
@@ -11168,7 +11199,7 @@ route('v2_003_material_list', async (body, env) => {
 });
 
 route('v2_003_material_detail', async (body, env) => {
-  if (!isOpsAuth(body, env)) return err('unauthorized', 401);
+  if (!v003CanRead(body, env)) return err('unauthorized', 401);
   const id = v003Text(body.id, 100);
   if (!id) return err('missing_id');
   const item = await env.DB.prepare(`SELECT *, CASE WHEN status='active' AND min_qty>0 AND current_qty<=min_qty
@@ -11194,7 +11225,6 @@ route('v2_003_material_save', async (body, env) => {
     material_code: v003Text(body.material_code, 80), barcode,
     name_zh: nameZh, name_ko: nameKo, category,
     spec: v003Text(body.spec, 160), unit,
-    warehouse_name: v003Text(body.warehouse_name, 80),
     location_code: v003Text(body.location_code, 80),
     min_qty: Math.max(0, v003Number(body.min_qty)),
     unit_cost: Math.max(0, v003Number(body.unit_cost)),
@@ -11216,10 +11246,10 @@ route('v2_003_material_save', async (body, env) => {
   if (id) {
     const result = await env.DB.prepare(`UPDATE v2_003_materials SET
       material_code=COALESCE(NULLIF(?,''), material_code), barcode=?, name_zh=?, name_ko=?, category=?, spec=?, unit=?,
-      warehouse_name=?, location_code=?, min_qty=?, unit_cost=?, currency=?, supplier=?, status=?, note=?,
+      location_code=?, min_qty=?, unit_cost=?, currency=?, supplier=?, status=?, note=?,
       updated_by=?, updated_at=? WHERE id=?`)
       .bind(data.material_code, data.barcode, data.name_zh, data.name_ko, data.category, data.spec, data.unit,
-        data.warehouse_name, data.location_code, data.min_qty, data.unit_cost, data.currency, data.supplier,
+        data.location_code, data.min_qty, data.unit_cost, data.currency, data.supplier,
         data.status, data.note, op.name, t, id).run();
     if (!v003Changes(result)) return err('not_found', 404);
     return json({ ok: true, id });
@@ -11233,7 +11263,7 @@ route('v2_003_material_save', async (body, env) => {
      created_by, created_at, updated_by, updated_at)
     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?,?)`)
     .bind(newId, code, data.barcode, data.name_zh, data.name_ko, data.category, data.spec, data.unit,
-      data.warehouse_name, data.location_code, opening, data.min_qty, data.unit_cost, data.currency,
+      '', data.location_code, opening, data.min_qty, data.unit_cost, data.currency,
       data.supplier, data.status, data.note, op.name, t, op.name, t)];
   if (opening > 0) {
     stmts.push(env.DB.prepare(`INSERT INTO v2_003_material_txns
@@ -11241,15 +11271,177 @@ route('v2_003_material_save', async (body, env) => {
        recipient_id, recipient_name, purpose, related_doc_no, unit_cost, supplier, note,
        operator_id, operator_name, created_at)
       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-      .bind(v003Id('MTX'), newId, 'opening', opening, 0, opening, data.warehouse_name, data.location_code,
+      .bind(v003Id('MTX'), newId, 'opening', opening, 0, opening, '', data.location_code,
         '', '', '期初库存', '', data.unit_cost, data.supplier, data.note, op.id, op.name, t));
   }
   await env.DB.batch(stmts);
   return json({ ok: true, id: newId, material_code: code });
 });
 
+async function v003PrepareMaterialImport(body, env) {
+  const source = Array.isArray(body.rows) ? body.rows : [];
+  if (!source.length) return { errors: [{ row: 0, error: 'bulk_import_empty' }], plans: [] };
+  if (source.length > 300) return { errors: [{ row: 0, error: 'bulk_import_limit' }], plans: [] };
+
+  const existingRs = await env.DB.prepare(`SELECT id, material_code, barcode, name_zh, name_ko, category,
+    spec, unit, location_code, current_qty, min_qty, unit_cost, currency, supplier, status, note
+    FROM v2_003_materials`).all();
+  const existing = existingRs.results || [];
+  const byCode = new Map(existing.filter(x => x.material_code).map(x => [String(x.material_code), x]));
+  const byBarcode = new Map(existing.filter(x => x.barcode).map(x => [String(x.barcode), x]));
+  const usedCodes = new Set();
+  const usedBarcodes = new Set();
+  const usedTargets = new Set();
+  const errors = [];
+  const plans = [];
+  const dayPrefix = 'HC-' + kstToday().replace(/-/g, '') + '-';
+  let sequence = existing.reduce((max, x) => {
+    const code = String(x.material_code || '');
+    if (!code.startsWith(dayPrefix)) return max;
+    return Math.max(max, parseInt(code.slice(dayPrefix.length), 10) || 0);
+  }, 0);
+  const hasValue = (raw, key) => raw && raw[key] != null && String(raw[key]).trim() !== '';
+
+  for (let i = 0; i < source.length; i++) {
+    const raw = source[i] || {};
+    const row = Math.max(1, Math.trunc(v003Number(raw.row_no, i + 2)));
+    let code = v003Text(raw.material_code, 80);
+    const barcode = v003Text(raw.barcode, 120);
+    const codeTarget = code ? byCode.get(code) : null;
+    const barcodeTarget = barcode ? byBarcode.get(barcode) : null;
+    if (codeTarget && barcodeTarget && codeTarget.id !== barcodeTarget.id) {
+      errors.push({ row, error: 'bulk_code_barcode_conflict' });
+      continue;
+    }
+    const target = codeTarget || barcodeTarget || null;
+    if (target && usedTargets.has(target.id)) {
+      errors.push({ row, error: 'bulk_duplicate_target' });
+      continue;
+    }
+    if (code && usedCodes.has(code)) {
+      errors.push({ row, error: 'bulk_duplicate_code' });
+      continue;
+    }
+    if (barcode && usedBarcodes.has(barcode)) {
+      errors.push({ row, error: 'bulk_duplicate_barcode' });
+      continue;
+    }
+
+    const nameZh = v003Text(raw.name_zh, 160);
+    const category = v003Text(raw.category, 80);
+    const unit = v003Text(raw.unit, 40);
+    if (!nameZh || !category || !unit) {
+      errors.push({ row, error: 'name_category_unit_required' });
+      continue;
+    }
+    const status = hasValue(raw, 'status') ? v003Text(raw.status, 30) : (target && target.status) || 'active';
+    if (!['active', 'inactive'].includes(status)) {
+      errors.push({ row, error: 'bulk_invalid_status' });
+      continue;
+    }
+    const opening = hasValue(raw, 'opening_qty') ? v003Number(raw.opening_qty, NaN) : 0;
+    const minQty = hasValue(raw, 'min_qty') ? v003Number(raw.min_qty, NaN) : v003Number(target && target.min_qty);
+    const unitCost = hasValue(raw, 'unit_cost') ? v003Number(raw.unit_cost, NaN) : v003Number(target && target.unit_cost);
+    if (![opening, minQty, unitCost].every(Number.isFinite) || opening < 0 || minQty < 0 || unitCost < 0) {
+      errors.push({ row, error: 'bulk_invalid_number' });
+      continue;
+    }
+    if (!code) {
+      if (target && target.material_code) code = String(target.material_code);
+      else {
+        do { sequence++; code = dayPrefix + String(sequence).padStart(3, '0'); }
+        while (byCode.has(code) || usedCodes.has(code));
+      }
+    }
+    const conflictingCode = byCode.get(code);
+    if (conflictingCode && (!target || conflictingCode.id !== target.id)) {
+      errors.push({ row, error: 'duplicate_item_code' });
+      continue;
+    }
+    const conflictingBarcode = barcode ? byBarcode.get(barcode) : null;
+    if (conflictingBarcode && (!target || conflictingBarcode.id !== target.id)) {
+      errors.push({ row, error: 'duplicate_barcode' });
+      continue;
+    }
+
+    const keep = (key, fallback = '') => hasValue(raw, key) ? v003Text(raw[key], key === 'note' ? 1000 : 160) : v003Text(target && target[key], key === 'note' ? 1000 : 160);
+    plans.push({
+      row,
+      action: target ? 'update' : 'create',
+      id: target ? target.id : v003Id('MAT'),
+      material_code: code,
+      barcode: barcode || v003Text(target && target.barcode, 120),
+      name_zh: nameZh,
+      name_ko: keep('name_ko'),
+      category,
+      spec: keep('spec'),
+      unit,
+      location_code: keep('location_code'),
+      opening_qty: target ? 0 : opening,
+      min_qty: minQty,
+      unit_cost: unitCost,
+      currency: 'KRW',
+      supplier: keep('supplier'),
+      status,
+      note: keep('note')
+    });
+    usedCodes.add(code);
+    if (barcode) usedBarcodes.add(barcode);
+    if (target) usedTargets.add(target.id);
+  }
+  return { errors, plans };
+}
+
+route('v2_003_material_bulk_import', async (body, env) => {
+  if (!isAdmin(body, env)) return err('unauthorized_admin_only', 401);
+  const prepared = await v003PrepareMaterialImport(body, env);
+  if (prepared.errors.length) return json({ ok: false, error: 'bulk_import_invalid', errors: prepared.errors }, 400);
+  const created = prepared.plans.filter(x => x.action === 'create').length;
+  const updated = prepared.plans.length - created;
+  if (String(body.dry_run || '') === '1') {
+    return json({ ok: true, dry_run: true, created_count: created, updated_count: updated,
+      items: prepared.plans.map(x => ({ row: x.row, action: x.action, material_code: x.material_code,
+        name_zh: x.name_zh, category: x.category, unit: x.unit, opening_qty: x.opening_qty })) });
+  }
+  const op = v003RequireOperator(body) || { id: 'ADMIN', name: '管理员' };
+  return withIdem(env, body, 'v2_003_material_bulk_import', async () => {
+    const t = now();
+    const statements = [];
+    for (const item of prepared.plans) {
+      if (item.action === 'update') {
+        statements.push(env.DB.prepare(`UPDATE v2_003_materials SET material_code=?, barcode=?, name_zh=?, name_ko=?,
+          category=?, spec=?, unit=?, location_code=?, min_qty=?, unit_cost=?, currency=?, supplier=?, status=?, note=?,
+          updated_by=?, updated_at=? WHERE id=?`)
+          .bind(item.material_code, item.barcode, item.name_zh, item.name_ko, item.category, item.spec, item.unit,
+            item.location_code, item.min_qty, item.unit_cost, item.currency, item.supplier, item.status, item.note,
+            op.name, t, item.id));
+      } else {
+        statements.push(env.DB.prepare(`INSERT INTO v2_003_materials
+          (id, material_code, barcode, name_zh, name_ko, category, spec, unit, warehouse_name, location_code,
+           current_qty, min_qty, unit_cost, currency, supplier, status, note, stock_version,
+           created_by, created_at, updated_by, updated_at)
+          VALUES(?,?,?,?,?,?,?,?,'',?,?,?,?,?,?,?,?,0,?,?,?,?)`)
+          .bind(item.id, item.material_code, item.barcode, item.name_zh, item.name_ko, item.category, item.spec,
+            item.unit, item.location_code, item.opening_qty, item.min_qty, item.unit_cost, item.currency,
+            item.supplier, item.status, item.note, op.name, t, op.name, t));
+        if (item.opening_qty > 0) {
+          statements.push(env.DB.prepare(`INSERT INTO v2_003_material_txns
+            (id, material_id, txn_type, qty_delta, qty_before, qty_after, warehouse_name, location_code,
+             recipient_id, recipient_name, purpose, related_doc_no, unit_cost, supplier, note,
+             operator_id, operator_name, department, created_at)
+            VALUES(?,?,?,?,?,?,'',?,'','','期初库存',?,?,?,?,?,?,?,?)`)
+            .bind(v003Id('MTX'), item.id, 'opening', item.opening_qty, 0, item.opening_qty,
+              item.location_code, '', item.unit_cost, item.supplier, item.note, op.id, op.name, '', t));
+        }
+      }
+    }
+    await env.DB.batch(statements);
+    return { ok: true, created_count: created, updated_count: updated, total: prepared.plans.length };
+  });
+});
+
 route('v2_003_material_txn', async (body, env) => {
-  if (!isAdmin(body, env) && !isOpsKey(body, env)) return err('unauthorized', 401);
+  if (!v003CanField(body, env)) return err('unauthorized', 401);
   const txnType = v003Text(body.txn_type, 30);
   const allowed = ['inbound', 'issue', 'use', 'return', 'adjust', 'stocktake'];
   if (!allowed.includes(txnType)) return err('invalid_txn_type');
@@ -11260,6 +11452,10 @@ route('v2_003_material_txn', async (body, env) => {
   if (!id) return err('missing_material_id');
   const op = v003RequireOperator(body);
   if (!op) return err('operator_required');
+  const department = ['issue', 'use', 'return'].includes(txnType) ? v003Department(body.department) : '';
+  const recipientName = v003Text(body.recipient_name, 120);
+  if (['issue', 'use', 'return'].includes(txnType) && !department) return err('department_required');
+  if (['issue', 'use', 'return'].includes(txnType) && !recipientName) return err('recipient_required');
   const rawQty = v003Number(body.qty, NaN);
   if (!['adjust', 'stocktake'].includes(txnType) && (!Number.isFinite(rawQty) || rawQty <= 0)) {
     return err('positive_qty_required');
@@ -11284,26 +11480,25 @@ route('v2_003_material_txn', async (body, env) => {
       if (after < 0) throw new Error('insufficient_stock');
       const version = Number(item.stock_version) || 0;
       const t = now();
-      const warehouse = v003Text(body.warehouse_name || item.warehouse_name, 80);
       const location = v003Text(body.location_code || item.location_code, 80);
       const cost = Math.max(0, v003Number(body.unit_cost, item.unit_cost));
       const supplier = v003Text(body.supplier || item.supplier, 160);
       const txId = v003Id('MTX');
       const results = await env.DB.batch([
-        env.DB.prepare(`UPDATE v2_003_materials SET current_qty=?, warehouse_name=?, location_code=?,
+        env.DB.prepare(`UPDATE v2_003_materials SET current_qty=?, location_code=?,
           unit_cost=?, supplier=?, stock_version=stock_version+1, updated_by=?, updated_at=?
           WHERE id=? AND stock_version=?`)
-          .bind(after, warehouse, location, cost, supplier, op.name, t, id, version),
+          .bind(after, location, cost, supplier, op.name, t, id, version),
         env.DB.prepare(`INSERT INTO v2_003_material_txns
           (id, material_id, txn_type, qty_delta, qty_before, qty_after, warehouse_name, location_code,
            recipient_id, recipient_name, purpose, related_doc_no, unit_cost, supplier, note,
-           operator_id, operator_name, created_at)
-          SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? FROM v2_003_materials
+           operator_id, operator_name, department, created_at)
+          SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? FROM v2_003_materials
           WHERE id=? AND stock_version=?`)
-          .bind(txId, id, txnType, delta, before, after, warehouse, location,
-            v003Text(body.recipient_id, 80), v003Text(body.recipient_name, 120),
+          .bind(txId, id, txnType, delta, before, after, '', location,
+            v003Text(body.recipient_id, 80), recipientName,
             v003Text(body.purpose, 240), v003Text(body.related_doc_no, 120), cost, supplier,
-            v003Text(body.note, 1000), op.id, op.name, t, id, version + 1)
+            v003Text(body.note, 1000), op.id, op.name, department, t, id, version + 1)
       ]);
       if (v003Changes(results[0]) === 1 && v003Changes(results[1]) === 1) {
         return { ok: true, id: txId, qty_before: before, qty_delta: delta, qty_after: after };
@@ -11313,12 +11508,45 @@ route('v2_003_material_txn', async (body, env) => {
   });
 });
 
+route('v2_003_department_usage', async (body, env) => {
+  if (!isAdmin(body, env)) return err('unauthorized_admin_only', 401);
+  const department = v003Text(body.department, 20);
+  if (department && !v003Department(department)) return err('department_required');
+  const startRange = kstDayRangeUtc(v003Text(body.start_date, 10));
+  const endRange = kstDayRangeUtc(v003Text(body.end_date, 10));
+  const where = ["t.txn_type IN ('issue','use','return')", "t.department IN ('代发','大货','进口')"];
+  const binds = [];
+  if (department) { where.push('t.department=?'); binds.push(department); }
+  if (startRange) { where.push('t.created_at>=?'); binds.push(startRange.startUtc); }
+  if (endRange) { where.push('t.created_at<?'); binds.push(endRange.endUtc); }
+  const rs = await env.DB.prepare(`SELECT t.department, m.id AS material_id, m.material_code,
+      m.name_zh, m.name_ko, m.category, m.unit,
+      ROUND(SUM(CASE WHEN t.txn_type='issue' THEN -t.qty_delta ELSE 0 END),4) AS issue_qty,
+      ROUND(SUM(CASE WHEN t.txn_type='use' THEN -t.qty_delta ELSE 0 END),4) AS use_qty,
+      ROUND(SUM(CASE WHEN t.txn_type='return' THEN t.qty_delta ELSE 0 END),4) AS return_qty,
+      COUNT(*) AS record_count
+    FROM v2_003_material_txns t JOIN v2_003_materials m ON m.id=t.material_id
+    WHERE ${where.join(' AND ')}
+    GROUP BY t.department, m.id, m.material_code, m.name_zh, m.name_ko, m.category, m.unit
+    ORDER BY CASE t.department WHEN '代发' THEN 1 WHEN '大货' THEN 2 ELSE 3 END,
+      use_qty DESC, issue_qty DESC, m.category, m.name_zh`).bind(...binds).all();
+  const items = rs.results || [];
+  const summary = V003_DEPARTMENTS.map(name => {
+    const rows = items.filter(x => x.department === name);
+    return {
+      department: name,
+      material_count: rows.length,
+      record_count: rows.reduce((sum, x) => sum + v003Number(x.record_count), 0)
+    };
+  });
+  return json({ ok: true, departments: V003_DEPARTMENTS, summary, items });
+});
+
 route('v2_003_asset_list', async (body, env) => {
-  if (!isOpsAuth(body, env)) return err('unauthorized', 401);
+  if (!v003CanRead(body, env)) return err('unauthorized', 401);
   const { limit, offset } = pageParams(body);
   const search = v003Text(body.search, 120);
   const category = v003Text(body.category, 80);
-  const warehouse = v003Text(body.warehouse_name, 80);
   const keeper = v003Text(body.keeper, 120);
   const status = v003Text(body.status, 30);
   const where = ['1=1'];
@@ -11328,7 +11556,6 @@ route('v2_003_asset_list', async (body, env) => {
     for (let i = 0; i < 6; i++) binds.push('%' + search + '%');
   }
   if (category) { where.push('category=?'); binds.push(category); }
-  if (warehouse) { where.push('warehouse_name=?'); binds.push(warehouse); }
   if (keeper) { where.push('(keeper_name LIKE ? OR keeper_id LIKE ?)'); binds.push('%' + keeper + '%', '%' + keeper + '%'); }
   if (status) { where.push('status=?'); binds.push(status); }
   const sqlWhere = 'WHERE ' + where.join(' AND ');
@@ -11342,7 +11569,7 @@ route('v2_003_asset_list', async (body, env) => {
 });
 
 route('v2_003_asset_detail', async (body, env) => {
-  if (!isOpsAuth(body, env)) return err('unauthorized', 401);
+  if (!v003CanRead(body, env)) return err('unauthorized', 401);
   const id = v003Text(body.id, 100);
   if (!id) return err('missing_id');
   const [item, txns, attachments] = await Promise.all([
@@ -11384,7 +11611,7 @@ route('v2_003_asset_save', async (body, env) => {
     asset_code: assetCode, barcode,
     name_zh: nameZh, name_ko: v003Text(body.name_ko, 160), category,
     brand: v003Text(body.brand, 100), model: v003Text(body.model, 120), serial_no: serial,
-    warehouse_name: v003Text(body.warehouse_name, 80), location_code: v003Text(body.location_code, 80),
+    location_code: v003Text(body.location_code, 80),
     purchase_date: normalizeDateOnly(body.purchase_date),
     purchase_cost: Math.max(0, v003Number(body.purchase_cost)),
     currency: v003Text(body.currency || 'KRW', 12) || 'KRW',
@@ -11397,19 +11624,19 @@ route('v2_003_asset_save', async (body, env) => {
     if (!existing) return err('not_found', 404);
     const result = await env.DB.batch([
       env.DB.prepare(`UPDATE v2_003_assets SET asset_code=COALESCE(NULLIF(?,''),asset_code), barcode=?,
-        name_zh=?, name_ko=?, category=?, brand=?, model=?, serial_no=?, warehouse_name=?, location_code=?,
+        name_zh=?, name_ko=?, category=?, brand=?, model=?, serial_no=?, location_code=?,
         purchase_date=?, purchase_cost=?, currency=?, supplier=?, warranty_until=?, note=?,
         asset_version=asset_version+1, updated_by=?, updated_at=? WHERE id=?`)
         .bind(data.asset_code, data.barcode, data.name_zh, data.name_ko, data.category, data.brand, data.model,
-          data.serial_no, data.warehouse_name, data.location_code, data.purchase_date, data.purchase_cost,
+          data.serial_no, data.location_code, data.purchase_date, data.purchase_cost,
           data.currency, data.supplier, data.warranty_until, data.note, op.name, t, id),
       env.DB.prepare(`INSERT INTO v2_003_asset_txns
         (id, asset_id, action_type, status_before, status_after, from_warehouse, from_location,
          to_warehouse, to_location, from_keeper_id, from_keeper_name, to_keeper_id, to_keeper_name,
          related_doc_no, note, operator_id, operator_name, created_at)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-        .bind(v003Id('ATX'), id, 'edit', existing.status, existing.status,
-          existing.warehouse_name, existing.location_code, data.warehouse_name, data.location_code,
+      .bind(v003Id('ATX'), id, 'edit', existing.status, existing.status,
+          existing.warehouse_name, existing.location_code, '', data.location_code,
           existing.keeper_id, existing.keeper_name, existing.keeper_id, existing.keeper_name,
           '', '修改物品资料', op.id, op.name, t)
     ]);
@@ -11425,21 +11652,21 @@ route('v2_003_asset_save', async (body, env) => {
        currency, supplier, warranty_until, note, asset_version, created_by, created_at, updated_by, updated_at)
       VALUES(?,?,?,?,?,?,?,?,?,?,?,'','','available',?,?,?,?,?,?,0,?,?,?,?)`)
       .bind(newId, code, data.barcode, data.name_zh, data.name_ko, data.category, data.brand, data.model,
-        data.serial_no, data.warehouse_name, data.location_code, data.purchase_date, data.purchase_cost,
+        data.serial_no, '', data.location_code, data.purchase_date, data.purchase_cost,
         data.currency, data.supplier, data.warranty_until, data.note, op.name, t, op.name, t),
     env.DB.prepare(`INSERT INTO v2_003_asset_txns
       (id, asset_id, action_type, status_before, status_after, from_warehouse, from_location,
        to_warehouse, to_location, from_keeper_id, from_keeper_name, to_keeper_id, to_keeper_name,
        related_doc_no, note, operator_id, operator_name, created_at)
       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-      .bind(v003Id('ATX'), newId, 'create', '', 'available', '', '', data.warehouse_name, data.location_code,
+      .bind(v003Id('ATX'), newId, 'create', '', 'available', '', '', '', data.location_code,
         '', '', '', '', '', data.note, op.id, op.name, t)
   ]);
   return json({ ok: true, id: newId, asset_code: code });
 });
 
 route('v2_003_asset_action', async (body, env) => {
-  if (!isAdmin(body, env) && !isOpsKey(body, env)) return err('unauthorized', 401);
+  if (!v003CanField(body, env)) return err('unauthorized', 401);
   const action = v003Text(body.action_type, 30);
   const allowed = ['assign', 'return', 'transfer', 'repair_start', 'repair_done', 'retire', 'lost'];
   if (!allowed.includes(action)) return err('invalid_action_type');
@@ -11454,25 +11681,28 @@ route('v2_003_asset_action', async (body, env) => {
       if (!item) throw new Error('not_found');
       if (['retired', 'lost'].includes(item.status)) throw new Error('asset_unavailable');
       let status = item.status;
-      let warehouse = v003Text(body.warehouse_name || item.warehouse_name, 80);
       let location = v003Text(body.location_code || item.location_code, 80);
       let keeperId = item.keeper_id || '';
       let keeperName = item.keeper_name || '';
+      let keeperDepartment = v003Department(item.keeper_department);
       if (action === 'assign') {
         if (item.status !== 'available') throw new Error('asset_not_available');
         keeperId = v003Text(body.to_keeper_id || body.recipient_id || op.id, 80);
         keeperName = v003Text(body.to_keeper_name || body.recipient_name || op.name, 120);
         if (!keeperId && !keeperName) throw new Error('keeper_required');
+        keeperDepartment = v003Department(body.department);
+        if (!keeperDepartment) throw new Error('department_required');
         status = 'assigned';
       } else if (action === 'return') {
         if (item.status !== 'assigned') throw new Error('asset_not_assigned');
         if (!isAdmin(body, env) && item.keeper_id && item.keeper_id !== op.id) throw new Error('not_current_keeper');
         keeperId = '';
         keeperName = '';
+        keeperDepartment = '';
         status = 'available';
       } else if (action === 'transfer') {
         if (!isAdmin(body, env) && item.keeper_id && item.keeper_id !== op.id) throw new Error('not_current_keeper');
-        if (!warehouse) throw new Error('warehouse_required');
+        if (!location) throw new Error('location_required');
       } else if (action === 'repair_start') {
         status = 'repair';
       } else if (action === 'repair_done') {
@@ -11480,6 +11710,7 @@ route('v2_003_asset_action', async (body, env) => {
         status = 'available';
         keeperId = '';
         keeperName = '';
+        keeperDepartment = '';
       } else if (action === 'retire') {
         status = 'retired';
         keeperId = '';
@@ -11491,23 +11722,24 @@ route('v2_003_asset_action', async (body, env) => {
       const t = now();
       const txId = v003Id('ATX');
       const results = await env.DB.batch([
-        env.DB.prepare(`UPDATE v2_003_assets SET status=?, warehouse_name=?, location_code=?,
-          keeper_id=?, keeper_name=?, asset_version=asset_version+1, updated_by=?, updated_at=?
+        env.DB.prepare(`UPDATE v2_003_assets SET status=?, location_code=?,
+          keeper_id=?, keeper_name=?, keeper_department=?, asset_version=asset_version+1, updated_by=?, updated_at=?
           WHERE id=? AND asset_version=?`)
-          .bind(status, warehouse, location, keeperId, keeperName, op.name, t, id, version),
+          .bind(status, location, keeperId, keeperName, keeperDepartment, op.name, t, id, version),
         env.DB.prepare(`INSERT INTO v2_003_asset_txns
           (id, asset_id, action_type, status_before, status_after, from_warehouse, from_location,
            to_warehouse, to_location, from_keeper_id, from_keeper_name, to_keeper_id, to_keeper_name,
-           related_doc_no, note, operator_id, operator_name, created_at)
-          SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? FROM v2_003_assets
+           related_doc_no, note, operator_id, operator_name, from_department, to_department, created_at)
+          SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? FROM v2_003_assets
           WHERE id=? AND asset_version=?`)
           .bind(txId, id, action, item.status, status, item.warehouse_name, item.location_code,
-            warehouse, location, item.keeper_id, item.keeper_name, keeperId, keeperName,
-            v003Text(body.related_doc_no, 120), v003Text(body.note, 1000), op.id, op.name, t,
-            id, version + 1)
+            '', location, item.keeper_id, item.keeper_name, keeperId, keeperName,
+            v003Text(body.related_doc_no, 120), v003Text(body.note, 1000), op.id, op.name,
+            v003Department(item.keeper_department), keeperDepartment, t, id, version + 1)
       ]);
       if (v003Changes(results[0]) === 1 && v003Changes(results[1]) === 1) {
-        return { ok: true, id: txId, status, keeper_id: keeperId, keeper_name: keeperName };
+        return { ok: true, id: txId, status, keeper_id: keeperId, keeper_name: keeperName,
+          keeper_department: keeperDepartment };
       }
     }
     throw new Error('asset_changed_retry');
@@ -11515,7 +11747,7 @@ route('v2_003_asset_action', async (body, env) => {
 });
 
 route('v2_003_lookup', async (body, env) => {
-  if (!isOpsAuth(body, env)) return err('unauthorized', 401);
+  if (!v003CanRead(body, env)) return err('unauthorized', 401);
   const code = v003Text(body.code, 160);
   if (!code) return err('missing_code');
   const [material, asset] = await Promise.all([
@@ -11530,14 +11762,15 @@ route('v2_003_lookup', async (body, env) => {
 });
 
 route('v2_003_ledger_list', async (body, env) => {
-  if (!isOpsAuth(body, env)) return err('unauthorized', 401);
+  if (!v003CanRead(body, env)) return err('unauthorized', 401);
   const { limit, offset } = pageParams(body);
   const kind = v003Text(body.kind, 20);
   const search = v003Text(body.search, 120);
-  const fieldRequest = !isAdmin(body, env) && isOpsKey(body, env);
+  const fieldRequest = !isAdmin(body, env) && (isOpsKey(body, env) || v003IsPublicField(body));
   const fieldOperatorId = fieldRequest ? v003Text(body.operator_id, 80) : '';
   if (fieldRequest && !fieldOperatorId) return err('operator_required');
   const action = v003Text(body.txn_type || body.action_type, 30);
+  const department = v003Department(body.department);
   const startRange = kstDayRangeUtc(v003Text(body.start_date, 10));
   const endRange = kstDayRangeUtc(v003Text(body.end_date, 10));
 
@@ -11546,6 +11779,7 @@ route('v2_003_ledger_list', async (body, env) => {
     if (fieldRequest) { where.push('t.operator_id=?'); binds.push(fieldOperatorId); }
     if (search) { where.push('(m.material_code LIKE ? OR m.name_zh LIKE ? OR t.operator_name LIKE ? OR t.recipient_name LIKE ?)'); for (let i=0;i<4;i++) binds.push('%'+search+'%'); }
     if (action) { where.push('t.txn_type=?'); binds.push(action); }
+    if (department) { where.push('t.department=?'); binds.push(department); }
     if (startRange) { where.push('t.created_at>=?'); binds.push(startRange.startUtc); }
     if (endRange) { where.push('t.created_at<?'); binds.push(endRange.endUtc); }
     const w = 'WHERE ' + where.join(' AND ');
@@ -11554,7 +11788,7 @@ route('v2_003_ledger_list', async (body, env) => {
       env.DB.prepare(`SELECT 'material' AS kind, t.id, t.created_at, t.txn_type AS action_type,
         m.id AS item_id, m.material_code AS item_code, m.name_zh AS item_name, m.unit,
         t.qty_delta, t.qty_before, t.qty_after, t.operator_id, t.operator_name,
-        t.recipient_id, t.recipient_name, t.warehouse_name, t.location_code,
+        t.recipient_id, t.recipient_name, t.department, t.warehouse_name, t.location_code,
         t.related_doc_no, t.note, t.purpose
         FROM v2_003_material_txns t JOIN v2_003_materials m ON m.id=t.material_id ${w}
         ORDER BY t.created_at DESC LIMIT ? OFFSET ?`).bind(...binds, limit, offset).all()
@@ -11567,6 +11801,10 @@ route('v2_003_ledger_list', async (body, env) => {
     if (fieldRequest) { where.push('t.operator_id=?'); binds.push(fieldOperatorId); }
     if (search) { where.push('(a.asset_code LIKE ? OR a.name_zh LIKE ? OR t.operator_name LIKE ? OR t.to_keeper_name LIKE ?)'); for (let i=0;i<4;i++) binds.push('%'+search+'%'); }
     if (action) { where.push('t.action_type=?'); binds.push(action); }
+    if (department) {
+      where.push("(CASE WHEN t.action_type='return' THEN t.from_department ELSE t.to_department END)=?");
+      binds.push(department);
+    }
     if (startRange) { where.push('t.created_at>=?'); binds.push(startRange.startUtc); }
     if (endRange) { where.push('t.created_at<?'); binds.push(endRange.endUtc); }
     const w = 'WHERE ' + where.join(' AND ');
@@ -11576,6 +11814,7 @@ route('v2_003_ledger_list', async (body, env) => {
         a.id AS item_id, a.asset_code AS item_code, a.name_zh AS item_name, '' AS unit,
         0 AS qty_delta, 0 AS qty_before, 0 AS qty_after, t.operator_id, t.operator_name,
         t.to_keeper_id AS recipient_id, t.to_keeper_name AS recipient_name,
+        CASE WHEN t.action_type='return' THEN t.from_department ELSE t.to_department END AS department,
         t.to_warehouse AS warehouse_name, t.to_location AS location_code,
         t.related_doc_no, t.note, '' AS purpose
         FROM v2_003_asset_txns t JOIN v2_003_assets a ON a.id=t.asset_id ${w}
@@ -11718,7 +11957,7 @@ route('v2_003_purchase_order_detail', async (body, env) => {
 });
 
 route('v2_003_purchase_request_create', async (body, env) => {
-  if (!isAdmin(body, env) && !isOpsKey(body, env)) return err('unauthorized', 401);
+  if (!v003CanField(body, env)) return err('unauthorized', 401);
   const op = v003RequireOperator(body);
   if (!op) return err('operator_required');
   const input = v003Lines(body.lines);
@@ -11745,7 +11984,7 @@ route('v2_003_purchase_request_create', async (body, env) => {
        purchaser_name, supplier, purchase_channel, platform_order_no, expected_date, currency, total_amount,
        note, has_discrepancy, closed_reason, created_at, updated_at)
       VALUES(?,?,'requested',?,?,?,?,?,'','','','','','KRW',0,?,0,'',?,?)`)
-      .bind(orderId, orderNo, urgency, v003Text(body.warehouse_name, 80), v003Text(body.request_reason, 500),
+      .bind(orderId, orderNo, urgency, '', v003Text(body.request_reason, 500),
         op.id, op.name, v003Text(body.note, 1000), t, t)];
     for (const line of lines) {
       statements.push(env.DB.prepare(`INSERT INTO v2_003_purchase_order_lines
@@ -11877,7 +12116,7 @@ async function v003ReceivingDetail(env, shipment) {
 }
 
 route('v2_003_receiving_pending', async (body, env) => {
-  if (!isAdmin(body, env) && !isOpsKey(body, env)) return err('unauthorized', 401);
+  if (!v003CanField(body, env)) return err('unauthorized', 401);
   const method = ['express', 'supplier'].includes(String(body.delivery_method)) ? String(body.delivery_method) : '';
   const binds = [];
   let where = "WHERE s.status='pending'";
@@ -11893,7 +12132,7 @@ route('v2_003_receiving_pending', async (body, env) => {
 });
 
 route('v2_003_receiving_lookup', async (body, env) => {
-  if (!isAdmin(body, env) && !isOpsKey(body, env)) return err('unauthorized', 401);
+  if (!v003CanField(body, env)) return err('unauthorized', 401);
   const code = v003Text(body.code, 180);
   if (!code) return err('missing_code');
   const shipment = await env.DB.prepare(`SELECT s.*, o.order_no, o.warehouse_name AS requested_warehouse,
@@ -11906,7 +12145,7 @@ route('v2_003_receiving_lookup', async (body, env) => {
 });
 
 route('v2_003_receipt_confirm', async (body, env) => {
-  if (!isAdmin(body, env) && !isOpsKey(body, env)) return err('unauthorized', 401);
+  if (!v003CanField(body, env)) return err('unauthorized', 401);
   const shipmentId = v003Text(body.shipment_id, 100);
   const op = v003RequireOperator(body);
   if (!shipmentId) return err('missing_shipment_id');
@@ -11940,16 +12179,15 @@ route('v2_003_receipt_confirm', async (body, env) => {
     if (!raw) return err('receipt_lines_incomplete');
     const qty = v003Number(raw.received_qty, NaN);
     if (!Number.isFinite(qty) || qty < 0 || qty > 1000000000) return err('invalid_received_qty');
-    const warehouse = v003Text(raw.warehouse_name || body.warehouse_name || item.current_warehouse, 80);
     const location = v003Text(raw.location_code || body.location_code || item.current_location, 80);
-    if (qty > 0 && (!warehouse || !location)) return err('putaway_location_required');
+    if (qty > 0 && !location) return err('putaway_location_required');
     const difference = Math.round((qty - v003Number(item.expected_qty)) * 10000) / 10000;
     if (Math.abs(difference) > 0.0001) hasDiscrepancy = true;
     receiptItems.push({
       ...item,
       received_qty: qty,
       difference_qty: difference,
-      warehouse_name: warehouse,
+      warehouse_name: '',
       location_code: location,
       note: v003Text(raw.note, 500)
     });
@@ -11967,7 +12205,7 @@ route('v2_003_receipt_confirm', async (body, env) => {
     WHERE s.id=? AND s.status='pending'
       AND NOT EXISTS (SELECT 1 FROM v2_003_purchase_receipts r WHERE r.shipment_id=s.id)`)
     .bind(receiptId, receiptNo, shipmentId, shipment.order_id, shipment.delivery_method, shipment.tracking_no,
-      hasDiscrepancy ? 1 : 0, discrepancyNote, op.id, op.name, v003Text(body.warehouse_name, 80), t, t, shipmentId));
+      hasDiscrepancy ? 1 : 0, discrepancyNote, op.id, op.name, '', t, t, shipmentId));
   for (const item of receiptItems) {
     const receiptItemId = v003Id('RCI');
     statements.push(env.DB.prepare(`INSERT INTO v2_003_purchase_receipt_items
@@ -11983,10 +12221,10 @@ route('v2_003_receipt_confirm', async (body, env) => {
       .bind(item.received_qty, t, item.id, receiptId));
     if (item.received_qty > 0) {
       statements.push(env.DB.prepare(`UPDATE v2_003_materials SET current_qty=current_qty+?,
-        warehouse_name=?, location_code=?, unit_cost=?, supplier=?, stock_version=stock_version+1,
+        location_code=?, unit_cost=?, supplier=?, stock_version=stock_version+1,
         updated_by=?, updated_at=? WHERE id=?
         AND EXISTS (SELECT 1 FROM v2_003_purchase_receipts WHERE id=?)`)
-        .bind(item.received_qty, item.warehouse_name, item.location_code, Math.max(0, v003Number(item.unit_cost)),
+        .bind(item.received_qty, item.location_code, Math.max(0, v003Number(item.unit_cost)),
           v003Text(shipment.supplier || shipment.order_supplier, 160), op.name, t, item.material_id, receiptId));
       statements.push(env.DB.prepare(`INSERT INTO v2_003_material_txns
         (id, material_id, txn_type, qty_delta, qty_before, qty_after, warehouse_name, location_code,
@@ -12130,8 +12368,6 @@ async function handleMultipartUpload(formData, env) {
     await ensureMigrated(env.DB);
     if (!formData) return err("invalid multipart form");
     const k = formData.get("k") || "";
-    if (!isOpsAuth({ k }, env)) return err("unauthorized", 401);
-
     const file = formData.get("file");
     if (!file) return err("missing file");
 
@@ -12139,6 +12375,14 @@ async function handleMultipartUpload(formData, env) {
     const related_doc_id = v003Text(formData.get("related_doc_id"), 120);
     const attachment_category = v003Text(formData.get("attachment_category"), 80);
     const uploaded_by = v003Text(formData.get("uploaded_by"), 120);
+    const fieldBody = {
+      k,
+      operator_id: v003Text(formData.get("operator_id"), 80),
+      operator_name: v003Text(formData.get("operator_name") || uploaded_by, 120)
+    };
+    const publicArrival = attachment_category === 'arrival_photo' && related_doc_type === 'material_shipment'
+      && v003IsPublicField(fieldBody);
+    if (!isOpsAuth(fieldBody, env) && !publicArrival) return err("unauthorized", 401);
     if (!related_doc_type || !related_doc_id) return err("missing attachment target");
     if (attachment_category === 'arrival_photo') {
       if (related_doc_type !== 'material_shipment') return err('invalid_arrival_photo_target');
