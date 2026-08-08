@@ -4,6 +4,7 @@ var S003 = {
   key: '', role: '', badge: '', operatorId: '', operatorName: '',
   locations: [], currentMaterial: null, currentAsset: null, ledgerRows: [],
   purchaseOrders: [], purchaseMaterials: [], purchaseRequestLines: [], currentPurchase: null, currentShipment: null,
+  materialImportRows: [], materialImportPreview: null,
   badgeScanner: null, itemScanner: null, receivingScanner: null, currentView: 'dashboard', busy: false
 };
 
@@ -54,48 +55,62 @@ function refreshCurrentView() {
 }
 
 async function api(action, data, options) {
-  var body = Object.assign({}, data || {}, { action: action, k: (options && options.key) || S003.key });
+  var body = Object.assign({}, data || {});
+  if (isField()) {
+    if (!body.operator_id) body.operator_id = S003.operatorId;
+    if (!body.operator_name) body.operator_name = S003.operatorName;
+  }
+  body.action = action;
+  body.k = (options && options.key) || S003.key;
   var res;
   try {
     res = await fetch(V2_API, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
   } catch(e) { throw new Error('network_error'); }
   var json;
   try { json = await res.json(); } catch(e) { throw new Error('invalid_response'); }
-  if (!res.ok || !json.ok) throw new Error(json.error || json.message || ('http_' + res.status));
+  if (!res.ok || !json.ok) { var apiError = new Error(json.error || json.message || ('http_' + res.status)); apiError.details = json; throw apiError; }
   return json;
 }
 
 function errorText(code) {
   var zh = {
-    unauthorized:'访问码错误或已失效', unauthorized_admin_only:'此操作仅限管理员', network_error:'网络连接失败，请稍后重试',
+    unauthorized:'身份验证失败或登录已失效', unauthorized_admin_only:'此操作仅限管理员', network_error:'网络连接失败，请稍后重试',
     invalid_response:'服务器返回异常', not_found:'没有找到对应记录', duplicate_item_code:'编号已被使用', duplicate_barcode:'条码已被使用', duplicate_serial_no:'序列号已被使用',
     insufficient_stock:'库存不足，不能提交', material_inactive:'该耗材已停用', stock_changed_retry:'库存刚被其他人修改，请刷新后重试',
     asset_changed_retry:'物品状态刚被修改，请刷新后重试', asset_not_available:'该物品当前不可领用', asset_not_assigned:'该物品当前没有被领用',
     not_current_keeper:'只有当前领用人或管理员可以归还', asset_unavailable:'该物品已报废或遗失', asset_not_in_repair:'该物品不在维修中',
     operator_required:'缺少操作人信息', positive_qty_required:'数量必须大于 0', valid_counted_qty_required:'请输入正确的实盘数量',
-    name_category_unit_required:'请填写名称、分类和单位', name_category_required:'请填写名称和分类', warehouse_and_location_required:'请填写仓库和位置编码',
+    recipient_required:'请填写领用或使用人', department_required:'请选择代发、大货或进口部门', location_required:'请填写存放位置',
+    name_category_unit_required:'请填写名称、分类和单位', name_category_required:'请填写名称和分类',
+    bulk_import_empty:'表格中没有可导入的数据', bulk_import_limit:'一次最多导入 300 行', bulk_import_invalid:'表格中有错误，请按提示修改',
+    bulk_code_barcode_conflict:'耗材编号和条码分别对应两条现有记录', bulk_duplicate_target:'表格中多行指向同一耗材', bulk_duplicate_code:'表格内耗材编号重复', bulk_duplicate_barcode:'表格内条码重复',
+    bulk_invalid_status:'状态只能填写 active/启用 或 inactive/停用', bulk_invalid_number:'库存、最低库存或单价格式不正确',
     purchase_lines_required:'请至少添加一种采购耗材', invalid_purchase_line:'采购耗材或申请数量不正确', material_not_found:'耗材不存在或已停用',
     purchase_order_closed:'采购单已经关闭，不能继续修改', ordered_qty_below_shipped:'采购数量不能小于已经登记发货的数量', ordered_qty_required:'请填写实际采购数量',
     delivery_method_required:'请选择送货方式', tracking_no_required:'请填写快递单号', duplicate_tracking_no:'这个快递单号已经登记过',
     invalid_shipment_line:'发货明细或数量不正确', shipment_qty_exceeds_ordered:'本批发货数量超过尚未发货的采购数量', shipment_lines_required:'请填写本批发货明细',
     shipment_not_found:'没有找到对应的采购到货记录', arrival_photo_required:'供应商送货必须先拍摄至少一张到货照片', receipt_lines_incomplete:'请清点全部到货明细',
-    invalid_received_qty:'实际收到数量不正确', putaway_location_required:'请填写实际收到耗材的上架仓库和位置', close_reason_required:'请填写关闭原因',
+    invalid_received_qty:'实际收到数量不正确', putaway_location_required:'请填写实际收到耗材的上架位置', close_reason_required:'请填写关闭原因',
     image_required:'到货凭证必须是照片', file_too_large:'照片不能超过 15MB', shipment_not_pending:'该到货单已收货或已取消', invalid_arrival_photo_target:'到货照片关联错误'
   };
   var ko = {
-    unauthorized:'접근 코드가 올바르지 않습니다', unauthorized_admin_only:'관리자만 가능한 작업입니다', network_error:'네트워크 연결 실패',
+    unauthorized:'본인 확인에 실패했거나 로그인이 만료되었습니다', unauthorized_admin_only:'관리자만 가능한 작업입니다', network_error:'네트워크 연결 실패',
     invalid_response:'서버 응답 오류', not_found:'해당 기록을 찾을 수 없습니다', duplicate_item_code:'이미 사용 중인 번호입니다', duplicate_barcode:'이미 사용 중인 바코드입니다', duplicate_serial_no:'이미 사용 중인 시리얼 번호입니다',
     insufficient_stock:'재고가 부족합니다', material_inactive:'사용 중지된 소모품입니다', stock_changed_retry:'재고가 변경되었습니다. 새로고침 후 다시 시도하세요',
     asset_changed_retry:'비품 상태가 변경되었습니다. 다시 시도하세요', asset_not_available:'현재 수령할 수 없는 비품입니다', asset_not_assigned:'현재 사용 중인 비품이 아닙니다',
     not_current_keeper:'현재 사용자 또는 관리자만 반납할 수 있습니다', asset_unavailable:'폐기 또는 분실 처리된 비품입니다', asset_not_in_repair:'수리 중인 비품이 아닙니다',
     operator_required:'작업자 정보가 없습니다', positive_qty_required:'수량은 0보다 커야 합니다', valid_counted_qty_required:'올바른 실사 수량을 입력하세요',
-    name_category_unit_required:'명칭·분류·단위를 입력하세요', name_category_required:'명칭과 분류를 입력하세요', warehouse_and_location_required:'창고와 위치 코드를 입력하세요',
+    recipient_required:'수령 또는 사용자를 입력하세요', department_required:'배송대행·대형화물·수입 부서를 선택하세요', location_required:'보관 위치를 입력하세요',
+    name_category_unit_required:'명칭·분류·단위를 입력하세요', name_category_required:'명칭과 분류를 입력하세요',
+    bulk_import_empty:'등록할 데이터가 없습니다', bulk_import_limit:'한 번에 최대 300행까지 등록할 수 있습니다', bulk_import_invalid:'표의 오류를 수정하세요',
+    bulk_code_barcode_conflict:'번호와 바코드가 서로 다른 기존 소모품을 가리킵니다', bulk_duplicate_target:'여러 행이 같은 소모품을 가리킵니다', bulk_duplicate_code:'표 안에 중복 번호가 있습니다', bulk_duplicate_barcode:'표 안에 중복 바코드가 있습니다',
+    bulk_invalid_status:'상태는 active/사용 또는 inactive/미사용만 가능합니다', bulk_invalid_number:'재고·최소 재고·단가 형식이 올바르지 않습니다',
     purchase_lines_required:'구매할 소모품을 한 개 이상 추가하세요', invalid_purchase_line:'구매 품목 또는 요청 수량이 올바르지 않습니다', material_not_found:'소모품이 없거나 사용 중지 상태입니다',
     purchase_order_closed:'이미 종료된 구매 건입니다', ordered_qty_below_shipped:'구매 수량은 이미 발송 등록된 수량보다 적을 수 없습니다', ordered_qty_required:'실제 구매 수량을 입력하세요',
     delivery_method_required:'배송 방식을 선택하세요', tracking_no_required:'택배 송장번호를 입력하세요', duplicate_tracking_no:'이미 등록된 송장번호입니다',
     invalid_shipment_line:'발송 품목 또는 수량이 올바르지 않습니다', shipment_qty_exceeds_ordered:'발송 수량이 미발송 구매 수량을 초과합니다', shipment_lines_required:'이번 발송 내역을 입력하세요',
     shipment_not_found:'구매 입고 내역을 찾을 수 없습니다', arrival_photo_required:'공급업체 배송은 도착 사진을 한 장 이상 촬영해야 합니다', receipt_lines_incomplete:'전체 입고 품목을 확인하세요',
-    invalid_received_qty:'실제 입고 수량이 올바르지 않습니다', putaway_location_required:'실제 입고 품목의 창고와 위치를 입력하세요', close_reason_required:'종료 사유를 입력하세요',
+    invalid_received_qty:'실제 입고 수량이 올바르지 않습니다', putaway_location_required:'실제 입고 품목의 적치 위치를 입력하세요', close_reason_required:'종료 사유를 입력하세요',
     image_required:'도착 증빙은 사진만 가능합니다', file_too_large:'사진은 15MB 이하여야 합니다', shipment_not_pending:'이미 입고 또는 취소된 건입니다', invalid_arrival_photo_target:'도착 사진 연결 오류'
   };
   return (S003.lang === 'ko' ? ko[code] : zh[code]) || code || T('failed');
@@ -115,27 +130,14 @@ function setPage(id) {
 
 function showEntry() { stopBadgeScanner(); setPage('entryPage'); }
 
-async function openFieldEntry() {
-  var key = localStorage.getItem(V2_003_OPS_KEY_STORAGE) || '';
-  if (!key) {
-    key = prompt(S003.lang === 'ko' ? '현장 접근 코드를 입력하세요' : '请输入现场访问码') || '';
-    key = key.trim();
-  }
-  if (!key) return;
-  try {
-    var auth = await api('v2_003_auth_check', {}, { key: key });
-    if (auth.role !== 'operator' && auth.role !== 'admin') throw new Error('unauthorized');
-    S003.key = key;
-    S003.role = auth.role;
-    localStorage.setItem(V2_003_OPS_KEY_STORAGE, key);
-  } catch(e) {
-    localStorage.removeItem(V2_003_OPS_KEY_STORAGE);
-    toast(errorText(e.message), true);
-    return;
-  }
-  var badge = localStorage.getItem(V2_003_BADGE_KEY) || '';
-  var day = localStorage.getItem(V2_003_BADGE_DAY_KEY) || '';
-  if (badge && day === kstToday() && applyBadge(badge, false)) { bootApp(); return; }
+function openFieldEntry() {
+  // 现场端不使用访问码，也不复用管理员会话；每次进入都重新识别当前操作人。
+  S003.key = '';
+  S003.role = 'operator';
+  S003.badge = '';
+  S003.operatorId = '';
+  S003.operatorName = '';
+  E('badgeError').textContent = '';
   setPage('badgePage');
 }
 
@@ -176,21 +178,17 @@ function parseBadge(raw) {
   return { raw:raw, id:id, name:name };
 }
 
-function applyBadge(raw, persist) {
+function applyBadge(raw) {
   var badge = parseBadge(raw);
   if (!badge) return false;
   S003.badge = badge.raw; S003.operatorId = badge.id; S003.operatorName = badge.name;
-  if (persist !== false) {
-    localStorage.setItem(V2_003_BADGE_KEY, badge.raw);
-    localStorage.setItem(V2_003_BADGE_DAY_KEY, kstToday());
-  }
   return true;
 }
 
 function manualBadge() {
   var raw = prompt(S003.lang === 'ko' ? '형식: EMP-이름 또는 EMP-001|이름' : '格式：EMP-姓名 或 EMP-001|姓名');
   if (!raw) return;
-  if (!applyBadge(raw, true)) { E('badgeError').textContent = S003.lang === 'ko' ? '명찰 형식이 올바르지 않습니다' : '工牌格式不正确'; return; }
+  if (!applyBadge(raw)) { E('badgeError').textContent = S003.lang === 'ko' ? '명찰 형식이 올바르지 않습니다' : '工牌格式不正确'; return; }
   bootApp();
 }
 
@@ -200,7 +198,7 @@ async function startBadgeScan() {
   try {
     S003.badgeScanner = new Html5Qrcode('badgeReader');
     await S003.badgeScanner.start({ facingMode:'environment' }, { fps:8, qrbox:{width:240,height:160} }, function(text) {
-      if (!applyBadge(text, true)) { E('badgeError').textContent = S003.lang === 'ko' ? '명찰 QR이 아닙니다' : '不是有效工牌二维码'; return; }
+      if (!applyBadge(text)) { E('badgeError').textContent = S003.lang === 'ko' ? '명찰 QR이 아닙니다' : '不是有效工牌二维码'; return; }
       stopBadgeScanner(); bootApp();
     }, function() {});
     E('badgeScanBtn').textContent = T('close');
@@ -251,14 +249,11 @@ function changeAdminName() {
 }
 
 function logout003() {
-  var wasField = isField();
   S003.key = ''; S003.role = ''; S003.operatorId = ''; S003.operatorName = '';
   localStorage.removeItem(V2_003_AUTH_KEY); localStorage.removeItem(V2_003_ROLE_KEY);
-  if (wasField) {
-    S003.badge = '';
-    localStorage.removeItem(V2_003_BADGE_KEY);
-    localStorage.removeItem(V2_003_BADGE_DAY_KEY);
-  }
+  S003.badge = '';
+  localStorage.removeItem(V2_003_BADGE_KEY);
+  localStorage.removeItem(V2_003_BADGE_DAY_KEY);
   document.body.classList.remove('role-field', 'role-admin');
   closeScanner(); closeReceivingScanner(); showEntry();
 }
@@ -317,8 +312,30 @@ async function loadDashboard() {
     ];
     E('dashboardStats').innerHTML = stats.map(function(x) { return '<div class="stat-card '+x[2]+'"><div class="stat-label">'+esc(x[0])+'</div><div class="stat-value">'+esc(x[1])+'</div></div>'; }).join('');
     E('recentActivity').innerHTML = (res.recent || []).length ? res.recent.map(activityHtml).join('') : '<div class="empty">'+esc(T('no_data'))+'</div>';
+    loadDepartmentUsage();
   } catch(e) { E('dashboardStats').innerHTML = '<div class="empty">'+esc(errorText(e.message))+'</div>'; }
 }
+
+async function loadDepartmentUsage() {
+  if (!isAdmin() || !E('departmentUsageTable')) return;
+  E('departmentUsageTable').innerHTML = '<div class="empty">'+esc(T('loading'))+'</div>';
+  try {
+    var res = await api('v2_003_department_usage', { department:val('usageDepartment'), start_date:val('usageStart'), end_date:val('usageEnd') });
+    E('departmentUsageSummary').innerHTML = (res.summary || []).map(function(x) {
+      return '<div class="department-card dept-'+departmentClass(x.department)+'"><b>'+esc(departmentLabel(x.department))+'</b><strong>'+esc(x.material_count||0)+'</strong><small>'+esc(T('material_count'))+' · '+esc(x.record_count||0)+' '+(S003.lang==='ko'?'건':'条记录')+'</small></div>';
+    }).join('');
+    var rows = res.items || [];
+    if (!rows.length) { E('departmentUsageTable').innerHTML='<div class="empty">'+esc(T('no_data'))+'</div>'; return; }
+    var head='<table><thead><tr><th>'+esc(T('department'))+'</th><th>'+esc(T('materials'))+'</th><th>'+esc(T('category'))+'</th><th>'+esc(T('issue'))+'</th><th>'+esc(T('use'))+'</th><th>'+esc(T('return_item'))+'</th></tr></thead><tbody>';
+    E('departmentUsageTable').innerHTML=head+rows.map(function(x){var name=S003.lang==='ko'&&x.name_ko?x.name_ko:x.name_zh;return '<tr><td><span class="tag '+departmentTagClass(x.department)+'">'+esc(departmentLabel(x.department))+'</span></td><td><b>'+esc(name)+'</b><br><small>'+esc(x.material_code)+' · '+esc(x.unit)+'</small></td><td>'+esc(x.category||'--')+'</td><td>'+esc(fmtQty(x.issue_qty))+' '+esc(x.unit)+'</td><td><b>'+esc(fmtQty(x.use_qty))+' '+esc(x.unit)+'</b></td><td>'+esc(fmtQty(x.return_qty))+' '+esc(x.unit)+'</td></tr>';}).join('')+'</tbody></table>';
+  } catch(e) {
+    E('departmentUsageTable').innerHTML='<div class="empty">'+esc(errorText(e.message))+'</div>';
+  }
+}
+
+function departmentLabel(value){return ({'代发':T('department_direct'),'大货':T('department_bulk'),'进口':T('department_import')})[value]||value||'--';}
+function departmentClass(value){return ({'代发':'direct','大货':'bulk','进口':'import'})[value]||'none';}
+function departmentTagClass(value){return ({'代发':'blue','大货':'orange','进口':'purple'})[value]||'gray';}
 
 function activityHtml(r) {
   var action = r.kind === 'material' ? txnLabel(r.txn_type) : assetActionLabel(r.action_type);
@@ -329,7 +346,7 @@ function activityHtml(r) {
 function ledgerActivityHtml(r) {
   var action = r.kind === 'material' ? txnLabel(r.action_type) : assetActionLabel(r.action_type);
   var extra = r.kind === 'material' ? ((Number(r.qty_delta) > 0 ? '+' : '') + fmtQty(r.qty_delta) + ' ' + (r.unit || '')) : assetStatusLabel(r.status_after || r.action_type);
-  return '<div class="activity-item"><div class="activity-dot '+esc(r.kind)+'">'+(r.kind === 'material' ? '耗' : '物')+'</div><div class="activity-main"><b>'+esc(action)+' · '+esc(r.item_name || r.item_code)+'</b><small>'+esc(extra)+' · '+esc([r.warehouse_name,r.location_code].filter(Boolean).join(' / ') || '--')+'</small></div><div class="activity-time">'+esc(fmtTime(r.created_at))+'</div></div>';
+  return '<div class="activity-item"><div class="activity-dot '+esc(r.kind)+'">'+(r.kind === 'material' ? '耗' : '物')+'</div><div class="activity-main"><b>'+esc(action)+' · '+esc(r.item_name || r.item_code)+'</b><small>'+esc([extra,departmentLabel(r.department),r.recipient_name].filter(function(x){return x&&x!=='--';}).join(' · ') || '--')+'</small></div><div class="activity-time">'+esc(fmtTime(r.created_at))+'</div></div>';
 }
 
 function fillDatalist(id, values) { E(id).innerHTML = (values || []).map(function(v) { return '<option value="'+esc(v)+'"></option>'; }).join(''); }
@@ -338,8 +355,6 @@ async function loadLocations(renderSettings) {
   try {
     var res = await api('v2_003_location_list', { include_inactive: isAdmin() ? 1 : 0 });
     S003.locations = res.items || [];
-    var warehouses = Array.from(new Set(S003.locations.map(function(x) { return x.warehouse_name; }).filter(Boolean)));
-    fillDatalist('warehouseList', warehouses);
     fillDatalist('locationList', S003.locations.map(function(x) { return x.location_code; }).filter(Boolean));
     if (renderSettings) renderLocations();
   } catch(e) { if (renderSettings) E('locationListBody').innerHTML = '<div class="empty">'+esc(errorText(e.message))+'</div>'; }
@@ -349,7 +364,7 @@ function renderLocations() {
   var body = E('locationListBody');
   if (!S003.locations.length) { body.innerHTML = '<div class="empty">'+esc(T('no_data'))+'</div>'; return; }
   body.innerHTML = S003.locations.map(function(x) {
-    return '<div class="settings-row"><b>'+esc(x.warehouse_name)+'</b><span>'+esc(x.location_code)+'</span><span>'+esc(x.location_name || '--')+'</span><button class="btn mini soft" onclick="editLocation(\''+jsq(x.id)+'\')">'+esc(T('edit'))+'</button></div>';
+    return '<div class="settings-row"><b>'+esc(x.location_code)+'</b><span>'+esc(x.location_name || '--')+'</span><button class="btn mini soft" onclick="editLocation(\''+jsq(x.id)+'\')">'+esc(T('edit'))+'</button></div>';
   }).join('');
 }
 
@@ -369,7 +384,7 @@ async function loadMaterials() {
 
 function materialCardHtml(m) {
   var name = S003.lang === 'ko' && m.name_ko ? m.name_ko : m.name_zh;
-  return '<article class="item-card '+(Number(m.low_stock) ? 'low' : '')+'" onclick="openMaterialDetail(\''+jsq(m.id)+'\')"><div class="item-head"><div class="item-title"><b>'+esc(name)+'</b><small>'+esc(m.material_code)+(m.spec ? ' · '+esc(m.spec) : '')+'</small></div><div class="stock-number">'+esc(fmtQty(m.current_qty))+'<small>'+esc(m.unit)+'</small></div></div><div class="item-meta"><span class="tag blue">'+esc(m.category)+'</span>'+(Number(m.low_stock) ? '<span class="tag red">'+esc(T('low_stock_badge'))+'</span>' : '')+'<span>⌖ '+esc([m.warehouse_name,m.location_code].filter(Boolean).join(' / ') || '--')+'</span><span>'+esc(T('min_stock'))+': '+esc(fmtQty(m.min_qty))+'</span></div></article>';
+  return '<article class="item-card '+(Number(m.low_stock) ? 'low' : '')+'" onclick="openMaterialDetail(\''+jsq(m.id)+'\')"><div class="item-head"><div class="item-title"><b>'+esc(name)+'</b><small>'+esc(m.material_code)+(m.spec ? ' · '+esc(m.spec) : '')+'</small></div><div class="stock-number">'+esc(fmtQty(m.current_qty))+'<small>'+esc(m.unit)+'</small></div></div><div class="item-meta"><span class="tag blue">'+esc(m.category)+'</span>'+(Number(m.low_stock) ? '<span class="tag red">'+esc(T('low_stock_badge'))+'</span>' : '')+(m.location_code?'<span>⌖ '+esc(m.location_code)+'</span>':'')+'<span>'+esc(T('min_stock'))+': '+esc(fmtQty(m.min_qty))+'</span></div></article>';
 }
 
 async function openMaterialDetail(id) {
@@ -394,9 +409,9 @@ function renderMaterialDetail(res) {
     actions += '<button class="btn soft" onclick="openMaterialForm(S003.currentMaterial.item)">'+esc(T('edit'))+'</button>';
   }
   var info = isField() ? [
-    [T('category'),m.category],[T('spec'),m.spec],[T('warehouse'),m.warehouse_name],[T('location'),m.location_code]
+    [T('category'),m.category],[T('spec'),m.spec],[T('storage_location'),m.location_code]
   ] : [
-    [T('category'),m.category],[T('spec'),m.spec],[T('warehouse'),m.warehouse_name],[T('location'),m.location_code],
+    [T('category'),m.category],[T('spec'),m.spec],[T('storage_location'),m.location_code],
     [T('min_stock'),fmtQty(m.min_qty)+' '+(m.unit||'')],[T('cost'),fmtMoney(m.unit_cost,m.currency)],[T('supplier'),m.supplier],[T('status'),m.status === 'active' ? T('active') : T('inactive')]
   ];
   var history = (res.transactions || []).length ? (res.transactions || []).map(materialTxnHtml).join('') : '<div class="empty">'+esc(T('no_data'))+'</div>';
@@ -406,16 +421,16 @@ function renderMaterialDetail(res) {
 
 function infoCell(x) { return '<div class="info-cell"><small>'+esc(x[0])+'</small><b>'+esc(x[1] || '--')+'</b></div>'; }
 function txnLabel(t) { return ({opening:S003.lang==='ko'?'기초재고':'期初库存',inbound:T('inbound'),purchase_inbound:S003.lang==='ko'?'구매 입고':'采购到货',issue:T('issue'),use:T('use'),return:T('return_item'),adjust:T('adjust'),stocktake:T('stocktake')})[t] || t; }
-function materialTxnHtml(t) { var delta = Number(t.qty_delta)||0; return '<div class="timeline-row"><div class="timeline-action">'+esc(txnLabel(t.txn_type))+' <span class="tag '+(delta<0?'orange':'green')+'">'+(delta>0?'+':'')+esc(fmtQty(delta))+'</span></div><div class="timeline-detail">'+esc(t.operator_name||'--')+(t.recipient_name?' → '+esc(t.recipient_name):'')+'<small>'+esc([t.purpose,t.related_doc_no,t.note].filter(Boolean).join(' · ')||'--')+' · '+esc(fmtQty(t.qty_before))+' → '+esc(fmtQty(t.qty_after))+'</small></div><div class="timeline-time">'+esc(fmtTime(t.created_at))+'</div></div>'; }
+function materialTxnHtml(t) { var delta = Number(t.qty_delta)||0; return '<div class="timeline-row"><div class="timeline-action">'+esc(txnLabel(t.txn_type))+' <span class="tag '+(delta<0?'orange':'green')+'">'+(delta>0?'+':'')+esc(fmtQty(delta))+'</span></div><div class="timeline-detail">'+esc(t.operator_name||'--')+(t.recipient_name?' → '+esc(t.recipient_name):'')+(t.department?' · '+esc(departmentLabel(t.department)):'')+'<small>'+esc([t.purpose,t.related_doc_no,t.note].filter(Boolean).join(' · ')||'--')+' · '+esc(fmtQty(t.qty_before))+' → '+esc(fmtQty(t.qty_after))+'</small></div><div class="timeline-time">'+esc(fmtTime(t.created_at))+'</div></div>'; }
 
-function clearMaterialForm() { ['mfId','mfCode','mfBarcode','mfNameZh','mfNameKo','mfCategory','mfSpec','mfUnit','mfWarehouse','mfLocation','mfCost','mfSupplier','mfNote'].forEach(function(id){E(id).value='';}); E('mfOpening').value='0'; E('mfMin').value='0'; E('mfStatus').value='active'; }
+function clearMaterialForm() { ['mfId','mfCode','mfBarcode','mfNameZh','mfNameKo','mfCategory','mfSpec','mfUnit','mfLocation','mfCost','mfSupplier','mfNote'].forEach(function(id){E(id).value='';}); E('mfOpening').value='0'; E('mfMin').value='0'; E('mfStatus').value='active'; }
 function openMaterialForm(item) {
   if (!isAdmin()) return;
   clearMaterialForm();
   if (item) {
     E('materialFormTitle').textContent = T('edit'); E('mfId').value=item.id; E('mfCode').value=item.material_code||''; E('mfBarcode').value=item.barcode||'';
     E('mfNameZh').value=item.name_zh||''; E('mfNameKo').value=item.name_ko||''; E('mfCategory').value=item.category||''; E('mfSpec').value=item.spec||'';
-    E('mfUnit').value=item.unit||''; E('mfWarehouse').value=item.warehouse_name||''; E('mfLocation').value=item.location_code||''; E('mfMin').value=item.min_qty||0;
+    E('mfUnit').value=item.unit||''; E('mfLocation').value=item.location_code||''; E('mfMin').value=item.min_qty||0;
     E('mfCost').value=item.unit_cost||''; E('mfSupplier').value=item.supplier||''; E('mfStatus').value=item.status||'active'; E('mfNote').value=item.note||''; E('mfOpeningWrap').classList.add('hidden');
   } else { E('materialFormTitle').textContent=T('add_material'); E('mfOpeningWrap').classList.remove('hidden'); }
   goView('material-edit');
@@ -423,7 +438,7 @@ function openMaterialForm(item) {
 
 async function saveMaterial(event) {
   event.preventDefault(); if (S003.busy) return; S003.busy=true;
-  var data = Object.assign(operatorPayload(), { id:val('mfId'), material_code:val('mfCode'), barcode:val('mfBarcode'), name_zh:val('mfNameZh'), name_ko:val('mfNameKo'), category:val('mfCategory'), spec:val('mfSpec'), unit:val('mfUnit'), warehouse_name:val('mfWarehouse'), location_code:val('mfLocation'), opening_qty:num('mfOpening'), min_qty:num('mfMin'), unit_cost:num('mfCost'), currency:'KRW', supplier:val('mfSupplier'), status:val('mfStatus'), note:val('mfNote') });
+  var data = Object.assign(operatorPayload(), { id:val('mfId'), material_code:val('mfCode'), barcode:val('mfBarcode'), name_zh:val('mfNameZh'), name_ko:val('mfNameKo'), category:val('mfCategory'), spec:val('mfSpec'), unit:val('mfUnit'), location_code:val('mfLocation'), opening_qty:num('mfOpening'), min_qty:num('mfMin'), unit_cost:num('mfCost'), currency:'KRW', supplier:val('mfSupplier'), status:val('mfStatus'), note:val('mfNote') });
   try { var res=await api('v2_003_material_save',data); toast(T('success')); await loadLocations(false); openMaterialDetail(res.id); }
   catch(e){ toast(errorText(e.message),true); } finally { S003.busy=false; }
 }
@@ -431,20 +446,85 @@ async function saveMaterial(event) {
 function openMaterialTxn(type) {
   var m=S003.currentMaterial&&S003.currentMaterial.item; if(!m)return;
   E('mtMaterialId').value=m.id; E('mtType').value=type; E('mtTitle').textContent=txnLabel(type); E('mtItemInfo').textContent=(S003.lang==='ko'&&m.name_ko?m.name_ko:m.name_zh)+' · '+fmtQty(m.current_qty)+' '+m.unit;
-  ['mtQty','mtPurpose','mtDoc','mtNote'].forEach(function(id){E(id).value='';}); E('mtCost').value=m.unit_cost||''; E('mtSupplier').value=m.supplier||''; E('mtRecipient').value=S003.operatorName||'';
+  ['mtQty','mtPurpose','mtDoc','mtNote'].forEach(function(id){E(id).value='';}); E('mtCost').value=m.unit_cost||''; E('mtSupplier').value=m.supplier||''; E('mtRecipient').value=S003.operatorName||''; E('mtDepartment').value='';
   E('mtQty').min=type==='adjust'?'':'0.01'; E('mtQtyLabel').textContent=type==='stocktake'?T('counted_qty'):(type==='adjust'?T('delta_qty'):T('qty'));
-  E('mtInboundFields').classList.toggle('hidden',type!=='inbound'); E('mtPeopleFields').classList.toggle('hidden',['inbound','adjust','stocktake'].includes(type));
+  var needsPeople=!['inbound','adjust','stocktake'].includes(type);
+  E('mtInboundFields').classList.toggle('hidden',type!=='inbound'); E('mtPeopleFields').classList.toggle('hidden',!needsPeople);
+  E('mtRecipient').readOnly=isField(); E('mtRecipient').required=needsPeople; E('mtDepartment').required=needsPeople;
   E('materialTxnModal').classList.remove('hidden'); setTimeout(function(){E('mtQty').focus();},80);
 }
 
 async function submitMaterialTxn(event) {
   event.preventDefault(); if(S003.busy)return; S003.busy=true;
-  var type=val('mtType'), qty=num('mtQty'); var data=Object.assign(operatorPayload(),{material_id:val('mtMaterialId'),txn_type:type,recipient_name:val('mtRecipient'),purpose:val('mtPurpose'),related_doc_no:val('mtDoc'),unit_cost:num('mtCost'),supplier:val('mtSupplier'),note:val('mtNote'),client_req_id:reqId('mtx')});
+  var type=val('mtType'), qty=num('mtQty'); var data=Object.assign(operatorPayload(),{material_id:val('mtMaterialId'),txn_type:type,recipient_name:val('mtRecipient'),department:val('mtDepartment'),purpose:val('mtPurpose'),related_doc_no:val('mtDoc'),unit_cost:num('mtCost'),supplier:val('mtSupplier'),note:val('mtNote'),client_req_id:reqId('mtx')});
   if(type==='adjust')data.delta=qty; else if(type==='stocktake')data.counted_qty=qty; else data.qty=qty;
-  if(type==='issue'&&val('mtRecipient')===S003.operatorName)data.recipient_id=S003.operatorId;
+  if(['issue','use','return'].includes(type)&&val('mtRecipient')===S003.operatorName)data.recipient_id=S003.operatorId;
   try { await api('v2_003_material_txn',data); closeModal('materialTxnModal'); toast(T('success')); openMaterialDetail(data.material_id); }
   catch(e){toast(errorText(e.message),true);} finally{S003.busy=false;}
 }
+
+var MATERIAL_IMPORT_HEADERS = {
+  '耗材编号（可空）':'material_code','耗材编号':'material_code','material_code':'material_code',
+  '条码（可空）':'barcode','条码':'barcode','barcode':'barcode',
+  '中文名称*':'name_zh','中文名称':'name_zh','name_zh':'name_zh',
+  '韩文名称':'name_ko','name_ko':'name_ko','分类*':'category','分类':'category','category':'category',
+  '规格':'spec','spec':'spec','单位*':'unit','单位':'unit','unit':'unit',
+  '存放位置':'location_code','位置/货位':'location_code','location_code':'location_code',
+  '期初库存':'opening_qty','opening_qty':'opening_qty','最低库存':'min_qty','min_qty':'min_qty',
+  '单价':'unit_cost','unit_cost':'unit_cost','供应商':'supplier','supplier':'supplier',
+  '状态':'status','status':'status','备注':'note','note':'note'
+};
+
+function openMaterialImport(){if(!isAdmin())return;S003.materialImportRows=[];S003.materialImportPreview=null;E('materialImportInput').value='';E('materialImportStatus').innerHTML='<span>'+esc(T('import_waiting'))+'</span>';E('materialImportPreview').innerHTML='';E('confirmMaterialImportBtn').disabled=true;E('materialImportModal').classList.remove('hidden');}
+function closeMaterialImport(){E('materialImportModal').classList.add('hidden');}
+
+function downloadMaterialTemplate(){
+  var headers=['耗材编号（可空）','条码（可空）','中文名称*','韩文名称','分类*','规格','单位*','存放位置','期初库存','最低库存','单价','供应商','状态','备注'];
+  var sheet=XLSX.utils.aoa_to_sheet([headers]);
+  sheet['!cols']=[14,16,20,18,14,18,10,16,12,12,12,18,12,24].map(function(w){return{wch:w};});
+  var guide=XLSX.utils.aoa_to_sheet([
+    ['填写说明','内容'],
+    ['必填列','中文名称、分类、单位'],
+    ['耗材编号','可以留空，系统自动生成；与现有编号一致时更新资料'],
+    ['条码','可以留空；与现有条码一致时更新资料'],
+    ['期初库存','只对新建耗材生效，更新现有耗材时不会改库存'],
+    ['状态','填写 active/启用 或 inactive/停用；留空默认为启用'],
+    ['数量限制','一次最多 300 行']
+  ]);
+  guide['!cols']=[{wch:16},{wch:70}];
+  var wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,sheet,'耗材导入');XLSX.utils.book_append_sheet(wb,guide,'填写说明');
+  XLSX.writeFile(wb,'CK-003-耗材批量导入模板.xlsx');
+}
+
+function normalizeImportStatus(value){var s=String(value==null?'':value).trim();return ({'启用':'active','使用':'active','사용':'active','停用':'inactive','미사용':'inactive'})[s]||s||'active';}
+
+function mapMaterialImportRows(rawRows){
+  return (rawRows||[]).map(function(raw,index){var item={row_no:index+2};Object.keys(raw||{}).forEach(function(header){var key=MATERIAL_IMPORT_HEADERS[String(header).trim()];if(key)item[key]=raw[header];});item.status=normalizeImportStatus(item.status);return item;}).filter(function(x){return Object.keys(x).some(function(k){return k!=='row_no'&&String(x[k]==null?'':x[k]).trim()!=='';});});
+}
+
+function localMaterialImportErrors(rows){
+  var errors=[],codes=new Set(),barcodes=new Set();
+  if(!rows.length)return[{row:0,error:'bulk_import_empty'}];
+  if(rows.length>300)return[{row:0,error:'bulk_import_limit'}];
+  rows.forEach(function(x){var row=x.row_no,code=String(x.material_code||'').trim(),barcode=String(x.barcode||'').trim();if(!String(x.name_zh||'').trim()||!String(x.category||'').trim()||!String(x.unit||'').trim())errors.push({row:row,error:'name_category_unit_required'});['opening_qty','min_qty','unit_cost'].forEach(function(k){if(String(x[k]==null?'':x[k]).trim()!==''&&(isNaN(Number(x[k]))||Number(x[k])<0))errors.push({row:row,error:'bulk_invalid_number'});});if(!['active','inactive'].includes(String(x.status||'active')))errors.push({row:row,error:'bulk_invalid_status'});if(code){if(codes.has(code))errors.push({row:row,error:'bulk_duplicate_code'});codes.add(code);}if(barcode){if(barcodes.has(barcode))errors.push({row:row,error:'bulk_duplicate_barcode'});barcodes.add(barcode);}});
+  return errors;
+}
+
+function renderMaterialImportErrors(errors){E('materialImportStatus').className='import-status error';E('materialImportStatus').innerHTML='<b>'+(S003.lang==='ko'?'수정이 필요한 행':'以下行需要修改')+'</b><div class="import-errors">'+errors.slice(0,30).map(function(x){return '<span>'+(x.row?((S003.lang==='ko'?'행 ':'第 ')+esc(x.row)+(S003.lang==='ko'?'':' 行')):'')+'：'+esc(errorText(x.error))+'</span>';}).join('')+'</div>';E('confirmMaterialImportBtn').disabled=true;}
+
+function renderMaterialImportPreview(preview,fileName){
+  E('materialImportStatus').className='import-status success';E('materialImportStatus').innerHTML='<b>'+esc(fileName)+'</b><span>'+esc(preview.items.length)+(S003.lang==='ko'?'행 확인 완료':' 行校验通过')+' · '+(S003.lang==='ko'?'신규 ':'新建 ')+esc(preview.created_count)+' · '+(S003.lang==='ko'?'수정 ':'更新 ')+esc(preview.updated_count)+'</span>';
+  var head='<table><thead><tr><th>'+esc(S003.lang==='ko'?'행':'行')+'</th><th>'+esc(T('status'))+'</th><th>'+esc(T('material_code'))+'</th><th>'+esc(T('name_zh'))+'</th><th>'+esc(T('category'))+'</th><th>'+esc(T('unit'))+'</th><th>'+esc(T('opening_qty'))+'</th></tr></thead><tbody>';
+  E('materialImportPreview').innerHTML=head+preview.items.slice(0,100).map(function(x){return '<tr><td>'+esc(x.row)+'</td><td><span class="tag '+(x.action==='create'?'green':'blue')+'">'+esc(x.action==='create'?(S003.lang==='ko'?'신규':'新建'):(S003.lang==='ko'?'수정':'更新'))+'</span></td><td>'+esc(x.material_code)+'</td><td><b>'+esc(x.name_zh)+'</b></td><td>'+esc(x.category)+'</td><td>'+esc(x.unit)+'</td><td>'+esc(fmtQty(x.opening_qty))+'</td></tr>';}).join('')+'</tbody></table>';
+  E('confirmMaterialImportBtn').disabled=false;
+}
+
+async function readMaterialImport(input){
+  var file=input.files&&input.files[0];if(!file)return;E('confirmMaterialImportBtn').disabled=true;E('materialImportStatus').className='import-status';E('materialImportStatus').innerHTML='<span>'+esc(T('loading'))+'</span>';E('materialImportPreview').innerHTML='';
+  try{var buffer=await file.arrayBuffer(),wb=XLSX.read(buffer,{type:'array'}),sheet=wb.Sheets[wb.SheetNames[0]],raw=XLSX.utils.sheet_to_json(sheet,{defval:'',raw:false}),rows=mapMaterialImportRows(raw),localErrors=localMaterialImportErrors(rows);if(localErrors.length){renderMaterialImportErrors(localErrors);return;}var preview=await api('v2_003_material_bulk_import',Object.assign(operatorPayload(),{rows:rows,dry_run:1}));S003.materialImportRows=rows;S003.materialImportPreview=preview;renderMaterialImportPreview(preview,file.name);}catch(e){var errors=e.details&&e.details.errors;if(errors&&errors.length)renderMaterialImportErrors(errors);else{E('materialImportStatus').className='import-status error';E('materialImportStatus').textContent=errorText(e.message);}}
+}
+
+async function confirmMaterialImport(){if(S003.busy||!S003.materialImportRows.length)return;S003.busy=true;E('confirmMaterialImportBtn').disabled=true;try{var res=await api('v2_003_material_bulk_import',Object.assign(operatorPayload(),{rows:S003.materialImportRows,client_req_id:reqId('mimp')}));toast((S003.lang==='ko'?'일괄 등록 완료: 신규 ':'批量导入完成：新建 ')+res.created_count+(S003.lang==='ko'?', 수정 ':'，更新 ')+res.updated_count);S003.purchaseMaterials=[];closeMaterialImport();loadMaterials();loadDashboard();}catch(e){var errors=e.details&&e.details.errors;if(errors&&errors.length)renderMaterialImportErrors(errors);else toast(errorText(e.message),true);}finally{S003.busy=false;if(!E('materialImportModal').classList.contains('hidden'))E('confirmMaterialImportBtn').disabled=false;}}
 
 async function loadAssets() {
   E('assetList').innerHTML='<div class="empty">'+esc(T('loading'))+'</div>';
@@ -454,7 +534,7 @@ async function loadAssets() {
 
 function assetStatusLabel(s){return ({available:T('available'),assigned:T('assigned'),repair:T('repair'),retired:T('retired'),lost:T('lost')})[s]||s;}
 function statusTagClass(s){return ({available:'green',assigned:'blue',repair:'orange',retired:'gray',lost:'red'})[s]||'gray';}
-function assetCardHtml(a){var name=S003.lang==='ko'&&a.name_ko?a.name_ko:a.name_zh;return '<article class="item-card" onclick="openAssetDetail(\''+jsq(a.id)+'\')"><div class="item-head"><div class="item-title"><b>'+esc(name)+'</b><small>'+esc(a.asset_code)+(a.model?' · '+esc(a.model):'')+'</small></div><span class="tag '+statusTagClass(a.status)+'">'+esc(assetStatusLabel(a.status))+'</span></div><div class="item-meta"><span class="tag blue">'+esc(a.category)+'</span><span>⌖ '+esc([a.warehouse_name,a.location_code].filter(Boolean).join(' / ')||'--')+'</span>'+(a.keeper_name?'<span>◎ '+esc(a.keeper_name)+'</span>':'')+'</div></article>';}
+function assetCardHtml(a){var name=S003.lang==='ko'&&a.name_ko?a.name_ko:a.name_zh;return '<article class="item-card" onclick="openAssetDetail(\''+jsq(a.id)+'\')"><div class="item-head"><div class="item-title"><b>'+esc(name)+'</b><small>'+esc(a.asset_code)+(a.model?' · '+esc(a.model):'')+'</small></div><span class="tag '+statusTagClass(a.status)+'">'+esc(assetStatusLabel(a.status))+'</span></div><div class="item-meta"><span class="tag blue">'+esc(a.category)+'</span>'+(a.location_code?'<span>⌖ '+esc(a.location_code)+'</span>':'')+(a.keeper_name?'<span>◎ '+esc(a.keeper_name)+'</span>':'')+(a.keeper_department?'<span class="tag '+departmentTagClass(a.keeper_department)+'">'+esc(departmentLabel(a.keeper_department))+'</span>':'')+'</div></article>';}
 
 async function openAssetDetail(id){goView('asset-detail');E('assetDetail').innerHTML='<div class="empty">'+esc(T('loading'))+'</div>';try{var res=await api('v2_003_asset_detail',{id:id});S003.currentAsset=res;renderAssetDetail(res);}catch(e){E('assetDetail').innerHTML='<div class="empty">'+esc(errorText(e.message))+'</div>';}}
 
@@ -471,23 +551,23 @@ function renderAssetDetail(res){
     if(!['retired','lost'].includes(a.status))actions+='<button class="btn danger" onclick="openAssetAction(\'retire\')">'+esc(T('retire'))+'</button><button class="btn danger" onclick="openAssetAction(\'lost\')">'+esc(T('mark_lost'))+'</button>';
     actions+='<button class="btn soft" onclick="printAssetQr()">'+esc(T('print_qr'))+'</button><button class="btn soft" onclick="E(\'assetPhotoInput\').click()">'+esc(T('upload_photo'))+'</button>';
   }
-  var info=isField()?[[T('category'),a.category],[T('brand'),a.brand],[T('model'),a.model],[T('warehouse'),a.warehouse_name],[T('location'),a.location_code],[T('keeper'),a.keeper_name||'--'],[T('status'),assetStatusLabel(a.status)]]:[[T('category'),a.category],[T('brand'),a.brand],[T('model'),a.model],[T('serial_no'),a.serial_no],[T('warehouse'),a.warehouse_name],[T('location'),a.location_code],[T('keeper'),a.keeper_name||'--'],[T('status'),assetStatusLabel(a.status)],[T('purchase_date'),fmtDate(a.purchase_date)],[T('purchase_cost'),fmtMoney(a.purchase_cost,a.currency)],[T('supplier'),a.supplier],[T('warranty_until'),fmtDate(a.warranty_until)]];
+  var info=isField()?[[T('category'),a.category],[T('brand'),a.brand],[T('model'),a.model],[T('storage_location'),a.location_code],[T('keeper'),a.keeper_name||'--'],[T('department'),departmentLabel(a.keeper_department)],[T('status'),assetStatusLabel(a.status)]]:[[T('category'),a.category],[T('brand'),a.brand],[T('model'),a.model],[T('serial_no'),a.serial_no],[T('storage_location'),a.location_code],[T('keeper'),a.keeper_name||'--'],[T('department'),departmentLabel(a.keeper_department)],[T('status'),assetStatusLabel(a.status)],[T('purchase_date'),fmtDate(a.purchase_date)],[T('purchase_cost'),fmtMoney(a.purchase_cost,a.currency)],[T('supplier'),a.supplier],[T('warranty_until'),fmtDate(a.warranty_until)]];
   var photos=(res.attachments||[]).length?'<div class="panel"><div class="panel-head"><h2>'+esc(T('photos'))+'</h2></div><div class="photo-grid">'+res.attachments.map(function(p){return '<a href="'+esc(fileUrl(p.file_key))+'" target="_blank"><img src="'+esc(fileUrl(p.file_key))+'" alt="'+esc(p.file_name)+'"></a>';}).join('')+'</div></div>':'';
   var history=(res.transactions||[]).length?res.transactions.map(assetTxnHtml).join(''):'<div class="empty">'+esc(T('no_data'))+'</div>';
   var historyPanel=isField()?'':'<div class="panel"><div class="panel-head"><h2>'+esc(T('asset_history'))+'</h2></div><div class="timeline">'+history+'</div></div>';
   E('assetDetail').innerHTML='<div class="detail-hero"><div class="hero-top"><div><h1>'+esc(name)+'</h1><p>'+esc(a.asset_code)+(a.barcode?' · '+esc(a.barcode):'')+'</p></div><div><span class="tag '+statusTagClass(a.status)+'">'+esc(assetStatusLabel(a.status))+'</span></div></div><div class="detail-actions">'+actions+'</div></div><div class="panel"><div class="info-grid">'+info.map(infoCell).join('')+'</div>'+(a.note?'<p class="item-meta">'+esc(T('note'))+': '+esc(a.note)+'</p>':'')+'</div>'+(isField()?'':photos)+historyPanel;
 }
 
-function assetTxnHtml(t){var move=[t.to_warehouse,t.to_location].filter(Boolean).join(' / '),keeper=t.to_keeper_name||'';return '<div class="timeline-row"><div class="timeline-action">'+esc(assetActionLabel(t.action_type))+'</div><div class="timeline-detail">'+esc(t.operator_name||'--')+'<small>'+esc([keeper,move,t.related_doc_no,t.note].filter(Boolean).join(' · ')||'--')+'</small></div><div class="timeline-time">'+esc(fmtTime(t.created_at))+'</div></div>';}
+function assetTxnHtml(t){var move=t.to_location||'',keeper=t.to_keeper_name||'',dept=t.to_department||t.from_department||'';return '<div class="timeline-row"><div class="timeline-action">'+esc(assetActionLabel(t.action_type))+'</div><div class="timeline-detail">'+esc(t.operator_name||'--')+'<small>'+esc([keeper,departmentLabel(dept),move,t.related_doc_no,t.note].filter(function(x){return x&&x!=='--';}).join(' · ')||'--')+'</small></div><div class="timeline-time">'+esc(fmtTime(t.created_at))+'</div></div>';}
 
-function clearAssetForm(){['afId','afCode','afBarcode','afNameZh','afNameKo','afCategory','afBrand','afModel','afSerial','afWarehouse','afLocation','afPurchaseDate','afCost','afSupplier','afWarranty','afNote'].forEach(function(id){E(id).value='';});}
-function openAssetForm(item){if(!isAdmin())return;clearAssetForm();if(item){E('assetFormTitle').textContent=T('edit');E('afId').value=item.id;E('afCode').value=item.asset_code||'';E('afBarcode').value=item.barcode||'';E('afNameZh').value=item.name_zh||'';E('afNameKo').value=item.name_ko||'';E('afCategory').value=item.category||'';E('afBrand').value=item.brand||'';E('afModel').value=item.model||'';E('afSerial').value=item.serial_no||'';E('afWarehouse').value=item.warehouse_name||'';E('afLocation').value=item.location_code||'';E('afPurchaseDate').value=item.purchase_date||'';E('afCost').value=item.purchase_cost||'';E('afSupplier').value=item.supplier||'';E('afWarranty').value=item.warranty_until||'';E('afNote').value=item.note||'';}else E('assetFormTitle').textContent=T('add_asset');goView('asset-edit');}
+function clearAssetForm(){['afId','afCode','afBarcode','afNameZh','afNameKo','afCategory','afBrand','afModel','afSerial','afLocation','afPurchaseDate','afCost','afSupplier','afWarranty','afNote'].forEach(function(id){E(id).value='';});}
+function openAssetForm(item){if(!isAdmin())return;clearAssetForm();if(item){E('assetFormTitle').textContent=T('edit');E('afId').value=item.id;E('afCode').value=item.asset_code||'';E('afBarcode').value=item.barcode||'';E('afNameZh').value=item.name_zh||'';E('afNameKo').value=item.name_ko||'';E('afCategory').value=item.category||'';E('afBrand').value=item.brand||'';E('afModel').value=item.model||'';E('afSerial').value=item.serial_no||'';E('afLocation').value=item.location_code||'';E('afPurchaseDate').value=item.purchase_date||'';E('afCost').value=item.purchase_cost||'';E('afSupplier').value=item.supplier||'';E('afWarranty').value=item.warranty_until||'';E('afNote').value=item.note||'';}else E('assetFormTitle').textContent=T('add_asset');goView('asset-edit');}
 
-async function saveAsset(event){event.preventDefault();if(S003.busy)return;S003.busy=true;var data=Object.assign(operatorPayload(),{id:val('afId'),asset_code:val('afCode'),barcode:val('afBarcode'),name_zh:val('afNameZh'),name_ko:val('afNameKo'),category:val('afCategory'),brand:val('afBrand'),model:val('afModel'),serial_no:val('afSerial'),warehouse_name:val('afWarehouse'),location_code:val('afLocation'),purchase_date:val('afPurchaseDate'),purchase_cost:num('afCost'),currency:'KRW',supplier:val('afSupplier'),warranty_until:val('afWarranty'),note:val('afNote')});try{var res=await api('v2_003_asset_save',data);toast(T('success'));await loadLocations(false);openAssetDetail(res.id);}catch(e){toast(errorText(e.message),true);}finally{S003.busy=false;}}
+async function saveAsset(event){event.preventDefault();if(S003.busy)return;S003.busy=true;var data=Object.assign(operatorPayload(),{id:val('afId'),asset_code:val('afCode'),barcode:val('afBarcode'),name_zh:val('afNameZh'),name_ko:val('afNameKo'),category:val('afCategory'),brand:val('afBrand'),model:val('afModel'),serial_no:val('afSerial'),location_code:val('afLocation'),purchase_date:val('afPurchaseDate'),purchase_cost:num('afCost'),currency:'KRW',supplier:val('afSupplier'),warranty_until:val('afWarranty'),note:val('afNote')});try{var res=await api('v2_003_asset_save',data);toast(T('success'));await loadLocations(false);openAssetDetail(res.id);}catch(e){toast(errorText(e.message),true);}finally{S003.busy=false;}}
 
-function openAssetAction(type){var a=S003.currentAsset&&S003.currentAsset.item;if(!a)return;if(type==='retire'&&!confirm(T('confirm_retire')))return;if(type==='lost'&&!confirm(T('confirm_lost')))return;E('aaAssetId').value=a.id;E('aaType').value=type;E('aaTitle').textContent=assetActionLabel(type);E('aaItemInfo').textContent=(S003.lang==='ko'&&a.name_ko?a.name_ko:a.name_zh)+' · '+a.asset_code;E('aaKeeper').value=type==='assign'?(S003.operatorName||''):'';E('aaWarehouse').value=a.warehouse_name||'';E('aaLocation').value=a.location_code||'';E('aaDoc').value='';E('aaNote').value='';E('aaKeeperFields').classList.toggle('hidden',type!=='assign');E('aaLocationFields').classList.toggle('hidden',!['return','transfer','repair_done'].includes(type));E('assetActionModal').classList.remove('hidden');}
+function openAssetAction(type){var a=S003.currentAsset&&S003.currentAsset.item;if(!a)return;if(type==='retire'&&!confirm(T('confirm_retire')))return;if(type==='lost'&&!confirm(T('confirm_lost')))return;E('aaAssetId').value=a.id;E('aaType').value=type;E('aaTitle').textContent=assetActionLabel(type);E('aaItemInfo').textContent=(S003.lang==='ko'&&a.name_ko?a.name_ko:a.name_zh)+' · '+a.asset_code;E('aaKeeper').value=type==='assign'?(S003.operatorName||''):'';E('aaDepartment').value=type==='assign'?(a.keeper_department||''):'';E('aaLocation').value=a.location_code||'';E('aaDoc').value='';E('aaNote').value='';E('aaKeeper').readOnly=isField();E('aaKeeperFields').classList.toggle('hidden',type!=='assign');E('aaDepartmentFields').classList.toggle('hidden',type!=='assign');E('aaDepartment').required=type==='assign';E('aaLocationFields').classList.toggle('hidden',!['return','transfer','repair_done'].includes(type));E('assetActionModal').classList.remove('hidden');}
 
-async function submitAssetAction(event){event.preventDefault();if(S003.busy)return;S003.busy=true;var type=val('aaType'),keeper=val('aaKeeper');var data=Object.assign(operatorPayload(),{asset_id:val('aaAssetId'),action_type:type,to_keeper_name:keeper,warehouse_name:val('aaWarehouse'),location_code:val('aaLocation'),related_doc_no:val('aaDoc'),note:val('aaNote'),client_req_id:reqId('atx')});if(type==='assign'&&keeper===S003.operatorName)data.to_keeper_id=S003.operatorId;try{await api('v2_003_asset_action',data);closeModal('assetActionModal');toast(T('success'));openAssetDetail(data.asset_id);}catch(e){toast(errorText(e.message),true);}finally{S003.busy=false;}}
+async function submitAssetAction(event){event.preventDefault();if(S003.busy)return;S003.busy=true;var type=val('aaType'),keeper=val('aaKeeper');var data=Object.assign(operatorPayload(),{asset_id:val('aaAssetId'),action_type:type,to_keeper_name:keeper,department:val('aaDepartment'),location_code:val('aaLocation'),related_doc_no:val('aaDoc'),note:val('aaNote'),client_req_id:reqId('atx')});if(type==='assign'&&keeper===S003.operatorName)data.to_keeper_id=S003.operatorId;try{await api('v2_003_asset_action',data);closeModal('assetActionModal');toast(T('success'));openAssetDetail(data.asset_id);}catch(e){toast(errorText(e.message),true);}finally{S003.busy=false;}}
 
 function fileUrl(key){return V2_API+'/file?key='+encodeURIComponent(key||'');}
 async function uploadAssetPhoto(input){var a=S003.currentAsset&&S003.currentAsset.item,file=input.files&&input.files[0];if(!a||!file)return;var fd=new FormData();fd.append('action','v2_attachment_upload');fd.append('k',S003.key);fd.append('file',file);fd.append('related_doc_type','asset');fd.append('related_doc_id',a.id);fd.append('attachment_category','asset_photo');fd.append('uploaded_by',S003.operatorName);try{var res=await fetch(V2_API,{method:'POST',body:fd});var json=await res.json();if(!res.ok||!json.ok)throw new Error(json.error||'upload_failed');toast(T('photo_uploaded'));openAssetDetail(a.id);}catch(e){toast(errorText(e.message),true);}finally{input.value='';}}
@@ -509,7 +589,6 @@ async function ensurePurchaseMaterials(){
 async function openPurchaseRequest(){
   try{await ensurePurchaseMaterials();}catch(e){toast(errorText(e.message),true);return;}
   S003.purchaseRequestLines=[];
-  E('prWarehouse').value=(S003.locations[0]&&S003.locations[0].warehouse_name)||'';
   E('prUrgency').value='normal';E('prReason').value='';E('prNote').value='';E('prMaterialInput').value='';E('prMaterialQty').value='1';
   renderPurchaseRequestLines();E('purchaseRequestModal').classList.remove('hidden');
 }
@@ -536,7 +615,7 @@ async function submitPurchaseRequest(event){
   var lines=S003.purchaseRequestLines.filter(function(x){return Number(x.requested_qty)>0;}).map(function(x){return{material_id:x.material_id,requested_qty:Number(x.requested_qty),note:x.note||''};});
   if(!lines.length){toast(T('add_material_hint'),true);return;}
   S003.busy=true;
-  try{var res=await api('v2_003_purchase_request_create',Object.assign(operatorPayload(),{warehouse_name:val('prWarehouse'),urgency:val('prUrgency'),request_reason:val('prReason'),note:val('prNote'),lines:lines,client_req_id:reqId('preq')}));closeModal('purchaseRequestModal');toast(S003.lang==='ko'?'구매 요청이 제출되었습니다':'采购申请已提交');if(isAdmin())openPurchaseDetail(res.id);else loadFieldHome();}
+  try{var res=await api('v2_003_purchase_request_create',Object.assign(operatorPayload(),{urgency:val('prUrgency'),request_reason:val('prReason'),note:val('prNote'),lines:lines,client_req_id:reqId('preq')}));closeModal('purchaseRequestModal');toast(S003.lang==='ko'?'구매 요청이 제출되었습니다':'采购申请已提交');if(isAdmin())openPurchaseDetail(res.id);else loadFieldHome();}
   catch(e){toast(errorText(e.message),true);}finally{S003.busy=false;}
 }
 
@@ -554,7 +633,7 @@ async function loadPurchasing(){
 
 function purchaseCardHtml(o){
   var total=Number(o.line_count)||0,done=Number(o.completed_line_count)||0,pct=total?Math.round(done/total*100):0;
-  return '<article class="purchase-card" onclick="openPurchaseDetail(\''+jsq(o.id)+'\')"><div class="purchase-card-top"><div><small>'+esc(o.order_no)+'</small><h3>'+esc(o.request_reason||T('new_purchase_request'))+'</h3></div><div class="purchase-tags">'+(Number(o.has_discrepancy)?'<span class="tag red">'+esc(T('discrepancy'))+'</span>':'')+'<span class="tag '+purchaseStatusClass(o.status)+'">'+esc(purchaseStatusLabel(o.status))+'</span></div></div><div class="purchase-meta"><span>◎ '+esc(o.requested_by_name||'--')+'</span><span>⌖ '+esc(o.warehouse_name||'--')+'</span><span>'+esc(total)+' '+(S003.lang==='ko'?'종':'种')+'</span>'+(Number(o.pending_shipment_count)?'<span>▥ '+esc(o.pending_shipment_count)+' '+esc(T('waiting_receipt_count'))+'</span>':'')+'</div><div class="progress-row"><div class="progress-track"><i style="width:'+pct+'%"></i></div><b>'+pct+'%</b></div></article>';
+  return '<article class="purchase-card" onclick="openPurchaseDetail(\''+jsq(o.id)+'\')"><div class="purchase-card-top"><div><small>'+esc(o.order_no)+'</small><h3>'+esc(o.request_reason||T('new_purchase_request'))+'</h3></div><div class="purchase-tags">'+(Number(o.has_discrepancy)?'<span class="tag red">'+esc(T('discrepancy'))+'</span>':'')+'<span class="tag '+purchaseStatusClass(o.status)+'">'+esc(purchaseStatusLabel(o.status))+'</span></div></div><div class="purchase-meta"><span>◎ '+esc(o.requested_by_name||'--')+'</span><span>'+esc(total)+' '+(S003.lang==='ko'?'종':'种')+'</span>'+(Number(o.pending_shipment_count)?'<span>▥ '+esc(o.pending_shipment_count)+' '+esc(T('waiting_receipt_count'))+'</span>':'')+'</div><div class="progress-row"><div class="progress-track"><i style="width:'+pct+'%"></i></div><b>'+pct+'%</b></div></article>';
 }
 
 async function openPurchaseDetail(id){
@@ -568,7 +647,7 @@ function renderPurchaseDetail(res){
   if(!closed&&res.lines.some(function(l){return Number(l.ordered_qty)>Number(l.scheduled_qty);})){actions+='<button class="btn success" onclick="openShipmentModal()">▥ '+esc(T('add_shipment'))+'</button>';}
   if(!closed)actions+='<button class="btn soft danger-text" onclick="closePurchaseOrder(\'cancel\')">'+esc(T('cancel_order'))+'</button>';
   if(o.status==='partial_received')actions+='<button class="btn warning" onclick="closePurchaseOrder(\'difference\')">'+esc(T('close_difference'))+'</button>';
-  var info=[[T('requester'),o.requested_by_name],[T('purchaser'),o.purchaser_name],[T('warehouse'),o.warehouse_name],[T('urgency'),o.urgency==='urgent'?T('urgent'):T('normal')],[T('supplier'),o.supplier],[T('purchase_channel'),o.purchase_channel],[T('platform_order_no'),o.platform_order_no],[T('expected_date'),fmtDate(o.expected_date)]];
+  var info=[[T('requester'),o.requested_by_name],[T('purchaser'),o.purchaser_name],[T('urgency'),o.urgency==='urgent'?T('urgent'):T('normal')],[T('supplier'),o.supplier],[T('purchase_channel'),o.purchase_channel],[T('platform_order_no'),o.platform_order_no],[T('expected_date'),fmtDate(o.expected_date)]];
   var lines='<table><thead><tr><th>'+esc(T('asset_name'))+'</th><th>'+esc(T('requested_qty'))+'</th><th>'+esc(T('ordered_qty'))+'</th><th>'+esc(T('received_qty'))+'</th></tr></thead><tbody>'+res.lines.map(function(l){var name=materialDisplay(l),complete=Number(l.ordered_qty)>0&&Number(l.received_qty)>=Number(l.ordered_qty);return '<tr><td><b>'+esc(name)+'</b><br><small>'+esc(l.material_code+' · '+(l.spec||'--'))+'</small></td><td>'+esc(fmtQty(l.requested_qty))+' '+esc(l.unit)+'</td><td>'+esc(fmtQty(l.ordered_qty))+' '+esc(l.unit)+'</td><td><b class="'+(complete?'good-text':'')+'">'+esc(fmtQty(l.received_qty))+' '+esc(l.unit)+'</b></td></tr>';}).join('')+'</tbody></table>';
   var shipmentItems=res.shipment_items||[],attachments=res.attachments||[];
   var shipments=(res.shipments||[]).length?res.shipments.map(function(s){var items=shipmentItems.filter(function(i){return i.shipment_id===s.id;});var photos=attachments.filter(function(a){return a.related_doc_id===s.id;});var status=s.status==='pending'?T('waiting_receipt_count'):(s.status==='discrepancy'?T('discrepancy'):(s.status==='received'?T('status_completed'):T('status_cancelled')));return '<article class="shipment-card '+(s.status==='pending'?'clickable':'')+'" '+(s.status==='pending'?'onclick="openReceiptByCode(\''+jsq(s.shipment_no)+'\')"':'')+'><div class="shipment-card-head"><div><b>'+esc(deliveryLabel(s.delivery_method))+'</b><small>'+esc(s.tracking_no||s.shipment_no)+'</small></div><span class="tag '+(s.status==='pending'?'purple':s.status==='received'?'green':s.status==='discrepancy'?'red':'gray')+'">'+esc(status)+'</span></div><div class="shipment-mini-lines">'+items.map(function(i){return '<span>'+esc(materialDisplay(i))+' × '+esc(fmtQty(i.expected_qty))+' '+esc(i.unit)+'</span>';}).join('')+'</div>'+(photos.length?'<div class="mini-photo-row">'+photos.slice(0,4).map(function(p){return '<img src="'+esc(fileUrl(p.file_key))+'" alt="">';}).join('')+'</div>':'')+'</article>';}).join(''):'<div class="empty">'+esc(T('no_data'))+'</div>';
@@ -619,17 +698,17 @@ function renderReceiptDetail(res){
   var s=res.shipment||{},already=s.status!=='pending',photos=res.attachments||[];
   var photoHtml=photos.length?'<div class="photo-grid arrival-photo-grid">'+photos.map(function(p){return '<a href="'+esc(fileUrl(p.file_key))+'" target="_blank"><img src="'+esc(fileUrl(p.file_key))+'" alt=""></a>';}).join('')+'</div>':'<div class="photo-placeholder">'+esc(T('photo_required'))+'</div>';
   if(already){E('receiptDetail').innerHTML='<div class="detail-hero"><div class="hero-top"><div><p>'+esc(s.shipment_no)+'</p><h1>'+esc(s.tracking_no||deliveryLabel(s.delivery_method))+'</h1></div><span class="tag '+(s.status==='discrepancy'?'red':'green')+'">'+esc(s.status==='discrepancy'?T('discrepancy'):T('status_completed'))+'</span></div></div><div class="panel success-panel"><h2>'+esc(T('already_received'))+'</h2><p>'+esc([s.received_by,fmtTime(s.received_at)].filter(Boolean).join(' · '))+'</p></div>'+(photos.length?'<div class="panel"><h2>'+esc(T('arrival_photos'))+'</h2>'+photoHtml+'</div>':'');return;}
-  var itemRows=(res.items||[]).map(function(i,index){var wh=i.warehouse_name||s.requested_warehouse||'',loc=i.location_code||'';return '<div class="receipt-line" data-item-id="'+esc(i.id)+'"><div class="receipt-line-title"><div><b>'+esc(materialDisplay(i))+'</b><small>'+esc(i.material_code+' · '+(i.spec||'--'))+'</small></div><span>'+esc(T('expected_qty'))+' <b>'+esc(fmtQty(i.expected_qty))+' '+esc(i.unit)+'</b></span></div><div class="receipt-inputs"><label><span>'+esc(T('actual_received'))+'</span><div class="qty-unit"><input class="rc-qty" type="number" min="0" step="0.01" value="'+esc(i.expected_qty)+'"><em>'+esc(i.unit)+'</em></div></label><label><span>'+esc(T('warehouse'))+'</span><input class="rc-wh" list="warehouseList" value="'+esc(wh)+'" required></label><label><span>'+esc(T('location'))+'</span><input class="rc-loc" list="locationList" value="'+esc(loc)+'" required></label><label class="receipt-note"><span>'+esc(T('note'))+'</span><input class="rc-note"></label></div></div>';}).join('');
+  var itemRows=(res.items||[]).map(function(i){var loc=i.location_code||'';return '<div class="receipt-line" data-item-id="'+esc(i.id)+'"><div class="receipt-line-title"><div><b>'+esc(materialDisplay(i))+'</b><small>'+esc(i.material_code+' · '+(i.spec||'--'))+'</small></div><span>'+esc(T('expected_qty'))+' <b>'+esc(fmtQty(i.expected_qty))+' '+esc(i.unit)+'</b></span></div><div class="receipt-inputs"><label><span>'+esc(T('actual_received'))+'</span><div class="qty-unit"><input class="rc-qty" type="number" min="0" step="0.01" value="'+esc(i.expected_qty)+'"><em>'+esc(i.unit)+'</em></div></label><label><span>'+esc(T('putaway_location'))+'</span><input class="rc-loc" list="locationList" value="'+esc(loc)+'" required></label><label class="receipt-note"><span>'+esc(T('note'))+'</span><input class="rc-note"></label></div></div>';}).join('');
   E('receiptDetail').innerHTML='<div class="detail-hero receipt-hero"><div class="hero-top"><div><p>'+esc(s.shipment_no)+' · '+esc(s.order_no||'')+'</p><h1>'+esc(s.tracking_no||deliveryLabel(s.delivery_method))+'</h1><small>'+esc([s.supplier,s.expected_date].filter(Boolean).join(' · '))+'</small></div><span class="tag purple">'+esc(T('waiting_receipt_count'))+'</span></div></div><form class="receipt-form" onsubmit="submitReceipt(event)"><div class="panel"><div class="panel-head"><h2>'+esc(T('shipment_items'))+'</h2></div><div class="receipt-lines">'+itemRows+'</div></div><div class="panel"><div class="panel-head"><h2>'+esc(T('arrival_photos'))+'</h2><button type="button" class="btn '+(s.delivery_method==='supplier'&&!photos.length?'warning':'soft')+'" onclick="E(\'arrivalPhotoInput\').click()">＋ '+esc(T('take_arrival_photo'))+'</button></div>'+photoHtml+'</div><div class="panel"><label><span>'+esc(T('difference_note'))+'</span><textarea id="receiptDiffNote" rows="3" placeholder="'+esc(S003.lang==='ko'?'파손·부족·초과·오배송 내용을 입력하세요':'破损、少货、多货、错货时填写')+'"></textarea></label><div class="form-actions sticky-actions"><button type="button" class="btn soft" onclick="goView(\'receiving\')">'+esc(T('cancel'))+'</button><button type="submit" class="btn success">'+esc(T('confirm_receipt'))+'</button></div></div></form>';
 }
 
 async function submitReceipt(event){
-  event.preventDefault();if(S003.busy)return;var s=S003.currentShipment&&S003.currentShipment.shipment;if(!s)return;var rows=Array.from(E('receiptDetail').querySelectorAll('[data-item-id]'));var items=rows.map(function(row){return{shipment_item_id:row.dataset.itemId,received_qty:Number(row.querySelector('.rc-qty').value),warehouse_name:row.querySelector('.rc-wh').value.trim(),location_code:row.querySelector('.rc-loc').value.trim(),note:row.querySelector('.rc-note').value.trim()};});S003.busy=true;
+  event.preventDefault();if(S003.busy)return;var s=S003.currentShipment&&S003.currentShipment.shipment;if(!s)return;var rows=Array.from(E('receiptDetail').querySelectorAll('[data-item-id]'));var items=rows.map(function(row){return{shipment_item_id:row.dataset.itemId,received_qty:Number(row.querySelector('.rc-qty').value),location_code:row.querySelector('.rc-loc').value.trim(),note:row.querySelector('.rc-note').value.trim()};});S003.busy=true;
   try{var res=await api('v2_003_receipt_confirm',Object.assign(operatorPayload(),{shipment_id:s.id,items:items,discrepancy_note:val('receiptDiffNote'),client_req_id:reqId('recv')}));toast(res.duplicate?T('already_received'):T('receipt_success'),!!res.duplicate);await openReceiptByCode(s.shipment_no);}catch(e){toast(errorText(e.message),true);}finally{S003.busy=false;}
 }
 
 async function uploadArrivalPhoto(input){
-  var s=S003.currentShipment&&S003.currentShipment.shipment,file=input.files&&input.files[0];if(!s||!file)return;var fd=new FormData();fd.append('action','v2_attachment_upload');fd.append('k',S003.key);fd.append('file',file);fd.append('related_doc_type','material_shipment');fd.append('related_doc_id',s.id);fd.append('attachment_category','arrival_photo');fd.append('uploaded_by',S003.operatorName);
+  var s=S003.currentShipment&&S003.currentShipment.shipment,file=input.files&&input.files[0];if(!s||!file)return;var fd=new FormData();fd.append('action','v2_attachment_upload');fd.append('k',S003.key);fd.append('file',file);fd.append('related_doc_type','material_shipment');fd.append('related_doc_id',s.id);fd.append('attachment_category','arrival_photo');fd.append('uploaded_by',S003.operatorName);fd.append('operator_id',S003.operatorId);fd.append('operator_name',S003.operatorName);
   try{var response=await fetch(V2_API,{method:'POST',body:fd}),json=await response.json();if(!response.ok||!json.ok)throw new Error(json.error||'upload_failed');toast(T('photo_uploaded'));await openReceiptByCode(s.shipment_no);}catch(e){toast(errorText(e.message),true);}finally{input.value='';}
 }
 
@@ -639,15 +718,15 @@ async function startReceivingScan(){if(S003.receivingScanner){stopReceivingScan(
 function stopReceivingScan(){if(!S003.receivingScanner)return;var s=S003.receivingScanner;S003.receivingScanner=null;Promise.resolve(s.stop()).catch(function(){}).finally(function(){try{s.clear();}catch(e){}if(E('receivingScanBtn'))E('receivingScanBtn').textContent=T('start_scan');});}
 function lookupShipmentFromScanner(){openReceiptByCode(val('manualTrackingCode'));}
 
-async function loadLedger(){E('ledgerList').innerHTML='<div class="empty">'+esc(T('loading'))+'</div>';try{var payload={kind:val('ledgerKind'),search:isField()?'':val('ledgerSearch'),start_date:val('ledgerStart'),end_date:val('ledgerEnd'),limit:200};if(isField())payload.operator_id=S003.operatorId;var res=await api('v2_003_ledger_list',payload);S003.ledgerRows=res.items||[];renderLedger();}catch(e){E('ledgerList').innerHTML='<div class="empty">'+esc(errorText(e.message))+'</div>';}}
-function renderLedger(){if(!S003.ledgerRows.length){E('ledgerList').innerHTML='<div class="empty">'+esc(T('no_data'))+'</div>';return;}if(isField()){E('ledgerList').className='my-record-list';E('ledgerList').innerHTML=S003.ledgerRows.map(ledgerActivityHtml).join('');return;}E('ledgerList').className='table-wrap';var head='<table><thead><tr><th>'+esc(T('time'))+'</th><th>'+esc(T('category'))+'</th><th>'+esc(T('asset_name'))+'</th><th>'+esc(T('status'))+'</th><th>'+esc(T('qty'))+'</th><th>'+esc(T('operator'))+'</th><th>'+esc(T('recipient'))+'</th><th>'+esc(T('warehouse'))+'</th><th>'+esc(T('note'))+'</th></tr></thead><tbody>';var rows=S003.ledgerRows.map(function(r){var action=r.kind==='material'?txnLabel(r.action_type):assetActionLabel(r.action_type);var qty=r.kind==='material'?((Number(r.qty_delta)>0?'+':'')+fmtQty(r.qty_delta)+' '+(r.unit||'')):'--';return '<tr><td>'+esc(fmtTime(r.created_at))+'</td><td>'+esc(r.kind==='material'?T('materials'):T('assets'))+'</td><td><b>'+esc(r.item_name)+'</b><br><small>'+esc(r.item_code)+'</small></td><td>'+esc(action)+'</td><td>'+esc(qty)+'</td><td>'+esc(r.operator_name||'--')+'</td><td>'+esc(r.recipient_name||'--')+'</td><td>'+esc([r.warehouse_name,r.location_code].filter(Boolean).join('/')||'--')+'</td><td>'+esc([r.purpose,r.related_doc_no,r.note].filter(Boolean).join(' · ')||'--')+'</td></tr>';}).join('');E('ledgerList').innerHTML=head+rows+'</tbody></table>';}
+async function loadLedger(){E('ledgerList').innerHTML='<div class="empty">'+esc(T('loading'))+'</div>';try{var payload={kind:val('ledgerKind'),department:isField()?'':val('ledgerDepartment'),search:isField()?'':val('ledgerSearch'),start_date:val('ledgerStart'),end_date:val('ledgerEnd'),limit:200};if(isField())payload.operator_id=S003.operatorId;var res=await api('v2_003_ledger_list',payload);S003.ledgerRows=res.items||[];renderLedger();}catch(e){E('ledgerList').innerHTML='<div class="empty">'+esc(errorText(e.message))+'</div>';}}
+function renderLedger(){if(!S003.ledgerRows.length){E('ledgerList').innerHTML='<div class="empty">'+esc(T('no_data'))+'</div>';return;}if(isField()){E('ledgerList').className='my-record-list';E('ledgerList').innerHTML=S003.ledgerRows.map(ledgerActivityHtml).join('');return;}E('ledgerList').className='table-wrap';var head='<table><thead><tr><th>'+esc(T('time'))+'</th><th>'+esc(T('category'))+'</th><th>'+esc(T('asset_name'))+'</th><th>'+esc(T('status'))+'</th><th>'+esc(T('qty'))+'</th><th>'+esc(T('operator'))+'</th><th>'+esc(T('recipient'))+'</th><th>'+esc(T('department'))+'</th><th>'+esc(T('storage_location'))+'</th><th>'+esc(T('note'))+'</th></tr></thead><tbody>';var rows=S003.ledgerRows.map(function(r){var action=r.kind==='material'?txnLabel(r.action_type):assetActionLabel(r.action_type);var qty=r.kind==='material'?((Number(r.qty_delta)>0?'+':'')+fmtQty(r.qty_delta)+' '+(r.unit||'')):'--';return '<tr><td>'+esc(fmtTime(r.created_at))+'</td><td>'+esc(r.kind==='material'?T('materials'):T('assets'))+'</td><td><b>'+esc(r.item_name)+'</b><br><small>'+esc(r.item_code)+'</small></td><td>'+esc(action)+'</td><td>'+esc(qty)+'</td><td>'+esc(r.operator_name||'--')+'</td><td>'+esc(r.recipient_name||'--')+'</td><td>'+esc(departmentLabel(r.department))+'</td><td>'+esc(r.location_code||'--')+'</td><td>'+esc([r.purpose,r.related_doc_no,r.note].filter(Boolean).join(' · ')||'--')+'</td></tr>';}).join('');E('ledgerList').innerHTML=head+rows+'</tbody></table>';}
 
 function csvCell(v){v=String(v==null?'':v);return '"'+v.replace(/"/g,'""')+'"';}
-function exportLedgerCsv(){if(!isAdmin())return;if(!S003.ledgerRows.length){toast(T('no_data'),true);return;}var rows=[['时间','类别','编号','名称','操作','数量变化','操作前','操作后','操作人','领用人','仓库','位置','关联单号','备注']];S003.ledgerRows.forEach(function(r){rows.push([fmtTime(r.created_at),r.kind,r.item_code,r.item_name,r.action_type,r.qty_delta,r.qty_before,r.qty_after,r.operator_name,r.recipient_name,r.warehouse_name,r.location_code,r.related_doc_no,[r.purpose,r.note].filter(Boolean).join(' · ')]);});var csv='\ufeff'+rows.map(function(row){return row.map(csvCell).join(',');}).join('\r\n');var blob=new Blob([csv],{type:'text/csv;charset=utf-8'});var url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='CK-003-ledger-'+kstToday()+'.csv';a.click();setTimeout(function(){URL.revokeObjectURL(url);},500);}
+function exportLedgerCsv(){if(!isAdmin())return;if(!S003.ledgerRows.length){toast(T('no_data'),true);return;}var rows=[['时间','类别','编号','名称','操作','数量变化','操作前','操作后','操作人','领用人','部门','存放位置','关联单号','备注']];S003.ledgerRows.forEach(function(r){rows.push([fmtTime(r.created_at),r.kind,r.item_code,r.item_name,r.action_type,r.qty_delta,r.qty_before,r.qty_after,r.operator_name,r.recipient_name,r.department,r.location_code,r.related_doc_no,[r.purpose,r.note].filter(Boolean).join(' · ')]);});var csv='\ufeff'+rows.map(function(row){return row.map(csvCell).join(',');}).join('\r\n');var blob=new Blob([csv],{type:'text/csv;charset=utf-8'});var url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='CK-003-ledger-'+kstToday()+'.csv';a.click();setTimeout(function(){URL.revokeObjectURL(url);},500);}
 
-function openLocationModal(){if(!isAdmin())return;E('locId').value='';E('locWarehouse').value='';E('locCode').value='';E('locName').value='';E('locActive').checked=true;E('locationModal').classList.remove('hidden');}
-function editLocation(id){var x=S003.locations.find(function(v){return v.id===id;});if(!x)return;E('locId').value=x.id;E('locWarehouse').value=x.warehouse_name;E('locCode').value=x.location_code;E('locName').value=x.location_name||'';E('locActive').checked=Number(x.active)!==0;E('locationModal').classList.remove('hidden');}
-async function saveLocation(event){event.preventDefault();if(S003.busy)return;S003.busy=true;var data=Object.assign(operatorPayload(),{id:val('locId'),warehouse_name:val('locWarehouse'),location_code:val('locCode'),location_name:val('locName'),active:E('locActive').checked?1:0});try{await api('v2_003_location_save',data);closeModal('locationModal');toast(T('success'));loadLocations(true);}catch(e){toast(errorText(e.message),true);}finally{S003.busy=false;}}
+function openLocationModal(){if(!isAdmin())return;E('locId').value='';E('locCode').value='';E('locName').value='';E('locActive').checked=true;E('locationModal').classList.remove('hidden');}
+function editLocation(id){var x=S003.locations.find(function(v){return v.id===id;});if(!x)return;E('locId').value=x.id;E('locCode').value=x.location_code;E('locName').value=x.location_name||'';E('locActive').checked=Number(x.active)!==0;E('locationModal').classList.remove('hidden');}
+async function saveLocation(event){event.preventDefault();if(S003.busy)return;S003.busy=true;var data=Object.assign(operatorPayload(),{id:val('locId'),location_code:val('locCode'),location_name:val('locName'),active:E('locActive').checked?1:0});try{await api('v2_003_location_save',data);closeModal('locationModal');toast(T('success'));loadLocations(true);}catch(e){toast(errorText(e.message),true);}finally{S003.busy=false;}}
 
 function closeModal(id){E(id).classList.add('hidden');}
 function openScanner(){E('scannerModal').classList.remove('hidden');E('scannerError').textContent='';E('manualItemCode').value='';}
@@ -657,4 +736,9 @@ function stopItemScanner(){if(!S003.itemScanner)return;var s=S003.itemScanner;S0
 function lookupManualCode(){lookupCode(val('manualItemCode'));}
 async function lookupCode(code){code=String(code||'').trim();if(!code)return;try{var res=await api('v2_003_lookup',{code:code});closeScanner();if(res.item.kind==='asset')openAssetDetail(res.item.id);else openMaterialDetail(res.item.id);}catch(e){E('scannerError').textContent=errorText(e.message);}}
 
-window.addEventListener('DOMContentLoaded',function(){populateStaticLists();applyI18n();showEntry();E('ledgerStart').value=kstToday();E('ledgerEnd').value=kstToday();});
+window.addEventListener('DOMContentLoaded',function(){
+  populateStaticLists();applyI18n();showEntry();
+  var today=kstToday();
+  E('ledgerStart').value=today;E('ledgerEnd').value=today;
+  E('usageStart').value=today.slice(0,8)+'01';E('usageEnd').value=today;
+});
