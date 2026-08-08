@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#102a43">
+  <title>耗材与物品管理 / 소모품·비품 관리</title>
+  <link rel="stylesheet" href="style.css?v=20260808a">
+</head>
+<body>
+
+<section id="entryPage" class="entry-page">
+  <div class="brand-block">
+    <div class="brand-mark">CK</div>
+    <h1 data-i18n="app_title">耗材与物品管理</h1>
+    <p data-i18n="app_subtitle">CK 仓库 · 仁川</p>
+  </div>
+  <div class="entry-actions">
+    <button class="entry-card field" onclick="openFieldEntry()">
+      <span class="entry-icon">▣</span>
+      <span><b data-i18n="field_entry">现场使用</b><small data-i18n="field_entry_sub">扫工牌领用、消耗或归还</small></span>
+      <span class="entry-arrow">›</span>
+    </button>
+    <button class="entry-card admin" onclick="openAdminLogin()">
+      <span class="entry-icon">⚙</span>
+      <span><b data-i18n="admin_entry">管理后台</b><small data-i18n="admin_entry_sub">建档、入库、盘点与统计</small></span>
+      <span class="entry-arrow">›</span>
+    </button>
+  </div>
+  <div class="entry-footer">
+    <button class="text-btn" onclick="toggleLang()" data-i18n="switch_lang">한국어</button>
+    <a href="../" data-i18n="back_home">返回系统首页</a>
+  </div>
+</section>
+
+<section id="badgePage" class="auth-page hidden">
+  <button class="back-link" onclick="showEntry()">‹ <span data-i18n="back">返回</span></button>
+  <div class="auth-card">
+    <div class="auth-icon">▣</div>
+    <h2 data-i18n="badge_title">请扫描工牌</h2>
+    <p data-i18n="badge_hint">识别操作人后才能记录领用和归还</p>
+    <div id="badgeReader" class="reader"></div>
+    <button id="badgeScanBtn" class="btn primary full" onclick="startBadgeScan()" data-i18n="scan_badge">开始扫码</button>
+    <button class="btn soft full" onclick="manualBadge()" data-i18n="manual_badge">手动输入工牌</button>
+    <div id="badgeError" class="form-error"></div>
+  </div>
+</section>
+
+<section id="adminLoginPage" class="auth-page hidden">
+  <button class="back-link" onclick="showEntry()">‹ <span data-i18n="back">返回</span></button>
+  <form class="auth-card" onsubmit="doAdminLogin(event)">
+    <div class="auth-icon">⚙</div>
+    <h2 data-i18n="admin_login">管理员登录</h2>
+    <input id="adminKeyInput" type="password" autocomplete="current-password" data-i18n-placeholder="access_code" placeholder="请输入访问码">
+    <button class="btn primary full" type="submit" data-i18n="enter">进入系统</button>
+    <div id="adminLoginError" class="form-error"></div>
+  </form>
+</section>
+
+<div id="appWrap" class="hidden">
+  <header class="app-header">
+    <div class="header-brand">
+      <span class="mini-logo">CK</span>
+      <div><b data-i18n="app_title">耗材与物品管理</b><small id="headerMode">--</small></div>
+    </div>
+    <div class="header-actions">
+      <button class="header-chip" id="operatorChip" onclick="changeAdminName()">--</button>
+      <button class="icon-btn" onclick="toggleLang()" data-i18n="switch_lang">한국어</button>
+      <button class="icon-btn" onclick="logout003()" data-i18n="logout">退出</button>
+    </div>
+  </header>
+
+  <nav class="main-tabs" id="mainTabs">
+    <button class="active" data-view="dashboard" onclick="goView('dashboard',this)"><span>⌂</span><b data-i18n="dashboard">总览</b></button>
+    <button data-view="materials" onclick="goView('materials',this)"><span>▤</span><b data-i18n="materials">耗材</b></button>
+    <button data-view="assets" onclick="goView('assets',this)"><span>▣</span><b data-i18n="assets">仓库物品</b></button>
+    <button data-view="ledger" onclick="goView('ledger',this)"><span>↕</span><b data-i18n="ledger">出入记录</b></button>
+    <button id="settingsTabBtn" data-view="settings" onclick="goView('settings',this)"><span>⚙</span><b data-i18n="settings">基础设置</b></button>
+  </nav>
+
+  <main class="app-main">
+    <section id="view-dashboard" class="view active">
+      <div id="dashboardStats" class="stat-grid"></div>
+      <div class="panel">
+        <div class="panel-head"><h2 data-i18n="recent_activity">最近动态</h2><button class="btn mini soft" onclick="loadDashboard()">↻</button></div>
+        <div id="recentActivity" class="activity-list"><div class="empty" data-i18n="loading">加载中...</div></div>
+      </div>
+    </section>
+
+    <section id="view-materials" class="view">
+      <div class="toolbar">
+        <div class="search-group"><input id="materialSearch" data-i18n-placeholder="search" placeholder="搜索名称、编号或条码" onkeydown="if(event.key==='Enter')loadMaterials()"><button onclick="loadMaterials()">⌕</button></div>
+        <button class="btn soft" onclick="openScanner()">▣ <span data-i18n="scan_item">扫码查找</span></button>
+        <button id="addMaterialBtn" class="btn primary admin-only" onclick="openMaterialForm()">＋ <span data-i18n="add_material">新增耗材</span></button>
+      </div>
+      <div class="filter-row">
+        <select id="materialCategory" onchange="loadMaterials()"><option value="" data-i18n="all_categories">全部分类</option></select>
+        <select id="materialStatus" class="admin-only" onchange="loadMaterials()">
+          <option value="" data-i18n="all_statuses">全部状态</option>
+          <option value="active" data-i18n="active">启用</option>
+          <option value="inactive" data-i18n="inactive">停用</option>
+        </select>
+        <label class="check-label"><input id="lowStockOnly" type="checkbox" onchange="loadMaterials()"><span data-i18n="only_low">只看库存预警</span></label>
+      </div>
+      <div id="materialList" class="card-list"></div>
+    </section>
+
+    <section id="view-material-detail" class="view">
+      <button class="back-link inline" onclick="goView('materials')">‹ <span data-i18n="back">返回</span></button>
+      <div id="materialDetail"></div>
+    </section>
+
+    <section id="view-material-edit" class="view">
+      <button class="back-link inline" onclick="goView('materials')">‹ <span data-i18n="back">返回</span></button>
+      <form class="panel form-panel" onsubmit="saveMaterial(event)">
+        <h2 id="materialFormTitle" data-i18n="add_material">新增耗材</h2>
+        <input id="mfId" type="hidden">
+        <div class="form-grid">
+          <label><span data-i18n="material_code">耗材编号</span><input id="mfCode" placeholder="自动生成 / 자동 생성"></label>
+          <label><span data-i18n="barcode">条码（可选）</span><input id="mfBarcode"></label>
+          <label><span data-i18n="name_zh">中文名称</span><input id="mfNameZh" required></label>
+          <label><span data-i18n="name_ko">韩文名称（可选）</span><input id="mfNameKo"></label>
+          <label><span data-i18n="category">分类</span><input id="mfCategory" list="materialCategoryList" required></label>
+          <label><span data-i18n="spec">规格</span><input id="mfSpec"></label>
+          <label><span data-i18n="unit">单位</span><input id="mfUnit" list="materialUnitList" required></label>
+          <label><span data-i18n="warehouse">仓库</span><input id="mfWarehouse" list="warehouseList"></label>
+          <label><span data-i18n="location">位置/货位</span><input id="mfLocation" list="locationList"></label>
+          <label id="mfOpeningWrap"><span data-i18n="opening_qty">期初库存</span><input id="mfOpening" type="number" min="0" step="0.01" value="0"></label>
+          <label><span data-i18n="min_stock">最低库存</span><input id="mfMin" type="number" min="0" step="0.01" value="0"></label>
+          <label><span data-i18n="cost">单价</span><input id="mfCost" type="number" min="0" step="0.01"></label>
+          <label><span data-i18n="supplier">供应商</span><input id="mfSupplier"></label>
+          <label><span data-i18n="status">状态</span><select id="mfStatus"><option value="active" data-i18n="active">启用</option><option value="inactive" data-i18n="inactive">停用</option></select></label>
+        </div>
+        <label><span data-i18n="note">备注</span><textarea id="mfNote" rows="3"></textarea></label>
+        <div class="form-actions"><button type="button" class="btn soft" onclick="goView('materials')" data-i18n="cancel">取消</button><button type="submit" class="btn primary" data-i18n="save">保存</button></div>
+      </form>
+    </section>
+
+    <section id="view-assets" class="view">
+      <div class="toolbar">
+        <div class="search-group"><input id="assetSearch" data-i18n-placeholder="search" placeholder="搜索名称、编号或条码" onkeydown="if(event.key==='Enter')loadAssets()"><button onclick="loadAssets()">⌕</button></div>
+        <button class="btn soft" onclick="openScanner()">▣ <span data-i18n="scan_item">扫码查找</span></button>
+        <button class="btn primary admin-only" onclick="openAssetForm()">＋ <span data-i18n="add_asset">新增物品</span></button>
+      </div>
+      <div class="filter-row">
+        <select id="assetCategory" onchange="loadAssets()"><option value="" data-i18n="all_categories">全部分类</option></select>
+        <select id="assetStatus" onchange="loadAssets()">
+          <option value="" data-i18n="all_statuses">全部状态</option>
+          <option value="available" data-i18n="available">在库可用</option>
+          <option value="assigned" data-i18n="assigned">已领用</option>
+          <option value="repair" data-i18n="repair">维修中</option>
+          <option value="retired" data-i18n="retired">已报废</option>
+          <option value="lost" data-i18n="lost">遗失</option>
+        </select>
+      </div>
+      <div id="assetList" class="card-list"></div>
+    </section>
+
+    <section id="view-asset-detail" class="view">
+      <button class="back-link inline" onclick="goView('assets')">‹ <span data-i18n="back">返回</span></button>
+      <div id="assetDetail"></div>
+    </section>
+
+    <section id="view-asset-edit" class="view">
+      <button class="back-link inline" onclick="goView('assets')">‹ <span data-i18n="back">返回</span></button>
+      <form class="panel form-panel" onsubmit="saveAsset(event)">
+        <h2 id="assetFormTitle" data-i18n="add_asset">新增物品</h2>
+        <input id="afId" type="hidden">
+        <div class="form-grid">
+          <label><span data-i18n="asset_code">物品编号</span><input id="afCode" placeholder="自动生成 / 자동 생성"></label>
+          <label><span data-i18n="barcode">条码（可选）</span><input id="afBarcode"></label>
+          <label><span data-i18n="name_zh">中文名称</span><input id="afNameZh" required></label>
+          <label><span data-i18n="name_ko">韩文名称（可选）</span><input id="afNameKo"></label>
+          <label><span data-i18n="category">分类</span><input id="afCategory" list="assetCategoryList" required></label>
+          <label><span data-i18n="brand">品牌</span><input id="afBrand"></label>
+          <label><span data-i18n="model">型号</span><input id="afModel"></label>
+          <label><span data-i18n="serial_no">序列号</span><input id="afSerial"></label>
+          <label><span data-i18n="warehouse">仓库</span><input id="afWarehouse" list="warehouseList"></label>
+          <label><span data-i18n="location">位置/货位</span><input id="afLocation" list="locationList"></label>
+          <label><span data-i18n="purchase_date">购买日期</span><input id="afPurchaseDate" type="date"></label>
+          <label><span data-i18n="purchase_cost">采购价格</span><input id="afCost" type="number" min="0" step="0.01"></label>
+          <label><span data-i18n="supplier">供应商</span><input id="afSupplier"></label>
+          <label><span data-i18n="warranty_until">保修截止</span><input id="afWarranty" type="date"></label>
+        </div>
+        <label><span data-i18n="note">备注</span><textarea id="afNote" rows="3"></textarea></label>
+        <div class="form-actions"><button type="button" class="btn soft" onclick="goView('assets')" data-i18n="cancel">取消</button><button type="submit" class="btn primary" data-i18n="save">保存</button></div>
+      </form>
+    </section>
+
+    <section id="view-ledger" class="view">
+      <div class="panel">
+        <div class="filter-row ledger-filter">
+          <select id="ledgerKind" onchange="loadLedger()"><option value="" data-i18n="all_records">全部记录</option><option value="material" data-i18n="material_records">耗材记录</option><option value="asset" data-i18n="asset_records">物品记录</option></select>
+          <input id="ledgerSearch" data-i18n-placeholder="search" placeholder="搜索名称、编号或人员" onkeydown="if(event.key==='Enter')loadLedger()">
+          <input id="ledgerStart" type="date"><input id="ledgerEnd" type="date">
+          <button class="btn primary" onclick="loadLedger()" data-i18n="query">查询</button>
+          <button class="btn soft" onclick="exportLedgerCsv()" data-i18n="export_csv">导出 CSV</button>
+        </div>
+        <div id="ledgerList" class="table-wrap"></div>
+      </div>
+    </section>
+
+    <section id="view-settings" class="view">
+      <div class="panel">
+        <div class="panel-head"><h2 data-i18n="locations">仓库与位置</h2><button class="btn primary" onclick="openLocationModal()">＋ <span data-i18n="add_location">新增位置</span></button></div>
+        <div id="locationListBody" class="settings-list"></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<datalist id="materialCategoryList"></datalist>
+<datalist id="assetCategoryList"></datalist>
+<datalist id="materialUnitList"></datalist>
+<datalist id="warehouseList"></datalist>
+<datalist id="locationList"></datalist>
+
+<div id="materialTxnModal" class="modal hidden" onclick="if(event.target===this)closeModal('materialTxnModal')">
+  <form class="modal-card" onsubmit="submitMaterialTxn(event)">
+    <div class="modal-head"><h2 id="mtTitle">--</h2><button type="button" onclick="closeModal('materialTxnModal')">×</button></div>
+    <input id="mtMaterialId" type="hidden"><input id="mtType" type="hidden">
+    <div id="mtItemInfo" class="modal-item-info"></div>
+    <label><span id="mtQtyLabel" data-i18n="qty">数量</span><input id="mtQty" type="number" step="0.01" required></label>
+    <div id="mtInboundFields" class="form-grid compact">
+      <label><span data-i18n="cost">单价</span><input id="mtCost" type="number" min="0" step="0.01"></label>
+      <label><span data-i18n="supplier">供应商</span><input id="mtSupplier"></label>
+    </div>
+    <div id="mtPeopleFields">
+      <label><span data-i18n="recipient">领用人</span><input id="mtRecipient"></label>
+      <label><span data-i18n="purpose">用途</span><input id="mtPurpose"></label>
+    </div>
+    <label><span data-i18n="related_doc">关联单号/任务</span><input id="mtDoc"></label>
+    <label><span data-i18n="note">备注</span><textarea id="mtNote" rows="2"></textarea></label>
+    <div class="form-actions"><button type="button" class="btn soft" onclick="closeModal('materialTxnModal')" data-i18n="cancel">取消</button><button type="submit" class="btn primary" data-i18n="confirm_submit">确认提交</button></div>
+  </form>
+</div>
+
+<div id="assetActionModal" class="modal hidden" onclick="if(event.target===this)closeModal('assetActionModal')">
+  <form class="modal-card" onsubmit="submitAssetAction(event)">
+    <div class="modal-head"><h2 id="aaTitle">--</h2><button type="button" onclick="closeModal('assetActionModal')">×</button></div>
+    <input id="aaAssetId" type="hidden"><input id="aaType" type="hidden">
+    <div id="aaItemInfo" class="modal-item-info"></div>
+    <div id="aaKeeperFields"><label><span data-i18n="recipient">领用人</span><input id="aaKeeper"></label></div>
+    <div id="aaLocationFields" class="form-grid compact">
+      <label><span data-i18n="warehouse">仓库</span><input id="aaWarehouse" list="warehouseList"></label>
+      <label><span data-i18n="location">位置/货位</span><input id="aaLocation" list="locationList"></label>
+    </div>
+    <label><span data-i18n="related_doc">关联单号/任务</span><input id="aaDoc"></label>
+    <label><span data-i18n="note">备注</span><textarea id="aaNote" rows="3"></textarea></label>
+    <div class="form-actions"><button type="button" class="btn soft" onclick="closeModal('assetActionModal')" data-i18n="cancel">取消</button><button type="submit" class="btn primary" data-i18n="confirm_submit">确认提交</button></div>
+  </form>
+</div>
+
+<div id="locationModal" class="modal hidden" onclick="if(event.target===this)closeModal('locationModal')">
+  <form class="modal-card small" onsubmit="saveLocation(event)">
+    <div class="modal-head"><h2 data-i18n="add_location">新增位置</h2><button type="button" onclick="closeModal('locationModal')">×</button></div>
+    <input id="locId" type="hidden">
+    <label><span data-i18n="warehouse">仓库</span><input id="locWarehouse" required></label>
+    <label><span data-i18n="location_code">位置编码</span><input id="locCode" required></label>
+    <label><span data-i18n="location_name">位置名称</span><input id="locName"></label>
+    <label class="check-label"><input id="locActive" type="checkbox" checked><span data-i18n="active">启用</span></label>
+    <div class="form-actions"><button type="button" class="btn soft" onclick="closeModal('locationModal')" data-i18n="cancel">取消</button><button type="submit" class="btn primary" data-i18n="save">保存</button></div>
+  </form>
+</div>
+
+<div id="scannerModal" class="modal hidden" onclick="if(event.target===this)closeScanner()">
+  <div class="modal-card small">
+    <div class="modal-head"><h2 data-i18n="scan_title">扫描耗材或物品二维码</h2><button type="button" onclick="closeScanner()">×</button></div>
+    <div id="itemReader" class="reader"></div>
+    <button id="itemScanBtn" class="btn primary full" onclick="startItemScan()" data-i18n="start_scan">开始扫描</button>
+    <div class="manual-code-row"><input id="manualItemCode" data-i18n-placeholder="manual_code" placeholder="手动输入编号/条码" onkeydown="if(event.key==='Enter')lookupManualCode()"><button class="btn soft" onclick="lookupManualCode()" data-i18n="query">查询</button></div>
+    <div id="scannerError" class="form-error"></div>
+  </div>
+</div>
+
+<div id="toast" class="toast"></div>
+<input id="assetPhotoInput" type="file" accept="image/*" capture="environment" class="hidden" onchange="uploadAssetPhoto(this)">
+
+<script src="../shared/html5-qrcode.min.js"></script>
+<script src="../shared/qrcode.min.js"></script>
+<script src="config.js?v=20260808a"></script>
+<script src="app.js?v=20260808a"></script>
+</body>
+</html>

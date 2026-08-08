@@ -1685,10 +1685,155 @@ const MIGRATIONS = [
   `ALTER TABLE v2_inbound_plans ADD COLUMN unload_completed_at TEXT DEFAULT ''`,
   `ALTER TABLE v2_inbound_plans ADD COLUMN unload_completed_by TEXT DEFAULT ''`,
   `CREATE INDEX IF NOT EXISTS idx_v2_inbound_plans_unload_completed_at ON v2_inbound_plans(unload_completed_at)`,
+
+  // ---- v2.20260808a：003 耗材与物品管理 ----
+  `CREATE TABLE IF NOT EXISTS v2_003_locations (
+    id TEXT PRIMARY KEY,
+    warehouse_name TEXT DEFAULT '',
+    location_code TEXT DEFAULT '',
+    location_name TEXT DEFAULT '',
+    active INTEGER DEFAULT 1,
+    created_by TEXT DEFAULT '',
+    created_at TEXT,
+    updated_at TEXT
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_003_location_unique
+    ON v2_003_locations(warehouse_name, location_code)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_003_location_active
+    ON v2_003_locations(active, warehouse_name, location_code)`,
+
+  `CREATE TABLE IF NOT EXISTS v2_003_materials (
+    id TEXT PRIMARY KEY,
+    material_code TEXT DEFAULT '',
+    barcode TEXT DEFAULT '',
+    name_zh TEXT DEFAULT '',
+    name_ko TEXT DEFAULT '',
+    category TEXT DEFAULT '',
+    spec TEXT DEFAULT '',
+    unit TEXT DEFAULT '',
+    warehouse_name TEXT DEFAULT '',
+    location_code TEXT DEFAULT '',
+    current_qty REAL DEFAULT 0,
+    min_qty REAL DEFAULT 0,
+    unit_cost REAL DEFAULT 0,
+    currency TEXT DEFAULT 'KRW',
+    supplier TEXT DEFAULT '',
+    status TEXT DEFAULT 'active',
+    note TEXT DEFAULT '',
+    stock_version INTEGER DEFAULT 0,
+    created_by TEXT DEFAULT '',
+    created_at TEXT,
+    updated_by TEXT DEFAULT '',
+    updated_at TEXT
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_003_material_code
+    ON v2_003_materials(material_code) WHERE material_code != ''`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_003_material_barcode
+    ON v2_003_materials(barcode) WHERE barcode != ''`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_003_material_status_category
+    ON v2_003_materials(status, category, name_zh)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_003_material_low_stock
+    ON v2_003_materials(status, current_qty, min_qty)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_003_material_location
+    ON v2_003_materials(warehouse_name, location_code)`,
+
+  `CREATE TABLE IF NOT EXISTS v2_003_material_txns (
+    id TEXT PRIMARY KEY,
+    material_id TEXT DEFAULT '',
+    txn_type TEXT DEFAULT '',
+    qty_delta REAL DEFAULT 0,
+    qty_before REAL DEFAULT 0,
+    qty_after REAL DEFAULT 0,
+    warehouse_name TEXT DEFAULT '',
+    location_code TEXT DEFAULT '',
+    recipient_id TEXT DEFAULT '',
+    recipient_name TEXT DEFAULT '',
+    purpose TEXT DEFAULT '',
+    related_doc_no TEXT DEFAULT '',
+    unit_cost REAL DEFAULT 0,
+    supplier TEXT DEFAULT '',
+    note TEXT DEFAULT '',
+    operator_id TEXT DEFAULT '',
+    operator_name TEXT DEFAULT '',
+    created_at TEXT
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_003_mtxn_material_time
+    ON v2_003_material_txns(material_id, created_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_003_mtxn_type_time
+    ON v2_003_material_txns(txn_type, created_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_003_mtxn_operator_time
+    ON v2_003_material_txns(operator_id, created_at)`,
+
+  `CREATE TABLE IF NOT EXISTS v2_003_assets (
+    id TEXT PRIMARY KEY,
+    asset_code TEXT DEFAULT '',
+    barcode TEXT DEFAULT '',
+    name_zh TEXT DEFAULT '',
+    name_ko TEXT DEFAULT '',
+    category TEXT DEFAULT '',
+    brand TEXT DEFAULT '',
+    model TEXT DEFAULT '',
+    serial_no TEXT DEFAULT '',
+    warehouse_name TEXT DEFAULT '',
+    location_code TEXT DEFAULT '',
+    keeper_id TEXT DEFAULT '',
+    keeper_name TEXT DEFAULT '',
+    status TEXT DEFAULT 'available',
+    purchase_date TEXT DEFAULT '',
+    purchase_cost REAL DEFAULT 0,
+    currency TEXT DEFAULT 'KRW',
+    supplier TEXT DEFAULT '',
+    warranty_until TEXT DEFAULT '',
+    note TEXT DEFAULT '',
+    asset_version INTEGER DEFAULT 0,
+    created_by TEXT DEFAULT '',
+    created_at TEXT,
+    updated_by TEXT DEFAULT '',
+    updated_at TEXT
+  )`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_003_asset_code
+    ON v2_003_assets(asset_code) WHERE asset_code != ''`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_003_asset_barcode
+    ON v2_003_assets(barcode) WHERE barcode != ''`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_003_asset_serial
+    ON v2_003_assets(serial_no) WHERE serial_no != ''`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_003_asset_status_category
+    ON v2_003_assets(status, category, name_zh)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_003_asset_keeper
+    ON v2_003_assets(keeper_id, status)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_003_asset_location
+    ON v2_003_assets(warehouse_name, location_code)`,
+
+  `CREATE TABLE IF NOT EXISTS v2_003_asset_txns (
+    id TEXT PRIMARY KEY,
+    asset_id TEXT DEFAULT '',
+    action_type TEXT DEFAULT '',
+    status_before TEXT DEFAULT '',
+    status_after TEXT DEFAULT '',
+    from_warehouse TEXT DEFAULT '',
+    from_location TEXT DEFAULT '',
+    to_warehouse TEXT DEFAULT '',
+    to_location TEXT DEFAULT '',
+    from_keeper_id TEXT DEFAULT '',
+    from_keeper_name TEXT DEFAULT '',
+    to_keeper_id TEXT DEFAULT '',
+    to_keeper_name TEXT DEFAULT '',
+    related_doc_no TEXT DEFAULT '',
+    note TEXT DEFAULT '',
+    operator_id TEXT DEFAULT '',
+    operator_name TEXT DEFAULT '',
+    created_at TEXT
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_003_atxn_asset_time
+    ON v2_003_asset_txns(asset_id, created_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_003_atxn_type_time
+    ON v2_003_asset_txns(action_type, created_at)`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_003_atxn_operator_time
+    ON v2_003_asset_txns(operator_id, created_at)`,
 ];
 
 // 每次发布迁移变化时手动 +1（patch 段），冷启动只比对一次字符串即可跳过整段 MIGRATIONS
-const CURRENT_SCHEMA_VERSION = 'v2.20260609a';
+const CURRENT_SCHEMA_VERSION = 'v2.20260808a';
 
 let _migrated = false;
 async function ensureMigrated(db) {
@@ -10731,6 +10876,593 @@ route("v2_dashboard_management_summary", async (body, env) => {
     by_job_type,
     by_worker
   });
+});
+
+// =====================================================
+// 003 - Consumables & warehouse assets / 耗材与物品管理
+// =====================================================
+function v003Id(prefix) {
+  return String(prefix || 'V003') + '-' + crypto.randomUUID();
+}
+
+function v003Text(value, maxLen = 200) {
+  return String(value == null ? '' : value).trim().slice(0, maxLen);
+}
+
+function v003Number(value, fallback = 0) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function v003Changes(result) {
+  return Number(result && result.meta && result.meta.changes) || 0;
+}
+
+function v003Operator(body) {
+  return {
+    id: v003Text(body.operator_id || body.worker_id || '', 80),
+    name: v003Text(body.operator_name || body.worker_name || body.created_by || '', 120)
+  };
+}
+
+function v003RequireOperator(body) {
+  const op = v003Operator(body);
+  if (!op.id && !op.name) return null;
+  if (!op.id) op.id = op.name;
+  if (!op.name) op.name = op.id;
+  return op;
+}
+
+async function v003NextCode(env, tableName, fieldName, prefix) {
+  const day = kstToday().replace(/-/g, '');
+  const base = prefix + '-' + day + '-';
+  const allowed = {
+    v2_003_materials: 'material_code',
+    v2_003_assets: 'asset_code'
+  };
+  if (allowed[tableName] !== fieldName) throw new Error('invalid code target');
+  const row = await env.DB.prepare(
+    `SELECT ${fieldName} AS code FROM ${tableName} WHERE ${fieldName} LIKE ? ORDER BY ${fieldName} DESC LIMIT 1`
+  ).bind(base + '%').first();
+  const last = row && row.code ? parseInt(String(row.code).split('-').pop(), 10) || 0 : 0;
+  return base + String(last + 1).padStart(3, '0');
+}
+
+route('v2_003_auth_check', async (body, env) => {
+  if (isAdmin(body, env)) return json({ ok: true, role: 'admin' });
+  if (isOpsKey(body, env)) return json({ ok: true, role: 'operator' });
+  if (isAuth(body, env)) return json({ ok: true, role: 'viewer' });
+  return err('unauthorized', 401);
+});
+
+route('v2_003_dashboard', async (body, env) => {
+  if (!isOpsAuth(body, env)) return err('unauthorized', 401);
+  const range = kstDayRangeUtc(kstToday());
+  const [materials, low, assets, assigned, repair, mToday, aToday, recentM, recentA] = await Promise.all([
+    env.DB.prepare("SELECT COUNT(*) AS c FROM v2_003_materials WHERE status='active'").first(),
+    env.DB.prepare("SELECT COUNT(*) AS c FROM v2_003_materials WHERE status='active' AND min_qty>0 AND current_qty<=min_qty").first(),
+    env.DB.prepare("SELECT COUNT(*) AS c FROM v2_003_assets WHERE status!='retired'").first(),
+    env.DB.prepare("SELECT COUNT(*) AS c FROM v2_003_assets WHERE status='assigned'").first(),
+    env.DB.prepare("SELECT COUNT(*) AS c FROM v2_003_assets WHERE status='repair'").first(),
+    env.DB.prepare("SELECT COUNT(*) AS c FROM v2_003_material_txns WHERE created_at>=? AND created_at<?")
+      .bind(range.startUtc, range.endUtc).first(),
+    env.DB.prepare("SELECT COUNT(*) AS c FROM v2_003_asset_txns WHERE created_at>=? AND created_at<?")
+      .bind(range.startUtc, range.endUtc).first(),
+    env.DB.prepare(`SELECT t.*, m.material_code AS item_code, m.name_zh AS item_name, m.unit
+      FROM v2_003_material_txns t JOIN v2_003_materials m ON m.id=t.material_id
+      ORDER BY t.created_at DESC LIMIT 8`).all(),
+    env.DB.prepare(`SELECT t.*, a.asset_code AS item_code, a.name_zh AS item_name
+      FROM v2_003_asset_txns t JOIN v2_003_assets a ON a.id=t.asset_id
+      ORDER BY t.created_at DESC LIMIT 8`).all()
+  ]);
+  const recent = [];
+  (recentM.results || []).forEach(r => recent.push({ kind: 'material', ...r }));
+  (recentA.results || []).forEach(r => recent.push({ kind: 'asset', ...r }));
+  recent.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+  return json({
+    ok: true,
+    summary: {
+      material_count: Number(materials && materials.c) || 0,
+      low_stock_count: Number(low && low.c) || 0,
+      asset_count: Number(assets && assets.c) || 0,
+      assigned_asset_count: Number(assigned && assigned.c) || 0,
+      repair_asset_count: Number(repair && repair.c) || 0,
+      material_txn_today: Number(mToday && mToday.c) || 0,
+      asset_txn_today: Number(aToday && aToday.c) || 0
+    },
+    recent: recent.slice(0, 10)
+  });
+});
+
+route('v2_003_location_list', async (body, env) => {
+  if (!isOpsAuth(body, env)) return err('unauthorized', 401);
+  const includeInactive = isAdmin(body, env) && String(body.include_inactive || '') === '1';
+  const rs = await env.DB.prepare(
+    `SELECT * FROM v2_003_locations ${includeInactive ? '' : 'WHERE active=1'}
+     ORDER BY warehouse_name, location_code`
+  ).all();
+  return json({ ok: true, items: rs.results || [] });
+});
+
+route('v2_003_location_save', async (body, env) => {
+  if (!isAdmin(body, env)) return err('unauthorized_admin_only', 401);
+  const warehouse = v003Text(body.warehouse_name, 80);
+  const code = v003Text(body.location_code, 80);
+  const name = v003Text(body.location_name, 120);
+  if (!warehouse || !code) return err('warehouse_and_location_required');
+  const active = String(body.active) === '0' || body.active === false ? 0 : 1;
+  const id = v003Text(body.id, 100);
+  const op = v003RequireOperator(body) || { id: 'ADMIN', name: '管理员' };
+  const t = now();
+  if (id) {
+    const result = await env.DB.prepare(`UPDATE v2_003_locations
+      SET warehouse_name=?, location_code=?, location_name=?, active=?, updated_at=? WHERE id=?`)
+      .bind(warehouse, code, name, active, t, id).run();
+    if (!v003Changes(result)) return err('not_found', 404);
+    return json({ ok: true, id });
+  }
+  const newId = v003Id('LOC');
+  await env.DB.prepare(`INSERT INTO v2_003_locations
+    (id, warehouse_name, location_code, location_name, active, created_by, created_at, updated_at)
+    VALUES(?,?,?,?,?,?,?,?)`)
+    .bind(newId, warehouse, code, name, active, op.name, t, t).run();
+  return json({ ok: true, id: newId });
+});
+
+route('v2_003_material_list', async (body, env) => {
+  if (!isOpsAuth(body, env)) return err('unauthorized', 401);
+  const { limit, offset } = pageParams(body);
+  const search = v003Text(body.search, 120);
+  const category = v003Text(body.category, 80);
+  const warehouse = v003Text(body.warehouse_name, 80);
+  let status = v003Text(body.status, 30);
+  const lowOnly = String(body.low_stock_only || '') === '1';
+  if (!isAdmin(body, env)) status = 'active';
+  const where = ['1=1'];
+  const binds = [];
+  if (search) {
+    where.push('(material_code LIKE ? OR barcode LIKE ? OR name_zh LIKE ? OR name_ko LIKE ? OR spec LIKE ?)');
+    for (let i = 0; i < 5; i++) binds.push('%' + search + '%');
+  }
+  if (category) { where.push('category=?'); binds.push(category); }
+  if (warehouse) { where.push('warehouse_name=?'); binds.push(warehouse); }
+  if (status) { where.push('status=?'); binds.push(status); }
+  if (lowOnly) where.push("status='active' AND min_qty>0 AND current_qty<=min_qty");
+  const sqlWhere = 'WHERE ' + where.join(' AND ');
+  const [count, rows] = await Promise.all([
+    env.DB.prepare(`SELECT COUNT(*) AS c FROM v2_003_materials ${sqlWhere}`).bind(...binds).first(),
+    env.DB.prepare(`SELECT *, CASE WHEN status='active' AND min_qty>0 AND current_qty<=min_qty THEN 1 ELSE 0 END AS low_stock
+      FROM v2_003_materials ${sqlWhere}
+      ORDER BY low_stock DESC, category, name_zh, material_code LIMIT ? OFFSET ?`)
+      .bind(...binds, limit, offset).all()
+  ]);
+  return json({ ok: true, items: rows.results || [], ...pageMeta(count && count.c, limit, offset) });
+});
+
+route('v2_003_material_detail', async (body, env) => {
+  if (!isOpsAuth(body, env)) return err('unauthorized', 401);
+  const id = v003Text(body.id, 100);
+  if (!id) return err('missing_id');
+  const item = await env.DB.prepare(`SELECT *, CASE WHEN status='active' AND min_qty>0 AND current_qty<=min_qty
+    THEN 1 ELSE 0 END AS low_stock FROM v2_003_materials WHERE id=?`).bind(id).first();
+  if (!item) return err('not_found', 404);
+  const txns = await env.DB.prepare(`SELECT * FROM v2_003_material_txns
+    WHERE material_id=? ORDER BY created_at DESC LIMIT 100`).bind(id).all();
+  return json({ ok: true, item, transactions: txns.results || [] });
+});
+
+route('v2_003_material_save', async (body, env) => {
+  if (!isAdmin(body, env)) return err('unauthorized_admin_only', 401);
+  const id = v003Text(body.id, 100);
+  const nameZh = v003Text(body.name_zh, 160);
+  const nameKo = v003Text(body.name_ko, 160);
+  const category = v003Text(body.category, 80);
+  const unit = v003Text(body.unit, 40);
+  if (!nameZh || !category || !unit) return err('name_category_unit_required');
+  const barcode = v003Text(body.barcode, 120);
+  const op = v003RequireOperator(body) || { id: 'ADMIN', name: '管理员' };
+  const status = ['active', 'inactive'].includes(String(body.status)) ? String(body.status) : 'active';
+  const data = {
+    material_code: v003Text(body.material_code, 80), barcode,
+    name_zh: nameZh, name_ko: nameKo, category,
+    spec: v003Text(body.spec, 160), unit,
+    warehouse_name: v003Text(body.warehouse_name, 80),
+    location_code: v003Text(body.location_code, 80),
+    min_qty: Math.max(0, v003Number(body.min_qty)),
+    unit_cost: Math.max(0, v003Number(body.unit_cost)),
+    currency: v003Text(body.currency || 'KRW', 12) || 'KRW',
+    supplier: v003Text(body.supplier, 160), status,
+    note: v003Text(body.note, 1000)
+  };
+  if (data.material_code) {
+    const dup = await env.DB.prepare('SELECT id FROM v2_003_materials WHERE material_code=? AND id!=? LIMIT 1')
+      .bind(data.material_code, id || '').first();
+    if (dup) return err('duplicate_item_code');
+  }
+  if (barcode) {
+    const dup = await env.DB.prepare('SELECT id FROM v2_003_materials WHERE barcode=? AND id!=? LIMIT 1')
+      .bind(barcode, id || '').first();
+    if (dup) return err('duplicate_barcode');
+  }
+  const t = now();
+  if (id) {
+    const result = await env.DB.prepare(`UPDATE v2_003_materials SET
+      material_code=COALESCE(NULLIF(?,''), material_code), barcode=?, name_zh=?, name_ko=?, category=?, spec=?, unit=?,
+      warehouse_name=?, location_code=?, min_qty=?, unit_cost=?, currency=?, supplier=?, status=?, note=?,
+      updated_by=?, updated_at=? WHERE id=?`)
+      .bind(data.material_code, data.barcode, data.name_zh, data.name_ko, data.category, data.spec, data.unit,
+        data.warehouse_name, data.location_code, data.min_qty, data.unit_cost, data.currency, data.supplier,
+        data.status, data.note, op.name, t, id).run();
+    if (!v003Changes(result)) return err('not_found', 404);
+    return json({ ok: true, id });
+  }
+  const newId = v003Id('MAT');
+  const code = data.material_code || await v003NextCode(env, 'v2_003_materials', 'material_code', 'HC');
+  const opening = Math.max(0, v003Number(body.opening_qty));
+  const stmts = [env.DB.prepare(`INSERT INTO v2_003_materials
+    (id, material_code, barcode, name_zh, name_ko, category, spec, unit, warehouse_name, location_code,
+     current_qty, min_qty, unit_cost, currency, supplier, status, note, stock_version,
+     created_by, created_at, updated_by, updated_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?,?)`)
+    .bind(newId, code, data.barcode, data.name_zh, data.name_ko, data.category, data.spec, data.unit,
+      data.warehouse_name, data.location_code, opening, data.min_qty, data.unit_cost, data.currency,
+      data.supplier, data.status, data.note, op.name, t, op.name, t)];
+  if (opening > 0) {
+    stmts.push(env.DB.prepare(`INSERT INTO v2_003_material_txns
+      (id, material_id, txn_type, qty_delta, qty_before, qty_after, warehouse_name, location_code,
+       recipient_id, recipient_name, purpose, related_doc_no, unit_cost, supplier, note,
+       operator_id, operator_name, created_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .bind(v003Id('MTX'), newId, 'opening', opening, 0, opening, data.warehouse_name, data.location_code,
+        '', '', '期初库存', '', data.unit_cost, data.supplier, data.note, op.id, op.name, t));
+  }
+  await env.DB.batch(stmts);
+  return json({ ok: true, id: newId, material_code: code });
+});
+
+route('v2_003_material_txn', async (body, env) => {
+  if (!isAdmin(body, env) && !isOpsKey(body, env)) return err('unauthorized', 401);
+  const txnType = v003Text(body.txn_type, 30);
+  const allowed = ['inbound', 'issue', 'use', 'return', 'adjust', 'stocktake'];
+  if (!allowed.includes(txnType)) return err('invalid_txn_type');
+  if (['inbound', 'adjust', 'stocktake'].includes(txnType) && !isAdmin(body, env)) {
+    return err('unauthorized_admin_only', 401);
+  }
+  const id = v003Text(body.material_id, 100);
+  if (!id) return err('missing_material_id');
+  const op = v003RequireOperator(body);
+  if (!op) return err('operator_required');
+  const rawQty = v003Number(body.qty, NaN);
+  if (!['adjust', 'stocktake'].includes(txnType) && (!Number.isFinite(rawQty) || rawQty <= 0)) {
+    return err('positive_qty_required');
+  }
+  return withIdem(env, body, 'v2_003_material_txn', async () => {
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const item = await env.DB.prepare('SELECT * FROM v2_003_materials WHERE id=?').bind(id).first();
+      if (!item) throw new Error('not_found');
+      if (item.status !== 'active' && !isAdmin(body, env)) throw new Error('material_inactive');
+      const before = v003Number(item.current_qty);
+      let delta = 0;
+      if (txnType === 'inbound' || txnType === 'return') delta = rawQty;
+      else if (txnType === 'issue' || txnType === 'use') delta = -rawQty;
+      else if (txnType === 'adjust') delta = v003Number(body.delta, NaN);
+      else if (txnType === 'stocktake') {
+        const counted = v003Number(body.counted_qty, NaN);
+        if (!Number.isFinite(counted) || counted < 0) throw new Error('valid_counted_qty_required');
+        delta = counted - before;
+      }
+      if (!Number.isFinite(delta) || Math.abs(delta) > 1000000000) throw new Error('invalid_qty');
+      const after = Math.round((before + delta) * 10000) / 10000;
+      if (after < 0) throw new Error('insufficient_stock');
+      const version = Number(item.stock_version) || 0;
+      const t = now();
+      const warehouse = v003Text(body.warehouse_name || item.warehouse_name, 80);
+      const location = v003Text(body.location_code || item.location_code, 80);
+      const cost = Math.max(0, v003Number(body.unit_cost, item.unit_cost));
+      const supplier = v003Text(body.supplier || item.supplier, 160);
+      const txId = v003Id('MTX');
+      const results = await env.DB.batch([
+        env.DB.prepare(`UPDATE v2_003_materials SET current_qty=?, warehouse_name=?, location_code=?,
+          unit_cost=?, supplier=?, stock_version=stock_version+1, updated_by=?, updated_at=?
+          WHERE id=? AND stock_version=?`)
+          .bind(after, warehouse, location, cost, supplier, op.name, t, id, version),
+        env.DB.prepare(`INSERT INTO v2_003_material_txns
+          (id, material_id, txn_type, qty_delta, qty_before, qty_after, warehouse_name, location_code,
+           recipient_id, recipient_name, purpose, related_doc_no, unit_cost, supplier, note,
+           operator_id, operator_name, created_at)
+          SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? FROM v2_003_materials
+          WHERE id=? AND stock_version=?`)
+          .bind(txId, id, txnType, delta, before, after, warehouse, location,
+            v003Text(body.recipient_id, 80), v003Text(body.recipient_name, 120),
+            v003Text(body.purpose, 240), v003Text(body.related_doc_no, 120), cost, supplier,
+            v003Text(body.note, 1000), op.id, op.name, t, id, version + 1)
+      ]);
+      if (v003Changes(results[0]) === 1 && v003Changes(results[1]) === 1) {
+        return { ok: true, id: txId, qty_before: before, qty_delta: delta, qty_after: after };
+      }
+    }
+    throw new Error('stock_changed_retry');
+  });
+});
+
+route('v2_003_asset_list', async (body, env) => {
+  if (!isOpsAuth(body, env)) return err('unauthorized', 401);
+  const { limit, offset } = pageParams(body);
+  const search = v003Text(body.search, 120);
+  const category = v003Text(body.category, 80);
+  const warehouse = v003Text(body.warehouse_name, 80);
+  const keeper = v003Text(body.keeper, 120);
+  const status = v003Text(body.status, 30);
+  const where = ['1=1'];
+  const binds = [];
+  if (search) {
+    where.push('(asset_code LIKE ? OR barcode LIKE ? OR name_zh LIKE ? OR name_ko LIKE ? OR serial_no LIKE ? OR model LIKE ?)');
+    for (let i = 0; i < 6; i++) binds.push('%' + search + '%');
+  }
+  if (category) { where.push('category=?'); binds.push(category); }
+  if (warehouse) { where.push('warehouse_name=?'); binds.push(warehouse); }
+  if (keeper) { where.push('(keeper_name LIKE ? OR keeper_id LIKE ?)'); binds.push('%' + keeper + '%', '%' + keeper + '%'); }
+  if (status) { where.push('status=?'); binds.push(status); }
+  const sqlWhere = 'WHERE ' + where.join(' AND ');
+  const [count, rows] = await Promise.all([
+    env.DB.prepare(`SELECT COUNT(*) AS c FROM v2_003_assets ${sqlWhere}`).bind(...binds).first(),
+    env.DB.prepare(`SELECT * FROM v2_003_assets ${sqlWhere}
+      ORDER BY CASE status WHEN 'repair' THEN 0 WHEN 'lost' THEN 1 ELSE 2 END, category, name_zh, asset_code
+      LIMIT ? OFFSET ?`).bind(...binds, limit, offset).all()
+  ]);
+  return json({ ok: true, items: rows.results || [], ...pageMeta(count && count.c, limit, offset) });
+});
+
+route('v2_003_asset_detail', async (body, env) => {
+  if (!isOpsAuth(body, env)) return err('unauthorized', 401);
+  const id = v003Text(body.id, 100);
+  if (!id) return err('missing_id');
+  const [item, txns, attachments] = await Promise.all([
+    env.DB.prepare('SELECT * FROM v2_003_assets WHERE id=?').bind(id).first(),
+    env.DB.prepare('SELECT * FROM v2_003_asset_txns WHERE asset_id=? ORDER BY created_at DESC LIMIT 100').bind(id).all(),
+    env.DB.prepare("SELECT * FROM v2_attachments WHERE related_doc_type='asset' AND related_doc_id=? ORDER BY created_at DESC")
+      .bind(id).all()
+  ]);
+  if (!item) return err('not_found', 404);
+  return json({ ok: true, item, transactions: txns.results || [], attachments: attachments.results || [] });
+});
+
+route('v2_003_asset_save', async (body, env) => {
+  if (!isAdmin(body, env)) return err('unauthorized_admin_only', 401);
+  const id = v003Text(body.id, 100);
+  const nameZh = v003Text(body.name_zh, 160);
+  const category = v003Text(body.category, 80);
+  if (!nameZh || !category) return err('name_category_required');
+  const barcode = v003Text(body.barcode, 120);
+  const serial = v003Text(body.serial_no, 160);
+  const op = v003RequireOperator(body) || { id: 'ADMIN', name: '管理员' };
+  const assetCode = v003Text(body.asset_code, 80);
+  if (assetCode) {
+    const dup = await env.DB.prepare('SELECT id FROM v2_003_assets WHERE asset_code=? AND id!=? LIMIT 1')
+      .bind(assetCode, id || '').first();
+    if (dup) return err('duplicate_item_code');
+  }
+  if (barcode) {
+    const dup = await env.DB.prepare('SELECT id FROM v2_003_assets WHERE barcode=? AND id!=? LIMIT 1')
+      .bind(barcode, id || '').first();
+    if (dup) return err('duplicate_barcode');
+  }
+  if (serial) {
+    const dup = await env.DB.prepare('SELECT id FROM v2_003_assets WHERE serial_no=? AND id!=? LIMIT 1')
+      .bind(serial, id || '').first();
+    if (dup) return err('duplicate_serial_no');
+  }
+  const data = {
+    asset_code: assetCode, barcode,
+    name_zh: nameZh, name_ko: v003Text(body.name_ko, 160), category,
+    brand: v003Text(body.brand, 100), model: v003Text(body.model, 120), serial_no: serial,
+    warehouse_name: v003Text(body.warehouse_name, 80), location_code: v003Text(body.location_code, 80),
+    purchase_date: normalizeDateOnly(body.purchase_date),
+    purchase_cost: Math.max(0, v003Number(body.purchase_cost)),
+    currency: v003Text(body.currency || 'KRW', 12) || 'KRW',
+    supplier: v003Text(body.supplier, 160), warranty_until: normalizeDateOnly(body.warranty_until),
+    note: v003Text(body.note, 1000)
+  };
+  const t = now();
+  if (id) {
+    const existing = await env.DB.prepare('SELECT * FROM v2_003_assets WHERE id=?').bind(id).first();
+    if (!existing) return err('not_found', 404);
+    const result = await env.DB.batch([
+      env.DB.prepare(`UPDATE v2_003_assets SET asset_code=COALESCE(NULLIF(?,''),asset_code), barcode=?,
+        name_zh=?, name_ko=?, category=?, brand=?, model=?, serial_no=?, warehouse_name=?, location_code=?,
+        purchase_date=?, purchase_cost=?, currency=?, supplier=?, warranty_until=?, note=?,
+        asset_version=asset_version+1, updated_by=?, updated_at=? WHERE id=?`)
+        .bind(data.asset_code, data.barcode, data.name_zh, data.name_ko, data.category, data.brand, data.model,
+          data.serial_no, data.warehouse_name, data.location_code, data.purchase_date, data.purchase_cost,
+          data.currency, data.supplier, data.warranty_until, data.note, op.name, t, id),
+      env.DB.prepare(`INSERT INTO v2_003_asset_txns
+        (id, asset_id, action_type, status_before, status_after, from_warehouse, from_location,
+         to_warehouse, to_location, from_keeper_id, from_keeper_name, to_keeper_id, to_keeper_name,
+         related_doc_no, note, operator_id, operator_name, created_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .bind(v003Id('ATX'), id, 'edit', existing.status, existing.status,
+          existing.warehouse_name, existing.location_code, data.warehouse_name, data.location_code,
+          existing.keeper_id, existing.keeper_name, existing.keeper_id, existing.keeper_name,
+          '', '修改物品资料', op.id, op.name, t)
+    ]);
+    if (!v003Changes(result[0])) return err('not_found', 404);
+    return json({ ok: true, id });
+  }
+  const newId = v003Id('AST');
+  const code = data.asset_code || await v003NextCode(env, 'v2_003_assets', 'asset_code', 'WP');
+  await env.DB.batch([
+    env.DB.prepare(`INSERT INTO v2_003_assets
+      (id, asset_code, barcode, name_zh, name_ko, category, brand, model, serial_no,
+       warehouse_name, location_code, keeper_id, keeper_name, status, purchase_date, purchase_cost,
+       currency, supplier, warranty_until, note, asset_version, created_by, created_at, updated_by, updated_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,'','','available',?,?,?,?,?,?,0,?,?,?,?)`)
+      .bind(newId, code, data.barcode, data.name_zh, data.name_ko, data.category, data.brand, data.model,
+        data.serial_no, data.warehouse_name, data.location_code, data.purchase_date, data.purchase_cost,
+        data.currency, data.supplier, data.warranty_until, data.note, op.name, t, op.name, t),
+    env.DB.prepare(`INSERT INTO v2_003_asset_txns
+      (id, asset_id, action_type, status_before, status_after, from_warehouse, from_location,
+       to_warehouse, to_location, from_keeper_id, from_keeper_name, to_keeper_id, to_keeper_name,
+       related_doc_no, note, operator_id, operator_name, created_at)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .bind(v003Id('ATX'), newId, 'create', '', 'available', '', '', data.warehouse_name, data.location_code,
+        '', '', '', '', '', data.note, op.id, op.name, t)
+  ]);
+  return json({ ok: true, id: newId, asset_code: code });
+});
+
+route('v2_003_asset_action', async (body, env) => {
+  if (!isAdmin(body, env) && !isOpsKey(body, env)) return err('unauthorized', 401);
+  const action = v003Text(body.action_type, 30);
+  const allowed = ['assign', 'return', 'transfer', 'repair_start', 'repair_done', 'retire', 'lost'];
+  if (!allowed.includes(action)) return err('invalid_action_type');
+  if (!['assign', 'return'].includes(action) && !isAdmin(body, env)) return err('unauthorized_admin_only', 401);
+  const id = v003Text(body.asset_id, 100);
+  const op = v003RequireOperator(body);
+  if (!id) return err('missing_asset_id');
+  if (!op) return err('operator_required');
+  return withIdem(env, body, 'v2_003_asset_action', async () => {
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const item = await env.DB.prepare('SELECT * FROM v2_003_assets WHERE id=?').bind(id).first();
+      if (!item) throw new Error('not_found');
+      if (['retired', 'lost'].includes(item.status)) throw new Error('asset_unavailable');
+      let status = item.status;
+      let warehouse = v003Text(body.warehouse_name || item.warehouse_name, 80);
+      let location = v003Text(body.location_code || item.location_code, 80);
+      let keeperId = item.keeper_id || '';
+      let keeperName = item.keeper_name || '';
+      if (action === 'assign') {
+        if (item.status !== 'available') throw new Error('asset_not_available');
+        keeperId = v003Text(body.to_keeper_id || body.recipient_id || op.id, 80);
+        keeperName = v003Text(body.to_keeper_name || body.recipient_name || op.name, 120);
+        if (!keeperId && !keeperName) throw new Error('keeper_required');
+        status = 'assigned';
+      } else if (action === 'return') {
+        if (item.status !== 'assigned') throw new Error('asset_not_assigned');
+        if (!isAdmin(body, env) && item.keeper_id && item.keeper_id !== op.id) throw new Error('not_current_keeper');
+        keeperId = '';
+        keeperName = '';
+        status = 'available';
+      } else if (action === 'transfer') {
+        if (!warehouse) throw new Error('warehouse_required');
+      } else if (action === 'repair_start') {
+        status = 'repair';
+      } else if (action === 'repair_done') {
+        if (item.status !== 'repair') throw new Error('asset_not_in_repair');
+        status = 'available';
+        keeperId = '';
+        keeperName = '';
+      } else if (action === 'retire') {
+        status = 'retired';
+        keeperId = '';
+        keeperName = '';
+      } else if (action === 'lost') {
+        status = 'lost';
+      }
+      const version = Number(item.asset_version) || 0;
+      const t = now();
+      const txId = v003Id('ATX');
+      const results = await env.DB.batch([
+        env.DB.prepare(`UPDATE v2_003_assets SET status=?, warehouse_name=?, location_code=?,
+          keeper_id=?, keeper_name=?, asset_version=asset_version+1, updated_by=?, updated_at=?
+          WHERE id=? AND asset_version=?`)
+          .bind(status, warehouse, location, keeperId, keeperName, op.name, t, id, version),
+        env.DB.prepare(`INSERT INTO v2_003_asset_txns
+          (id, asset_id, action_type, status_before, status_after, from_warehouse, from_location,
+           to_warehouse, to_location, from_keeper_id, from_keeper_name, to_keeper_id, to_keeper_name,
+           related_doc_no, note, operator_id, operator_name, created_at)
+          SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? FROM v2_003_assets
+          WHERE id=? AND asset_version=?`)
+          .bind(txId, id, action, item.status, status, item.warehouse_name, item.location_code,
+            warehouse, location, item.keeper_id, item.keeper_name, keeperId, keeperName,
+            v003Text(body.related_doc_no, 120), v003Text(body.note, 1000), op.id, op.name, t,
+            id, version + 1)
+      ]);
+      if (v003Changes(results[0]) === 1 && v003Changes(results[1]) === 1) {
+        return { ok: true, id: txId, status, keeper_id: keeperId, keeper_name: keeperName };
+      }
+    }
+    throw new Error('asset_changed_retry');
+  });
+});
+
+route('v2_003_lookup', async (body, env) => {
+  if (!isOpsAuth(body, env)) return err('unauthorized', 401);
+  const code = v003Text(body.code, 160);
+  if (!code) return err('missing_code');
+  const [material, asset] = await Promise.all([
+    env.DB.prepare(`SELECT id, material_code AS code, barcode, name_zh, name_ko, 'material' AS kind
+      FROM v2_003_materials WHERE material_code=? OR barcode=? LIMIT 1`).bind(code, code).first(),
+    env.DB.prepare(`SELECT id, asset_code AS code, barcode, name_zh, name_ko, 'asset' AS kind
+      FROM v2_003_assets WHERE asset_code=? OR barcode=? LIMIT 1`).bind(code, code).first()
+  ]);
+  const item = asset || material;
+  if (!item) return err('not_found', 404);
+  return json({ ok: true, item });
+});
+
+route('v2_003_ledger_list', async (body, env) => {
+  if (!isOpsAuth(body, env)) return err('unauthorized', 401);
+  const { limit, offset } = pageParams(body);
+  const kind = v003Text(body.kind, 20);
+  const search = v003Text(body.search, 120);
+  const action = v003Text(body.txn_type || body.action_type, 30);
+  const startRange = kstDayRangeUtc(v003Text(body.start_date, 10));
+  const endRange = kstDayRangeUtc(v003Text(body.end_date, 10));
+
+  async function materialRows() {
+    const where = ['1=1']; const binds = [];
+    if (search) { where.push('(m.material_code LIKE ? OR m.name_zh LIKE ? OR t.operator_name LIKE ? OR t.recipient_name LIKE ?)'); for (let i=0;i<4;i++) binds.push('%'+search+'%'); }
+    if (action) { where.push('t.txn_type=?'); binds.push(action); }
+    if (startRange) { where.push('t.created_at>=?'); binds.push(startRange.startUtc); }
+    if (endRange) { where.push('t.created_at<?'); binds.push(endRange.endUtc); }
+    const w = 'WHERE ' + where.join(' AND ');
+    const [count, rows] = await Promise.all([
+      env.DB.prepare(`SELECT COUNT(*) AS c FROM v2_003_material_txns t JOIN v2_003_materials m ON m.id=t.material_id ${w}`).bind(...binds).first(),
+      env.DB.prepare(`SELECT 'material' AS kind, t.id, t.created_at, t.txn_type AS action_type,
+        m.id AS item_id, m.material_code AS item_code, m.name_zh AS item_name, m.unit,
+        t.qty_delta, t.qty_before, t.qty_after, t.operator_id, t.operator_name,
+        t.recipient_id, t.recipient_name, t.warehouse_name, t.location_code,
+        t.related_doc_no, t.note, t.purpose
+        FROM v2_003_material_txns t JOIN v2_003_materials m ON m.id=t.material_id ${w}
+        ORDER BY t.created_at DESC LIMIT ? OFFSET ?`).bind(...binds, limit, offset).all()
+    ]);
+    return { total: Number(count && count.c) || 0, rows: rows.results || [] };
+  }
+
+  async function assetRows() {
+    const where = ['1=1']; const binds = [];
+    if (search) { where.push('(a.asset_code LIKE ? OR a.name_zh LIKE ? OR t.operator_name LIKE ? OR t.to_keeper_name LIKE ?)'); for (let i=0;i<4;i++) binds.push('%'+search+'%'); }
+    if (action) { where.push('t.action_type=?'); binds.push(action); }
+    if (startRange) { where.push('t.created_at>=?'); binds.push(startRange.startUtc); }
+    if (endRange) { where.push('t.created_at<?'); binds.push(endRange.endUtc); }
+    const w = 'WHERE ' + where.join(' AND ');
+    const [count, rows] = await Promise.all([
+      env.DB.prepare(`SELECT COUNT(*) AS c FROM v2_003_asset_txns t JOIN v2_003_assets a ON a.id=t.asset_id ${w}`).bind(...binds).first(),
+      env.DB.prepare(`SELECT 'asset' AS kind, t.id, t.created_at, t.action_type,
+        a.id AS item_id, a.asset_code AS item_code, a.name_zh AS item_name, '' AS unit,
+        0 AS qty_delta, 0 AS qty_before, 0 AS qty_after, t.operator_id, t.operator_name,
+        t.to_keeper_id AS recipient_id, t.to_keeper_name AS recipient_name,
+        t.to_warehouse AS warehouse_name, t.to_location AS location_code,
+        t.related_doc_no, t.note, '' AS purpose
+        FROM v2_003_asset_txns t JOIN v2_003_assets a ON a.id=t.asset_id ${w}
+        ORDER BY t.created_at DESC LIMIT ? OFFSET ?`).bind(...binds, limit, offset).all()
+    ]);
+    return { total: Number(count && count.c) || 0, rows: rows.results || [] };
+  }
+
+  if (kind === 'material') {
+    const r = await materialRows();
+    return json({ ok: true, items: r.rows, ...pageMeta(r.total, limit, offset) });
+  }
+  if (kind === 'asset') {
+    const r = await assetRows();
+    return json({ ok: true, items: r.rows, ...pageMeta(r.total, limit, offset) });
+  }
+  const [m, a] = await Promise.all([materialRows(), assetRows()]);
+  const items = m.rows.concat(a.rows)
+    .sort((x, y) => String(y.created_at).localeCompare(String(x.created_at)))
+    .slice(0, limit);
+  return json({ ok: true, items, ...pageMeta(m.total + a.total, limit, offset) });
 });
 
 // =====================================================
