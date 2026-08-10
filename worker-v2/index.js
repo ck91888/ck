@@ -11278,6 +11278,53 @@ route('v2_003_material_save', async (body, env) => {
   return json({ ok: true, id: newId, material_code: code });
 });
 
+route('v2_003_material_delete', async (body, env) => {
+  if (!isAdmin(body, env)) return err('unauthorized_admin_only', 401);
+  const id = v003Text(body.id, 100);
+  if (!id) return err('missing_id');
+  const mode = v003Text(body.mode || 'delete', 20);
+  if (!['delete', 'archive'].includes(mode)) return err('invalid_delete_mode');
+  const op = v003RequireOperator(body) || { id: 'ADMIN', name: '管理员' };
+
+  if (mode === 'archive') {
+    const result = await env.DB.prepare(`UPDATE v2_003_materials
+      SET status='inactive', updated_by=?, updated_at=? WHERE id=?`)
+      .bind(op.name, now(), id).run();
+    if (!v003Changes(result)) return err('not_found', 404);
+    return json({ ok: true, id, archived: true });
+  }
+
+  const blockerQuery = `SELECT m.current_qty,
+      (SELECT COUNT(*) FROM v2_003_material_txns t WHERE t.material_id=m.id) AS txn_count,
+      (SELECT COUNT(*) FROM v2_003_purchase_order_lines l WHERE l.material_id=m.id) AS purchase_line_count,
+      (SELECT COUNT(*) FROM v2_003_purchase_shipment_items s WHERE s.material_id=m.id) AS shipment_item_count,
+      (SELECT COUNT(*) FROM v2_003_purchase_receipt_items r WHERE r.material_id=m.id) AS receipt_item_count
+    FROM v2_003_materials m WHERE m.id=?`;
+  const blockers = await env.DB.prepare(blockerQuery).bind(id).first();
+  if (!blockers) return err('not_found', 404);
+  const blocked = v003Number(blockers.current_qty) !== 0
+    || v003Number(blockers.txn_count) > 0
+    || v003Number(blockers.purchase_line_count) > 0
+    || v003Number(blockers.shipment_item_count) > 0
+    || v003Number(blockers.receipt_item_count) > 0;
+  if (blocked) return json({ ok: false, error: 'material_delete_blocked', can_archive: true, blockers }, 409);
+
+  // Re-check every dependency inside the DELETE statement so a stale browser cannot bypass the guard.
+  const result = await env.DB.prepare(`DELETE FROM v2_003_materials
+    WHERE id=? AND COALESCE(current_qty,0)=0
+      AND NOT EXISTS (SELECT 1 FROM v2_003_material_txns t WHERE t.material_id=v2_003_materials.id)
+      AND NOT EXISTS (SELECT 1 FROM v2_003_purchase_order_lines l WHERE l.material_id=v2_003_materials.id)
+      AND NOT EXISTS (SELECT 1 FROM v2_003_purchase_shipment_items s WHERE s.material_id=v2_003_materials.id)
+      AND NOT EXISTS (SELECT 1 FROM v2_003_purchase_receipt_items r WHERE r.material_id=v2_003_materials.id)`)
+    .bind(id).run();
+  if (!v003Changes(result)) {
+    const latest = await env.DB.prepare(blockerQuery).bind(id).first();
+    if (!latest) return err('not_found', 404);
+    return json({ ok: false, error: 'material_delete_blocked', can_archive: true, blockers: latest }, 409);
+  }
+  return json({ ok: true, id, deleted: true });
+});
+
 async function v003PrepareMaterialImport(body, env) {
   const source = Array.isArray(body.rows) ? body.rows : [];
   if (!source.length) return { errors: [{ row: 0, error: 'bulk_import_empty' }], plans: [] };

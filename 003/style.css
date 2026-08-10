@@ -197,6 +197,8 @@ body.role-field .main-tabs button.active { color: var(--green); border-bottom-co
 .stock-number { text-align: right; font-size: 24px; font-weight: 900; color: var(--navy); white-space: nowrap; }
 .stock-number small { font-size: 11px; color: var(--muted); margin-left: 3px; }
 .item-meta { display: flex; flex-wrap: wrap; gap: 7px 12px; color: var(--muted); font-size: 11px; margin-top: 12px; }
+.card-delete-btn { margin-left: auto; min-height: 26px; padding: 3px 8px; border: 1px solid #f1c0b8; border-radius: 8px; color: var(--red); background: var(--red-bg); font-size: 10px; font-weight: 800; }
+.card-delete-btn:hover { border-color: var(--red); background: #ffe6e1; }
 .tag { display: inline-flex; align-items: center; border-radius: 999px; padding: 3px 8px; font-size: 10px; font-weight: 800; }
 .tag.blue { color: #075bb2; background: var(--cyan); }
 .tag.green { color: #087856; background: var(--green-bg); }
