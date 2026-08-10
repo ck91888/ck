@@ -389,14 +389,27 @@
     <label><span data-i18n="urgency">紧急程度</span><select id="prUrgency"><option value="normal" data-i18n="normal">普通</option><option value="urgent" data-i18n="urgent">紧急</option></select></label>
     <label><span data-i18n="request_reason">申请原因</span><input id="prReason" required></label>
     <div class="line-picker">
-      <input id="prMaterialInput" list="purchaseMaterialList" data-i18n-placeholder="choose_material" placeholder="输入耗材编号或选择耗材">
-      <input id="prMaterialQty" type="number" min="0.01" step="0.01" value="1" aria-label="数量">
+      <button id="prMaterialSelect" class="material-select-btn" type="button" onclick="openPurchaseMaterialPicker()">
+        <span id="prMaterialSelectText" data-i18n="choose_material">请选择已备案耗材</span>
+        <em><span data-i18n="choose_material_action">选择耗材</span> ›</em>
+      </button>
+      <label class="request-qty-field"><span data-i18n="requested_qty">预计需求量</span><input id="prMaterialQty" type="number" min="0.01" step="0.01" value="1" inputmode="decimal"></label>
       <button class="btn soft" type="button" onclick="addPurchaseRequestLine()">＋ <span data-i18n="add_line">添加</span></button>
     </div>
+    <p class="field-help"><span data-i18n="material_selection_hint">必须从已备案耗材中点选，不能只输入相似名称</span>；<span data-i18n="requested_qty_hint">仓库填写大概需要多少；实际采购量由采购负责人下单时填写</span></p>
     <div id="prLineEditor" class="line-editor"><div class="empty" data-i18n="add_material_hint">请先添加需要采购的耗材</div></div>
     <label><span data-i18n="note">备注</span><textarea id="prNote" rows="2"></textarea></label>
     <div class="form-actions"><button type="button" class="btn soft" onclick="closeModal('purchaseRequestModal')" data-i18n="cancel">取消</button><button type="submit" class="btn primary" data-i18n="submit_request">提交申请</button></div>
   </form>
+</div>
+
+<div id="purchaseMaterialPickerModal" class="modal modal-over hidden" onclick="if(event.target===this)closePurchaseMaterialPicker()">
+  <div class="modal-card wide material-picker-card">
+    <div class="modal-head"><h2 data-i18n="material_picker_title">选择已备案耗材</h2><button type="button" onclick="closePurchaseMaterialPicker()">×</button></div>
+    <p class="picker-guide" data-i18n="material_picker_hint">输入文字只用于搜索，点中一条已备案耗材后才算选择成功</p>
+    <div class="material-picker-search"><span>⌕</span><input id="purchaseMaterialSearch" data-i18n-placeholder="material_search" placeholder="搜索名称、编号或规格" oninput="renderPurchaseMaterialPicker()"></div>
+    <div id="purchaseMaterialPickerList" class="material-picker-list"></div>
+  </div>
 </div>
 
 <div id="materialImportModal" class="modal hidden" onclick="if(event.target===this)closeMaterialImport()">
@@ -425,6 +438,7 @@
       <label><span data-i18n="expected_date">预计到货日期</span><input id="poExpectedDate" type="date"></label>
     </div>
     <div class="section-label" data-i18n="ordered_items">实际采购明细</div>
+    <p class="purchase-order-guide" data-i18n="actual_purchase_hint">预计需求量只作参考，请按实际下单数量逐项填写；没有购买的填 0</p>
     <div id="poLineEditor" class="line-editor"></div>
     <label><span data-i18n="note">备注</span><textarea id="poNote" rows="2"></textarea></label>
     <div class="form-actions"><button type="button" class="btn soft" onclick="closeModal('purchaseOrderModal')" data-i18n="cancel">取消</button><button type="submit" class="btn primary" data-i18n="save_purchase">保存采购结果</button></div>
@@ -474,12 +488,11 @@
 <div id="toast" class="toast"></div>
 <input id="assetPhotoInput" type="file" accept="image/*" capture="environment" class="hidden" onchange="uploadAssetPhoto(this)">
 <input id="arrivalPhotoInput" type="file" accept="image/*" capture="environment" class="hidden" onchange="uploadArrivalPhoto(this)">
-<datalist id="purchaseMaterialList"></datalist>
 
 <script src="../shared/xlsx.full.min.js"></script>
 <script src="../shared/html5-qrcode.min.js"></script>
 <script src="../shared/qrcode.min.js"></script>
-<script src="config.js?v=20260810a"></script>
-<script src="app.js?v=20260810a"></script>
+<script src="config.js?v=20260810b"></script>
+<script src="app.js?v=20260810b"></script>
 </body>
 </html>
