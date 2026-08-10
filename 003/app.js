@@ -3,7 +3,7 @@ var S003 = {
   lang: localStorage.getItem(V2_003_LANG_KEY) || 'zh',
   key: '', role: '', badge: '', operatorId: '', operatorName: '',
   locations: [], materialRows: [], currentMaterial: null, currentAsset: null, ledgerRows: [],
-  purchaseOrders: [], purchaseMaterials: [], purchaseRequestLines: [], currentPurchase: null, currentShipment: null,
+  purchaseOrders: [], purchaseMaterials: [], purchaseRequestLines: [], purchaseSelectedMaterialId: '', currentPurchase: null, currentShipment: null,
   materialImportRows: [], materialImportPreview: null,
   badgeScanner: null, itemScanner: null, receivingScanner: null, currentView: 'dashboard', busy: false
 };
@@ -86,7 +86,7 @@ function errorText(code) {
     bulk_code_barcode_conflict:'耗材编号和条码分别对应两条现有记录', bulk_duplicate_target:'表格中多行指向同一耗材', bulk_duplicate_code:'表格内耗材编号重复', bulk_duplicate_barcode:'表格内条码重复',
     bulk_invalid_status:'状态只能填写 active/启用 或 inactive/停用', bulk_invalid_number:'库存、最低库存或单价格式不正确',
     purchase_lines_required:'请至少添加一种采购耗材', invalid_purchase_line:'采购耗材或申请数量不正确', material_not_found:'耗材不存在或已停用',
-    purchase_order_closed:'采购单已经关闭，不能继续修改', ordered_qty_below_shipped:'采购数量不能小于已经登记发货的数量', ordered_qty_required:'请填写实际采购数量',
+    purchase_order_closed:'采购单已经关闭，不能继续修改', ordered_qty_below_shipped:'实际采购量不能小于已经登记发货的数量', ordered_qty_required:'请逐项填写实际采购量，没有购买的填 0',
     delivery_method_required:'请选择送货方式', tracking_no_required:'请填写快递单号', duplicate_tracking_no:'这个快递单号已经登记过',
     invalid_shipment_line:'发货明细或数量不正确', shipment_qty_exceeds_ordered:'本批发货数量超过尚未发货的采购数量', shipment_lines_required:'请填写本批发货明细',
     shipment_not_found:'没有找到对应的采购到货记录', arrival_photo_required:'供应商送货必须先拍摄至少一张到货照片', receipt_lines_incomplete:'请清点全部到货明细',
@@ -107,7 +107,7 @@ function errorText(code) {
     bulk_code_barcode_conflict:'번호와 바코드가 서로 다른 기존 소모품을 가리킵니다', bulk_duplicate_target:'여러 행이 같은 소모품을 가리킵니다', bulk_duplicate_code:'표 안에 중복 번호가 있습니다', bulk_duplicate_barcode:'표 안에 중복 바코드가 있습니다',
     bulk_invalid_status:'상태는 active/사용 또는 inactive/미사용만 가능합니다', bulk_invalid_number:'재고·최소 재고·단가 형식이 올바르지 않습니다',
     purchase_lines_required:'구매할 소모품을 한 개 이상 추가하세요', invalid_purchase_line:'구매 품목 또는 요청 수량이 올바르지 않습니다', material_not_found:'소모품이 없거나 사용 중지 상태입니다',
-    purchase_order_closed:'이미 종료된 구매 건입니다', ordered_qty_below_shipped:'구매 수량은 이미 발송 등록된 수량보다 적을 수 없습니다', ordered_qty_required:'실제 구매 수량을 입력하세요',
+    purchase_order_closed:'이미 종료된 구매 건입니다', ordered_qty_below_shipped:'실제 구매 수량은 이미 발송 등록된 수량보다 적을 수 없습니다', ordered_qty_required:'품목별 실제 구매 수량을 입력하고 구매하지 않은 품목은 0을 입력하세요',
     delivery_method_required:'배송 방식을 선택하세요', tracking_no_required:'택배 송장번호를 입력하세요', duplicate_tracking_no:'이미 등록된 송장번호입니다',
     invalid_shipment_line:'발송 품목 또는 수량이 올바르지 않습니다', shipment_qty_exceeds_ordered:'발송 수량이 미발송 구매 수량을 초과합니다', shipment_lines_required:'이번 발송 내역을 입력하세요',
     shipment_not_found:'구매 입고 내역을 찾을 수 없습니다', arrival_photo_required:'공급업체 배송은 도착 사진을 한 장 이상 촬영해야 합니다', receipt_lines_incomplete:'전체 입고 품목을 확인하세요',
@@ -444,7 +444,7 @@ function openMaterialForm(item) {
 async function saveMaterial(event) {
   event.preventDefault(); if (S003.busy) return; S003.busy=true;
   var data = Object.assign(operatorPayload(), { id:val('mfId'), material_code:val('mfCode'), barcode:val('mfBarcode'), name_zh:val('mfNameZh'), name_ko:val('mfNameKo'), category:val('mfCategory'), spec:val('mfSpec'), unit:val('mfUnit'), location_code:val('mfLocation'), opening_qty:num('mfOpening'), min_qty:num('mfMin'), unit_cost:num('mfCost'), currency:'KRW', supplier:val('mfSupplier'), status:val('mfStatus'), note:val('mfNote') });
-  try { var res=await api('v2_003_material_save',data); toast(T('success')); await loadLocations(false); openMaterialDetail(res.id); }
+  try { var res=await api('v2_003_material_save',data); S003.purchaseMaterials=[]; toast(T('success')); await loadLocations(false); openMaterialDetail(res.id); }
   catch(e){ toast(errorText(e.message),true); } finally { S003.busy=false; }
 }
 
@@ -471,6 +471,7 @@ async function deleteMaterial(id) {
   try {
     await api('v2_003_material_delete', Object.assign(operatorPayload(), { id:id, mode:'delete' }));
     S003.currentMaterial = null;
+    S003.purchaseMaterials = [];
     toast(T('material_deleted'));
     if (S003.currentView === 'material-detail') goView('materials'); else await loadMaterials();
   } catch(e) {
@@ -483,6 +484,7 @@ async function deleteMaterial(id) {
     try {
       await api('v2_003_material_delete', Object.assign(operatorPayload(), { id:id, mode:'archive' }));
       S003.currentMaterial = null;
+      S003.purchaseMaterials = [];
       toast(T('material_archived'));
       if (S003.currentView === 'material-detail') goView('materials'); else await loadMaterials();
     } catch(archiveError) {
@@ -631,26 +633,67 @@ function materialDisplay(m){return S003.lang==='ko'&&m.name_ko?m.name_ko:m.name_
 
 async function ensurePurchaseMaterials(){
   if(S003.purchaseMaterials.length)return;
-  var res=await api('v2_003_material_list',{status:'active',limit:200});
-  S003.purchaseMaterials=res.items||[];
-  E('purchaseMaterialList').innerHTML=S003.purchaseMaterials.map(function(m){return '<option value="'+esc(m.material_code)+'">'+esc(materialDisplay(m)+' · '+m.spec+' · '+fmtQty(m.current_qty)+' '+m.unit)+'</option>';}).join('');
+  var first=await api('v2_003_material_list',{status:'active',limit:200,offset:0});
+  var items=(first.items||[]).slice(),total=Number(first.total)||items.length;
+  for(var offset=items.length;offset<total;offset+=200){
+    var page=await api('v2_003_material_list',{status:'active',limit:200,offset:offset});
+    items=items.concat(page.items||[]);
+    if(!(page.items||[]).length)break;
+  }
+  S003.purchaseMaterials=items;
 }
 
 async function openPurchaseRequest(){
   try{await ensurePurchaseMaterials();}catch(e){toast(errorText(e.message),true);return;}
   S003.purchaseRequestLines=[];
-  E('prUrgency').value='normal';E('prReason').value='';E('prNote').value='';E('prMaterialInput').value='';E('prMaterialQty').value='1';
+  S003.purchaseSelectedMaterialId='';
+  E('prUrgency').value='normal';E('prReason').value='';E('prNote').value='';E('prMaterialQty').value='1';
+  renderPurchaseMaterialSelection();
   renderPurchaseRequestLines();E('purchaseRequestModal').classList.remove('hidden');
 }
 
+function renderPurchaseMaterialSelection(){
+  var button=E('prMaterialSelect'),text=E('prMaterialSelectText');if(!button||!text)return;
+  var m=S003.purchaseMaterials.find(function(x){return x.id===S003.purchaseSelectedMaterialId;});
+  button.classList.toggle('selected',!!m);
+  text.textContent=m?(materialDisplay(m)+' · '+m.material_code+(m.spec?' · '+m.spec:'')):T('choose_material');
+}
+
+function openPurchaseMaterialPicker(){
+  E('purchaseMaterialSearch').value='';renderPurchaseMaterialPicker();
+  E('purchaseMaterialPickerModal').classList.remove('hidden');
+  setTimeout(function(){E('purchaseMaterialSearch').focus();},80);
+}
+
+function closePurchaseMaterialPicker(){E('purchaseMaterialPickerModal').classList.add('hidden');}
+
+function renderPurchaseMaterialPicker(){
+  var q=val('purchaseMaterialSearch').toLocaleLowerCase(),selected=S003.purchaseSelectedMaterialId;
+  var rows=S003.purchaseMaterials.filter(function(m){
+    if(!q)return true;
+    return [m.material_code,m.barcode,m.name_zh,m.name_ko,m.spec,m.category].some(function(v){return String(v||'').toLocaleLowerCase().includes(q);});
+  });
+  var shown=rows.slice(0,200);
+  E('purchaseMaterialPickerList').innerHTML=shown.length?shown.map(function(m){
+    return '<button type="button" class="material-picker-item '+(m.id===selected?'selected':'')+'" onclick="selectPurchaseMaterial(\''+jsq(m.id)+'\')"><span><b>'+esc(materialDisplay(m))+'</b><small>'+esc(m.material_code+(m.spec?' · '+m.spec:'')+' · '+T('current_stock')+' '+fmtQty(m.current_qty)+' '+m.unit)+'</small></span><i>✓</i></button>';
+  }).join(''):'<div class="empty">'+esc(T('material_no_match'))+'</div>';
+}
+
+function selectPurchaseMaterial(id){
+  var m=S003.purchaseMaterials.find(function(x){return x.id===id;});if(!m)return;
+  S003.purchaseSelectedMaterialId=m.id;renderPurchaseMaterialSelection();closePurchaseMaterialPicker();
+  setTimeout(function(){E('prMaterialQty').focus();E('prMaterialQty').select();},80);
+}
+
 function addPurchaseRequestLine(){
-  var code=val('prMaterialInput'),qty=num('prMaterialQty');
-  var m=S003.purchaseMaterials.find(function(x){return x.material_code===code||x.barcode===code||x.id===code;});
-  if(!m||qty<=0){toast(S003.lang==='ko'?'소모품과 수량을 확인하세요':'请选择正确的耗材并填写数量',true);return;}
+  var qty=num('prMaterialQty');
+  var m=S003.purchaseMaterials.find(function(x){return x.id===S003.purchaseSelectedMaterialId;});
+  if(!m){toast(T('material_selection_hint'),true);return;}
+  if(qty<=0){toast(S003.lang==='ko'?'예상 필요 수량을 입력하세요':'请填写预计需求量',true);return;}
   var existing=S003.purchaseRequestLines.find(function(x){return x.material_id===m.id;});
   if(existing)existing.requested_qty=Math.round((existing.requested_qty+qty)*10000)/10000;
   else S003.purchaseRequestLines.push({material_id:m.id,material:m,requested_qty:qty,note:''});
-  E('prMaterialInput').value='';E('prMaterialQty').value='1';renderPurchaseRequestLines();
+  S003.purchaseSelectedMaterialId='';E('prMaterialQty').value='1';renderPurchaseMaterialSelection();renderPurchaseRequestLines();
 }
 
 function updatePurchaseRequestLine(id,value){var x=S003.purchaseRequestLines.find(function(v){return v.material_id===id;});if(x)x.requested_qty=Number(value)||0;}
@@ -707,12 +750,12 @@ function renderPurchaseDetail(res){
 function openPurchaseOrderModal(){
   var res=S003.currentPurchase;if(!res)return;var o=res.order;
   E('poOrderId').value=o.id;E('poSupplier').value=o.supplier||'';E('poChannel').value=o.purchase_channel||'';E('poPlatformNo').value=o.platform_order_no||'';E('poExpectedDate').value=o.expected_date||'';E('poNote').value=o.note||'';
-  E('poLineEditor').innerHTML=res.lines.map(function(l){var value=Number(l.ordered_qty)>0?l.ordered_qty:l.requested_qty;return '<div class="edit-line purchase-edit-line" data-line-id="'+esc(l.id)+'"><div><b>'+esc(materialDisplay(l))+'</b><small>'+esc(l.material_code+' · '+(l.spec||'--'))+'</small></div><label><span>'+esc(T('ordered_qty'))+'</span><div class="qty-unit"><input class="po-qty" type="number" min="'+esc(l.scheduled_qty||0)+'" step="0.01" value="'+esc(value)+'"><em>'+esc(l.unit)+'</em></div></label><label><span>'+esc(T('cost'))+'</span><input class="po-cost" type="number" min="0" step="0.01" value="'+esc(l.unit_cost||0)+'"></label></div>';}).join('');
+  E('poLineEditor').innerHTML=res.lines.map(function(l){var hasSaved=o.status!=='requested'||Number(l.ordered_qty)>0||Number(l.scheduled_qty)>0,value=hasSaved?fmtQty(l.ordered_qty):'';return '<div class="edit-line purchase-edit-line" data-line-id="'+esc(l.id)+'"><div><b>'+esc(materialDisplay(l))+'</b><small>'+esc(l.material_code+' · '+(l.spec||'--')+' · '+T('requested_qty')+' '+fmtQty(l.requested_qty)+' '+l.unit)+'</small></div><label><span>'+esc(T('ordered_qty'))+'</span><div class="qty-unit"><input class="po-qty" type="number" min="'+esc(l.scheduled_qty||0)+'" step="0.01" value="'+esc(value)+'" placeholder="'+esc(T('actual_qty_placeholder'))+'" inputmode="decimal" required><em>'+esc(l.unit)+'</em></div></label><label><span>'+esc(T('cost'))+'</span><input class="po-cost" type="number" min="0" step="0.01" value="'+esc(l.unit_cost||0)+'" inputmode="decimal"></label></div>';}).join('');
   E('purchaseOrderModal').classList.remove('hidden');
 }
 
 async function submitPurchaseOrder(event){
-  event.preventDefault();if(S003.busy)return;var lines=Array.from(E('poLineEditor').querySelectorAll('[data-line-id]')).map(function(row){return{id:row.dataset.lineId,ordered_qty:Number(row.querySelector('.po-qty').value)||0,unit_cost:Number(row.querySelector('.po-cost').value)||0};});S003.busy=true;
+  event.preventDefault();if(S003.busy)return;var rows=Array.from(E('poLineEditor').querySelectorAll('[data-line-id]')),lines=[];for(var i=0;i<rows.length;i++){var qtyInput=rows[i].querySelector('.po-qty'),rawQty=qtyInput.value.trim(),actualQty=Number(rawQty);if(rawQty===''||!Number.isFinite(actualQty)||actualQty<0){toast(T('actual_purchase_hint'),true);qtyInput.focus();return;}lines.push({id:rows[i].dataset.lineId,ordered_qty:actualQty,unit_cost:Number(rows[i].querySelector('.po-cost').value)||0});}S003.busy=true;
   try{await api('v2_003_purchase_order_update',Object.assign(operatorPayload(),{id:val('poOrderId'),supplier:val('poSupplier'),purchase_channel:val('poChannel'),platform_order_no:val('poPlatformNo'),expected_date:val('poExpectedDate'),note:val('poNote'),currency:'KRW',lines:lines}));closeModal('purchaseOrderModal');toast(T('success'));openPurchaseDetail(val('poOrderId'));}catch(e){toast(errorText(e.message),true);}finally{S003.busy=false;}
 }
 

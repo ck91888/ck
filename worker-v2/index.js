@@ -12063,8 +12063,11 @@ route('v2_003_purchase_order_update', async (body, env) => {
   const t = now();
   const statements = [];
   for (const line of existing) {
-    const raw = changes.get(line.id) || {};
-    const orderedQty = v003Number(raw.ordered_qty, line.ordered_qty || line.requested_qty);
+    const raw = changes.get(line.id);
+    if (!raw || raw.ordered_qty == null || String(raw.ordered_qty).trim() === '') {
+      return err('ordered_qty_required');
+    }
+    const orderedQty = v003Number(raw.ordered_qty, NaN);
     const unitCost = Math.max(0, v003Number(raw.unit_cost, line.unit_cost));
     if (!Number.isFinite(orderedQty) || orderedQty < 0 || orderedQty < v003Number(line.scheduled_qty)) {
       return err('ordered_qty_below_shipped');
