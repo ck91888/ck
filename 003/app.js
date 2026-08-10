@@ -2,7 +2,7 @@
 var S003 = {
   lang: localStorage.getItem(V2_003_LANG_KEY) || 'zh',
   key: '', role: '', badge: '', operatorId: '', operatorName: '',
-  locations: [], currentMaterial: null, currentAsset: null, ledgerRows: [],
+  locations: [], materialRows: [], currentMaterial: null, currentAsset: null, ledgerRows: [],
   purchaseOrders: [], purchaseMaterials: [], purchaseRequestLines: [], currentPurchase: null, currentShipment: null,
   materialImportRows: [], materialImportPreview: null,
   badgeScanner: null, itemScanner: null, receivingScanner: null, currentView: 'dashboard', busy: false
@@ -91,7 +91,8 @@ function errorText(code) {
     invalid_shipment_line:'发货明细或数量不正确', shipment_qty_exceeds_ordered:'本批发货数量超过尚未发货的采购数量', shipment_lines_required:'请填写本批发货明细',
     shipment_not_found:'没有找到对应的采购到货记录', arrival_photo_required:'供应商送货必须先拍摄至少一张到货照片', receipt_lines_incomplete:'请清点全部到货明细',
     invalid_received_qty:'实际收到数量不正确', putaway_location_required:'请填写实际收到耗材的上架位置', close_reason_required:'请填写关闭原因',
-    image_required:'到货凭证必须是照片', file_too_large:'照片不能超过 15MB', shipment_not_pending:'该到货单已收货或已取消', invalid_arrival_photo_target:'到货照片关联错误'
+    image_required:'到货凭证必须是照片', file_too_large:'照片不能超过 15MB', shipment_not_pending:'该到货单已收货或已取消', invalid_arrival_photo_target:'到货照片关联错误',
+    material_delete_blocked:'该耗材有库存或业务记录，不能永久删除'
   };
   var ko = {
     unauthorized:'본인 확인에 실패했거나 로그인이 만료되었습니다', unauthorized_admin_only:'관리자만 가능한 작업입니다', network_error:'네트워크 연결 실패',
@@ -111,7 +112,8 @@ function errorText(code) {
     invalid_shipment_line:'발송 품목 또는 수량이 올바르지 않습니다', shipment_qty_exceeds_ordered:'발송 수량이 미발송 구매 수량을 초과합니다', shipment_lines_required:'이번 발송 내역을 입력하세요',
     shipment_not_found:'구매 입고 내역을 찾을 수 없습니다', arrival_photo_required:'공급업체 배송은 도착 사진을 한 장 이상 촬영해야 합니다', receipt_lines_incomplete:'전체 입고 품목을 확인하세요',
     invalid_received_qty:'실제 입고 수량이 올바르지 않습니다', putaway_location_required:'실제 입고 품목의 적치 위치를 입력하세요', close_reason_required:'종료 사유를 입력하세요',
-    image_required:'도착 증빙은 사진만 가능합니다', file_too_large:'사진은 15MB 이하여야 합니다', shipment_not_pending:'이미 입고 또는 취소된 건입니다', invalid_arrival_photo_target:'도착 사진 연결 오류'
+    image_required:'도착 증빙은 사진만 가능합니다', file_too_large:'사진은 15MB 이하여야 합니다', shipment_not_pending:'이미 입고 또는 취소된 건입니다', invalid_arrival_photo_target:'도착 사진 연결 오류',
+    material_delete_blocked:'재고 또는 업무 기록이 있어 영구 삭제할 수 없습니다'
   };
   return (S003.lang === 'ko' ? ko[code] : zh[code]) || code || T('failed');
 }
@@ -378,13 +380,15 @@ async function loadMaterials() {
   E('materialList').innerHTML = '<div class="empty">'+esc(T('loading'))+'</div>';
   try {
     var res = await api('v2_003_material_list', { search:val('materialSearch'), category:val('materialCategory'), status:val('materialStatus'), low_stock_only:E('lowStockOnly').checked ? 1 : 0, limit:200 });
-    E('materialList').innerHTML = res.items.length ? res.items.map(materialCardHtml).join('') : '<div class="empty">'+esc(T('no_data'))+'</div>';
+    S003.materialRows = res.items || [];
+    E('materialList').innerHTML = S003.materialRows.length ? S003.materialRows.map(materialCardHtml).join('') : '<div class="empty">'+esc(T('no_data'))+'</div>';
   } catch(e) { E('materialList').innerHTML = '<div class="empty">'+esc(errorText(e.message))+'</div>'; }
 }
 
 function materialCardHtml(m) {
   var name = S003.lang === 'ko' && m.name_ko ? m.name_ko : m.name_zh;
-  return '<article class="item-card '+(Number(m.low_stock) ? 'low' : '')+'" onclick="openMaterialDetail(\''+jsq(m.id)+'\')"><div class="item-head"><div class="item-title"><b>'+esc(name)+'</b><small>'+esc(m.material_code)+(m.spec ? ' · '+esc(m.spec) : '')+'</small></div><div class="stock-number">'+esc(fmtQty(m.current_qty))+'<small>'+esc(m.unit)+'</small></div></div><div class="item-meta"><span class="tag blue">'+esc(m.category)+'</span>'+(Number(m.low_stock) ? '<span class="tag red">'+esc(T('low_stock_badge'))+'</span>' : '')+(m.location_code?'<span>⌖ '+esc(m.location_code)+'</span>':'')+'<span>'+esc(T('min_stock'))+': '+esc(fmtQty(m.min_qty))+'</span></div></article>';
+  var deleteBtn = isAdmin() ? '<button type="button" class="card-delete-btn" aria-label="'+esc(T('delete_material')+' '+name)+'" onclick="event.stopPropagation();deleteMaterial(\''+jsq(m.id)+'\')">× '+esc(T('delete_material'))+'</button>' : '';
+  return '<article class="item-card '+(Number(m.low_stock) ? 'low' : '')+'" onclick="openMaterialDetail(\''+jsq(m.id)+'\')"><div class="item-head"><div class="item-title"><b>'+esc(name)+'</b><small>'+esc(m.material_code)+(m.spec ? ' · '+esc(m.spec) : '')+'</small></div><div class="stock-number">'+esc(fmtQty(m.current_qty))+'<small>'+esc(m.unit)+'</small></div></div><div class="item-meta"><span class="tag blue">'+esc(m.category)+'</span>'+(m.status !== 'active' ? '<span class="tag gray">'+esc(T('inactive'))+'</span>' : '')+(Number(m.low_stock) ? '<span class="tag red">'+esc(T('low_stock_badge'))+'</span>' : '')+(m.location_code?'<span>⌖ '+esc(m.location_code)+'</span>':'')+'<span>'+esc(T('min_stock'))+': '+esc(fmtQty(m.min_qty))+'</span>'+deleteBtn+'</div></article>';
 }
 
 async function openMaterialDetail(id) {
@@ -407,6 +411,7 @@ function renderMaterialDetail(res) {
     actions += '<button class="btn soft" onclick="openMaterialTxn(\'stocktake\')">'+esc(T('stocktake'))+'</button>';
     actions += '<button class="btn soft" onclick="openMaterialTxn(\'adjust\')">'+esc(T('adjust'))+'</button>';
     actions += '<button class="btn soft" onclick="openMaterialForm(S003.currentMaterial.item)">'+esc(T('edit'))+'</button>';
+    actions += '<button class="btn danger" onclick="deleteMaterial(\''+jsq(m.id)+'\')">'+esc(T('delete_material'))+'</button>';
   }
   var info = isField() ? [
     [T('category'),m.category],[T('spec'),m.spec],[T('storage_location'),m.location_code]
@@ -441,6 +446,51 @@ async function saveMaterial(event) {
   var data = Object.assign(operatorPayload(), { id:val('mfId'), material_code:val('mfCode'), barcode:val('mfBarcode'), name_zh:val('mfNameZh'), name_ko:val('mfNameKo'), category:val('mfCategory'), spec:val('mfSpec'), unit:val('mfUnit'), location_code:val('mfLocation'), opening_qty:num('mfOpening'), min_qty:num('mfMin'), unit_cost:num('mfCost'), currency:'KRW', supplier:val('mfSupplier'), status:val('mfStatus'), note:val('mfNote') });
   try { var res=await api('v2_003_material_save',data); toast(T('success')); await loadLocations(false); openMaterialDetail(res.id); }
   catch(e){ toast(errorText(e.message),true); } finally { S003.busy=false; }
+}
+
+function materialDeleteBlockReason(details) {
+  var b = details && details.blockers || {};
+  var parts = [];
+  if (Number(b.current_qty)) parts.push(T('delete_reason_stock').replace('{qty}', fmtQty(b.current_qty)));
+  if (Number(b.txn_count)) parts.push(T('delete_reason_history').replace('{count}', String(b.txn_count)));
+  if (Number(b.purchase_line_count)) parts.push(T('delete_reason_purchase').replace('{count}', String(b.purchase_line_count)));
+  var shippingCount = Number(b.shipment_item_count) + Number(b.receipt_item_count);
+  if (shippingCount) parts.push(T('delete_reason_shipping').replace('{count}', String(shippingCount)));
+  return parts.join(S003.lang === 'ko' ? ', ' : '、') || errorText('material_delete_blocked');
+}
+
+async function deleteMaterial(id) {
+  if (!isAdmin() || S003.busy || !id) return;
+  var row = S003.materialRows.find(function(x) { return x.id === id; });
+  var current = S003.currentMaterial && S003.currentMaterial.item;
+  var item = row || (current && current.id === id ? current : null);
+  var name = item ? (S003.lang === 'ko' && item.name_ko ? item.name_ko : item.name_zh) : id;
+  var message = T('confirm_delete_material').replace('{name}', name || id);
+  if (!confirm(message)) return;
+  S003.busy = true;
+  try {
+    await api('v2_003_material_delete', Object.assign(operatorPayload(), { id:id, mode:'delete' }));
+    S003.currentMaterial = null;
+    toast(T('material_deleted'));
+    if (S003.currentView === 'material-detail') goView('materials'); else await loadMaterials();
+  } catch(e) {
+    if (e.message !== 'material_delete_blocked' || !e.details || !e.details.can_archive) {
+      toast(errorText(e.message), true);
+      return;
+    }
+    var reason = materialDeleteBlockReason(e.details);
+    if (!confirm(T('delete_blocked_archive').replace('{reason}', reason))) return;
+    try {
+      await api('v2_003_material_delete', Object.assign(operatorPayload(), { id:id, mode:'archive' }));
+      S003.currentMaterial = null;
+      toast(T('material_archived'));
+      if (S003.currentView === 'material-detail') goView('materials'); else await loadMaterials();
+    } catch(archiveError) {
+      toast(errorText(archiveError.message), true);
+    }
+  } finally {
+    S003.busy = false;
+  }
 }
 
 function openMaterialTxn(type) {
