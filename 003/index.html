@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="theme-color" content="#102a43">
   <title>耗材与物品管理 / 소모품·비품 관리</title>
-  <link rel="stylesheet" href="style.css?v=20260810a">
+  <link rel="stylesheet" href="style.css?v=20260810c">
 </head>
 <body>
 
@@ -198,10 +198,10 @@
           <label><span data-i18n="barcode">条码（可选）</span><input id="mfBarcode"></label>
           <label><span data-i18n="name_zh">中文名称</span><input id="mfNameZh" required></label>
           <label><span data-i18n="name_ko">韩文名称（可选）</span><input id="mfNameKo"></label>
-          <label><span data-i18n="category">分类</span><input id="mfCategory" list="materialCategoryList" required></label>
+          <label><span data-i18n="category">分类</span><div class="explicit-choice-control"><input id="mfCategory" required><button type="button" onclick="openValuePicker('mfCategory','material_category')"><span data-i18n="choose">选择</span> ›</button></div></label>
           <label><span data-i18n="spec">规格</span><input id="mfSpec"></label>
-          <label><span data-i18n="unit">单位</span><input id="mfUnit" list="materialUnitList" required></label>
-          <label><span data-i18n="storage_location">存放位置/货位（可选）</span><input id="mfLocation" list="locationList"></label>
+          <label><span data-i18n="unit">单位</span><div class="explicit-choice-control"><input id="mfUnit" required><button type="button" onclick="openValuePicker('mfUnit','material_unit')"><span data-i18n="choose">选择</span> ›</button></div></label>
+          <label><span data-i18n="storage_location">存放位置/货位（可选）</span><div class="location-control" data-location-control data-location-optional="1"><input id="mfLocation" class="location-value" type="hidden"><button class="location-select-btn" type="button" onclick="openLocationPicker(this)"><span class="location-display" data-i18n="choose_location">请选择位置</span><em><span data-i18n="choose">选择</span> ›</em></button><button class="location-scan-btn" type="button" onclick="openLocationScanner(this)">▣ <span data-i18n="scan_location">扫码</span></button></div></label>
           <label id="mfOpeningWrap"><span data-i18n="opening_qty">期初库存</span><input id="mfOpening" type="number" min="0" step="0.01" value="0"></label>
           <label><span data-i18n="min_stock">最低库存</span><input id="mfMin" type="number" min="0" step="0.01" value="0"></label>
           <label><span data-i18n="cost">单价</span><input id="mfCost" type="number" min="0" step="0.01"></label>
@@ -248,11 +248,11 @@
           <label><span data-i18n="barcode">条码（可选）</span><input id="afBarcode"></label>
           <label><span data-i18n="name_zh">中文名称</span><input id="afNameZh" required></label>
           <label><span data-i18n="name_ko">韩文名称（可选）</span><input id="afNameKo"></label>
-          <label><span data-i18n="category">分类</span><input id="afCategory" list="assetCategoryList" required></label>
+          <label><span data-i18n="category">分类</span><div class="explicit-choice-control"><input id="afCategory" required><button type="button" onclick="openValuePicker('afCategory','asset_category')"><span data-i18n="choose">选择</span> ›</button></div></label>
           <label><span data-i18n="brand">品牌</span><input id="afBrand"></label>
           <label><span data-i18n="model">型号</span><input id="afModel"></label>
           <label><span data-i18n="serial_no">序列号</span><input id="afSerial"></label>
-          <label><span data-i18n="storage_location">存放位置/货位（可选）</span><input id="afLocation" list="locationList"></label>
+          <label><span data-i18n="storage_location">存放位置/货位（可选）</span><div class="location-control" data-location-control data-location-optional="1"><input id="afLocation" class="location-value" type="hidden"><button class="location-select-btn" type="button" onclick="openLocationPicker(this)"><span class="location-display" data-i18n="choose_location">请选择位置</span><em><span data-i18n="choose">选择</span> ›</em></button><button class="location-scan-btn" type="button" onclick="openLocationScanner(this)">▣ <span data-i18n="scan_location">扫码</span></button></div></label>
           <label><span data-i18n="purchase_date">购买日期</span><input id="afPurchaseDate" type="date"></label>
           <label><span data-i18n="purchase_cost">采购价格</span><input id="afCost" type="number" min="0" step="0.01"></label>
           <label><span data-i18n="supplier">供应商</span><input id="afSupplier"></label>
@@ -323,17 +323,12 @@
 
     <section id="view-settings" class="view">
       <div class="panel">
-        <div class="panel-head"><h2 data-i18n="locations">存放位置</h2><button class="btn primary" onclick="openLocationModal()">＋ <span data-i18n="add_location">新增位置</span></button></div>
+        <div class="panel-head"><h2 data-i18n="locations">存放位置</h2><div class="panel-actions"><button class="btn soft" onclick="openLocationImport()">⇧ <span data-i18n="bulk_import_locations">批量导入位置</span></button><button class="btn primary" onclick="openLocationModal()">＋ <span data-i18n="add_location">新增位置</span></button></div></div>
         <div id="locationListBody" class="settings-list"></div>
       </div>
     </section>
   </main>
 </div>
-
-<datalist id="materialCategoryList"></datalist>
-<datalist id="assetCategoryList"></datalist>
-<datalist id="materialUnitList"></datalist>
-<datalist id="locationList"></datalist>
 
 <div id="materialTxnModal" class="modal hidden" onclick="if(event.target===this)closeModal('materialTxnModal')">
   <form class="modal-card" onsubmit="submitMaterialTxn(event)">
@@ -364,7 +359,7 @@
     <div id="aaKeeperFields"><label><span data-i18n="recipient">领用人</span><input id="aaKeeper"></label></div>
     <div id="aaDepartmentFields"><label><span data-i18n="department">使用部门</span><select id="aaDepartment" required><option value="" data-i18n="choose_department">请选择部门</option><option value="代发" data-i18n="department_direct">代发</option><option value="大货" data-i18n="department_bulk">大货</option><option value="进口" data-i18n="department_import">进口</option></select></label></div>
     <div id="aaLocationFields" class="form-grid compact">
-      <label><span data-i18n="storage_location">存放位置/货位</span><input id="aaLocation" list="locationList"></label>
+      <label><span data-i18n="storage_location">存放位置/货位</span><div class="location-control" data-location-control data-location-optional="1"><input id="aaLocation" class="location-value" type="hidden"><button class="location-select-btn" type="button" onclick="openLocationPicker(this)"><span class="location-display" data-i18n="choose_location">请选择位置</span><em><span data-i18n="choose">选择</span> ›</em></button><button class="location-scan-btn" type="button" onclick="openLocationScanner(this)">▣ <span data-i18n="scan_location">扫码</span></button></div></label>
     </div>
     <label><span data-i18n="related_doc">关联单号/任务</span><input id="aaDoc"></label>
     <label><span data-i18n="note">备注</span><textarea id="aaNote" rows="3"></textarea></label>
@@ -381,6 +376,51 @@
     <label class="check-label"><input id="locActive" type="checkbox" checked><span data-i18n="active">启用</span></label>
     <div class="form-actions"><button type="button" class="btn soft" onclick="closeModal('locationModal')" data-i18n="cancel">取消</button><button type="submit" class="btn primary" data-i18n="save">保存</button></div>
   </form>
+</div>
+
+<div id="locationImportModal" class="modal hidden" onclick="if(event.target===this)closeLocationImport()">
+  <div class="modal-card wide">
+    <div class="modal-head"><h2 data-i18n="bulk_import_locations">批量导入位置</h2><button type="button" onclick="closeLocationImport()">×</button></div>
+    <div class="import-guide">
+      <div><b data-i18n="location_import_step">1. 下载模板并填写位置</b><small data-i18n="location_import_hint">位置编码一致时更新名称和状态；不会删除已有位置。</small></div>
+      <button class="btn soft" type="button" onclick="downloadLocationTemplate()">↓ <span data-i18n="download_template">下载 Excel 模板</span></button>
+    </div>
+    <label class="file-drop" for="locationImportInput"><b data-i18n="choose_spreadsheet">选择 Excel 或 CSV 文件</b><small>.xlsx / .xls / .csv，最多 500 行</small></label>
+    <input id="locationImportInput" class="hidden" type="file" accept=".xlsx,.xls,.csv" onchange="readLocationImport(this)">
+    <div id="locationImportStatus" class="import-status"><span data-i18n="import_waiting">尚未选择文件</span></div>
+    <div id="locationImportPreview" class="import-preview"></div>
+    <div class="form-actions"><button type="button" class="btn soft" onclick="closeLocationImport()" data-i18n="cancel">取消</button><button id="confirmLocationImportBtn" type="button" class="btn primary" onclick="confirmLocationImport()" disabled data-i18n="confirm_import">确认批量导入</button></div>
+  </div>
+</div>
+
+<div id="valuePickerModal" class="modal modal-over hidden" onclick="if(event.target===this)closeValuePicker()">
+  <div class="modal-card small material-picker-card">
+    <div class="modal-head"><h2 id="valuePickerTitle" data-i18n="choose">选择</h2><button type="button" onclick="closeValuePicker()">×</button></div>
+    <p class="picker-guide" data-i18n="value_picker_hint">点选已有选项；需要新内容时也可以直接在原输入框填写。</p>
+    <div class="material-picker-search"><span>⌕</span><input id="valuePickerSearch" data-i18n-placeholder="search_option" placeholder="搜索选项" oninput="renderValuePicker()"></div>
+    <div id="valuePickerList" class="material-picker-list"></div>
+  </div>
+</div>
+
+<div id="locationPickerModal" class="modal modal-over hidden" onclick="if(event.target===this)closeLocationPicker()">
+  <div class="modal-card wide material-picker-card">
+    <div class="modal-head"><h2 data-i18n="choose_location">选择位置</h2><button type="button" onclick="closeLocationPicker()">×</button></div>
+    <p class="picker-guide" data-i18n="location_picker_hint">搜索并点选基础设置中已启用的位置，也可以扫描位置编码。</p>
+    <button class="btn success full" type="button" onclick="openLocationScanner()">▣ <span data-i18n="scan_location_code">扫描位置编码</span></button>
+    <div class="material-picker-search location-picker-search"><span>⌕</span><input id="locationPickerSearch" data-i18n-placeholder="location_search" placeholder="搜索位置编码或名称" oninput="renderLocationPicker()"></div>
+    <div id="locationPickerList" class="material-picker-list"></div>
+    <button id="clearLocationBtn" class="btn soft full" type="button" onclick="clearLocationSelection()" data-i18n="clear_location">清除位置</button>
+  </div>
+</div>
+
+<div id="locationScannerModal" class="modal modal-over-top hidden" onclick="if(event.target===this)closeLocationScanner()">
+  <div class="modal-card small">
+    <div class="modal-head"><h2 data-i18n="scan_location_code">扫描位置编码</h2><button type="button" onclick="closeLocationScanner()">×</button></div>
+    <div id="locationReader" class="reader"></div>
+    <button id="locationScanStartBtn" class="btn success full" type="button" onclick="startLocationScan()" data-i18n="start_scan">开始扫描</button>
+    <div class="manual-code-row"><input id="manualLocationCode" data-i18n-placeholder="manual_location_code" placeholder="手动输入位置编码" onkeydown="if(event.key==='Enter'){event.preventDefault();applyManualLocationCode()}"><button class="btn soft" type="button" onclick="applyManualLocationCode()" data-i18n="confirm">确认</button></div>
+    <div id="locationScannerError" class="form-error"></div>
+  </div>
 </div>
 
 <div id="purchaseRequestModal" class="modal hidden" onclick="if(event.target===this)closeModal('purchaseRequestModal')">
@@ -459,6 +499,7 @@
       <label><span data-i18n="expected_date">预计到货日期</span><input id="shExpectedDate" type="date"></label>
     </div>
     <div class="section-label" data-i18n="shipment_items">本批发货明细</div>
+    <p class="picker-guide" data-i18n="shipment_selection_hint">勾选这个快递实际包含的物品，再填写本包裹发货数量；未勾选的物品不会绑定这个快递单号。</p>
     <div id="shLineEditor" class="line-editor"></div>
     <label><span data-i18n="note">备注</span><textarea id="shNote" rows="2"></textarea></label>
     <div class="form-actions"><button type="button" class="btn soft" onclick="closeModal('shipmentModal')" data-i18n="cancel">取消</button><button type="submit" class="btn primary" data-i18n="confirm_shipment">确认登记</button></div>
@@ -492,7 +533,7 @@
 <script src="../shared/xlsx.full.min.js"></script>
 <script src="../shared/html5-qrcode.min.js"></script>
 <script src="../shared/qrcode.min.js"></script>
-<script src="config.js?v=20260810b"></script>
-<script src="app.js?v=20260810b"></script>
+<script src="config.js?v=20260810c"></script>
+<script src="app.js?v=20260810c"></script>
 </body>
 </html>
