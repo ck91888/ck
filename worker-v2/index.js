@@ -11170,6 +11170,78 @@ route('v2_003_location_save', async (body, env) => {
   return json({ ok: true, id: newId });
 });
 
+function v003LocationImportStatus(value) {
+  const raw = v003Text(value, 30).toLowerCase();
+  if (!raw || ['active', '启用', '使用', '사용', '1'].includes(raw)) return 1;
+  if (['inactive', '停用', '미사용', '0'].includes(raw)) return 0;
+  return null;
+}
+
+async function v003PrepareLocationImport(body, env) {
+  const rawRows = Array.isArray(body.rows) ? body.rows : [];
+  const errors = [];
+  if (!rawRows.length) return { errors: [{ row: 0, error: 'bulk_import_empty' }], plans: [] };
+  if (rawRows.length > 500) return { errors: [{ row: 0, error: 'bulk_location_limit' }], plans: [] };
+  const existingRs = await env.DB.prepare('SELECT * FROM v2_003_locations ORDER BY location_code').all();
+  const existing = existingRs.results || [];
+  const exact = new Map(existing.map(x => [v003Text(x.location_code, 80), x]));
+  const lower = new Map();
+  for (const row of existing) {
+    const key = v003Text(row.location_code, 80).toLocaleLowerCase();
+    if (key && !lower.has(key)) lower.set(key, row);
+  }
+  const used = new Set();
+  const plans = [];
+  for (let index = 0; index < rawRows.length; index++) {
+    const raw = rawRows[index] || {};
+    const rowNo = Math.max(1, Math.floor(v003Number(raw.row_no, index + 2)));
+    const code = v003Text(raw.location_code, 80);
+    const key = code.toLocaleLowerCase();
+    const active = v003LocationImportStatus(raw.status);
+    if (!code) errors.push({ row: rowNo, error: 'bulk_location_code_required' });
+    if (code && used.has(key)) errors.push({ row: rowNo, error: 'bulk_duplicate_location' });
+    if (key) used.add(key);
+    if (active == null) errors.push({ row: rowNo, error: 'bulk_invalid_status' });
+    if (!code || active == null) continue;
+    const target = exact.get(code) || lower.get(key) || null;
+    plans.push({
+      row: rowNo,
+      action: target ? 'update' : 'create',
+      id: target ? target.id : v003Id('LOC'),
+      location_code: target ? v003Text(target.location_code, 80) : code,
+      location_name: v003Text(raw.location_name, 120),
+      active
+    });
+  }
+  return { errors, plans };
+}
+
+route('v2_003_location_bulk_import', async (body, env) => {
+  if (!isAdmin(body, env)) return err('unauthorized_admin_only', 401);
+  const prepared = await v003PrepareLocationImport(body, env);
+  if (prepared.errors.length) return json({ ok: false, error: 'bulk_import_invalid', errors: prepared.errors }, 400);
+  const created = prepared.plans.filter(x => x.action === 'create').length;
+  const updated = prepared.plans.length - created;
+  if (String(body.dry_run || '') === '1') {
+    return json({ ok: true, dry_run: true, created_count: created, updated_count: updated,
+      items: prepared.plans.map(x => ({ row: x.row, action: x.action, location_code: x.location_code,
+        location_name: x.location_name, active: x.active })) });
+  }
+  const op = v003RequireOperator(body) || { id: 'ADMIN', name: '管理员' };
+  return withIdem(env, body, 'v2_003_location_bulk_import', async () => {
+    const t = now();
+    const statements = prepared.plans.map(item => item.action === 'update'
+      ? env.DB.prepare(`UPDATE v2_003_locations SET location_name=?, active=?, updated_at=? WHERE id=?`)
+        .bind(item.location_name, item.active, t, item.id)
+      : env.DB.prepare(`INSERT INTO v2_003_locations
+          (id, warehouse_name, location_code, location_name, active, created_by, created_at, updated_at)
+          VALUES(?,'',?,?,?,?,?,?)`)
+        .bind(item.id, item.location_code, item.location_name, item.active, op.name, t, t));
+    await env.DB.batch(statements);
+    return { ok: true, created_count: created, updated_count: updated, total: prepared.plans.length };
+  });
+});
+
 route('v2_003_material_list', async (body, env) => {
   if (!v003CanRead(body, env)) return err('unauthorized', 401);
   const { limit, offset } = pageParams(body);
@@ -12242,6 +12314,14 @@ route('v2_003_receipt_confirm', async (body, env) => {
       note: v003Text(raw.note, 500)
     });
   }
+  const requiredLocations = [...new Set(receiptItems.filter(x => x.received_qty > 0).map(x => x.location_code))];
+  if (requiredLocations.length) {
+    const placeholders = requiredLocations.map(() => '?').join(',');
+    const locationRs = await env.DB.prepare(`SELECT location_code FROM v2_003_locations
+      WHERE active=1 AND location_code IN (${placeholders})`).bind(...requiredLocations).all();
+    const validLocations = new Set((locationRs.results || []).map(x => x.location_code));
+    if (requiredLocations.some(code => !validLocations.has(code))) return err('invalid_putaway_location');
+  }
   const discrepancyNote = v003Text(body.discrepancy_note, 1000);
   if (discrepancyNote) hasDiscrepancy = true;
   const receiptId = v003Id('REC');
@@ -12300,10 +12380,14 @@ route('v2_003_receipt_confirm', async (body, env) => {
   statements.push(env.DB.prepare(`UPDATE v2_003_purchase_orders SET
     has_discrepancy=CASE WHEN ?=1 THEN 1 ELSE has_discrepancy END,
     status=CASE
-      WHEN (SELECT COALESCE(SUM(received_qty),0) FROM v2_003_purchase_order_lines WHERE order_id=id)
-        >= (SELECT COALESCE(SUM(ordered_qty),0) FROM v2_003_purchase_order_lines WHERE order_id=id)
-       AND (SELECT COALESCE(SUM(ordered_qty),0) FROM v2_003_purchase_order_lines WHERE order_id=id)>0
-       AND NOT EXISTS (SELECT 1 FROM v2_003_purchase_order_lines WHERE order_id=id AND ordered_qty<=0)
+      WHEN (SELECT COALESCE(SUM(received_qty),0) FROM v2_003_purchase_order_lines
+              WHERE order_id=v2_003_purchase_orders.id)
+        >= (SELECT COALESCE(SUM(ordered_qty),0) FROM v2_003_purchase_order_lines
+              WHERE order_id=v2_003_purchase_orders.id)
+       AND (SELECT COALESCE(SUM(ordered_qty),0) FROM v2_003_purchase_order_lines
+              WHERE order_id=v2_003_purchase_orders.id)>0
+       AND NOT EXISTS (SELECT 1 FROM v2_003_purchase_order_lines
+              WHERE order_id=v2_003_purchase_orders.id AND ordered_qty<=0)
       THEN 'completed' ELSE 'partial_received' END,
     updated_at=? WHERE id=? AND EXISTS (SELECT 1 FROM v2_003_purchase_receipts WHERE id=?)`)
     .bind(hasDiscrepancy ? 1 : 0, t, shipment.order_id, receiptId));

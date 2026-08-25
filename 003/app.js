@@ -4,8 +4,9 @@ var S003 = {
   key: '', role: '', badge: '', operatorId: '', operatorName: '',
   locations: [], materialRows: [], currentMaterial: null, currentAsset: null, ledgerRows: [],
   purchaseOrders: [], purchaseMaterials: [], purchaseRequestLines: [], purchaseSelectedMaterialId: '', currentPurchase: null, currentShipment: null,
-  materialImportRows: [], materialImportPreview: null,
-  badgeScanner: null, itemScanner: null, receivingScanner: null, currentView: 'dashboard', busy: false
+  materialImportRows: [], materialImportPreview: null, locationImportRows: [], locationImportPreview: null,
+  valuePickerTargetId: '', valuePickerKind: '', locationTarget: null,
+  badgeScanner: null, itemScanner: null, receivingScanner: null, locationScanner: null, currentView: 'dashboard', busy: false
 };
 
 function E(id) { return document.getElementById(id); }
@@ -28,6 +29,7 @@ function applyI18n() {
   document.documentElement.lang = S003.lang === 'ko' ? 'ko' : 'zh';
   document.querySelectorAll('[data-i18n]').forEach(function(el) { el.textContent = T(el.getAttribute('data-i18n')); });
   document.querySelectorAll('[data-i18n-placeholder]').forEach(function(el) { el.placeholder = T(el.getAttribute('data-i18n-placeholder')); });
+  refreshLocationControls();
   if (S003.role) updateHeader();
 }
 
@@ -80,17 +82,17 @@ function errorText(code) {
     asset_changed_retry:'物品状态刚被修改，请刷新后重试', asset_not_available:'该物品当前不可领用', asset_not_assigned:'该物品当前没有被领用',
     not_current_keeper:'只有当前领用人或管理员可以归还', asset_unavailable:'该物品已报废或遗失', asset_not_in_repair:'该物品不在维修中',
     operator_required:'缺少操作人信息', positive_qty_required:'数量必须大于 0', valid_counted_qty_required:'请输入正确的实盘数量',
-    recipient_required:'请填写领用或使用人', department_required:'请选择代发、大货或进口部门', location_required:'请填写存放位置',
+    recipient_required:'请填写领用或使用人', department_required:'请选择代发、大货或进口部门', location_required:'请填写存放位置', location_not_registered:'请选择或扫描基础设置中已启用的位置',
     name_category_unit_required:'请填写名称、分类和单位', name_category_required:'请填写名称和分类',
-    bulk_import_empty:'表格中没有可导入的数据', bulk_import_limit:'一次最多导入 300 行', bulk_import_invalid:'表格中有错误，请按提示修改',
+    bulk_import_empty:'表格中没有可导入的数据', bulk_import_limit:'一次最多导入 300 行', bulk_location_limit:'一次最多导入 500 个位置', bulk_import_invalid:'表格中有错误，请按提示修改',
     bulk_code_barcode_conflict:'耗材编号和条码分别对应两条现有记录', bulk_duplicate_target:'表格中多行指向同一耗材', bulk_duplicate_code:'表格内耗材编号重复', bulk_duplicate_barcode:'表格内条码重复',
-    bulk_invalid_status:'状态只能填写 active/启用 或 inactive/停用', bulk_invalid_number:'库存、最低库存或单价格式不正确',
+    bulk_invalid_status:'状态只能填写 active/启用 或 inactive/停用', bulk_invalid_number:'库存、最低库存或单价格式不正确', bulk_location_code_required:'位置编码不能为空', bulk_duplicate_location:'表格内位置编码重复',
     purchase_lines_required:'请至少添加一种采购耗材', invalid_purchase_line:'采购耗材或申请数量不正确', material_not_found:'耗材不存在或已停用',
     purchase_order_closed:'采购单已经关闭，不能继续修改', ordered_qty_below_shipped:'实际采购量不能小于已经登记发货的数量', ordered_qty_required:'请逐项填写实际采购量，没有购买的填 0',
     delivery_method_required:'请选择送货方式', tracking_no_required:'请填写快递单号', duplicate_tracking_no:'这个快递单号已经登记过',
-    invalid_shipment_line:'发货明细或数量不正确', shipment_qty_exceeds_ordered:'本批发货数量超过尚未发货的采购数量', shipment_lines_required:'请填写本批发货明细',
+    invalid_shipment_line:'发货明细或数量不正确', shipment_qty_exceeds_ordered:'本批发货数量超过尚未发货的采购数量', shipment_lines_required:'请先勾选这个快递包含的物品并填写数量',
     shipment_not_found:'没有找到对应的采购到货记录', arrival_photo_required:'供应商送货必须先拍摄至少一张到货照片', receipt_lines_incomplete:'请清点全部到货明细',
-    invalid_received_qty:'实际收到数量不正确', putaway_location_required:'请填写实际收到耗材的上架位置', close_reason_required:'请填写关闭原因',
+    invalid_received_qty:'实际收到数量不正确', receipt_qty_required:'请逐项填写实际收到数量，未收到请填 0', putaway_location_required:'请填写实际收到耗材的上架位置', invalid_putaway_location:'上架位置必须是基础设置中已启用的位置', close_reason_required:'请填写关闭原因',
     image_required:'到货凭证必须是照片', file_too_large:'照片不能超过 15MB', shipment_not_pending:'该到货单已收货或已取消', invalid_arrival_photo_target:'到货照片关联错误',
     material_delete_blocked:'该耗材有库存或业务记录，不能永久删除'
   };
@@ -101,17 +103,17 @@ function errorText(code) {
     asset_changed_retry:'비품 상태가 변경되었습니다. 다시 시도하세요', asset_not_available:'현재 수령할 수 없는 비품입니다', asset_not_assigned:'현재 사용 중인 비품이 아닙니다',
     not_current_keeper:'현재 사용자 또는 관리자만 반납할 수 있습니다', asset_unavailable:'폐기 또는 분실 처리된 비품입니다', asset_not_in_repair:'수리 중인 비품이 아닙니다',
     operator_required:'작업자 정보가 없습니다', positive_qty_required:'수량은 0보다 커야 합니다', valid_counted_qty_required:'올바른 실사 수량을 입력하세요',
-    recipient_required:'수령 또는 사용자를 입력하세요', department_required:'배송대행·대형화물·수입 부서를 선택하세요', location_required:'보관 위치를 입력하세요',
+    recipient_required:'수령 또는 사용자를 입력하세요', department_required:'배송대행·대형화물·수입 부서를 선택하세요', location_required:'보관 위치를 입력하세요', location_not_registered:'기초 설정에 등록된 사용 중 위치를 선택하거나 스캔하세요',
     name_category_unit_required:'명칭·분류·단위를 입력하세요', name_category_required:'명칭과 분류를 입력하세요',
-    bulk_import_empty:'등록할 데이터가 없습니다', bulk_import_limit:'한 번에 최대 300행까지 등록할 수 있습니다', bulk_import_invalid:'표의 오류를 수정하세요',
+    bulk_import_empty:'등록할 데이터가 없습니다', bulk_import_limit:'한 번에 최대 300행까지 등록할 수 있습니다', bulk_location_limit:'한 번에 최대 500개 위치를 등록할 수 있습니다', bulk_import_invalid:'표의 오류를 수정하세요',
     bulk_code_barcode_conflict:'번호와 바코드가 서로 다른 기존 소모품을 가리킵니다', bulk_duplicate_target:'여러 행이 같은 소모품을 가리킵니다', bulk_duplicate_code:'표 안에 중복 번호가 있습니다', bulk_duplicate_barcode:'표 안에 중복 바코드가 있습니다',
-    bulk_invalid_status:'상태는 active/사용 또는 inactive/미사용만 가능합니다', bulk_invalid_number:'재고·최소 재고·단가 형식이 올바르지 않습니다',
+    bulk_invalid_status:'상태는 active/사용 또는 inactive/미사용만 가능합니다', bulk_invalid_number:'재고·최소 재고·단가 형식이 올바르지 않습니다', bulk_location_code_required:'위치 코드를 입력하세요', bulk_duplicate_location:'표 안에 중복 위치 코드가 있습니다',
     purchase_lines_required:'구매할 소모품을 한 개 이상 추가하세요', invalid_purchase_line:'구매 품목 또는 요청 수량이 올바르지 않습니다', material_not_found:'소모품이 없거나 사용 중지 상태입니다',
     purchase_order_closed:'이미 종료된 구매 건입니다', ordered_qty_below_shipped:'실제 구매 수량은 이미 발송 등록된 수량보다 적을 수 없습니다', ordered_qty_required:'품목별 실제 구매 수량을 입력하고 구매하지 않은 품목은 0을 입력하세요',
     delivery_method_required:'배송 방식을 선택하세요', tracking_no_required:'택배 송장번호를 입력하세요', duplicate_tracking_no:'이미 등록된 송장번호입니다',
-    invalid_shipment_line:'발송 품목 또는 수량이 올바르지 않습니다', shipment_qty_exceeds_ordered:'발송 수량이 미발송 구매 수량을 초과합니다', shipment_lines_required:'이번 발송 내역을 입력하세요',
+    invalid_shipment_line:'발송 품목 또는 수량이 올바르지 않습니다', shipment_qty_exceeds_ordered:'발송 수량이 미발송 구매 수량을 초과합니다', shipment_lines_required:'이 송장에 포함된 품목을 선택하고 수량을 입력하세요',
     shipment_not_found:'구매 입고 내역을 찾을 수 없습니다', arrival_photo_required:'공급업체 배송은 도착 사진을 한 장 이상 촬영해야 합니다', receipt_lines_incomplete:'전체 입고 품목을 확인하세요',
-    invalid_received_qty:'실제 입고 수량이 올바르지 않습니다', putaway_location_required:'실제 입고 품목의 적치 위치를 입력하세요', close_reason_required:'종료 사유를 입력하세요',
+    invalid_received_qty:'실제 입고 수량이 올바르지 않습니다', receipt_qty_required:'실제 입고 수량을 품목별로 입력하고 미입고는 0을 입력하세요', putaway_location_required:'실제 입고 품목의 적치 위치를 입력하세요', invalid_putaway_location:'적치 위치는 기초 설정에 등록된 사용 중 위치여야 합니다', close_reason_required:'종료 사유를 입력하세요',
     image_required:'도착 증빙은 사진만 가능합니다', file_too_large:'사진은 15MB 이하여야 합니다', shipment_not_pending:'이미 입고 또는 취소된 건입니다', invalid_arrival_photo_target:'도착 사진 연결 오류',
     material_delete_blocked:'재고 또는 업무 기록이 있어 영구 삭제할 수 없습니다'
   };
@@ -257,7 +259,7 @@ function logout003() {
   localStorage.removeItem(V2_003_BADGE_KEY);
   localStorage.removeItem(V2_003_BADGE_DAY_KEY);
   document.body.classList.remove('role-field', 'role-admin');
-  closeScanner(); closeReceivingScanner(); showEntry();
+  closeScanner(); closeReceivingScanner(); closeLocationScanner(); showEntry();
 }
 
 function goView(name, btn) {
@@ -351,13 +353,11 @@ function ledgerActivityHtml(r) {
   return '<div class="activity-item"><div class="activity-dot '+esc(r.kind)+'">'+(r.kind === 'material' ? '耗' : '物')+'</div><div class="activity-main"><b>'+esc(action)+' · '+esc(r.item_name || r.item_code)+'</b><small>'+esc([extra,departmentLabel(r.department),r.recipient_name].filter(function(x){return x&&x!=='--';}).join(' · ') || '--')+'</small></div><div class="activity-time">'+esc(fmtTime(r.created_at))+'</div></div>';
 }
 
-function fillDatalist(id, values) { E(id).innerHTML = (values || []).map(function(v) { return '<option value="'+esc(v)+'"></option>'; }).join(''); }
-
 async function loadLocations(renderSettings) {
   try {
     var res = await api('v2_003_location_list', { include_inactive: isAdmin() ? 1 : 0 });
     S003.locations = res.items || [];
-    fillDatalist('locationList', S003.locations.map(function(x) { return x.location_code; }).filter(Boolean));
+    refreshLocationControls();
     if (renderSettings) renderLocations();
   } catch(e) { if (renderSettings) E('locationListBody').innerHTML = '<div class="empty">'+esc(errorText(e.message))+'</div>'; }
 }
@@ -366,15 +366,86 @@ function renderLocations() {
   var body = E('locationListBody');
   if (!S003.locations.length) { body.innerHTML = '<div class="empty">'+esc(T('no_data'))+'</div>'; return; }
   body.innerHTML = S003.locations.map(function(x) {
-    return '<div class="settings-row"><b>'+esc(x.location_code)+'</b><span>'+esc(x.location_name || '--')+'</span><button class="btn mini soft" onclick="editLocation(\''+jsq(x.id)+'\')">'+esc(T('edit'))+'</button></div>';
+    return '<div class="settings-row"><b>'+esc(x.location_code)+'</b><span>'+esc(x.location_name || '--')+(Number(x.active)===0?' · '+esc(T('inactive')):'')+'</span><button class="btn mini soft" onclick="editLocation(\''+jsq(x.id)+'\')">'+esc(T('edit'))+'</button></div>';
   }).join('');
 }
 
 function populateStaticLists() {
-  fillDatalist('materialCategoryList', MATERIAL_CATEGORIES); fillDatalist('assetCategoryList', ASSET_CATEGORIES); fillDatalist('materialUnitList', MATERIAL_UNITS);
   E('materialCategory').innerHTML = '<option value="">'+esc(T('all_categories'))+'</option>' + MATERIAL_CATEGORIES.map(function(x){return '<option value="'+esc(x)+'">'+esc(x)+'</option>';}).join('');
   E('assetCategory').innerHTML = '<option value="">'+esc(T('all_categories'))+'</option>' + ASSET_CATEGORIES.map(function(x){return '<option value="'+esc(x)+'">'+esc(x)+'</option>';}).join('');
 }
+
+function valuePickerValues(kind) {
+  if (kind === 'material_category') return MATERIAL_CATEGORIES;
+  if (kind === 'asset_category') return ASSET_CATEGORIES;
+  if (kind === 'material_unit') return MATERIAL_UNITS;
+  return [];
+}
+
+function openValuePicker(targetId, kind) {
+  var target=E(targetId);if(!target)return;
+  S003.valuePickerTargetId=targetId;S003.valuePickerKind=kind;
+  E('valuePickerTitle').textContent=kind==='material_unit'?T('unit'):T('category');
+  E('valuePickerSearch').value='';renderValuePicker();E('valuePickerModal').classList.remove('hidden');
+  setTimeout(function(){E('valuePickerSearch').focus();},80);
+}
+
+function renderValuePicker() {
+  var target=E(S003.valuePickerTargetId),q=val('valuePickerSearch').toLocaleLowerCase(),selected=target?target.value:'';
+  var values=valuePickerValues(S003.valuePickerKind).filter(function(x){return !q||String(x).toLocaleLowerCase().includes(q);});
+  E('valuePickerList').innerHTML=values.length?values.map(function(x){return '<button type="button" class="material-picker-item '+(x===selected?'selected':'')+'" onclick="selectValuePicker(\''+jsq(x)+'\')"><span><b>'+esc(x)+'</b></span><i>✓</i></button>';}).join(''):'<div class="empty">'+esc(T('no_data'))+'</div>';
+}
+
+function selectValuePicker(value){var target=E(S003.valuePickerTargetId);if(target){target.value=value;target.dispatchEvent(new Event('change',{bubbles:true}));}closeValuePicker();}
+function closeValuePicker(){E('valuePickerModal').classList.add('hidden');S003.valuePickerTargetId='';S003.valuePickerKind='';}
+
+function activeLocations(){return S003.locations.filter(function(x){return Number(x.active)!==0&&x.location_code;});}
+function findActiveLocation(code){var key=String(code||'').trim().toLocaleLowerCase();return activeLocations().find(function(x){return String(x.location_code||'').trim().toLocaleLowerCase()===key;})||null;}
+function locationDisplayText(code){var x=S003.locations.find(function(v){return String(v.location_code||'')===String(code||'');});return x?[x.location_code,x.location_name].filter(Boolean).join(' · '):String(code||'');}
+
+function setLocationControlValue(control,code){
+  if(!control)return;var input=control.querySelector('.location-value'),button=control.querySelector('.location-select-btn'),display=control.querySelector('.location-display');if(!input||!button||!display)return;
+  input.value=String(code||'').trim();button.classList.toggle('selected',!!input.value);display.textContent=input.value?locationDisplayText(input.value):T('choose_location');
+}
+
+function setLocationInputValue(inputId,code){var input=E(inputId);if(!input)return;input.value=String(code||'').trim();setLocationControlValue(input.closest('[data-location-control]'),input.value);}
+function refreshLocationControls(){document.querySelectorAll('[data-location-control]').forEach(function(control){var input=control.querySelector('.location-value');setLocationControlValue(control,input&&input.value);});}
+
+function locationControlHtml(code,required){
+  return '<div class="location-control" data-location-control '+(required?'data-location-required="1"':'data-location-optional="1"')+'><input class="location-value rc-loc" type="hidden" value="'+esc(code||'')+'"><button class="location-select-btn '+(code?'selected':'')+'" type="button" onclick="openLocationPicker(this)"><span class="location-display">'+esc(code?locationDisplayText(code):T('choose_location'))+'</span><em>'+esc(T('choose'))+' ›</em></button><button class="location-scan-btn" type="button" onclick="openLocationScanner(this)">▣ '+esc(T('scan_location'))+'</button></div>';
+}
+
+function openLocationPicker(trigger){
+  var control=trigger&&trigger.closest?trigger.closest('[data-location-control]'):S003.locationTarget;if(!control)return;
+  S003.locationTarget=control;E('locationPickerSearch').value='';E('clearLocationBtn').classList.toggle('hidden',control.dataset.locationOptional!=='1');renderLocationPicker();E('locationPickerModal').classList.remove('hidden');
+  setTimeout(function(){E('locationPickerSearch').focus();},80);
+}
+
+function renderLocationPicker(){
+  var q=val('locationPickerSearch').toLocaleLowerCase(),selected=S003.locationTarget&&S003.locationTarget.querySelector('.location-value');selected=selected?selected.value:'';
+  var rows=activeLocations().filter(function(x){return !q||[x.location_code,x.location_name].some(function(v){return String(v||'').toLocaleLowerCase().includes(q);});});
+  E('locationPickerList').innerHTML=rows.length?rows.map(function(x){return '<button type="button" class="material-picker-item '+(x.location_code===selected?'selected':'')+'" onclick="selectLocation(\''+jsq(x.location_code)+'\')"><span><b>'+esc(x.location_code)+'</b><small>'+esc(x.location_name||'--')+'</small></span><i>✓</i></button>';}).join(''):'<div class="empty">'+esc(T('location_no_match'))+'</div>';
+}
+
+function selectLocation(code){var x=findActiveLocation(code);if(!x){toast(errorText('location_not_registered'),true);return;}setLocationControlValue(S003.locationTarget,x.location_code);closeLocationScanner();closeLocationPicker();}
+function clearLocationSelection(){if(!S003.locationTarget||S003.locationTarget.dataset.locationOptional!=='1')return;setLocationControlValue(S003.locationTarget,'');closeLocationPicker();}
+function closeLocationPicker(){E('locationPickerModal').classList.add('hidden');if(E('locationScannerModal').classList.contains('hidden'))S003.locationTarget=null;}
+
+function openLocationScanner(trigger){
+  if(trigger&&trigger.closest)S003.locationTarget=trigger.closest('[data-location-control]');
+  if(!S003.locationTarget)return;E('manualLocationCode').value='';E('locationScannerError').textContent='';E('locationScannerModal').classList.remove('hidden');startLocationScan();
+}
+
+async function startLocationScan(){
+  if(S003.locationScanner){stopLocationScan();return;}E('locationScannerError').textContent='';
+  try{S003.locationScanner=new Html5Qrcode('locationReader');await S003.locationScanner.start({facingMode:'environment'},{fps:10,qrbox:{width:260,height:180}},function(text){applyScannedLocation(text);},function(){});E('locationScanStartBtn').textContent=T('close');}
+  catch(e){E('locationScannerError').textContent=S003.lang==='ko'?'카메라를 열 수 없습니다. 위치 코드를 직접 입력하세요.':'无法打开摄像头，请手动输入位置编码';stopLocationScan();}
+}
+
+function stopLocationScan(){if(!S003.locationScanner)return;var scanner=S003.locationScanner;S003.locationScanner=null;Promise.resolve(scanner.stop()).catch(function(){}).finally(function(){try{scanner.clear();}catch(e){}if(E('locationScanStartBtn'))E('locationScanStartBtn').textContent=T('start_scan');});}
+function applyScannedLocation(code){var x=findActiveLocation(code);if(!x){E('locationScannerError').textContent=errorText('location_not_registered');return;}setLocationControlValue(S003.locationTarget,x.location_code);closeLocationScanner();closeLocationPicker();toast((S003.lang==='ko'?'위치 선택: ':'已选择位置：')+x.location_code);}
+function applyManualLocationCode(){applyScannedLocation(val('manualLocationCode'));}
+function closeLocationScanner(){stopLocationScan();if(E('locationScannerModal'))E('locationScannerModal').classList.add('hidden');if(E('locationPickerModal').classList.contains('hidden'))S003.locationTarget=null;}
 
 async function loadMaterials() {
   E('materialList').innerHTML = '<div class="empty">'+esc(T('loading'))+'</div>';
@@ -428,14 +499,14 @@ function infoCell(x) { return '<div class="info-cell"><small>'+esc(x[0])+'</smal
 function txnLabel(t) { return ({opening:S003.lang==='ko'?'기초재고':'期初库存',inbound:T('inbound'),purchase_inbound:S003.lang==='ko'?'구매 입고':'采购到货',issue:T('issue'),use:T('use'),return:T('return_item'),adjust:T('adjust'),stocktake:T('stocktake')})[t] || t; }
 function materialTxnHtml(t) { var delta = Number(t.qty_delta)||0; return '<div class="timeline-row"><div class="timeline-action">'+esc(txnLabel(t.txn_type))+' <span class="tag '+(delta<0?'orange':'green')+'">'+(delta>0?'+':'')+esc(fmtQty(delta))+'</span></div><div class="timeline-detail">'+esc(t.operator_name||'--')+(t.recipient_name?' → '+esc(t.recipient_name):'')+(t.department?' · '+esc(departmentLabel(t.department)):'')+'<small>'+esc([t.purpose,t.related_doc_no,t.note].filter(Boolean).join(' · ')||'--')+' · '+esc(fmtQty(t.qty_before))+' → '+esc(fmtQty(t.qty_after))+'</small></div><div class="timeline-time">'+esc(fmtTime(t.created_at))+'</div></div>'; }
 
-function clearMaterialForm() { ['mfId','mfCode','mfBarcode','mfNameZh','mfNameKo','mfCategory','mfSpec','mfUnit','mfLocation','mfCost','mfSupplier','mfNote'].forEach(function(id){E(id).value='';}); E('mfOpening').value='0'; E('mfMin').value='0'; E('mfStatus').value='active'; }
+function clearMaterialForm() { ['mfId','mfCode','mfBarcode','mfNameZh','mfNameKo','mfCategory','mfSpec','mfUnit','mfLocation','mfCost','mfSupplier','mfNote'].forEach(function(id){E(id).value='';}); setLocationInputValue('mfLocation',''); E('mfOpening').value='0'; E('mfMin').value='0'; E('mfStatus').value='active'; }
 function openMaterialForm(item) {
   if (!isAdmin()) return;
   clearMaterialForm();
   if (item) {
     E('materialFormTitle').textContent = T('edit'); E('mfId').value=item.id; E('mfCode').value=item.material_code||''; E('mfBarcode').value=item.barcode||'';
     E('mfNameZh').value=item.name_zh||''; E('mfNameKo').value=item.name_ko||''; E('mfCategory').value=item.category||''; E('mfSpec').value=item.spec||'';
-    E('mfUnit').value=item.unit||''; E('mfLocation').value=item.location_code||''; E('mfMin').value=item.min_qty||0;
+    E('mfUnit').value=item.unit||''; setLocationInputValue('mfLocation',item.location_code||''); E('mfMin').value=item.min_qty||0;
     E('mfCost').value=item.unit_cost||''; E('mfSupplier').value=item.supplier||''; E('mfStatus').value=item.status||'active'; E('mfNote').value=item.note||''; E('mfOpeningWrap').classList.add('hidden');
   } else { E('materialFormTitle').textContent=T('add_material'); E('mfOpeningWrap').classList.remove('hidden'); }
   goView('material-edit');
@@ -612,12 +683,12 @@ function renderAssetDetail(res){
 
 function assetTxnHtml(t){var move=t.to_location||'',keeper=t.to_keeper_name||'',dept=t.to_department||t.from_department||'';return '<div class="timeline-row"><div class="timeline-action">'+esc(assetActionLabel(t.action_type))+'</div><div class="timeline-detail">'+esc(t.operator_name||'--')+'<small>'+esc([keeper,departmentLabel(dept),move,t.related_doc_no,t.note].filter(function(x){return x&&x!=='--';}).join(' · ')||'--')+'</small></div><div class="timeline-time">'+esc(fmtTime(t.created_at))+'</div></div>';}
 
-function clearAssetForm(){['afId','afCode','afBarcode','afNameZh','afNameKo','afCategory','afBrand','afModel','afSerial','afLocation','afPurchaseDate','afCost','afSupplier','afWarranty','afNote'].forEach(function(id){E(id).value='';});}
-function openAssetForm(item){if(!isAdmin())return;clearAssetForm();if(item){E('assetFormTitle').textContent=T('edit');E('afId').value=item.id;E('afCode').value=item.asset_code||'';E('afBarcode').value=item.barcode||'';E('afNameZh').value=item.name_zh||'';E('afNameKo').value=item.name_ko||'';E('afCategory').value=item.category||'';E('afBrand').value=item.brand||'';E('afModel').value=item.model||'';E('afSerial').value=item.serial_no||'';E('afLocation').value=item.location_code||'';E('afPurchaseDate').value=item.purchase_date||'';E('afCost').value=item.purchase_cost||'';E('afSupplier').value=item.supplier||'';E('afWarranty').value=item.warranty_until||'';E('afNote').value=item.note||'';}else E('assetFormTitle').textContent=T('add_asset');goView('asset-edit');}
+function clearAssetForm(){['afId','afCode','afBarcode','afNameZh','afNameKo','afCategory','afBrand','afModel','afSerial','afLocation','afPurchaseDate','afCost','afSupplier','afWarranty','afNote'].forEach(function(id){E(id).value='';});setLocationInputValue('afLocation','');}
+function openAssetForm(item){if(!isAdmin())return;clearAssetForm();if(item){E('assetFormTitle').textContent=T('edit');E('afId').value=item.id;E('afCode').value=item.asset_code||'';E('afBarcode').value=item.barcode||'';E('afNameZh').value=item.name_zh||'';E('afNameKo').value=item.name_ko||'';E('afCategory').value=item.category||'';E('afBrand').value=item.brand||'';E('afModel').value=item.model||'';E('afSerial').value=item.serial_no||'';setLocationInputValue('afLocation',item.location_code||'');E('afPurchaseDate').value=item.purchase_date||'';E('afCost').value=item.purchase_cost||'';E('afSupplier').value=item.supplier||'';E('afWarranty').value=item.warranty_until||'';E('afNote').value=item.note||'';}else E('assetFormTitle').textContent=T('add_asset');goView('asset-edit');}
 
 async function saveAsset(event){event.preventDefault();if(S003.busy)return;S003.busy=true;var data=Object.assign(operatorPayload(),{id:val('afId'),asset_code:val('afCode'),barcode:val('afBarcode'),name_zh:val('afNameZh'),name_ko:val('afNameKo'),category:val('afCategory'),brand:val('afBrand'),model:val('afModel'),serial_no:val('afSerial'),location_code:val('afLocation'),purchase_date:val('afPurchaseDate'),purchase_cost:num('afCost'),currency:'KRW',supplier:val('afSupplier'),warranty_until:val('afWarranty'),note:val('afNote')});try{var res=await api('v2_003_asset_save',data);toast(T('success'));await loadLocations(false);openAssetDetail(res.id);}catch(e){toast(errorText(e.message),true);}finally{S003.busy=false;}}
 
-function openAssetAction(type){var a=S003.currentAsset&&S003.currentAsset.item;if(!a)return;if(type==='retire'&&!confirm(T('confirm_retire')))return;if(type==='lost'&&!confirm(T('confirm_lost')))return;E('aaAssetId').value=a.id;E('aaType').value=type;E('aaTitle').textContent=assetActionLabel(type);E('aaItemInfo').textContent=(S003.lang==='ko'&&a.name_ko?a.name_ko:a.name_zh)+' · '+a.asset_code;E('aaKeeper').value=type==='assign'?(S003.operatorName||''):'';E('aaDepartment').value=type==='assign'?(a.keeper_department||''):'';E('aaLocation').value=a.location_code||'';E('aaDoc').value='';E('aaNote').value='';E('aaKeeper').readOnly=isField();E('aaKeeperFields').classList.toggle('hidden',type!=='assign');E('aaDepartmentFields').classList.toggle('hidden',type!=='assign');E('aaDepartment').required=type==='assign';E('aaLocationFields').classList.toggle('hidden',!['return','transfer','repair_done'].includes(type));E('assetActionModal').classList.remove('hidden');}
+function openAssetAction(type){var a=S003.currentAsset&&S003.currentAsset.item;if(!a)return;if(type==='retire'&&!confirm(T('confirm_retire')))return;if(type==='lost'&&!confirm(T('confirm_lost')))return;E('aaAssetId').value=a.id;E('aaType').value=type;E('aaTitle').textContent=assetActionLabel(type);E('aaItemInfo').textContent=(S003.lang==='ko'&&a.name_ko?a.name_ko:a.name_zh)+' · '+a.asset_code;E('aaKeeper').value=type==='assign'?(S003.operatorName||''):'';E('aaDepartment').value=type==='assign'?(a.keeper_department||''):'';setLocationInputValue('aaLocation',a.location_code||'');E('aaDoc').value='';E('aaNote').value='';E('aaKeeper').readOnly=isField();E('aaKeeperFields').classList.toggle('hidden',type!=='assign');E('aaDepartmentFields').classList.toggle('hidden',type!=='assign');E('aaDepartment').required=type==='assign';E('aaLocationFields').classList.toggle('hidden',!['return','transfer','repair_done'].includes(type));E('assetActionModal').classList.remove('hidden');}
 
 async function submitAssetAction(event){event.preventDefault();if(S003.busy)return;S003.busy=true;var type=val('aaType'),keeper=val('aaKeeper');var data=Object.assign(operatorPayload(),{asset_id:val('aaAssetId'),action_type:type,to_keeper_name:keeper,department:val('aaDepartment'),location_code:val('aaLocation'),related_doc_no:val('aaDoc'),note:val('aaNote'),client_req_id:reqId('atx')});if(type==='assign'&&keeper===S003.operatorName)data.to_keeper_id=S003.operatorId;try{await api('v2_003_asset_action',data);closeModal('assetActionModal');toast(T('success'));openAssetDetail(data.asset_id);}catch(e){toast(errorText(e.message),true);}finally{S003.busy=false;}}
 
@@ -763,13 +834,14 @@ function openShipmentModal(){
   var res=S003.currentPurchase;if(!res)return;var o=res.order;E('shOrderId').value=o.id;E('shTracking').value='';E('shSupplier').value=o.supplier||'';E('shExpectedDate').value=o.expected_date||'';E('shNote').value='';
   var radio=document.querySelector('input[name="deliveryMethod"][value="express"]');if(radio)radio.checked=true;toggleDeliveryMethod();
   var available=res.lines.filter(function(l){return Number(l.ordered_qty)>Number(l.scheduled_qty);});
-  E('shLineEditor').innerHTML=available.map(function(l){var remain=Math.round((Number(l.ordered_qty)-Number(l.scheduled_qty))*10000)/10000;return '<div class="edit-line" data-line-id="'+esc(l.id)+'"><div><b>'+esc(materialDisplay(l))+'</b><small>'+esc(T('ordered_qty'))+' '+esc(fmtQty(l.ordered_qty))+' · '+esc(S003.lang==='ko'?'미등록':'未发货')+' '+esc(fmtQty(remain))+' '+esc(l.unit)+'</small></div><label><span>'+esc(T('expected_qty'))+'</span><div class="qty-unit"><input class="sh-qty" type="number" min="0" max="'+esc(remain)+'" step="0.01" value="'+esc(remain)+'"><em>'+esc(l.unit)+'</em></div></label></div>';}).join('');
+  E('shLineEditor').innerHTML=available.map(function(l){var remain=Math.round((Number(l.ordered_qty)-Number(l.scheduled_qty))*10000)/10000;return '<div class="edit-line shipment-select-line" data-line-id="'+esc(l.id)+'" data-remain="'+esc(remain)+'"><label class="shipment-item-choice"><input class="sh-selected" type="checkbox" onchange="toggleShipmentLine(this)"><span><b>'+esc(materialDisplay(l))+'</b><small>'+esc(l.material_code+' · '+(l.spec||'--'))+'</small><small>'+esc(T('ordered_qty'))+' '+esc(fmtQty(l.ordered_qty))+' · '+esc(S003.lang==='ko'?'미등록':'未发货')+' '+esc(fmtQty(remain))+' '+esc(l.unit)+'</small></span></label><label><span>'+esc(T('expected_qty'))+'</span><div class="qty-unit"><input class="sh-qty" type="number" min="0.01" max="'+esc(remain)+'" step="0.01" value="" placeholder="'+esc(fmtQty(remain))+'" inputmode="decimal" disabled><em>'+esc(l.unit)+'</em></div></label></div>';}).join('');
   E('shipmentModal').classList.remove('hidden');
 }
 
+function toggleShipmentLine(input){var row=input.closest('[data-line-id]'),qty=row&&row.querySelector('.sh-qty');if(!row||!qty)return;row.classList.toggle('selected',input.checked);qty.disabled=!input.checked;if(input.checked){if(!qty.value)qty.value=row.dataset.remain||'';setTimeout(function(){qty.focus();qty.select();},40);}else qty.value='';}
 function toggleDeliveryMethod(){var method=(document.querySelector('input[name="deliveryMethod"]:checked')||{}).value||'express';E('trackingField').classList.toggle('hidden',method!=='express');E('shTracking').required=method==='express';}
 async function submitShipment(event){
-  event.preventDefault();if(S003.busy)return;var method=(document.querySelector('input[name="deliveryMethod"]:checked')||{}).value||'express';var items=Array.from(E('shLineEditor').querySelectorAll('[data-line-id]')).map(function(row){return{order_line_id:row.dataset.lineId,expected_qty:Number(row.querySelector('.sh-qty').value)||0};}).filter(function(x){return x.expected_qty>0;});if(!items.length){toast(S003.lang==='ko'?'발송 수량을 입력하세요':'请填写本批发货数量',true);return;}S003.busy=true;
+  event.preventDefault();if(S003.busy)return;var method=(document.querySelector('input[name="deliveryMethod"]:checked')||{}).value||'express',items=[],rows=Array.from(E('shLineEditor').querySelectorAll('[data-line-id]'));for(var i=0;i<rows.length;i++){var checked=rows[i].querySelector('.sh-selected'),qtyInput=rows[i].querySelector('.sh-qty');if(!checked.checked)continue;var raw=qtyInput.value.trim(),qty=Number(raw),max=Number(rows[i].dataset.remain);if(raw===''||!Number.isFinite(qty)||qty<=0||qty>max){toast(errorText('invalid_shipment_line'),true);qtyInput.focus();return;}items.push({order_line_id:rows[i].dataset.lineId,expected_qty:qty});}if(!items.length){toast(errorText('shipment_lines_required'),true);return;}S003.busy=true;
   try{await api('v2_003_purchase_shipment_create',Object.assign(operatorPayload(),{order_id:val('shOrderId'),delivery_method:method,tracking_no:val('shTracking'),supplier:val('shSupplier'),expected_date:val('shExpectedDate'),note:val('shNote'),items:items,client_req_id:reqId('ship')}));closeModal('shipmentModal');toast(T('success'));openPurchaseDetail(val('shOrderId'));}catch(e){toast(errorText(e.message),true);}finally{S003.busy=false;}
 }
 
@@ -785,18 +857,18 @@ async function loadReceiving(){
 
 function receivingCardHtml(s){return '<button class="receiving-card" onclick="openReceiptByCode(\''+jsq(s.shipment_no)+'\')"><span class="receive-method '+esc(s.delivery_method)+'">'+(s.delivery_method==='express'?'▦':'▰')+'</span><span class="receive-main"><b>'+esc(s.tracking_no||s.shipment_no)+'</b><small>'+esc([s.supplier,s.order_no,s.expected_date].filter(Boolean).join(' · '))+'</small></span><span class="receive-count">'+esc(s.item_count)+' '+(S003.lang==='ko'?'종':'种')+'<i>›</i></span></button>';}
 function lookupShipmentManual(){openReceiptByCode(val('trackingLookupInput'));}
-async function openReceiptByCode(code){code=String(code||'').trim();if(!code)return;try{var res=await api('v2_003_receiving_lookup',{code:code});S003.currentShipment=res;closeReceivingScanner();goView('receipt-detail');renderReceiptDetail(res);}catch(e){toast(errorText(e.message),true);if(E('receivingScannerError'))E('receivingScannerError').textContent=errorText(e.message);}}
+async function openReceiptByCode(code){code=String(code||'').trim();if(!code)return;try{var res=await api('v2_003_receiving_lookup',{code:code});if(!S003.locations.length)await loadLocations(false);S003.currentShipment=res;closeReceivingScanner();goView('receipt-detail');renderReceiptDetail(res);}catch(e){toast(errorText(e.message),true);if(E('receivingScannerError'))E('receivingScannerError').textContent=errorText(e.message);}}
 
 function renderReceiptDetail(res){
   var s=res.shipment||{},already=s.status!=='pending',photos=res.attachments||[];
   var photoHtml=photos.length?'<div class="photo-grid arrival-photo-grid">'+photos.map(function(p){return '<a href="'+esc(fileUrl(p.file_key))+'" target="_blank"><img src="'+esc(fileUrl(p.file_key))+'" alt=""></a>';}).join('')+'</div>':'<div class="photo-placeholder">'+esc(T('photo_required'))+'</div>';
   if(already){E('receiptDetail').innerHTML='<div class="detail-hero"><div class="hero-top"><div><p>'+esc(s.shipment_no)+'</p><h1>'+esc(s.tracking_no||deliveryLabel(s.delivery_method))+'</h1></div><span class="tag '+(s.status==='discrepancy'?'red':'green')+'">'+esc(s.status==='discrepancy'?T('discrepancy'):T('status_completed'))+'</span></div></div><div class="panel success-panel"><h2>'+esc(T('already_received'))+'</h2><p>'+esc([s.received_by,fmtTime(s.received_at)].filter(Boolean).join(' · '))+'</p></div>'+(photos.length?'<div class="panel"><h2>'+esc(T('arrival_photos'))+'</h2>'+photoHtml+'</div>':'');return;}
-  var itemRows=(res.items||[]).map(function(i){var loc=i.location_code||'';return '<div class="receipt-line" data-item-id="'+esc(i.id)+'"><div class="receipt-line-title"><div><b>'+esc(materialDisplay(i))+'</b><small>'+esc(i.material_code+' · '+(i.spec||'--'))+'</small></div><span>'+esc(T('expected_qty'))+' <b>'+esc(fmtQty(i.expected_qty))+' '+esc(i.unit)+'</b></span></div><div class="receipt-inputs"><label><span>'+esc(T('actual_received'))+'</span><div class="qty-unit"><input class="rc-qty" type="number" min="0" step="0.01" value="'+esc(i.expected_qty)+'"><em>'+esc(i.unit)+'</em></div></label><label><span>'+esc(T('putaway_location'))+'</span><input class="rc-loc" list="locationList" value="'+esc(loc)+'" required></label><label class="receipt-note"><span>'+esc(T('note'))+'</span><input class="rc-note"></label></div></div>';}).join('');
-  E('receiptDetail').innerHTML='<div class="detail-hero receipt-hero"><div class="hero-top"><div><p>'+esc(s.shipment_no)+' · '+esc(s.order_no||'')+'</p><h1>'+esc(s.tracking_no||deliveryLabel(s.delivery_method))+'</h1><small>'+esc([s.supplier,s.expected_date].filter(Boolean).join(' · '))+'</small></div><span class="tag purple">'+esc(T('waiting_receipt_count'))+'</span></div></div><form class="receipt-form" onsubmit="submitReceipt(event)"><div class="panel"><div class="panel-head"><h2>'+esc(T('shipment_items'))+'</h2></div><div class="receipt-lines">'+itemRows+'</div></div><div class="panel"><div class="panel-head"><h2>'+esc(T('arrival_photos'))+'</h2><button type="button" class="btn '+(s.delivery_method==='supplier'&&!photos.length?'warning':'soft')+'" onclick="E(\'arrivalPhotoInput\').click()">＋ '+esc(T('take_arrival_photo'))+'</button></div>'+photoHtml+'</div><div class="panel"><label><span>'+esc(T('difference_note'))+'</span><textarea id="receiptDiffNote" rows="3" placeholder="'+esc(S003.lang==='ko'?'파손·부족·초과·오배송 내용을 입력하세요':'破损、少货、多货、错货时填写')+'"></textarea></label><div class="form-actions sticky-actions"><button type="button" class="btn soft" onclick="goView(\'receiving\')">'+esc(T('cancel'))+'</button><button type="submit" class="btn success">'+esc(T('confirm_receipt'))+'</button></div></div></form>';
+  var itemRows=(res.items||[]).map(function(i){var loc=findActiveLocation(i.location_code)?i.location_code:'';return '<div class="receipt-line" data-item-id="'+esc(i.id)+'"><div class="receipt-line-title"><div><b>'+esc(materialDisplay(i))+'</b><small>'+esc(i.material_code+' · '+(i.spec||'--'))+'</small></div><span>'+esc(T('expected_qty'))+' <b>'+esc(fmtQty(i.expected_qty))+' '+esc(i.unit)+'</b></span></div><div class="receipt-inputs"><label><span>'+esc(T('actual_received'))+'</span><div class="qty-unit"><input class="rc-qty" type="number" min="0" step="0.01" value="" placeholder="'+esc(T('expected_qty')+' '+fmtQty(i.expected_qty))+'" inputmode="decimal" required><em>'+esc(i.unit)+'</em></div></label><div class="location-field"><span>'+esc(T('putaway_location'))+'</span>'+locationControlHtml(loc,true)+'</div><label class="receipt-note"><span>'+esc(T('note'))+'</span><input class="rc-note"></label></div></div>';}).join('');
+  E('receiptDetail').innerHTML='<div class="detail-hero receipt-hero"><div class="hero-top"><div><p>'+esc(s.shipment_no)+' · '+esc(s.order_no||'')+'</p><h1>'+esc(s.tracking_no||deliveryLabel(s.delivery_method))+'</h1><small>'+esc([s.supplier,s.expected_date].filter(Boolean).join(' · '))+'</small></div><span class="tag purple">'+esc(T('waiting_receipt_count'))+'</span></div></div><form class="receipt-form" onsubmit="submitReceipt(event)"><div class="panel"><div class="panel-head"><h2>'+esc(T('shipment_items'))+'</h2></div><p class="picker-guide receipt-package-guide">'+esc(T('package_contents_hint'))+'</p><div class="receipt-lines">'+itemRows+'</div></div><div class="panel"><div class="panel-head"><h2>'+esc(T('arrival_photos'))+'</h2><button type="button" class="btn '+(s.delivery_method==='supplier'&&!photos.length?'warning':'soft')+'" onclick="E(\'arrivalPhotoInput\').click()">＋ '+esc(T('take_arrival_photo'))+'</button></div>'+photoHtml+'</div><div class="panel"><label><span>'+esc(T('difference_note'))+'</span><textarea id="receiptDiffNote" rows="3" placeholder="'+esc(S003.lang==='ko'?'파손·부족·초과·오배송 내용을 입력하세요':'破损、少货、多货、错货时填写')+'"></textarea></label><div class="form-actions sticky-actions"><button type="button" class="btn soft" onclick="goView(\'receiving\')">'+esc(T('cancel'))+'</button><button type="submit" class="btn success">'+esc(T('confirm_receipt'))+'</button></div></div></form>';
 }
 
 async function submitReceipt(event){
-  event.preventDefault();if(S003.busy)return;var s=S003.currentShipment&&S003.currentShipment.shipment;if(!s)return;var rows=Array.from(E('receiptDetail').querySelectorAll('[data-item-id]'));var items=rows.map(function(row){return{shipment_item_id:row.dataset.itemId,received_qty:Number(row.querySelector('.rc-qty').value),location_code:row.querySelector('.rc-loc').value.trim(),note:row.querySelector('.rc-note').value.trim()};});S003.busy=true;
+  event.preventDefault();if(S003.busy)return;var s=S003.currentShipment&&S003.currentShipment.shipment;if(!s)return;var rows=Array.from(E('receiptDetail').querySelectorAll('[data-item-id]')),items=[];for(var i=0;i<rows.length;i++){var qtyInput=rows[i].querySelector('.rc-qty'),raw=qtyInput.value.trim(),qty=Number(raw),location=rows[i].querySelector('.rc-loc').value.trim();if(raw===''||!Number.isFinite(qty)||qty<0){toast(errorText('receipt_qty_required'),true);qtyInput.focus();return;}if(qty>0&&!findActiveLocation(location)){toast(errorText('location_not_registered'),true);rows[i].querySelector('.location-select-btn').focus();return;}items.push({shipment_item_id:rows[i].dataset.itemId,received_qty:qty,location_code:location,note:rows[i].querySelector('.rc-note').value.trim()});}S003.busy=true;
   try{var res=await api('v2_003_receipt_confirm',Object.assign(operatorPayload(),{shipment_id:s.id,items:items,discrepancy_note:val('receiptDiffNote'),client_req_id:reqId('recv')}));toast(res.duplicate?T('already_received'):T('receipt_success'),!!res.duplicate);await openReceiptByCode(s.shipment_no);}catch(e){toast(errorText(e.message),true);}finally{S003.busy=false;}
 }
 
@@ -820,6 +892,44 @@ function exportLedgerCsv(){if(!isAdmin())return;if(!S003.ledgerRows.length){toas
 function openLocationModal(){if(!isAdmin())return;E('locId').value='';E('locCode').value='';E('locName').value='';E('locActive').checked=true;E('locationModal').classList.remove('hidden');}
 function editLocation(id){var x=S003.locations.find(function(v){return v.id===id;});if(!x)return;E('locId').value=x.id;E('locCode').value=x.location_code;E('locName').value=x.location_name||'';E('locActive').checked=Number(x.active)!==0;E('locationModal').classList.remove('hidden');}
 async function saveLocation(event){event.preventDefault();if(S003.busy)return;S003.busy=true;var data=Object.assign(operatorPayload(),{id:val('locId'),location_code:val('locCode'),location_name:val('locName'),active:E('locActive').checked?1:0});try{await api('v2_003_location_save',data);closeModal('locationModal');toast(T('success'));loadLocations(true);}catch(e){toast(errorText(e.message),true);}finally{S003.busy=false;}}
+
+var LOCATION_IMPORT_HEADERS={
+  '位置编码*':'location_code','位置编码':'location_code','location_code':'location_code','위치 코드*':'location_code','위치 코드':'location_code',
+  '位置名称':'location_name','location_name':'location_name','위치명':'location_name',
+  '状态':'status','status':'status','상태':'status'
+};
+
+function openLocationImport(){if(!isAdmin())return;S003.locationImportRows=[];S003.locationImportPreview=null;E('locationImportInput').value='';E('locationImportStatus').className='import-status';E('locationImportStatus').innerHTML='<span>'+esc(T('import_waiting'))+'</span>';E('locationImportPreview').innerHTML='';E('confirmLocationImportBtn').disabled=true;E('locationImportModal').classList.remove('hidden');}
+function closeLocationImport(){E('locationImportModal').classList.add('hidden');}
+
+function downloadLocationTemplate(){
+  var sheet=XLSX.utils.aoa_to_sheet([['位置编码*','位置名称','状态']]);
+  sheet['!cols']=[{wch:20},{wch:28},{wch:14}];
+  var guide=XLSX.utils.aoa_to_sheet([['填写说明','内容'],['必填列','位置编码'],['更新规则','位置编码与现有记录一致时更新位置名称和状态'],['状态','填写 active/启用 或 inactive/停用；留空默认为启用'],['数量限制','一次最多 500 行']]);guide['!cols']=[{wch:16},{wch:70}];
+  var wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,sheet,'位置导入');XLSX.utils.book_append_sheet(wb,guide,'填写说明');XLSX.writeFile(wb,'CK-003-位置批量导入模板.xlsx');
+}
+
+function mapLocationImportRows(rawRows){return(rawRows||[]).map(function(raw,index){var item={row_no:index+2};Object.keys(raw||{}).forEach(function(header){var key=LOCATION_IMPORT_HEADERS[String(header).trim()];if(key)item[key]=raw[header];});item.status=normalizeImportStatus(item.status);return item;}).filter(function(x){return Object.keys(x).some(function(k){return k!=='row_no'&&String(x[k]==null?'':x[k]).trim()!=='';});});}
+
+function localLocationImportErrors(rows){
+  var errors=[],codes=new Set();if(!rows.length)return[{row:0,error:'bulk_import_empty'}];if(rows.length>500)return[{row:0,error:'bulk_location_limit'}];
+  rows.forEach(function(x){var row=x.row_no,code=String(x.location_code||'').trim(),key=code.toLocaleLowerCase();if(!code)errors.push({row:row,error:'bulk_location_code_required'});if(code){if(codes.has(key))errors.push({row:row,error:'bulk_duplicate_location'});codes.add(key);}if(!['active','inactive'].includes(String(x.status||'active')))errors.push({row:row,error:'bulk_invalid_status'});});return errors;
+}
+
+function renderLocationImportErrors(errors){E('locationImportStatus').className='import-status error';E('locationImportStatus').innerHTML='<b>'+(S003.lang==='ko'?'수정이 필요한 행':'以下行需要修改')+'</b><div class="import-errors">'+errors.slice(0,40).map(function(x){return '<span>'+(x.row?((S003.lang==='ko'?'행 ':'第 ')+esc(x.row)+(S003.lang==='ko'?'':' 行')):'')+'：'+esc(errorText(x.error))+'</span>';}).join('')+'</div>';E('confirmLocationImportBtn').disabled=true;}
+
+function renderLocationImportPreview(preview,fileName){
+  E('locationImportStatus').className='import-status success';E('locationImportStatus').innerHTML='<b>'+esc(fileName)+'</b><span>'+esc(preview.items.length)+(S003.lang==='ko'?'행 확인 완료':' 行校验通过')+' · '+(S003.lang==='ko'?'신규 ':'新建 ')+esc(preview.created_count)+' · '+(S003.lang==='ko'?'수정 ':'更新 ')+esc(preview.updated_count)+'</span>';
+  var head='<table><thead><tr><th>'+esc(S003.lang==='ko'?'행':'行')+'</th><th>'+esc(T('status'))+'</th><th>'+esc(T('location_code'))+'</th><th>'+esc(T('location_name'))+'</th></tr></thead><tbody>';
+  E('locationImportPreview').innerHTML=head+preview.items.slice(0,150).map(function(x){return '<tr><td>'+esc(x.row)+'</td><td><span class="tag '+(x.action==='create'?'green':'blue')+'">'+esc(x.action==='create'?(S003.lang==='ko'?'신규':'新建'):(S003.lang==='ko'?'수정':'更新'))+'</span></td><td><b>'+esc(x.location_code)+'</b></td><td>'+esc(x.location_name||'--')+'</td></tr>';}).join('')+'</tbody></table>';E('confirmLocationImportBtn').disabled=false;
+}
+
+async function readLocationImport(input){
+  var file=input.files&&input.files[0];if(!file)return;E('confirmLocationImportBtn').disabled=true;E('locationImportStatus').className='import-status';E('locationImportStatus').innerHTML='<span>'+esc(T('loading'))+'</span>';E('locationImportPreview').innerHTML='';
+  try{var buffer=await file.arrayBuffer(),wb=XLSX.read(buffer,{type:'array'}),sheet=wb.Sheets[wb.SheetNames[0]],raw=XLSX.utils.sheet_to_json(sheet,{defval:'',raw:false}),rows=mapLocationImportRows(raw),localErrors=localLocationImportErrors(rows);if(localErrors.length){renderLocationImportErrors(localErrors);return;}var preview=await api('v2_003_location_bulk_import',Object.assign(operatorPayload(),{rows:rows,dry_run:1}));S003.locationImportRows=rows;S003.locationImportPreview=preview;renderLocationImportPreview(preview,file.name);}catch(e){var errors=e.details&&e.details.errors;if(errors&&errors.length)renderLocationImportErrors(errors);else{E('locationImportStatus').className='import-status error';E('locationImportStatus').textContent=errorText(e.message);}}
+}
+
+async function confirmLocationImport(){if(S003.busy||!S003.locationImportRows.length)return;S003.busy=true;E('confirmLocationImportBtn').disabled=true;try{var res=await api('v2_003_location_bulk_import',Object.assign(operatorPayload(),{rows:S003.locationImportRows,client_req_id:reqId('limp')}));toast((S003.lang==='ko'?'위치 일괄 등록 완료: 신규 ':'位置批量导入完成：新建 ')+res.created_count+(S003.lang==='ko'?', 수정 ':'，更新 ')+res.updated_count);closeLocationImport();await loadLocations(true);}catch(e){var errors=e.details&&e.details.errors;if(errors&&errors.length)renderLocationImportErrors(errors);else toast(errorText(e.message),true);}finally{S003.busy=false;if(!E('locationImportModal').classList.contains('hidden'))E('confirmLocationImportBtn').disabled=false;}}
 
 function closeModal(id){E(id).classList.add('hidden');}
 function openScanner(){E('scannerModal').classList.remove('hidden');E('scannerError').textContent='';E('manualItemCode').value='';}
