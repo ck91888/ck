@@ -1,0 +1,21 @@
+# Independent staging only. Replace the placeholder with a NEW staging D1 ID.
+# Never substitute the existing ck_v2 production database ID here.
+name = "ck-v2-api-sop-staging"
+main = "index.js"
+compatibility_date = "2026-03-03"
+
+[vars]
+SOP_UPGRADE_ENABLED = "true"
+SOP_ACCEPT_NEW = "true"
+SOP_AUTO_OUTBOUND = "true"
+SOP_ROLLOUT_DEPARTMENTS = "bulk"
+SOP_ENVIRONMENT = "staging"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "ck_v2_sop_staging"
+database_id = "REPLACE_WITH_NEW_STAGING_D1_ID"
+
+[[r2_buckets]]
+binding = "R2_BUCKET"
+bucket_name = "ck-v2-sop-staging-files"

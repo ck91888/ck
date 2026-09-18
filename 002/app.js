@@ -1802,9 +1802,18 @@ async function loadOutboundDetail() {
   html += '<div class="detail-section"><b>' + L("outbound_requirement") + ':</b>'
        + (o.outbound_requirement ? '<div class="remark-block">' + esc(o.outbound_requirement) + '</div>' : ' --')
        + '</div>';
+  if (res.sop_needs && res.sop_needs.length) {
+    html += '<div class="detail-section"><b>关联作业 / 연결 작업:</b>';
+    res.sop_needs.forEach(function(n) {
+      html += '<div class="remark-block"><b>' + esc(n.title) + '</b><br>' + esc(n.instructions) + '<br>' + esc(n.status) +
+        ' <a href="../sop/?tab=need&source=outbound&source_id=' + encodeURIComponent(o.id) + '">查看统一作业 / 작업 보기</a></div>';
+    });
+    html += '</div>';
+  } else {
   html += '<div class="detail-section"><b>' + L("instruction") + ':</b>'
        + (o.instruction ? '<div class="remark-block">' + esc(o.instruction) + '</div>' : ' --')
        + '</div>';
+  }
   html += '<div class="detail-section"><b>' + L("remark") + ':</b>'
        + (o.remark ? '<div class="remark-block">' + esc(o.remark) + '</div>' : ' --')
        + '</div>';

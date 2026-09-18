@@ -1,3 +1,4 @@
+import { handleSop, guardLegacy, linkedNeeds, outboundNeedStatements } from './sop.js';
 /**
  * CK Warehouse V2 — Backend Workerer
  * Independent from V1. Uses v2_ table prefix in same D1 database.
@@ -2728,7 +2729,7 @@ route("v2_outbound_order_create", async (body, env) => {
     const initStockOpStatus = uses_stock_operation === 1 ? 'reserved' : '';
     const outbound_requirement = String(body.outbound_requirement || "").trim();
     const source_inbound_plan_id = String(body.source_inbound_plan_id || "").trim();
-    await env.DB.prepare(`
+    const creationStatements = [env.DB.prepare(`
       INSERT INTO v2_outbound_orders(id, order_date, customer, biz_class, operation_mode,
         outbound_mode, instruction, remark, status, source_inbound_plan_id, created_by, created_at, updated_at,
         destination, po_no, wms_work_order_no,
@@ -2756,18 +2757,20 @@ route("v2_outbound_order_create", async (body, env) => {
       initStockOpStatus,
       expected_ship_at,
       outbound_requirement
-    ).run();
+    )];
 
     const lines = body.lines || [];
     for (let i = 0; i < lines.length; i++) {
       const ln = lines[i];
       // 行级 wms_order_no 已废弃；单头承载 wms_work_order_no，这里写空保留兼容列
-      await env.DB.prepare(`
+      creationStatements.push(env.DB.prepare(`
         INSERT INTO v2_outbound_order_lines(id, order_id, line_no, wms_order_no, sku, quantity, remark)
         VALUES(?,?,?,'',?,?,?)
-      `).bind("OBL-" + uid(), id, i + 1, String(ln.sku || ""), Number(ln.quantity || 0), String(ln.remark || "")).run();
+      `).bind("OBL-" + uid(), id, i + 1, String(ln.sku || ""), Number(ln.quantity || 0), String(ln.remark || "")));
     }
 
+    creationStatements.push(...outboundNeedStatements(env,body,id,display_no,t));
+    await env.DB.batch(creationStatements);
     return { ok: true, id, display_no };
   });
 });
@@ -2906,6 +2909,7 @@ route("v2_outbound_order_detail", async (body, env) => {
   return json({
     ok: true,
     order: row,
+    sop_needs: await linkedNeeds(env,id),
     lines: lines.results || [],
     jobs: jobs.results || [],
     attachments: allAtts,
@@ -12481,6 +12485,16 @@ export default {
     // Special handling for multipart upload — formData already parsed above, pass it directly
     if (action === "v2_attachment_upload" || isMultipart) {
       return await handleMultipartUpload(formData, env);
+    }
+
+    // SOP rollout is opt-in; old clients and in-flight legacy jobs stay on original routes.
+    if (action.startsWith('sop_')) {
+      try { return json(await handleSop(body, env)); }
+      catch (e) { return json({ok:false,error:'新版配置或迁移未就绪，请联系管理员'},503); }
+    }
+    if (env.SOP_UPGRADE_ENABLED === 'true') {
+      const blocked = await guardLegacy(body, env);
+      if (blocked) return json({ok:false,error:blocked},409);
     }
 
     const handler = HANDLERS[action];
