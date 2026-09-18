@@ -1,4 +1,4 @@
-# Independent staging only. Replace the placeholder with a NEW staging D1 ID.
+# Independent staging only. D1 ID verified against the user's staging screenshot.
 # Never substitute the existing ck_v2 production database ID here.
 name = "ck-v2-api-sop-staging"
 main = "index.js"
@@ -14,7 +14,7 @@ SOP_ENVIRONMENT = "staging"
 [[d1_databases]]
 binding = "DB"
 database_name = "ck_v2_sop_staging"
-database_id = "REPLACE_WITH_NEW_STAGING_D1_ID"
+database_id = "ba1eba33-bcdd-4de2-8927-d37dc3788396"
 
 [[r2_buckets]]
 binding = "R2_BUCKET"
