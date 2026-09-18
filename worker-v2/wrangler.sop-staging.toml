@@ -1,5 +1,6 @@
 # Independent staging only. D1 ID verified against the user's staging screenshot.
 # Never substitute the existing ck_v2 production database ID here.
+# Dedicated Workers Builds service: ck-v2-api-sop-staging (test branch only).
 name = "ck-v2-api-sop-staging"
 main = "index.js"
 compatibility_date = "2026-03-03"
