@@ -5,6 +5,13 @@ name = "ck-v2-api-sop-staging"
 main = "index.js"
 compatibility_date = "2026-03-03"
 
+[build]
+command = "node build-sop-staging.mjs"
+
+[assets]
+directory = "./.sop-staging-assets"
+run_worker_first = ["/api", "/file"]
+
 [vars]
 SOP_UPGRADE_ENABLED = "true"
 SOP_ACCEPT_NEW = "true"
