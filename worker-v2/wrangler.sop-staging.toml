@@ -5,8 +5,8 @@ name = "ck-v2-api-sop-staging"
 main = "index.js"
 compatibility_date = "2026-03-03"
 
-[build]
-command = "node build-sop-staging.mjs"
+# Workers Builds runs: node worker-v2/build-sop-staging.mjs from repository root.
+# Do not run a second custom build with a different working directory.
 
 [assets]
 directory = "./.sop-staging-assets"
