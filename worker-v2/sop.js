@@ -12,10 +12,21 @@ const date = v => { const s=text(v,10); if(!/^\d{4}-\d{2}-\d{2}$/.test(s)||new D
 const required = (v, label) => text(v) || fail(label+'不能为空');
 const stmt = (env, sql, ...args) => env.DB.prepare(sql).bind(...args);
 const all = async (env, sql,...args) => (await stmt(env,sql,...args).all()).results||[];
-export function principal(body,env) {
- let users; try {users=JSON.parse(env.SOP_USERS_JSON||'[]');}catch{return null;}
- return users.find(u=>u.key && u.key===body.sop_key && u.id && u.name && roles.includes(u.role))||null;
+function authorization(body,env) {
+ const configError = detail => ({ok:false,unauthorized:true,code:'AUTH_CONFIG',error:env.SOP_ENVIRONMENT==='staging'
+  ? detail+'。请在测试 Worker 的设置 → 变量和机密中检查 SOP_USERS_JSON（不是构建变量），保存并部署。'
+  : '授权配置未就绪，请联系管理员'});
+ if(!env.SOP_USERS_JSON) return configError('后台未配置个人授权');
+ let users; try {users=JSON.parse(env.SOP_USERS_JSON);}catch{return configError('后台个人授权配置不是有效 JSON');}
+ if(!Array.isArray(users)||!users.length) return configError('后台个人授权配置必须是非空人员数组');
+ const valid=u=>u&&typeof u.key==='string'&&u.key.length>0&&typeof u.id==='string'&&u.id&&typeof u.name==='string'&&u.name&&roles.includes(u.role);
+ if(!users.every(valid)) return configError('后台人员配置缺少有效的 key、id、name 或 role');
+ if(typeof body.sop_key!=='string'||!body.sop_key) return {ok:false,unauthorized:true,code:'AUTH_REQUIRED',error:'请先填写个人授权码，再点击进入'};
+ const user=users.find(u=>u.key===body.sop_key);
+ if(!user) return {ok:false,unauthorized:true,code:'AUTH_INVALID',error:'个人授权码不匹配。请输入后台人员配置中 key 对应的值，注意大小写及前后空格；不是整段 JSON 或 Cloudflare API 令牌。'};
+ return {ok:true,user};
 }
+export function principal(body,env) { return authorization(body,env).user||null; }
 function permit(u, department, allowed) {
  if(!u || !allowed.includes(u.role)) fail('无此操作权限');
  if(u.role!=='manager' && !(u.departments||[]).includes(department)) fail('无此部门权限');
@@ -64,7 +75,8 @@ async function verifySource(env, type, id, customer) {
 }
 export async function handleSop(b,env) {
  if(env.SOP_UPGRADE_ENABLED!=='true') return {ok:false,error:'新版尚未启用，原系统继续使用',disabled:true};
- const u=principal(b,env); if(!u) return {ok:false,error:'请输入个人授权码',unauthorized:true};
+ const auth=authorization(b,env); if(!auth.ok) return auth;
+ const u=auth.user;
  try {
   if(env.SOP_ACCEPT_NEW==='false' && /_create$|_adopt$|_from_outbound$/.test(b.action))fail('新版已暂停接收新任务，现有任务仍可收尾');
   if(b.action==='sop_session') return {ok:true,user:{id:u.id,name:u.name,role:u.role,departments:u.departments||[]},mode:env.SOP_ENVIRONMENT||'pilot'};
