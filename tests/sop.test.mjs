@@ -14,6 +14,19 @@ test('disabled upgrade does not read DB; authentication and viewer writes blocke
  const {call}=setup();assert.equal((await call('sop_session',{},'bad')).unauthorized,true);
  assert.equal((await call('sop_check_create',{ship_date:'2026-09-20'},'viewer-test')).ok,false);
 });
+test('authorization distinguishes setup, missing key and incorrect key without exposing secrets',async()=>{
+ const env={SOP_UPGRADE_ENABLED:'true',SOP_ENVIRONMENT:'staging'};
+ for(const value of [undefined,'not-json','{}','[]','[null]','[{"key":"secret-only"}]']) {
+  const r=await handleSop({action:'sop_session',sop_key:'wrong'},{...env,SOP_USERS_JSON:value});
+  assert.equal(r.code,'AUTH_CONFIG');assert.equal(r.ok,false);
+  assert.ok(!JSON.stringify(r).includes('secret-only'));
+ }
+ const {env:configured}=setup();
+ assert.equal((await handleSop({action:'sop_session'},configured)).code,'AUTH_REQUIRED');
+ for(const key of ['wrong',' manager-test','manager-test ']) assert.equal((await handleSop({action:'sop_session',sop_key:key},configured)).code,'AUTH_INVALID');
+ const r=await handleSop({action:'sop_session',sop_key:'manager-test'},configured);
+ assert.equal(r.ok,true);assert.equal(r.user.id,'M');assert.ok(!JSON.stringify(r).includes('manager-test'));
+});
 test('assignment has no hours; finish closes labor before review; rework preserves earlier segments',async()=>{
  const {call,DB}=setup();const t=await task(call);assert.equal(DB.raw.prepare('SELECT count(*) n FROM v2_ops_job_workers').get().n,0);
  assert.equal((await mutate(call,'sop_task_start',t.id)).ok,true);
