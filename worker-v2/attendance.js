@@ -1,5 +1,6 @@
 // Attendance is enabled only in the isolated staging rollout. Production routes stay unchanged.
 import { attendanceReport, kstDay } from './attendance-time.js';
+import { laborDepartment } from '../shared/labor-department.js';
 export const ATTENDANCE_SCHEMA=[
  `CREATE TABLE IF NOT EXISTS ck_attendance_people(id TEXT PRIMARY KEY,badge_id TEXT NOT NULL UNIQUE,name TEXT NOT NULL,agency TEXT NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('daily','permanent')),enabled INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL)`,
  `CREATE TABLE IF NOT EXISTS ck_attendance_days(id TEXT PRIMARY KEY,person_id TEXT NOT NULL,worker_id TEXT NOT NULL,name TEXT NOT NULL,agency TEXT NOT NULL,day TEXT NOT NULL,identity_key TEXT NOT NULL,signed_in TEXT NOT NULL,signed_out TEXT NOT NULL DEFAULT '',version INTEGER NOT NULL DEFAULT 1,UNIQUE(day,worker_id),UNIQUE(day,identity_key))`,
@@ -57,15 +58,17 @@ async function closePerson(env,r,t,reason){
 async function overview(env,date,t){
  const start=new Date(date+'T00:00:00+09:00').toISOString(),end=new Date(Date.parse(start)+86400000).toISOString();
  const days=await rows(env,'SELECT * FROM ck_attendance_days WHERE day=? ORDER BY signed_in,name,id',date);
- const segments=await rows(env,`SELECT w.*,j.biz_class,j.job_type,j.status AS job_status,j.display_no FROM v2_ops_job_workers w JOIN v2_ops_jobs j ON j.id=w.job_id WHERE w.joined_at<? AND (w.left_at='' OR w.left_at>?)`,end,start);
+ const segments=await rows(env,`SELECT w.*,j.biz_class,j.job_type,j.status AS job_status,j.display_no,s.kind AS assignment_kind,s.department AS assigned_department,s.state AS assignment_state FROM v2_ops_job_workers w JOIN v2_ops_jobs j ON j.id=w.job_id LEFT JOIN sop_records s ON s.id=j.id AND s.kind IN ('task','dispatch') WHERE w.joined_at<? AND (w.left_at='' OR w.left_at>?)`,end,start);
+ for(const s of segments){let assignment={};try{assignment=JSON.parse(s.assignment_state||'{}');}catch{}s.labor_department=assignment.labor_department||'';}
  const breaks=await rows(env,'SELECT b.* FROM ck_attendance_breaks b JOIN ck_attendance_days d ON d.id=b.attendance_id WHERE d.day=?',date);
  const history=await rows(env,'SELECT e.* FROM ck_attendance_events e JOIN ck_attendance_days d ON d.id=e.record_id WHERE d.day=? ORDER BY e.version',date);
  const output=[];
  for(const d of days){
   const record=publicDay(d),br=breaks.filter(x=>x.attendance_id===d.id);record.breaks=br.map(x=>({id:x.id,start:x.started_at,end:x.ended_at}));
-  const own=segments.filter(x=>x.worker_id===d.worker_id).map(x=>({id:x.id,jobId:x.job_id,jobNo:x.display_no||x.job_id,jobType:x.job_type,jobStatus:x.job_status,badgeId:x.worker_id,department:x.biz_class==='return'?'direct_ship':x.biz_class,start:x.joined_at,end:x.left_at,reason:x.leave_reason}));
+  const own=segments.filter(x=>x.worker_id===d.worker_id).map(x=>({id:x.id,jobId:x.job_id,jobNo:x.display_no||x.job_id,jobType:x.job_type,jobStatus:x.job_status,badgeId:x.worker_id,department:laborDepartment(x),start:x.joined_at,end:x.left_at,reason:x.leave_reason}));
   const verifiedWindow=own.filter(s=>!(s.start<record.inAt&&!s.end));
   const totals=attendanceReport(record,verifiedWindow,t,date);
+  if(own.some(s=>s.department==='other'))totals.flags.push('有作业尚未确认用工部门');
   if(own.some(s=>s.start<record.inAt&&!s.end))totals.flags.push('上个班次任务未退出，本日不计入');
   if(own.some(s=>((s.reason||'').startsWith('attendance:checkout')&&s.jobStatus!=='completed')||(s.reason||'').startsWith('attendance_stale:')))totals.flags.push('签退/跨日关闭的作业段，待负责人核实');
   const live=own.filter(s=>!s.end&&s.start>=record.inAt&&['working','pending','awaiting_close'].includes(s.jobStatus));
