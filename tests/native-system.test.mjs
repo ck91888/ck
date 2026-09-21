@@ -79,3 +79,12 @@ test('existing uploaded batch retains identity and evidence while items and roun
  const next=await call('v2_verify_batch_list');assert.equal(next.items.find(x=>x.id===seed.batch_id).scanned_ok_count,0);
  assert.equal(DB.raw.prepare('SELECT count(*) n FROM v2_verify_scan_logs WHERE batch_id=?').get(seed.batch_id).n,1);
 });
+
+ test('public test access needs explicit staging flag and never unlocks production',async()=>{
+ const {call,env}=setup();env.SOP_PUBLIC_TEST_ACCESS='true';delete env.SOP_USERS_JSON;
+ const identity=await call('sop_identity');assert.equal(identity.ok,true);assert.equal(identity.user.public_test,true);
+ assert.equal((await call('v2_auth_check')).ok,true);assert.equal((await call('sop_demo_prepare')).ok,true);
+ env.SOP_PUBLIC_TEST_ACCESS='false';assert.equal((await call('v2_auth_check')).ok,false);
+ env.SOP_PUBLIC_TEST_ACCESS='true';env.SOP_ENVIRONMENT='production';assert.equal((await call('v2_auth_check')).ok,false);
+ env.SOP_ENVIRONMENT='staging';env.SOP_UPGRADE_ENABLED='false';assert.equal((await call('v2_auth_check')).ok,false);
+ });

@@ -20,7 +20,7 @@
 独立 Worker：`ck-v2-api-sop-staging`；D1：`ck_v2_sop_staging`；R2：`ck-v2-sop-staging-files`。
 配置文件 `worker-v2/wrangler.sop-staging.toml` 已绑定测试资源。构建命令 `node worker-v2/build-sop-staging.mjs` 从仓库根目录执行，只发布显式列入的前端文件。
 
-测试登录沿用此前运行时机密 `SOP_USERS_JSON`。统一登录签发8小时HttpOnly/Secure/SameSite会话，四个原模块使用同源 `/api`。个人授权码不放URL和浏览器存储。当前原模块统一会话只支持 manager 负责人验收；其他岗位完整权限映射属于正式上线前验收项。不要直接给全体员工使用这一测试配置。
+按用户明确要求，测试站取消授权码。仅当 `SOP_ENVIRONMENT=staging`、`SOP_UPGRADE_ENABLED=true`、`SOP_PUBLIC_TEST_ACCESS=true` 同时成立时，后台使用固定测试负责人身份。生产环境忽略这个开关。公开测试站任何访问者均可操作测试数据，不得录入真实业务数据。关闭公开测试开关并重建前端即可恢复原测试授权流程；正式系统权限没有变化。
 
 示例单据由首页按钮通过真实业务接口创建，全部为虚拟信息。同一天重复准备不重复建单。浏览器内《验收说明》含完整操作路线。
 

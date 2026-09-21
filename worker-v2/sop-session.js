@@ -10,6 +10,7 @@ async function sign(value,env){return b64(new Uint8Array(await crypto.subtle.sig
 function cookie(value,seconds){return `${cookieName}=${value}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${seconds}`;}
 export async function sessionUser(request,env){
  if(env.SOP_ENVIRONMENT!=='staging'||env.SOP_UPGRADE_ENABLED!=='true')return null;
+ if(env.SOP_PUBLIC_TEST_ACCESS==='true')return {id:'staging-demo-manager',name:'测试负责人',role:'manager',departments:['bulk','direct_ship','import'],public_test:true};
  const value=(request.headers.get('Cookie')||'').split(';').map(x=>x.trim()).find(x=>x.startsWith(cookieName+'='))?.slice(cookieName.length+1);
  if(!value)return null;
  try{
@@ -28,7 +29,7 @@ export async function sessionAction(body,env){
  if(body.action==='sop_logout'){headers['Set-Cookie']=cookie('',0);return response({ok:true});}
  if(body.action==='sop_identity'){
   const u=env.SOP_REQUEST_USER;
-  return response(u?{ok:true,user:{id:u.id,name:u.name,role:u.role,departments:u.departments||[]}}:{ok:false,unauthorized:true,error:'请登录测试系统'});
+  return response(u?{ok:true,user:{id:u.id,name:u.name,role:u.role,departments:u.departments||[],public_test:!!u.public_test}}:{ok:false,unauthorized:true,error:'请登录测试系统'});
  }
  if(body.action!=='sop_login')return null;
  const result=await handleSop({...body,action:'sop_session'},{...env,SOP_REQUEST_USER:null});

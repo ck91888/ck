@@ -8,7 +8,7 @@ const apps=['001','002','003','shuju'];
 const shared=['html5-qrcode.min.js','xlsx.full.min.js','qrcode.min.js','sop-entry.js','sop-native.js','sop-native.css','sop-session.js','sop-dispatch-ui.js'];
 await mkdir(resolve(out,'shared'),{recursive:true});
 for(const f of shared)await copyFile(resolve(root,'shared',f),resolve(out,'shared',f));
-await writeFile(resolve(out,'shared/sop-rollout.js'),"window.CK_SOP_ROLLOUT={enabled:true,staging:true};\nwindow.SOP_API=location.origin+'/api';\n");
+await writeFile(resolve(out,'shared/sop-rollout.js'),"window.CK_SOP_ROLLOUT={enabled:true,staging:true,publicAccess:true};\nwindow.SOP_API=location.origin+'/api';\n");
 const head='<link rel="stylesheet" href="/shared/sop-native.css"><script src="/shared/sop-rollout.js"></script><script src="/shared/sop-session.js"></script>';
 for(const app of apps){
  await mkdir(resolve(out,app),{recursive:true});

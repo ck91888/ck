@@ -11,6 +11,10 @@
  document.addEventListener('DOMContentLoaded',async()=>{
   const banner=document.createElement('div');banner.className='ck-stage-banner';banner.innerHTML='<b>原系统升级 · 独立测试环境</b><span>仅使用虚拟数据 / 테스트 전용</span><a href="/">系统首页</a><a href="/验收说明.html">验收说明</a>';
   document.body.prepend(banner);
+  if(window.CK_SOP_ROLLOUT.publicAccess){
+   const loading=document.createElement('section');loading.id='ck-auth-gate';loading.innerHTML='<h2>正在进入测试系统…</h2><p role="alert"></p><button type="button" hidden>重试</button>';document.body.append(loading);
+   const enter=async()=>{const retry=loading.querySelector('button');retry.hidden=true;try{const r=await request('sop_identity');user=r.user;loading.remove();document.documentElement.classList.remove('ck-auth-pending');banner.insertAdjacentHTML('beforeend','<span>免授权码测试 · 请勿录入真实业务数据</span>');resolveReady(user);}catch(e){loading.querySelector('[role=alert]').textContent='测试服务暂时无法连接：'+e.message;retry.hidden=false;}};loading.querySelector('button').onclick=enter;await enter();return;
+  }
   const gate=document.createElement('section');gate.id='ck-auth-gate';gate.innerHTML='<form><h2>CK 仓库系统 · 测试登录</h2><p>登录一次即可在现场执行、协同中心、耗材和看板之间切换。</p><label>个人授权码<input name="key" type="password" autocomplete="current-password" required></label><button>进入测试系统</button><p role="alert"></p></form>';document.body.append(gate);
   function complete(r){user=r.user;gate.remove();document.documentElement.classList.remove('ck-auth-pending');banner.insertAdjacentHTML('beforeend','<button type="button" id="ck-session-logout">退出</button>');document.getElementById('ck-session-logout').onclick=()=>window.CKSession.logout();resolveReady(user);}
   gate.querySelector('form').onsubmit=async e=>{e.preventDefault();const button=gate.querySelector('button');button.disabled=true;gate.querySelector('[role="alert"]').textContent='登录中…';try{const r=await request('sop_login',{sop_key:gate.querySelector('input').value});gate.querySelector('input').value='';complete(r);}catch(e){gate.querySelector('[role="alert"]').textContent=e.message;}finally{button.disabled=false;}};
