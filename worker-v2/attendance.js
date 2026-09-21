@@ -8,6 +8,8 @@ export const ATTENDANCE_SCHEMA=[
  `CREATE UNIQUE INDEX IF NOT EXISTS ck_attendance_one_break ON ck_attendance_breaks(attendance_id) WHERE ended_at=''`,
  `CREATE INDEX IF NOT EXISTS ck_attendance_day ON ck_attendance_days(day,agency)`,
  `CREATE INDEX IF NOT EXISTS ck_attendance_worker ON ck_attendance_days(worker_id,day)`,
+ `CREATE INDEX IF NOT EXISTS ck_attendance_name_lookup ON ck_attendance_people(name,enabled,kind)`,
+ `CREATE INDEX IF NOT EXISTS ck_attendance_person_day ON ck_attendance_days(person_id,day)`,
  `CREATE TABLE IF NOT EXISTS ck_attendance_prints(id TEXT PRIMARY KEY,attendance_id TEXT NOT NULL,requested_at TEXT NOT NULL,requested_by TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'requested')`,
  // Enforce attendance inside the same SQLite transaction as any legacy or new task join.
  `CREATE TRIGGER IF NOT EXISTS ck_attendance_guard_join BEFORE INSERT ON v2_ops_job_workers
@@ -83,6 +85,19 @@ export async function handleAttendance(b,env){
   const badge=badgeOf(b.badge),p=await q(env,'SELECT * FROM ck_attendance_people WHERE badge_id=? AND enabled=1',badge).first();
   if(!p)fail('工牌未登记，请联系工作人员 / 등록되지 않은 명찰입니다');
   const r=await todayRecord(env,badge,t);return {ok:true,person:publicPerson(p),record:r?publicDay(r):null};
+ }
+ if(action==='sop_attendance_search'){
+  // Exact normalized names: all same-name matches must be explicitly confirmed.
+  // Expired daily badges cannot be recovered as if they were today's identity.
+  const name=nameOf(b.name),agency=b.agency?agencyOf(b.agency):'';
+  const people=await rows(env,`SELECT p.* FROM ck_attendance_people p
+   LEFT JOIN ck_attendance_days d ON d.person_id=p.id AND d.day=?
+   WHERE p.enabled=1 AND p.name=? AND (p.kind='permanent' OR d.id IS NOT NULL)
+   AND (?='' OR COALESCE(d.agency,p.agency)=?)
+   ORDER BY CASE WHEN d.id IS NULL THEN 1 ELSE 0 END,d.signed_in,p.badge_id LIMIT 51`,day,name,agency,agency);
+  if(people.length>50)fail('同名记录过多，请选择人力公司或联系工作人员 / 인력회사를 선택하거나 담당자에게 문의하세요');
+  const items=[];for(const p of people){const r=await todayRecord(env,p.badge_id,t);items.push({person:publicPerson(p),record:r?publicDay(r):null});}
+  return {ok:true,day,items};
  }
  if(action==='sop_attendance_people'){access(env,['manager']);return {ok:true,items:(await rows(env,"SELECT * FROM ck_attendance_people WHERE kind='permanent' ORDER BY name")).map(publicPerson)};}
  access(env,['manager','dispatcher','reviewer','kiosk']);
