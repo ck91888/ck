@@ -423,9 +423,15 @@ async function needGroups(env,u,b){
  if(b.source_id)items=items.filter(g=>g.source_id===b.source_id&&(!b.source_type||g.source_type===b.source_type));
  if(b.group_key)items=items.filter(g=>g.key===b.group_key);
  const total=items.length,offset=Math.max(0,Math.floor(Number(b.offset)||0));items=items.slice(offset,offset+50);
+ const ibIds=[...new Set(items.filter(g=>g.source_type==='inbound'&&g.source_id).map(g=>g.source_id))];
+ const obIds=[...new Set(items.filter(g=>g.source_type==='outbound'&&g.source_id).map(g=>g.source_id))];
+ const inClause=ids=>ids.map(()=>'?').join(',');
+ const plans=ibIds.length?await all(env,`SELECT id,display_no,customer,plan_date,expected_arrival,cargo_summary,purpose,remark,status,is_deleted FROM v2_inbound_plans WHERE id IN (${inClause(ibIds)})`,...ibIds):[];
+ const lines=ibIds.length?await all(env,`SELECT plan_id,unit_type,planned_qty,remark FROM v2_inbound_plan_lines WHERE plan_id IN (${inClause(ibIds)}) ORDER BY line_no`,...ibIds):[];
+ const outbounds=obIds.length?await all(env,`SELECT id,display_no FROM v2_outbound_orders WHERE id IN (${inClause(obIds)})`,...obIds):[];
  for(const g of items){
-  if(g.source_type==='inbound'&&g.source_id){const p=await stmt(env,'SELECT id,display_no,customer,plan_date,expected_arrival,cargo_summary,purpose,remark,status,is_deleted FROM v2_inbound_plans WHERE id=?',g.source_id).first();if(p){Object.assign(g,{plan:p,display_no:p.display_no||p.id,cargo_summary:p.cargo_summary,plan_date:p.plan_date,expected_arrival:p.expected_arrival});g.lines=await all(env,'SELECT unit_type,planned_qty,remark FROM v2_inbound_plan_lines WHERE plan_id=? ORDER BY line_no',g.source_id);}}
-  if(g.source_type==='outbound'&&g.source_id){const p=await stmt(env,'SELECT display_no FROM v2_outbound_orders WHERE id=?',g.source_id).first();g.display_no=p?.display_no||g.source_id;}
+  if(g.source_type==='inbound'){const p=plans.find(p=>p.id===g.source_id);if(p){Object.assign(g,{plan:p,display_no:p.display_no||p.id,cargo_summary:p.cargo_summary,plan_date:p.plan_date,expected_arrival:p.expected_arrival});g.lines=lines.filter(l=>l.plan_id===g.source_id);}}
+  if(g.source_type==='outbound')g.display_no=outbounds.find(p=>p.id===g.source_id)?.display_no||g.source_id;
   g.items.sort((a,b)=>(a.created_at||'').localeCompare(b.created_at||'')||(a.instruction_order||0)-(b.instruction_order||0)||a.title.localeCompare(b.title,'zh',{numeric:true}));
   const active=g.items.filter(x=>x.status!=='cancelled');g.completed=active.filter(x=>!!x.result||x.status==='closed').length;g.count=active.length;
   g.status=!active.length?'cancelled':g.completed===active.length?'completed':active.some(x=>x.status!=='pending')?'working':'pending';
