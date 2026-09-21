@@ -93,6 +93,7 @@ export async function handleSop(b,env) {
  try {
   if(env.SOP_ACCEPT_NEW==='false' && /_create$|_adopt$|_from_outbound$/.test(b.action))fail('新版已暂停接收新任务，现有任务仍可收尾');
   if(b.action==='sop_session') return {ok:true,user:{id:u.id,name:u.name,role:u.role,departments:u.departments||[]},mode:env.SOP_ENVIRONMENT||'pilot'};
+  if(b.action==='sop_need_groups')return await needGroups(env,u,b);
   if(b.action==='sop_list') {
    if(!kinds.includes(b.kind)) fail('无效类别');
    const offset=Math.max(0,Number(b.offset)||0),limit=50;
@@ -406,6 +407,30 @@ function appendRelated(env,extra,key,u,row,data,action,t){
 function validateWorkers(workers,lead){
  if(!Array.isArray(workers)||!workers.length||workers.length>50)fail('请扫描1至50名操作人员');
  const ids=new Set();return workers.map(w=>{const id=required(w.id,'工号'),name=required(w.name,'姓名');if(ids.has(id))fail('重复工牌');ids.add(id);return{id,name};}).map((w,i,a)=>{if(!a.some(x=>x.id===lead))fail('主操作员必须在参与人员中');return w;});
+}
+async function needGroups(env,u,b){
+ const departments=u.role==='manager'?[]:u.departments||[];
+ const filter=u.role==='manager'?'':` AND department IN (${departments.map(()=>'?').join(',')||"''"})`;
+ const rows=await all(env,`SELECT * FROM sop_records WHERE kind='need'${filter} ORDER BY updated_at DESC,id`,...departments);
+ const groups=new Map();
+ for(const row of rows){const x=publicState({...row,data:JSON.parse(row.state)});
+  const key=JSON.stringify([x.source_type||'standalone',x.source_id||x.supply_chain_no||x.id,x.customer]);
+  if(!groups.has(key))groups.set(key,{key,source_type:x.source_type||'standalone',source_id:x.source_id||'',customer:x.customer,display_no:x.supply_chain_no||x.source_id||x.id,updated_at:x.updated_at,items:[]});
+  groups.get(key).items.push(x);
+ }
+ let items=[...groups.values()];
+ if(b.need_id)items=items.filter(g=>g.items.some(x=>x.id===b.need_id));
+ if(b.source_id)items=items.filter(g=>g.source_id===b.source_id&&(!b.source_type||g.source_type===b.source_type));
+ if(b.group_key)items=items.filter(g=>g.key===b.group_key);
+ const total=items.length,offset=Math.max(0,Math.floor(Number(b.offset)||0));items=items.slice(offset,offset+50);
+ for(const g of items){
+  if(g.source_type==='inbound'&&g.source_id){const p=await stmt(env,'SELECT id,display_no,customer,plan_date,expected_arrival,cargo_summary,purpose,remark,status,is_deleted FROM v2_inbound_plans WHERE id=?',g.source_id).first();if(p){Object.assign(g,{plan:p,display_no:p.display_no||p.id,cargo_summary:p.cargo_summary,plan_date:p.plan_date,expected_arrival:p.expected_arrival});g.lines=await all(env,'SELECT unit_type,planned_qty,remark FROM v2_inbound_plan_lines WHERE plan_id=? ORDER BY line_no',g.source_id);}}
+  if(g.source_type==='outbound'&&g.source_id){const p=await stmt(env,'SELECT display_no FROM v2_outbound_orders WHERE id=?',g.source_id).first();g.display_no=p?.display_no||g.source_id;}
+  g.items.sort((a,b)=>(a.created_at||'').localeCompare(b.created_at||'')||(a.instruction_order||0)-(b.instruction_order||0)||a.title.localeCompare(b.title,'zh',{numeric:true}));
+  const active=g.items.filter(x=>x.status!=='cancelled');g.completed=active.filter(x=>!!x.result||x.status==='closed').length;g.count=active.length;
+  g.status=!active.length?'cancelled':g.completed===active.length?'completed':active.some(x=>x.status!=='pending')?'working':'pending';
+ }
+ return {ok:true,items,total,offset,more:offset+50<total};
 }
 async function dashboard(env,u,b){
  const days=date(b.date||new Date(Date.now()+9*3600000).toISOString().slice(0,10));

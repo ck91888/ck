@@ -37,7 +37,7 @@ test('original collaboration buttons open integrated needs and verification edit
  const f=await fixture(),p=await f.page('/002/');try{
  p.d.querySelector('[data-tab=need]').click();await until(()=>p.d.querySelector('#view-need article'),p.errors);assert.match(p.d.querySelector('#view-need').textContent,/虚拟|验收/);
  await p.w.openInboundDetail(f.seed.inbound_id);await until(()=>p.d.querySelector('#inboundDetailBody .ck-inline-heading button'),p.errors);
- p.d.querySelector('#inboundDetailBody .ck-inline-heading button').click();await until(()=>p.d.querySelector('#view-need #actions a'),p.errors);
+ p.d.querySelector('#inboundDetailBody .ck-inline-heading button').click();await until(()=>p.d.querySelector('#view-need #groupTable'),p.errors);
  p.d.querySelector('#btnNewCheck').click();await until(()=>p.d.querySelector('#checkListBody dialog')?.open,p.errors);
  assert.ok(p.d.querySelector('#checkListBody input[name=ship_date]'));assert.deepEqual(p.errors,[]);
  }finally{p.w.close();}
@@ -56,5 +56,19 @@ test('inbound work rows and inventory need optional outbound fields use original
  const data=p.w.CKInboundWorks.read();assert.equal(data.length,1);assert.equal(data[0].outbounds[0].quantity,'15');
  p.d.querySelector('[data-tab=need]').click();await until(()=>p.d.querySelector('#view-need #content .toolbar button'),p.errors);p.d.querySelector('#view-need #content .toolbar button').click();await until(()=>p.d.querySelector('#view-need dialog').open,p.errors);
  assert.equal(p.d.querySelector('#view-need [name=source_type]').value,'inventory');assert.ok(p.d.querySelector('#view-need #optionalOutbounds button'));assert.deepEqual(p.errors,[]);
+ }finally{p.w.close();}
+});
+
+test('one inbound instruction card contains every child and existing inbound print includes latest requirements',opts,async()=>{
+ const f=await fixture();const call=async(action,data)=>(await f.request({action,client_req_id:crypto.randomUUID(),...data})).json();
+ const added=await call('sop_need_create',{department:'bulk',source_type:'inbound',source_id:f.seed.inbound_id,customer:'虚拟验收客户',title:'另一分货要求',instructions:'第81至100箱保持散箱',owner:'测试处理员',reason:'分货明细',planned_quantity:20,planned_unit:'箱'});assert.equal(added.ok,true,added.error);
+ const p=await f.page('/002/');try{
+ p.d.querySelector('[data-tab=need]').click();await until(()=>p.d.querySelector('#view-need .ck-work-group'),p.errors);
+ assert.equal(p.d.querySelectorAll('#view-need .ck-work-group').length,1);assert.match(p.d.querySelector('#view-need .ck-work-group').textContent,/2项作业/);
+ p.d.querySelector('#view-need .ck-work-group button').click();await until(()=>p.d.querySelector('#groupTable'),p.errors);assert.equal(p.d.querySelectorAll('#groupTable tbody tr').length,2);
+ await p.w.openInboundDetail(f.seed.inbound_id);
+ const record=await call('sop_get',{id:added.id});const changed=await call('sop_need_update',{id:added.id,revision:record.record.revision,instructions:'最新要求：第81至100箱散箱，禁止打托',owner:'测试处理员'});assert.equal(changed.ok,true,changed.error);
+ let printed='';p.w.open=()=>({document:{open(){printed='';},write(s){printed+=s;},close(){}},close(){},focus(){},print(){}});
+ await p.w.printIbQr();assert.match(printed,/入库计划单/);assert.match(printed,/入库货物明细/);assert.match(printed,/本批作业要求及卸货分货依据/);assert.match(printed,/最新要求：第81至100箱散箱，禁止打托/);assert.match(printed,/class="inbound-cargo"/);assert.ok(!printed.includes('class="linked-ob-table"'));assert.deepEqual(p.errors,[]);
  }finally{p.w.close();}
 });

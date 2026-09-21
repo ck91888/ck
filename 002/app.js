@@ -3915,23 +3915,37 @@ function buildInboundQrHtml(text, cellSize) {
 }
 
 // 入库计划单 A4 打印：左上抬头 + 右上小二维码 + 双列信息 + 明细表 + 签字行
-function printIbQr() {
-  var displayNo = window._currentInboundPretty || _currentInboundId || '';
+async function printIbQr() {
   var planId = _currentInboundId || '';
-  var plan = window._currentInboundPlanCache || {};
+  if(!planId){alert('请先打开入库计划');return;}
+  var win = window.open('', '_blank');
+  if(!win){alert('请允许浏览器打开打印窗口');return;}
+  win.document.write('<p>正在读取最新入库计划和作业要求…</p>');
+  var latest;
+  try{latest=await api({action:'v2_inbound_plan_detail',id:planId});if(!latest||!latest.ok)throw Error(latest&&(latest.error||latest.message)||'读取失败');}
+  catch(e){win.close();alert('未能读取最新作业要求，未打印旧版。请重试：'+e.message);return;}
+  var plan = latest.plan;
+  var displayNo = plan.display_no || planId;
+  var printNeeds=latest.sop_needs||[];
+  var printStatus={pending:'待安排',assigned:'已分配',working:'作业中',paused:'已暂停',awaiting_review:'待审核',rework:'待整改',waiting_customer:'已审核·待客户安排',linked:'已关联出库',closed:'已关闭',cancelled:'已取消·不得执行'};
+  var workHtml='<h2>本批作业要求及卸货分货依据 / 작업·분류 지시</h2>';
+  if(printNeeds.length){
+   workHtml+='<table class="work-requirements"><thead><tr><th>序号</th><th>箱唛／货物范围</th><th>计划数量</th><th>作业要求</th><th>状态／版本</th></tr></thead><tbody>';
+   printNeeds.forEach(function(n,i){workHtml+='<tr><td>'+(i+1)+'</td><td>'+esc(n.scope_text||'见作业要求')+'</td><td>'+esc(n.planned_quantity?n.planned_quantity+' '+(n.planned_unit||''):'见要求')+'</td><td><b>'+esc(n.title)+'</b><div class="work-text">'+esc(n.instructions)+'</div>'+(n.location?'<div>位置：'+esc(n.location)+'</div>':'')+'</td><td>'+esc(printStatus[n.status]||n.status)+'<br>V'+esc(n.revision||1)+'</td></tr>';});
+   workHtml+='</tbody></table><p class="work-note">卸货前按本表确认货物范围及处理去向，再分别卸货、分货；要求不清或实物不符时，报告负责人确认。已取消要求不得执行。</p>';
+  }else workHtml+='<p class="work-note">当前未填写作业要求；按入库计划卸货。后续如新增要求，请重新打印最新版本。</p>';
 
   var qrHtml = '';
   try { qrHtml = buildInboundQrHtml(displayNo || planId, 3); }
   catch (e) { qrHtml = '<div style="color:red;font-size:10px;">QR error</div>'; }
 
-  var detailBody = document.getElementById('inboundDetailBody');
-  var tables = detailBody ? detailBody.querySelectorAll('table.line-table') : [];
-  var linesHtml = tables.length ? tables[0].outerHTML : '';
+  var linesHtml='<h2>入库货物明细 / 입고 화물 명세</h2><table class="inbound-cargo"><thead><tr><th>类型</th><th>计划数量</th><th>备注</th></tr></thead><tbody>';
+  (latest.lines||[]).forEach(function(ln){linesHtml+='<tr><td>'+esc(unitTypeLabel(ln.unit_type))+'</td><td>'+esc(ln.planned_qty)+'</td><td>'+esc(ln.remark||'—')+'</td></tr>';});
+  linesHtml+='</tbody></table>';
 
   var bizMap = { direct_ship: '直发/직배송', bulk: '大货/대량', return_op: '退件/반품', inventory_op: '库内/창고' };
-  var bizText = bizMap[plan.biz_class] || plan.biz_class || '';
+  var bizText = (plan.biz_classes||[plan.biz_class]).map(function(b){return bizMap[b]||b;}).join('、');
 
-  var win = window.open('', '_blank');
   var html = '<!doctype html><html><head><meta charset="utf-8"/><title>' + esc(displayNo) + '</title>' +
     '<style>' +
     'body{font-family:"Microsoft YaHei","Helvetica Neue",Arial,sans-serif;margin:20px 30px;color:#000;}' +
@@ -3946,6 +3960,7 @@ function printIbQr() {
     'table{width:100%;border-collapse:collapse;font-size:12px;margin-bottom:14px;}' +
     'th,td{border:1px solid #333;padding:5px 6px;text-align:left;}' +
     'th{background:#eee;font-weight:700;}' +
+    'h2{font-size:15px;margin:16px 0 8px}.work-text{white-space:pre-wrap;overflow-wrap:anywhere;margin-top:4px}.work-note{font-size:12px;line-height:1.6}thead{display:table-header-group}tr{break-inside:avoid}td{vertical-align:top;overflow-wrap:anywhere}.work-requirements th:nth-child(4){width:43%}' +
     '.sig-row{display:flex;gap:40px;margin-top:30px;font-size:13px;}' +
     '.sig-item{flex:1;}' +
     '.sig-line{border-bottom:1px solid #333;height:30px;margin-top:4px;}' +
@@ -3970,16 +3985,17 @@ function printIbQr() {
       (plan.remark ? '<div><span class="label">备注：</span>' + esc(plan.remark) + '</div>' : '') +
       (plan.purpose ? '<div style="grid-column:1/-1;"><span class="label">入库目的：</span>' + esc(plan.purpose) + '</div>' : '') +
     '</div>' +
-    linesHtml +
+    linesHtml + workHtml +
     '<div class="sig-row">' +
       '<div class="sig-item"><span class="label">制单人：</span>' + esc(plan.created_by || '') + '<div class="sig-line"></div></div>' +
       '<div class="sig-item"><span class="label">仓库确认：</span><div class="sig-line"></div></div>' +
       '<div class="sig-item"><span class="label">客户签收：</span><div class="sig-line"></div></div>' +
       '<div class="sig-item"><span class="label">日期：</span><div class="sig-line"></div></div>' +
     '</div>' +
-    '<div class="footer">Printed from CK Warehouse V2</div>' +
+    '<div class="footer">Printed from CK Warehouse V2 · ' + esc(new Date().toLocaleString('zh-CN',{timeZone:'Asia/Seoul'})) + ' KST</div>' +
     '<script>window.onload=function(){window.print();}<\/script>' +
     '</body></html>';
+  win.document.open();
   win.document.write(html);
   win.document.close();
 }

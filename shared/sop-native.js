@@ -1,14 +1,14 @@
 (function(){
 'use strict';
 window.CKWorkflow=function(root,options={}){
-root.classList.add('ck-workflow');
+root.classList.add('ck-workflow');if(options.context==='collab')root.classList.add('ck-native-collab');
 root.innerHTML=`<div id="notice" role="status" aria-live="polite"></div><div class="toolbar"><button id="refresh">刷新 / 새로고침</button><span id="updates"></span></div><section id="content"></section><dialog id="modal"><form id="editor"><h2 id="editorTitle"></h2><div id="fields"></div><div class="toolbar"><button type="submit" id="save">保存 / 저장</button><button type="button" id="cancel" class="light">关闭 / 닫기</button></div><p id="formError" role="alert"></p></form></dialog>`;
 const $=id=>root.querySelector('[id="'+id+'"]'), esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const entry=new URLSearchParams(options);
 const labels={need:'作业需求 / 작업 요청',task:'负责人派工 / 작업 배정',issue:'问题沟通 / 이슈',check:'出库核对 / 출고 확인',dashboard:'管理看板 / 관리 현황'};
 const departments={bulk:'大货 / 대량',direct_ship:'代发 / 출고대행',import:'进口 / 수입'};
 const states={pending:'待安排',assigned:'已分配',working:'作业中',paused:'已暂停',awaiting_review:'待审核',rework:'待整改',completed:'审核通过',waiting_customer:'待客户安排',linked:'已关联出库',closed:'已关闭',cancelled:'已作废',open:'处理中',responded:'已反馈'};
-let user=window.CKSession?.user,tab=Object.hasOwn(labels,entry.get('tab'))?entry.get('tab'):'need',offset=0,current=null,scanner=null,people=[],poll=null,listSnapshot='';
+let user=window.CKSession?.user,tab=Object.hasOwn(labels,entry.get('tab'))?entry.get('tab'):'need',offset=0,current=null,scanner=null,people=[],poll=null,listSnapshot='',currentGroup='';
 async function api(action,data={}){return window.CKSession.request(action,data);}
 function notice(s){$('notice').textContent=s;}
 function btn(label,fn,cls=''){const b=document.createElement('button');b.textContent=label;b.className=cls;b.type='button';b.onclick=()=>Promise.resolve().then(fn).catch(e=>notice(e.message));return b;}
@@ -31,10 +31,10 @@ function form(title,html,action,build,after){
 }
 $('cancel').onclick=closeModal;
 $('modal').addEventListener('cancel',e=>{e.preventDefault();closeModal();});
-$('refresh').onclick=()=> (current?detail(current.id):load()).catch(e=>notice(e.message));
+$('refresh').onclick=()=> (current?detail(current.id,true):currentGroup?groupDetail({group_key:currentGroup}):load()).catch(e=>notice(e.message));
 function renderTabs(){}
-async function checkUpdates(){if(tab==='dashboard'&&user&&!document.hidden&&root.isConnected&&root.offsetParent!==null){await renderDashboard();return;}if(!user||document.hidden||!root.isConnected||root.offsetParent===null||$('modal').open)return;try{if(current){const r=await api('sop_get',{id:current.id});if(r.record.revision!==current.revision)$('updates').textContent='有新要求/新记录，请刷新查看并确认 · 새 변경사항';}else if(tab!=='dashboard'){const r=await api('sop_list',{kind:tab,offset});if(JSON.stringify(r.items.map(x=>[x.id,x.revision]))!==listSnapshot)$('updates').textContent='列表有更新，请刷新 · 업데이트';}}catch{} }
-async function load(){notice('');$('updates').textContent='';current=null;const c=$('content');c.innerHTML='<p>加载中…</p>';if(tab==='dashboard')return renderDashboard();
+async function checkUpdates(){if(tab==='dashboard'&&user&&!document.hidden&&root.isConnected&&root.offsetParent!==null){await renderDashboard();return;}if(!user||document.hidden||!root.isConnected||root.offsetParent===null||$('modal').open)return;try{if(current){const r=await api('sop_get',{id:current.id});if(r.record.revision!==current.revision)$('updates').textContent='有新要求/新记录，请刷新查看并确认 · 새 변경사항';}else if(tab==='need'){const r=await api('sop_need_groups',currentGroup?{group_key:currentGroup}:{offset});if(JSON.stringify(r.items.map(g=>[g.key,g.items.map(x=>[x.id,x.revision])]))!==listSnapshot)$('updates').textContent='本批作业有更新，请刷新查看最新要求';}else if(tab!=='dashboard'){const r=await api('sop_list',{kind:tab,offset});if(JSON.stringify(r.items.map(x=>[x.id,x.revision]))!==listSnapshot)$('updates').textContent='列表有更新，请刷新 · 업데이트';}}catch{} }
+async function load(){notice('');$('updates').textContent='';current=null;currentGroup='';const c=$('content');c.innerHTML='<p>加载中…</p>';if(tab==='dashboard')return renderDashboard();if(tab==='need')return loadGroups();
  const r=await api('sop_list',{kind:tab,offset});listSnapshot=JSON.stringify(r.items.map(x=>[x.id,x.revision]));c.innerHTML='';const bar=document.createElement('div');bar.className='toolbar';
  const createLabels={need:'新建作业需求',task:'新建派工任务',check:'按出库日期建清单',issue:'接入现有问题'};
  if(user.role!=='viewer')bar.append(btn(createLabels[tab],()=>create(tab)));
@@ -42,6 +42,23 @@ async function load(){notice('');$('updates').textContent='';current=null;const 
  if(r.more)bar.append(btn('下一页',()=>{offset+=50;return load();},'light'));c.append(bar);
  if(!r.items.length)c.insertAdjacentHTML('beforeend','<div class="card muted">暂无记录。请从关联单据建立作业，或点击上方按钮。</div>');
  for(const x of r.items){const a=document.createElement('article');a.innerHTML=`<h3>${esc(x.title)} <span class="status">${esc(states[x.status]||x.status)}</span></h3><p>${esc(departments[x.department])} · ${esc(x.owner||'')} · ${esc(x.location||'')}</p><p class="muted">${esc(x.id)} · 版本 ${x.revision}</p>${x.kind==='issue'&&x.requirement_version>x.ack_version?'<p class="warn">作业要求有变更，仓库待确认</p>':''}`;a.append(btn('打开 / 열기',()=>detail(x.id)));c.append(a);}
+}
+function sourceName(g){return g.source_type==='inbound'?'入库计划':g.source_type==='inventory'?'库内库存':'原业务单据';}
+function groupHeader(g){return '<div class="card-title">'+esc(sourceName(g))+' · '+esc(g.display_no)+'</div><div class="ck-plan-facts"><div><span>客户</span><strong>'+esc(g.customer)+'</strong></div><div><span>本批货物</span><strong>'+esc(g.cargo_summary||'见下方作业范围')+'</strong></div><div><span>计划日期</span>'+esc(g.plan_date||'—')+'</div><div><span>预计到货</span>'+esc(g.expected_arrival||'—')+'</div></div>';}
+async function loadGroups(){
+ const r=await api('sop_need_groups',{offset});listSnapshot=JSON.stringify(r.items.map(g=>[g.key,g.items.map(x=>[x.id,x.revision])]));const c=$('content');c.innerHTML='';
+ const bar=document.createElement('div');bar.className='toolbar actions-bar';if(user.role!=='viewer')bar.append(btn('＋库存作业需求',()=>create('need'),'light'));const hint=document.createElement('span');hint.className='muted';hint.textContent='按入库计划汇总 · 共 '+r.total+' 批';bar.append(hint);c.append(bar);
+ if(!r.items.length)c.insertAdjacentHTML('beforeend','<div class="card muted">暂无作业指令。入库作业请在入库计划中填写；库存作业可单独新增。</div>');
+ for(const g of r.items){const card=document.createElement('article');card.className='card ck-work-group';card.innerHTML='<div class="ck-group-heading"><div>'+groupHeader(g)+'</div><span class="st st-'+esc(g.status)+'">'+esc(g.status==='completed'?'作业已完成':g.status==='working'?'处理中':g.status==='cancelled'?'已取消':'待安排')+'</span></div><div class="ck-group-summary">'+g.count+'项作业 · 已完成 '+g.completed+'项<span>'+esc(g.items.filter(x=>x.status!=='cancelled').map(x=>x.title).join('；'))+'</span></div>';card.append(btn('查看整批作业指令',()=>groupDetail({group_key:g.key}),'light'));c.append(card);}
+ const pages=document.createElement('div');pages.className='toolbar';if(offset)pages.append(btn('上一页',()=>{offset=Math.max(0,offset-50);return load();},'light'));if(r.more)pages.append(btn('下一页',()=>{offset+=50;return load();},'light'));c.append(pages);
+}
+async function groupDetail(query){
+ const r=await api('sop_need_groups',query),g=r.items[0];if(!g)throw Error('未找到本批作业指令');current=null;currentGroup=g.key;listSnapshot=JSON.stringify(r.items.map(g=>[g.key,g.items.map(x=>[x.id,x.revision])]));$('updates').textContent='';
+ const c=$('content');c.innerHTML='<div class="toolbar" id="groupActions"></div><article class="card">'+groupHeader(g)+'<p class="muted">同一批货物的全部作业要求如下；分货依据以客服文字及箱唛范围为准。</p></article><article class="card"><div class="card-title">本批作业明细 <span class="count">'+g.count+'项 · 已完成 '+g.completed+'项</span></div><div class="scroll" id="groupTable">'+CKWorkNeedsTable(g.items)+'</div></article>';
+ const actions=$('groupActions');actions.append(btn('← 返回作业指令列表',()=>load(),'light'));actions.append(btn('打印整批指令',()=>CKPrintWorkGroup(g),'light'));
+ if(g.source_type==='inbound'&&g.source_id){if(options.context==='collab'&&window.openInboundDetail)actions.append(btn('查看入库计划',()=>openInboundDetail(g.source_id),'light'));else {const a=document.createElement('a');a.href='/002/?inbound='+encodeURIComponent(g.source_id);a.textContent='查看入库计划';actions.append(a);}}
+ const table=$('groupTable').querySelector('table');const th=document.createElement('th');th.textContent='操作';table.querySelector('thead tr').append(th);
+ Array.from(table.querySelectorAll('tbody tr')).forEach((tr,i)=>{const td=document.createElement('td');td.append(btn(options.context==='field'?'派工／操作':'查看／处理',()=>detail(g.items[i].id,true),'light'));tr.append(td);});
 }
 function create(kind){current=null;
  if(kind==='need'){form('新建作业需求',depInput()+input('title','作业名称')+input('customer','客户')+select('source_type','关联来源',{inventory:'库内库存',inbound:'入库计划',outbound:'出库计划'})+input('supply_chain_no','供应链系统单号（库内库存必填）','text','',false)+input('scope_text','箱唛／货物范围','text','',false)+input('planned_quantity','本作业计划数量（同步出库必填）','number','',false)+select('planned_unit','计划单位',{箱:'箱',件:'件',托:'托'})+input('source_id','关联单据（可下拉选择）','text','',false)+area('instructions','操作要求')+input('owner','接单负责人')+input('deadline','要求完成时间','datetime-local','',false)+input('location','货物位置','text','',false)+input('reason','已有需求时的追加原因','text','',false)+'<div id=optionalOutbounds></div>','sop_need_create',v=>({...v,outbounds:readObs()}),r=>detail(r.id));const readObs=CKOptionalOutbounds($('optionalOutbounds'));$('editor').elements.source_type.onchange=e=>{if(e.target.value!=='inventory')attachSources('source_id',e.target.value);else $('editor').elements.source_id.value='';};}
@@ -57,8 +74,8 @@ function setupPeople(lead){const render=()=>{$('people').innerHTML='';for(const 
  $('camera').onclick=async()=>{try{if(scanner){await scanner.stop();scanner=null;return;}scanner=new Html5Qrcode('scanner');await scanner.start({facingMode:'environment'},{fps:8,qrbox:220},s=>{try{add(s);}catch(e){$('formError').textContent=e.message;}},()=>{});}catch(e){$('formError').textContent='无法打开相机，可用扫码枪或手动输入工牌';scanner=null;}};render();}
 function taskForm(need){const types={bulk_op:'大货操作',unload:'卸货',load_outbound:'装货',inbound_bulk:'大货理货上架',inbound_direct:'代发入库',pick_direct:'代发拣货',pack_direct:'代发打包',inbound_return:'退件',qc:'质检',scan_pallet:'进口扫码码托',pickup_delivery_import:'取送货',load_import:'装柜',other_internal:'跨组支援／整理'};
  form('负责人创建任务','<p>关联作业需求在此派工；卸货、入库、拣货、装货等带原单据业务，请从现场首页对应入口派工，以完成单据状态回写。</p>'+depInput()+input('title','任务名称','text',need?.title||'')+select('job_type','作业类型',{bulk_op:types.bulk_op,other_internal:types.other_internal})+input('need_id','关联作业需求','text',need?.id||'',false)+input('estimated_minutes','预计操作分钟','number','30')+input('deadline','预计完成时间','datetime-local','',false)+input('location','作业位置','text',need?.location||'',false)+peopleFields(),'sop_task_create',v=>({...v,workers:people}),r=>detail(r.id));setupPeople();if(need){$('editor').elements.department.value=need.department;$('editor').elements.need_id.readOnly=true;}}
-async function detail(id){const r=await api('sop_get',{id});current=r.record;const x=current;$('updates').textContent='';const c=$('content');c.innerHTML=`<article><h2>${esc(x.title)} <span class="status">${esc(states[x.status]||x.status)}</span></h2><p>${esc(departments[x.department])} · ${esc(x.owner||'')} · ${esc(x.id)} · 版本 ${x.revision}</p><p>${esc(x.instructions||'')}</p><p>位置：${esc(x.location||'—')}　期限：${esc(x.deadline||'—')}</p><div class="actions" id="actions"></div></article><section id="detailBody"></section>`;
- const a=$('actions');a.append(btn('返回列表',()=>options.back?options.back():load(),'light'));
+async function detail(id,individual=false){const r=await api('sop_get',{id});if(r.record.kind==='need'&&!individual)return groupDetail({need_id:id});current=r.record;if(current.kind!=='need')currentGroup='';const x=current;$('updates').textContent='';const c=$('content');c.innerHTML=`<article><h2>${esc(x.title)} <span class="status">${esc(states[x.status]||x.status)}</span></h2><p>${esc(departments[x.department])} · ${esc(x.owner||'')} · ${esc(x.id)} · 版本 ${x.revision}</p><p>${esc(x.instructions||'')}</p><p>位置：${esc(x.location||'—')}　期限：${esc(x.deadline||'—')}</p><div class="actions" id="actions"></div></article><section id="detailBody"></section>`;
+ const a=$('actions');a.append(btn(currentGroup?'← 返回本批作业指令':'返回列表',()=>currentGroup?groupDetail({group_key:currentGroup}):options.back?options.back():load(),'light'));
  const action=(label,action,html,build=v=>v)=>user.role==='viewer'?null:a.append(btn(label,()=>form(label,html,action,build)));
  if(x.kind==='need'){
   a.append(btn('打印作业单',()=>CKNeedPrint(x)));
@@ -149,7 +166,7 @@ function scanForm(record,pallet){
 }
 
 let destroyed=false;
-const start=async()=>{if(destroyed)return;try{if(options.id)await detail(options.id);else {await openSource();if(options.create)create(options.create);}}catch(e){notice(e.message);}if(!destroyed)poll=setInterval(checkUpdates,20000);};
+const start=async()=>{if(destroyed)return;try{if(options.group_source_id)await groupDetail({source_type:'inbound',source_id:options.group_source_id});else if(options.id)await detail(options.id);else {await openSource();if(options.create)create(options.create);}}catch(e){notice(e.message);}if(!destroyed)poll=setInterval(checkUpdates,20000);};
 start();
 return {load,detail,create,taskForm,destroy(){destroyed=true;clearInterval(poll);closeModal();root.replaceChildren();}};
 };

@@ -4295,6 +4295,7 @@ route("v2_inbound_plan_detail", async (body, env) => {
     jobs: enrichedJobs,
     attachments: atts.results || [],
     inbound_materials: (atts.results || []).filter(a => a.attachment_category === 'inbound_material'),
+    sop_needs: await linkedNeeds(env,id),
     linked_outbound_orders: linkedObRs.results || []
   });
 });

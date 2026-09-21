@@ -14,6 +14,11 @@
   const body=document.getElementById(target);if(!body||!id)return;
   const r=await request('sop_linked',{source_id:id});
   const head=block(body,'关联作业：操作要求、结果和数量在这里统一追踪');const buttons=head.querySelector('.ck-buttons');buttons.replaceChildren();
+  if(type==='inbound'&&r.items.length){
+   head.className='ck-inline-heading ck-inbound-work card';head.innerHTML='<div class="card-title">本批作业要求 / 작업 지시</div><div class="ck-work-preview">'+CKWorkNeedsTable(r.items)+'</div><div class="ck-buttons"></div>';
+   head.querySelector('.ck-buttons').append(button('查看整批作业指令',()=>{goView('need');mount(document.getElementById('view-need'),{tab:'need',group_source_id:id,context:'collab'});}));
+   head.querySelector('.ck-buttons').append(button('追加本批作业要求',()=>{goView('need');mount(document.getElementById('view-need'),{tab:'need',source:type,source_id:id,supplement:true,context:'collab'});}));return;
+  }
   for(const n of r.items){const b=button(n.title+' · '+n.status,()=>{goView('need');mount(document.getElementById('view-need'),{tab:'need',id:n.id,context:'collab'});});buttons.append(b);}
   buttons.append(button(r.items.length?'新增补充作业（需说明原因）':'建立到货后作业需求',()=>{goView('need');mount(document.getElementById('view-need'),{tab:'need',source:type,source_id:id,supplement:r.items.length>0,context:'collab'});}));
  }
@@ -71,7 +76,7 @@
    document.getElementById('btnNewCheck').onclick=()=>{goView('check');mount(document.getElementById('checkListBody'),{tab:'check',context:'collab',create:'check'});};
    const originalGoView=window.goView;window.goView=function(name){originalGoView(name);if(name==='outbound_create')outboundPicker().catch(e=>alert(e.message));};
    const wh=document.createElement('section');wh.className='ck-inline-heading ck-workflow ck-work-plans';document.getElementById('ibc-remark').closest('.form-group').after(wh);window.CKInboundWorks=CKWorkFields(wh);
-   showMain();if(params.get('need')&&params.get('create_outbound'))goView('outbound_create');else if(params.get('need')){goTab('need');mount(v,{tab:'need',id:params.get('need'),context:'collab'});}else if(params.get('issue'))openIssueDetail(params.get('issue'));else if(params.get('tab'))goTab(params.get('tab'));
+   showMain();if(params.get('need')&&params.get('create_outbound'))goView('outbound_create');else if(params.get('need')){goTab('need');mount(v,{tab:'need',id:params.get('need'),context:'collab'});}else if(params.get('inbound'))openInboundDetail(params.get('inbound'));else if(params.get('issue'))openIssueDetail(params.get('issue'));else if(params.get('tab'))goTab(params.get('tab'));
   }else if(app==='001'){
    window.CKInstallDispatch();
    const tasks=document.createElement('section');tasks.className='ck-inline-heading';tasks.innerHTML='<b>现场在途任务（点击继续原单据操作）</b><div class="ck-buttons"></div>';document.getElementById('page-home').append(tasks);

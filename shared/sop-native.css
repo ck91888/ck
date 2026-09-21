@@ -13,3 +13,17 @@
 
 body.ck-stage-home{display:block;min-height:100vh}body.ck-stage-home .nav{max-width:900px;margin:0 auto;padding:28px 20px}.ck-demo-control{max-width:640px;margin:24px auto;padding:18px;line-height:1.7;background:white;border:1px solid #d5dfe9;border-radius:8px}
 .ck-work-plans fieldset{border:1px solid #b9cbe0;border-radius:6px;padding:14px;margin:12px 0;background:#fff;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 16px}.ck-work-plans fieldset>label{margin:0}.ck-work-plans [data-outbounds],.ck-work-plans [data-outbound-row]{grid-column:1/-1}.ck-work-plans textarea{min-height:100px}.ck-work-plans button{align-self:end}.ck-work-plans h3{margin-top:0}@media(max-width:650px){.ck-work-plans fieldset{grid-template-columns:1fr}}
+/* Reuse the original collaboration visual language: compact white cards, grey borders, blue actions. */
+#view-need.ck-native-collab{padding:0;font:14px/1.55 -apple-system,system-ui,"Segoe UI",sans-serif;color:#222}
+#view-need.ck-native-collab article,#view-need.ck-native-collab .card{border:1px solid #e8e8e8;border-radius:14px;padding:14px;margin-bottom:12px}
+#view-need.ck-native-collab button{font-size:13px;font-weight:600;border:1px solid #ddd;border-radius:8px;padding:8px 14px;background:#fff;color:#1565c0;min-height:36px}
+#view-need.ck-native-collab button:hover{background:#f5f8fc}
+#view-need.ck-native-collab .toolbar{align-items:center;gap:8px;margin-bottom:12px}
+#view-need.ck-native-collab .card-title{font-size:16px;font-weight:700;margin:0 0 10px;color:#222}
+.ck-group-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.ck-group-heading>div{flex:1}.ck-group-heading .st{white-space:nowrap}
+.ck-plan-facts{display:grid;grid-template-columns:1fr 1fr;gap:6px 24px;font-size:13px}.ck-plan-facts span{display:inline-block;color:#777;margin-right:10px;min-width:60px}.ck-plan-facts strong{font-weight:600}
+.ck-group-summary{border-top:1px solid #eee;margin:12px 0 10px;padding-top:10px;font-size:13px;color:#555}.ck-group-summary span{display:block;margin-top:4px;color:#333}
+.ck-work-table{width:100%;border-collapse:collapse;font-size:13px}.ck-work-table th,.ck-work-table td{border:1px solid #e0e0e0;padding:9px;text-align:left;vertical-align:top;overflow-wrap:anywhere}.ck-work-table th{background:#f5f5f5!important;color:#333}.ck-work-table th:nth-child(3){width:46%}.ck-instruction-text{white-space:pre-wrap;line-height:1.65;margin-top:4px}.ck-cancelled{color:#888}.ck-work-preview{overflow:auto}
+.ck-inline-heading.ck-inbound-work{background:#fff;border:1px solid #e8e8e8;border-radius:14px;padding:14px}.ck-inbound-work .ck-buttons{margin-top:10px}.ck-inbound-work button{font-size:13px;color:#1565c0;background:#fff;border:1px solid #ddd;border-radius:8px}
+#mainTabs button[data-tab=need]{border-radius:0;padding:10px 18px;margin:0;border-top:0;border-left:0;border-right:0}
+@media(max-width:650px){.ck-plan-facts{grid-template-columns:1fr}.ck-group-heading{flex-wrap:wrap}.ck-work-table{min-width:600px}}

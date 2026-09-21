@@ -122,3 +122,10 @@ test('inventory work requires supply-chain reference; details preserve versions 
  assert.equal((await change('sop_need_forward',n.id,{note:'已转发'})).ok,true);assert.ok((await get(n.id)).forwarded);
  assert.equal((await change('sop_need_details',n.id,details)).ok,true);d=await get(n.id);assert.equal(d.details.version,2);assert.equal(d.forwarded,null);
 });
+
+test('grouping precedes pagination and keeps the whole inbound batch with its display number',async()=>{
+ const {login,call,DB}=setup();await login();const ib=await call('v2_inbound_plan_create',{customer:'分组测试',biz_classes:['bulk'],lines:[{unit_type:'box',planned_qty:50}],cargo_summary:'50箱'});assert.equal(ib.ok,true,ib.error);
+ for(let n=0;n<52;n++){const x=await call('sop_need_create',{department:'bulk',source_type:'inbound',source_id:ib.id,customer:'分组测试',title:'分货'+n,instructions:'测试范围'+n,owner:'处理员',reason:'分货'});assert.equal(x.ok,true,x.error);}
+ const r=await call('sop_need_groups');assert.equal(r.ok,true,r.error);assert.equal(r.total,1);assert.equal(r.items[0].items.length,52);assert.equal(r.more,false);assert.equal(r.items[0].display_no,ib.display_no);assert.equal(r.items[0].cargo_summary,'50箱');
+ const d=await call('v2_inbound_plan_detail',{id:ib.id});assert.equal(d.sop_needs.length,52);assert.equal(d.lines[0].planned_qty,50);
+});

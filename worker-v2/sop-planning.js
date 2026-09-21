@@ -6,10 +6,10 @@ export function workPlanStatements(env,rows,source,actor,t){
  if(!Array.isArray(rows)||rows.length>30)throw Error('每次最多建立30条作业需求');
  const statements=[],needs=[],outbounds=[];
  const sql=(s,...v)=>env.DB.prepare(s).bind(...v);
- for(const item of rows){
+ for(const [position,item] of rows.entries()){
   const id=item.id||'NEED-'+crypto.randomUUID(),department=item.department||'bulk';
   if(!['bulk','direct_ship','import'].includes(department))throw Error('业务类型无效');
-  const data={title:required(item.title,'作业名称'),customer:required(source.customer,'客户'),source_type:source.type,source_id:source.id||'',supply_chain_no:str(item.supply_chain_no||source.supply_chain_no),instructions:required(item.instructions,'客服文字要求'),scope_text:str(item.scope_text),owner:str(item.owner)||'工单处理员待接单',location:str(item.location),deadline:str(item.deadline),status:'pending',links:[],created_at:t,created_by:actor.name};
+  const data={instruction_order:position+1,title:required(item.title,'作业名称'),customer:required(source.customer,'客户'),source_type:source.type,source_id:source.id||'',supply_chain_no:str(item.supply_chain_no||source.supply_chain_no),instructions:required(item.instructions,'客服文字要求'),scope_text:str(item.scope_text),owner:str(item.owner)||'工单处理员待接单',location:str(item.location),deadline:str(item.deadline),status:'pending',links:[],created_at:t,created_by:actor.name};
   if(source.type==='inventory')required(data.supply_chain_no,'供应链系统单号');
   if(item.planned_quantity){data.planned_quantity=qty(item.planned_quantity);data.planned_unit=required(item.planned_unit,'计划单位');}
   const obs=item.outbounds||[];if(!Array.isArray(obs)||obs.length>20)throw Error('每条作业最多关联20个出库计划');
