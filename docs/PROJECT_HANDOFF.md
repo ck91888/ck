@@ -1,6 +1,6 @@
 # CK 仓库项目跨电脑接续
 
-最后更新：2026-09-21，入库流程修改进行中（尚未发布）。
+最后更新：2026-09-21，入库流程修改已完成本地验证，随本提交发布测试分支。接续时查看本提交 Cloudflare 检查是否成功。
 
 ## 仓库与环境
 - GitHub：ck91888/ck
@@ -19,18 +19,18 @@
 - 全21种作业统一部门识别，固定默认、通用作业确认实际用工部门。金某某原18:13—18:15打包已验证代发0:02、其他0:00。
 - 办公列表紧凑；作业需求每批两行、详情展开；手机保留触摸尺寸。47项测试通过。
 
-## 正在做：用户最新确认的入库规则
+## 本次完成：用户最新确认的入库规则
 1. 新建入库计划的分类横向排列，改为理货上架、直进直出、整托退回、换单，仍允许多选。
 2. 理货上架必填外部系统入库单号。现场理货入库扫外部号，识别原入库计划，完成后回写已入库，不能创建脱离原计划的新记录。
 3. 直进直出、整托退回、换单在卸货完成后自动完成入库节点，不要求额外理货。混合计划中的理货上架仍待实际完成。
 4. 现场理货入库去掉换单入库，保留退件入库用于记录自有系统退件操作工时。整托退回与退件工时会话必须分开。
 5. 重复单号应明确拒绝或提示核实，不能随意匹配；旧待理货计划应可补充外部单号。正在作业时防止换绑。
 
-目前已确认根因：数据库有external_inbound_no字段，v2_inbound_resolve_code会查它，但v2_inbound_plan_create和update没有接收/保存这个字段。当前代码还要求每个biz_task另行入库完成。
-本轮尚在本地开发，未发布的文件不能假定已在GitHub。接续时先查最新分支、PR及后续docs，确认是否已完成，避免覆盖另一台电脑尚在执行的工作。
+已修正根因：新建、修改、反馈转正完整保存external_inbound_no；理货扫描关联原计划；卸货完成自动推进免理货分类。新代码在worker-v2/inbound-flow.js、shared/inbound-flow-ui.js，具体规则和兼容边界见docs/20260921-inbound-flow.md。现有47项加本次11项，共58项自动化测试通过。浏览器已验证新建、更正外部号、扫描原计划和菜单入口。
+接续时先查最新分支、PR及后续docs，确认部署结果，避免覆盖另一台电脑尚在执行的工作。此次未对历史记录批量改分类或批量完成；遇到具体旧数据应核实实际货物处理方式。
 
 ## 家中电脑开始方式
-登录自己的账号并连接GitHub，读取此文档和PR。获取上述分支最新源码再修改，不要只获取main。Node原生测试通过node --test tests/attendance-department.test.mjs tests/attendance.test.mjs tests/sop.test.mjs tests/native-system.test.mjs tests/legacy-integration.test.mjs tests/people-selection.test.mjs运行；构建node worker-v2/build-sop-staging.mjs。后续新增测试也要运行。
+登录自己的账号并连接GitHub，读取此文档和PR。获取上述分支最新源码再修改，不要只获取main。Node原生测试通过node --test tests/attendance-department.test.mjs tests/attendance.test.mjs tests/sop.test.mjs tests/native-system.test.mjs tests/legacy-integration.test.mjs tests/people-selection.test.mjs tests/inbound-flow.test.mjs运行；构建node worker-v2/build-sop-staging.mjs。后续新增测试也要运行。
 
 原电脑本地快照在work/ck-upgrade（无.git），临时脚本在work/，用户交接资料在outputs/，不应依赖这些路径在家中存在。GitHub分支更新会自动触发Cloudflare测试构建，必须确认构建成功再验收线上。源码提交前核对远程head以免覆盖并行修改。不要把本地鉴权、缓存或测试生成资产上传到仓库。
 

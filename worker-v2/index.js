@@ -1,3 +1,4 @@
+import { inboundFlowEnabled, inboundCode, validateInboundCode, resolveInboundPlan, putawayTaskBiz, completeUnloadedDispositions, bindInboundCode, inboundLabels } from './inbound-flow.js';
 import { handleAttendance, guardAttendance } from './attendance.js';
 import { workPlanStatements } from './sop-planning.js';
 import { handleSop, guardLegacy, linkedNeeds, linkedCheck, outboundNeedStatements } from './sop.js';
@@ -3702,6 +3703,7 @@ route("v2_inbound_plan_create", async (body, env) => {
     return err("biz_classes 至少选择一个业务类型（代发/大货/退件）/ 업무 유형을 1개 이상 선택하세요");
   }
   return withIdem(env, body, "v2_inbound_plan_create", async () => {
+    const externalNo = await validateInboundCode(env,bizNorm.list,body.external_inbound_no);
     const id = "IB-" + uid();
     const t = now();
     const plan_date = String(body.plan_date || kstToday());
@@ -3713,8 +3715,8 @@ route("v2_inbound_plan_create", async (body, env) => {
 
     const inboundStatements = [env.DB.prepare(`
       INSERT INTO v2_inbound_plans(id, plan_date, customer, biz_class, biz_classes_json, cargo_summary,
-        expected_arrival, purpose, remark, status, created_by, created_at, updated_at, display_no)
-      VALUES(?,?,?,?,?,?,?,?,?,'pending',?,?,?,?)
+        expected_arrival, purpose, remark, status, created_by, created_at, updated_at, display_no, external_inbound_no)
+      VALUES(?,?,?,?,?,?,?,?,?,'pending',?,?,?,?,?)
     `).bind(
       id, plan_date,
       customer, biz_class, biz_classes_json,
@@ -3722,7 +3724,7 @@ route("v2_inbound_plan_create", async (body, env) => {
       normalizeDateOnly(body.expected_arrival),
       String(body.purpose || ""),
       String(body.remark || ""),
-      created_by, t, t, display_no
+      created_by, t, t, display_no, externalNo
     )];
 
     // 为每个业务类型创建一条 biz_task（pending）
@@ -3985,10 +3987,10 @@ async function recalcInboundPlanCompletion(env, plan_id, t, opts) {
   if (plan.source_type === 'return_session') return plan.status;
 
   const activeUnload = await env.DB.prepare(
-    "SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type='unload' AND status IN ('pending','working') LIMIT 1"
+    "SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type='unload' AND status IN ('pending','working','awaiting_close') LIMIT 1"
   ).bind(plan_id).first();
   const otherInbound = await env.DB.prepare(
-    "SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type IN ('inbound_direct','inbound_bulk','inbound_return','inbound_change_order') AND status IN ('pending','working') LIMIT 1"
+    "SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type IN ('inbound_direct','inbound_bulk','inbound_return','inbound_change_order') AND status IN ('pending','working','awaiting_close') LIMIT 1"
   ).bind(plan_id).first();
 
   // 卸货还在 → 不进入完成态。若仍有理货并行 → unloading_putting_away；否则 unloading
@@ -4002,13 +4004,14 @@ async function recalcInboundPlanCompletion(env, plan_id, t, opts) {
     return next;
   }
 
+  await completeUnloadedDispositions(env,plan_id,ts);
   const tasks = await listInboundPlanBizTasks(env, plan_id);
   if (tasks.length > 0) {
     const completedCnt = tasks.filter(x => x.status === 'completed').length;
     const allCompleted = (completedCnt === tasks.length);
     const someCompleted = (completedCnt > 0);
     let next;
-    if (allCompleted) {
+    if (allCompleted && !otherInbound) {
       // 所有 biz 已完成 → 整单 completed
       next = 'completed';
     } else if (someCompleted) {
@@ -4403,18 +4406,20 @@ route("v2_inbound_plan_ops_candidates", async (body, env) => {
   for (const p of rows) {
     // 修复后若不再属于 unload 候选状态 → 跳过
     if (scene === 'unload' && ['pending','unloading','unloading_putting_away'].indexOf(p.status) === -1) continue;
-    if (scene !== 'unload' && required_biz_class) {
+    const taskBiz=scene==='putaway'?putawayTaskBiz(env,p,required_biz_class||'direct_ship'):required_biz_class;
+    if(scene==='putaway'&&inboundFlowEnabled(env)&&!taskBiz)continue;
+    if (scene !== 'unload' && taskBiz) {
       await ensureInboundPlanBizTasks(env, p);
       const biz_classes = extractPlanBizClasses(p);
-      if (biz_classes.indexOf(required_biz_class) === -1) {
+      if (biz_classes.indexOf(taskBiz) === -1) {
         // 老数据兼容：如果 plan.biz_class 命中但不在 list（例如 import），跳过
-        if (p.biz_class !== required_biz_class) continue;
+        if (p.biz_class !== taskBiz) continue;
       }
       const tasks = await listInboundPlanBizTasks(env, p.id);
       const pending = tasks.filter(x => x.status !== 'completed').map(x => x.biz_class);
       // 如果存在 task：要求 required_biz_class 仍 pending
       // 如果无 task（极旧老数据）：放行（沿用旧 biz_class= 比对）
-      if (tasks.length > 0 && pending.indexOf(required_biz_class) === -1) continue;
+      if (tasks.length > 0 && pending.indexOf(taskBiz) === -1) continue;
     }
     items.push({
       ...p,
@@ -4431,6 +4436,7 @@ route("v2_inbound_resolve_code", async (body, env) => {
   const code = String(body.code || "").trim();
   const biz_class = String(body.biz_class || "").trim();
   if (!code) return err("missing code");
+  if(inboundFlowEnabled(env))return json(await resolveInboundPlan(env,code,biz_class));
 
   // 先探测：是否存在但已被软删除（"误转正回滚"产物）→ 现场扫码给清晰提示
   const probeDel = await env.DB.prepare(
@@ -4559,10 +4565,11 @@ route("v2_inbound_plan_update", async (body, env) => {
     }
     const biz_class = bizNorm.primary;
     const biz_classes_json = JSON.stringify(bizNorm.list);
+    const externalNo = await validateInboundCode(env,bizNorm.list,body.external_inbound_no ?? plan.external_inbound_no,id);
 
     await env.DB.prepare(
       `UPDATE v2_inbound_plans SET plan_date=?, customer=?, biz_class=?, biz_classes_json=?,
-        cargo_summary=?, expected_arrival=?, purpose=?, remark=?, updated_at=? WHERE id=?`
+        cargo_summary=?, expected_arrival=?, purpose=?, remark=?, external_inbound_no=?, updated_at=? WHERE id=?`
     ).bind(
       String(body.plan_date || plan.plan_date),
       String(body.customer || plan.customer),
@@ -4571,7 +4578,7 @@ route("v2_inbound_plan_update", async (body, env) => {
       normalizeDateOnly(body.expected_arrival != null ? body.expected_arrival : (plan.expected_arrival || "")),
       String(body.purpose != null ? body.purpose : (plan.purpose || "")),
       String(body.remark != null ? body.remark : (plan.remark || "")),
-      t, id
+      externalNo, t, id
     ).run();
 
     // biz_tasks 同步：pending 可增删；completed 不允许删
@@ -4619,6 +4626,11 @@ route("v2_inbound_plan_update", async (body, env) => {
 });
 
 // ===== 入库计划：记账标记 =====
+route("v2_inbound_plan_bind_external", async (body, env) => {
+  if (!inboundFlowEnabled(env) || !isAdmin(body,env)) return err("unauthorized",401);
+  return withIdem(env,body,"v2_inbound_plan_bind_external",()=>bindInboundCode(env,body));
+});
+
 route("v2_inbound_plan_mark_accounted", async (body, env) => {
   if (!isAuth(body, env)) return err("unauthorized", 401);
   const id = String(body.id || "").trim();
@@ -4863,6 +4875,8 @@ route("v2_inbound_dynamic_finalize", async (body, env) => {
     const bizNorm = normalizeInboundBizClasses({ biz_classes: body.biz_classes, biz_class: body.biz_class || plan.biz_class });
     const biz_class = bizNorm.primary || String(body.biz_class || plan.biz_class || "").trim();
     const biz_classes_json = bizNorm.list.length > 0 ? JSON.stringify(bizNorm.list) : (plan.biz_classes_json || '[]');
+    const externalNo=await validateInboundCode(env,bizNorm.list,body.external_inbound_no??plan.external_inbound_no,id);
+    if(inboundFlowEnabled(env)&&!bizNorm.list.length)throw Error("请选择入库业务分类");
     const cargo_summary = String(body.cargo_summary || plan.cargo_summary || "").trim();
     const expected_arrival = normalizeDateOnly(body.expected_arrival || plan.expected_arrival || "");
     const purpose = String(body.purpose || plan.purpose || "").trim();
@@ -4870,9 +4884,10 @@ route("v2_inbound_dynamic_finalize", async (body, env) => {
 
     await env.DB.prepare(`
       UPDATE v2_inbound_plans SET customer=?, biz_class=?, biz_classes_json=?, cargo_summary=?,
-        expected_arrival=?, purpose=?, remark=?, status='completed',
+        expected_arrival=?, purpose=?, remark=?, status=?, external_inbound_no=?,
         needs_info_update=0, updated_at=? WHERE id=?
-    `).bind(customer, biz_class, biz_classes_json, cargo_summary, expected_arrival, purpose, remark, t, id).run();
+    `).bind(customer, biz_class, biz_classes_json, cargo_summary, expected_arrival, purpose, remark,
+        inboundFlowEnabled(env)?'arrived_pending_putaway':'completed',externalNo,t,id).run();
 
     const newLines = body.lines || [];
     if (newLines.length > 0) {
@@ -4888,7 +4903,9 @@ route("v2_inbound_dynamic_finalize", async (body, env) => {
     // 同步 biz_task：写完毕（与 status='completed' 对齐）
     const updatedPlan = await env.DB.prepare("SELECT * FROM v2_inbound_plans WHERE id=?").bind(id).first();
     await ensureInboundPlanBizTasks(env, updatedPlan);
-    for (const biz of extractPlanBizClasses(updatedPlan)) {
+    if(inboundFlowEnabled(env)){
+      await recalcInboundPlanCompletion(env,id,t);
+    }else for (const biz of extractPlanBizClasses(updatedPlan)) {
       await markInboundBizTaskCompleted(env, id, biz, {
         completed_by: '(legacy_dynamic_finalize)'
       });
@@ -5204,6 +5221,8 @@ route("v2_feedback_finalize_to_inbound", async (body, env) => {
     const bizNorm = normalizeInboundBizClasses({ biz_classes: body.biz_classes, biz_class: body.biz_class });
     const biz_class = bizNorm.primary || String(body.biz_class || "").trim();
     const biz_classes_json = bizNorm.list.length > 0 ? JSON.stringify(bizNorm.list) : '[]';
+    const externalNo=await validateInboundCode(env,bizNorm.list,body.external_inbound_no);
+    if(inboundFlowEnabled(env)&&!bizNorm.list.length)throw Error("请选择入库业务分类");
     const cargo_summary = String(body.cargo_summary || "").trim();
     const expected_arrival = normalizeDateOnly(body.expected_arrival);
     const purpose = String(body.purpose || "").trim();
@@ -5212,11 +5231,11 @@ route("v2_feedback_finalize_to_inbound", async (body, env) => {
 
     await env.DB.prepare(`
       INSERT INTO v2_inbound_plans(id, plan_date, customer, biz_class, biz_classes_json, cargo_summary,
-        expected_arrival, purpose, remark, status, source_feedback_id, created_by, created_at, updated_at, display_no, source_type)
-      VALUES(?,?,?,?,?,?,?,?,?,'arrived_pending_putaway',?,?,?,?,?,'from_feedback')
+        expected_arrival, purpose, remark, status, source_feedback_id, created_by, created_at, updated_at, display_no, source_type, external_inbound_no, unload_completed_at, unload_completed_by)
+      VALUES(?,?,?,?,?,?,?,?,?,'arrived_pending_putaway',?,?,?,?,?,'from_feedback',?,?,?)
     `).bind(plan_id, plan_date, customer, biz_class, biz_classes_json, cargo_summary,
         expected_arrival, purpose, remark,
-        feedback_id, created_by, t, t, display_no).run();
+        feedback_id, created_by, t, t, display_no, externalNo, fb.completed_at||t, fb.completed_by||created_by).run();
 
     // 初始化 biz_tasks（pending）
     for (const biz of bizNorm.list) {
@@ -5243,6 +5262,7 @@ route("v2_feedback_finalize_to_inbound", async (body, env) => {
       UPDATE v2_field_feedbacks SET status='converted', inbound_plan_id=?, updated_at=? WHERE id=?
     `).bind(plan_id, t, feedback_id).run();
 
+    if(inboundFlowEnabled(env))await recalcInboundPlanCompletion(env,plan_id,t);
     return { ok: true, inbound_plan_id: plan_id, display_no };
   });
 });
@@ -5604,6 +5624,12 @@ route("v2_inbound_job_start", async (body, env) => {
 
   return withIdem(env, body, "v2_inbound_job_start", async () => {
     let plan_id = String(body.plan_id || "").trim();
+    if(inboundFlowEnabled(env)&&isStandard&&!plan_id){
+      const found=await resolveInboundPlan(env,external_inbound_no,biz_class);
+      if(found.kind!=='system')return {ok:false,error:'inbound_reference_invalid',message:found.message};
+      plan_id=found.plan.id;
+    }
+    if(inboundFlowEnabled(env)&&job_type==='inbound_change_order')return {ok:false,error:'inbound_change_order_removed',message:'换单计划卸货完成后自动入库，无需再次理货'};
     const t = now();
     const today = kstToday();
 
@@ -5616,9 +5642,13 @@ route("v2_inbound_job_start", async (body, env) => {
         return { ok: false, error: "plan_status_invalid", message: "当前状态不可开始理货 / 현재 상태에서 입고 불가, current: " + plan.status };
       }
       // 业务类型校验：当前 biz 必须在计划的 biz_classes_json 内（或老数据 biz_class 单值匹配）
+      if(inboundFlowEnabled(env)&&Number(plan.is_deleted||0))return {ok:false,error:'plan_deleted'};
+      const taskBiz=putawayTaskBiz(env,plan,biz_class);
+      if(inboundFlowEnabled(env)&&!taskBiz)return {ok:false,error:'putaway_not_required',message:'此计划卸货完成后自动入库，无需理货'};
+      if(inboundFlowEnabled(env)&&external_inbound_no&&inboundCode(plan.external_inbound_no)!==inboundCode(external_inbound_no))return {ok:false,error:'external_code_mismatch',message:'外部单号与所选计划不一致'};
       const biz_classes = extractPlanBizClasses(plan);
-      const inList = biz_classes.indexOf(biz_class) !== -1;
-      const legacyMatch = (plan.biz_class === biz_class);
+      const inList = biz_classes.indexOf(taskBiz) !== -1;
+      const legacyMatch = (plan.biz_class === taskBiz);
       if (!inList && !legacyMatch) {
         const have = biz_classes.length ? biz_classes.join('/') : (plan.biz_class || '');
         return { ok: false, error: "biz_class_mismatch", message: "plan biz_classes mismatch: plan=" + have + " req=" + biz_class };
@@ -5627,7 +5657,7 @@ route("v2_inbound_job_start", async (body, env) => {
       await ensureInboundPlanBizTasks(env, plan);
       const taskRow = await env.DB.prepare(
         "SELECT status FROM v2_inbound_plan_biz_tasks WHERE plan_id=? AND biz_class=?"
-      ).bind(plan_id, biz_class).first();
+      ).bind(plan_id, taskBiz).first();
       if (taskRow && taskRow.status === 'completed') {
         return { ok: false, error: "biz_task_already_completed", message: "该入库计划的此业务类型已完成入库" };
       }
@@ -5699,7 +5729,7 @@ route("v2_inbound_job_start", async (body, env) => {
         ).bind(plan_id).first();
         if (!rp) return { ok: false, error: "return session not found" };
         if (rp.status !== 'putting_away') return { ok: false, error: "return session status invalid: " + rp.status };
-        if (rp.biz_class !== 'return') return { ok: false, error: "not a return session" };
+        if (rp.biz_class !== 'return' || (inboundFlowEnabled(env) && rp.source_type !== 'return_session')) return { ok: false, error: "not a return session" };
       }
     } else {
       return { ok: false, error: "missing plan_id" };
@@ -5849,7 +5879,9 @@ route("v2_inbound_job_finish", async (body, env) => {
         }
 
         // 标记该业务类型的 biz_task 完成
-        const biz_for_task = mapInboundJobTypeToBiz(jobRow.job_type) || jobRow.biz_class || '';
+        const currentPlan=await env.DB.prepare('SELECT * FROM v2_inbound_plans WHERE id=?').bind(pid).first();
+        const originalBiz=mapInboundJobTypeToBiz(jobRow.job_type) || jobRow.biz_class || '';
+        const biz_for_task=putawayTaskBiz(env,currentPlan,originalBiz)||originalBiz;
         if (biz_for_task) {
           // 汇总参与人员 + 总分钟，写入 biz_task
           const wkRs = await env.DB.prepare(
@@ -6396,11 +6428,11 @@ route("v2_inbound_plan_export", async (body, env) => {
     const pendingBiz = tasks.filter(t => t.status !== 'completed').map(t => t.biz_class);
     // 入库类型执行状态明细：代发入库=已完成/EMP-xxx/2026-04-30 10:20；大货入库=未完成
     const taskDetail = tasks.map(t => {
-      const lbl = _INBOUND_BIZ_LABEL_ZH[t.biz_class] || t.biz_class;
+      const lbl = (inboundFlowEnabled(env)?inboundLabels:_INBOUND_BIZ_LABEL_ZH)[t.biz_class] || t.biz_class;
       if (t.status === 'completed') {
         const who = t.worker_names || t.completed_by || '';
         const at = t.completed_at ? fmtKst(t.completed_at) : '';
-        const src = t.completion_source === 'manual_force' ? '(手动)' : '';
+        const src = t.completion_source === 'manual_force' ? '(手动)' : t.completion_source==='unload'?'(卸货完成自动入库)':'';
         return `${lbl}=已完成${src}/${who}/${at}`;
       } else {
         return `${lbl}=未完成`;
@@ -6419,10 +6451,10 @@ route("v2_inbound_plan_export", async (body, env) => {
       外部WMS单号: p.external_inbound_no || '',
       计划日期: p.plan_date || '',
       客户: p.customer || '',
-      状态: _statusLabelZh(p.status),
-      业务分类: _bizListLabelZh(bizArr),
-      已完成入库类型: completedBiz.map(b => _BIZ_LABEL_ZH[b] || b).join('+'),
-      未完成入库类型: pendingBiz.map(b => _BIZ_LABEL_ZH[b] || b).join('+'),
+      状态: inboundFlowEnabled(env)&&p.status==='completed'?'已入库':_statusLabelZh(p.status),
+      业务分类: inboundFlowEnabled(env)?bizArr.map(b=>inboundLabels[b]||b).join('+'):_bizListLabelZh(bizArr),
+      已完成入库类型: completedBiz.map(b => (inboundFlowEnabled(env)?inboundLabels:_BIZ_LABEL_ZH)[b] || b).join('+'),
+      未完成入库类型: pendingBiz.map(b => (inboundFlowEnabled(env)?inboundLabels:_BIZ_LABEL_ZH)[b] || b).join('+'),
       入库类型执行状态明细: taskDetail,
       货物摘要: p.cargo_summary || '',
       用途: p.purpose || '',
@@ -7142,20 +7174,22 @@ route("v2_feedback_convert_to_inbound", async (body, env) => {
   const bizNorm = normalizeInboundBizClasses({ biz_classes: body.biz_classes, biz_class: body.biz_class });
   const biz_class = bizNorm.primary || String(body.biz_class || "");
   const biz_classes_json = bizNorm.list.length > 0 ? JSON.stringify(bizNorm.list) : '[]';
+  const externalNo=await validateInboundCode(env,bizNorm.list,body.external_inbound_no);
+  if(inboundFlowEnabled(env)&&!bizNorm.list.length)throw Error("请选择入库业务分类");
   const created_by = String(body.created_by || "");
   const display_no = await nextDisplayNo(env, plan_date);
 
   await env.DB.prepare(`
     INSERT INTO v2_inbound_plans(id, plan_date, customer, biz_class, biz_classes_json, cargo_summary,
-      expected_arrival, purpose, remark, status, source_feedback_id, created_by, created_at, updated_at, display_no)
-    VALUES(?,?,?,?,?,?,?,?,?,'pending',?,?,?,?,?)
+      expected_arrival, purpose, remark, status, source_feedback_id, created_by, created_at, updated_at, display_no, external_inbound_no)
+    VALUES(?,?,?,?,?,?,?,?,?,'pending',?,?,?,?,?,?)
   `).bind(
     id, plan_date, customer, biz_class, biz_classes_json,
     String(body.cargo_summary || fb.title || ""),
     normalizeDateOnly(body.expected_arrival),
     String(body.purpose || ""),
     String(body.remark || fb.content || ""),
-    feedback_id, created_by, t, t, display_no
+    feedback_id, created_by, t, t, display_no, externalNo
   ).run();
 
   // 初始化 biz_tasks（pending）

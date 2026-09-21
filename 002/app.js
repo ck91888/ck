@@ -2375,7 +2375,7 @@ async function loadInboundList() {
     // 多业务类型 tag（兼容老数据：列表后端注入 biz_classes，缺则回退 biz_class 单值）
     var bizArr = (p.biz_classes && p.biz_classes.length) ? p.biz_classes : (p.biz_class ? [p.biz_class] : []);
     for (var bi = 0; bi < bizArr.length; bi++) {
-      html += '<span class="biz-tag biz-' + esc(bizArr[bi]) + '" style="margin-right:4px;">' + esc(bizLabel(bizArr[bi])) + '</span>';
+      html += '<span class="biz-tag biz-' + esc(bizArr[bi]) + '" style="margin-right:4px;">' + esc((window.CKInboundLabel ? CKInboundLabel(bizArr[bi]) : bizLabel(bizArr[bi]))) + '</span>';
     }
     html += ' ' + esc(p.display_no || p.id) + ' · ' + esc(p.customer || "--") + ' · ' + esc(p.cargo_summary || "");
     html += '</div>';
@@ -2603,7 +2603,7 @@ async function submitInbound(btnEl) {
   if (!customer) { alert("请填写客户 / 고객을 입력하세요"); return; }
   // 业务类型至少选一个
   var bizArr = getIbcBizClasses();
-  if (bizArr.length === 0) { alert("请至少选择一个业务类型（代发/大货/退件）/ 업무 유형을 1개 이상 선택하세요"); return; }
+  if (bizArr.length === 0) { alert("请至少选择一个入库业务分类 / 입고 유형을 1개 이상 선택하세요"); return; }
   // 严格校验：必须至少有一行 planned_qty>0 的明细
   var linesPre = getIbcLines();
   if (linesPre.length === 0) { alert("请至少填写一行货物明细 / 화물 명세를 1건 이상 입력하세요"); return; }
@@ -2814,7 +2814,7 @@ async function loadInboundDetail() {
                      ((p.biz_classes && p.biz_classes.length) ? p.biz_classes : (p.biz_class ? [p.biz_class] : []));
   var bizTagsHtml = '';
   for (var dbi = 0; dbi < detailBizArr.length; dbi++) {
-    bizTagsHtml += '<span class="biz-tag biz-' + esc(detailBizArr[dbi]) + '" style="margin-right:4px;">' + esc(bizLabel(detailBizArr[dbi])) + '</span>';
+    bizTagsHtml += '<span class="biz-tag biz-' + esc(detailBizArr[dbi]) + '" style="margin-right:4px;">' + esc((window.CKInboundLabel ? CKInboundLabel(detailBizArr[dbi]) : bizLabel(detailBizArr[dbi]))) + '</span>';
   }
   html += '<div><b>' + L("biz_class") + ':</b> ' + (bizTagsHtml || '--') + '</div>';
   html += '<div><b>' + L("plan_date") + ':</b> ' + esc(p.plan_date) + '</div>';
@@ -2920,8 +2920,8 @@ async function loadInboundDetail() {
       var stClass = (t.status === 'completed') ? 'st-completed' : 'st-pending';
       var stText = (t.status === 'completed') ? (getLang() === 'ko' ? '완료' : '已完成') : (getLang() === 'ko' ? '미완료' : '未完成');
       html += '<tr>';
-      html += '<td><span class="biz-tag biz-' + esc(t.biz_class) + '">' + esc(bizLabel(t.biz_class)) + '</span></td>';
-      html += '<td>' + esc(inboundBizTaskLabel(t.biz_class)) + '</td>';
+      html += '<td><span class="biz-tag biz-' + esc(t.biz_class) + '">' + esc(window.CKInboundLabel ? CKInboundLabel(t.biz_class) : bizLabel(t.biz_class)) + '</span></td>';
+      html += '<td>' + esc(window.CKInboundLabel && p.source_type !== 'return_session' && p.source_type !== 'external_inbound' ? (t.biz_class === 'direct_ship' ? '现场理货入库 / 현장 검수·입고' : '卸货后自动入库 / 하차 후 자동 입고') : inboundBizTaskLabel(t.biz_class)) + '</td>';
       html += '<td><span class="st ' + stClass + '">' + esc(stText) + '</span></td>';
       // 完成人优先显示 worker_names（姓名串），fallback 到 completed_by（worker_id）
       var doneBy = t.worker_names || t.completed_by || '';
@@ -3944,7 +3944,7 @@ async function printIbQr() {
   linesHtml+='</tbody></table>';
 
   var bizMap = { direct_ship: '直发/직배송', bulk: '大货/대량', return_op: '退件/반품', inventory_op: '库内/창고' };
-  var bizText = (plan.biz_classes||[plan.biz_class]).map(function(b){return bizMap[b]||b;}).join('、');
+  var bizText = (plan.biz_classes||[plan.biz_class]).map(function(b){return window.CKInboundLabel ? CKInboundLabel(b) : (bizMap[b]||b);}).join('、');
 
   var html = '<!doctype html><html><head><meta charset="utf-8"/><title>' + esc(displayNo) + '</title>' +
     '<style>' +
@@ -3982,6 +3982,7 @@ async function printIbQr() {
       '<div><span class="label">客户：</span>' + esc(plan.customer || '') + '</div>' +
       '<div><span class="label">提出人：</span>' + esc(plan.created_by || '') + '</div>' +
       '<div><span class="label">业务分类：</span>' + esc(bizText) + '</div>' +
+      (window.CKInboundLabel ? '<div><span class="label">外部系统入库单号：</span>' + esc(plan.external_inbound_no || '—') + '</div>' : '') +
       (plan.remark ? '<div><span class="label">备注：</span>' + esc(plan.remark) + '</div>' : '') +
       (plan.purpose ? '<div style="grid-column:1/-1;"><span class="label">入库目的：</span>' + esc(plan.purpose) + '</div>' : '') +
     '</div>' +

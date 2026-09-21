@@ -91,14 +91,14 @@ test('existing uploaded batch retains identity and evidence while items and roun
 test('inbound bundles zero/multiple textual needs and multiple planned outbounds atomically',async()=>{
  const {login,call,get,change,DB,env}=setup();await login();
  const base={customer:'虚拟BD',biz_classes:['bulk','direct_ship'],lines:[{unit_type:'box',planned_qty:50}]};
- const plain=await call('v2_inbound_plan_create',base);assert.equal(plain.ok,true,plain.error);assert.equal(plain.needs.length,0);
+ const plain=await call('v2_inbound_plan_create',{...base,external_inbound_no:'FIXTURE-PLAIN'});assert.equal(plain.ok,true,plain.error);assert.equal(plain.needs.length,0);
  const work={title:'1–15打托',scope_text:'BD0921001–15',instructions:'1–15打托并反馈明细',department:'bulk',planned_quantity:15,planned_unit:'箱',outbounds:[{quantity:5,outbound_mode:'customer_pickup',expected_ship_at:'2026-09-25'},{quantity:10,outbound_mode:'customer_pickup',expected_ship_at:'2026-09-26'}]};
- const payload={...base,client_req_id:'bundle-idempotent',work_requests:[work,{title:'16–30散箱',instructions:'散箱出库',planned_quantity:15,planned_unit:'箱'},{title:'31–50代发',instructions:'入库代发',department:'direct_ship',planned_quantity:20,planned_unit:'箱'}]};
+ const payload={...base,external_inbound_no:'FIXTURE-BUNDLE',client_req_id:'bundle-idempotent',work_requests:[work,{title:'16–30散箱',instructions:'散箱出库',planned_quantity:15,planned_unit:'箱'},{title:'31–50代发',instructions:'入库代发',department:'direct_ship',planned_quantity:20,planned_unit:'箱'}]};
  const r=await call('v2_inbound_plan_create',payload);assert.equal(r.ok,true,r.error);assert.equal(r.needs.length,3);assert.equal(r.outbounds.length,2);
  assert.equal((await call('v2_inbound_plan_create',payload)).id,r.id);
  const nd=await get(r.needs[0].id);assert.equal(nd.source_id,r.id);assert.equal(nd.links[0].phase,'planned');assert.match(await guardLegacy({action:'v2_outbound_load_start',order_id:r.outbounds[0].id},env),/尚未/);
  const count=DB.raw.prepare('SELECT count(*) n FROM v2_inbound_plans').get().n;
- const bad=await call('v2_inbound_plan_create',{...base,work_requests:[{...work,outbounds:[{quantity:16,outbound_mode:'customer_pickup',expected_ship_at:'2026-09-25'}]}]});assert.equal(bad.ok,false);assert.equal(DB.raw.prepare('SELECT count(*) n FROM v2_inbound_plans').get().n,count,'invalid bundle leaves no orphan inbound');
+ const bad=await call('v2_inbound_plan_create',{...base,external_inbound_no:'FIXTURE-INVALID',work_requests:[{...work,outbounds:[{quantity:16,outbound_mode:'customer_pickup',expected_ship_at:'2026-09-25'}]}]});assert.equal(bad.ok,false);assert.equal(DB.raw.prepare('SELECT count(*) n FROM v2_inbound_plans').get().n,count,'invalid bundle leaves no orphan inbound');
  const task=await call('sop_task_create',{department:'bulk',need_id:nd.id,title:nd.title,job_type:'bulk_op',workers:[{id:'A',name:'甲'},{id:'B',name:'乙'}],lead_id:'A',estimated_minutes:30});assert.equal(task.ok,true,task.error);
  assert.equal((await change('sop_task_start',task.id)).ok,true);
  const result={quantity:15,unit:'箱',pallet_count:3,label_count:15,description:'完成打托',location:'内场'};
