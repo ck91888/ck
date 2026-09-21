@@ -91,7 +91,7 @@ export async function handleSop(b,env) {
  const auth=env.SOP_REQUEST_USER ? {ok:true,user:env.SOP_REQUEST_USER} : authorization(b,env); if(!auth.ok) return auth;
  const u=auth.user;
  try {
-  if(env.SOP_ACCEPT_NEW==='false' && /_create$|_adopt$|_from_outbound$/.test(b.action))fail('新版已暂停接收新任务，现有任务仍可收尾');
+  if(env.SOP_ACCEPT_NEW==='false' && (/_create$|_adopt$|_from_outbound$/.test(b.action)||b.action==='sop_task_dispatch'))fail('新版已暂停接收新任务，现有任务仍可收尾');
   if(b.action==='sop_session') return {ok:true,user:{id:u.id,name:u.name,role:u.role,departments:u.departments||[]},mode:env.SOP_ENVIRONMENT||'pilot'};
   if(b.action==='sop_field_resolve') {
    const code=required(b.code,'作业单号').split('|'),id=code[0]==='CKWORK'?code[1]:code[0];
@@ -191,6 +191,7 @@ export async function handleSop(b,env) {
     result:null,review:null,round:1,delegates:[],waiting_reason:'',pause_reason:''};
    const flow={bulk_op:'order_op',pick_direct:'order_op',pack_direct:'internal',unload:'unload',load_outbound:'outbound',inbound_bulk:'inbound',inbound_direct:'inbound',inbound_return:'inbound',qc:'internal',scan_pallet:'import',load_import:'import',pickup_delivery_import:'import'}[data.job_type]||'internal';
    const extra=[stmt(env,`INSERT INTO v2_ops_jobs(id,flow_stage,biz_class,job_type,related_doc_type,related_doc_id,status,created_by,created_at,updated_at,active_worker_count) VALUES(?,?,?,?,?,?,'pending',?,?,?,0)`,row.id,flow,department,data.job_type,need?.data.source_type==='inbound'?'inbound_plan':need?.data.source_type==='outbound'?'outbound_order':'sop_need',need?.data.source_id||data.need_id,u.id,t,t)];
+   data.customer=need?.data.customer||'';extra.push(stmt(env,'UPDATE v2_ops_jobs SET customer=? WHERE id=?',data.customer,row.id));
    if(b.action==='sop_task_dispatch'){if(department!=='bulk')fail('此作业属于其他部门，请从对应现场入口办理');if(!need)fail('请先扫描作业需求');data.status='working';data.started_at=t;for(const w of workers)extra.push(stmt(env,"INSERT INTO v2_ops_job_workers(id,job_id,worker_id,worker_name,joined_at) VALUES(?,?,?,?,?)",uid('WS'),row.id,w.id,w.name,t));extra.push(stmt(env,"UPDATE v2_ops_jobs SET status='working',active_worker_count=? WHERE id=?",workers.length,row.id));}
    if(need){const nd={...need.data,status:'assigned',task_id:row.id};appendRelated(env,extra,key+'-need',u,need,nd,b.action,t);}
    return await save(env,b,u,row,data,extra);
@@ -263,7 +264,7 @@ export async function handleSop(b,env) {
     const result=b.result||{}; const quantity=positive(result.quantity);const unit=required(result.unit,'成果单位');
     const counts={};for(const field of ['label_count','packed_count','operated_box_count','pallet_count','used_carton_large_count','used_carton_small_count','packed_sku_count','repaired_box_count','reboxed_count','forklift_location_count']){const v=Number(result[field]||0);if(!Number.isSafeInteger(v)||v<0)fail('工耗数量必须为非负整数');counts[field]=v;}
     if(d.need_id){const need=await read(env,d.need_id);const planned=(need?.data.links||[]).filter(x=>x.phase==='planned');if(planned.some(x=>x.unit!==unit)||planned.reduce((n,x)=>n+x.quantity,0)>quantity)fail('实际成果不足以覆盖预先关联的出库计划，请先核实出库安排');}
-    d.result={quantity,unit,...counts,used_forklift:!!result.used_forklift,description:required(result.description,'操作明细'),location:required(result.location,'货物位置'),finished_at:t,by:u.name};
+    d.result={quantity,unit,...counts,packed_box_count:counts.packed_count,total_operated_box_count:counts.operated_box_count,customer:d.customer||'',used_forklift:!!result.used_forklift,description:required(result.description,'操作明细'),location:required(result.location,'货物位置'),finished_at:t,by:u.name};
     d.status='awaiting_review';extra.push(...closeSegments(env,row.id,t,'operation_finished'),stmt(env,"UPDATE v2_ops_jobs SET status='awaiting_close',shared_result_json=?,updated_at=? WHERE id=?",JSON.stringify(d.result),t,row.id));
    }
    if(b.action==='sop_task_review'||b.action==='sop_task_complete_review') {
