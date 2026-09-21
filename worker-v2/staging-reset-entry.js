@@ -74,6 +74,6 @@ export async function resetGate(request,env,time=new Date().toISOString()){
 }
 export default {async fetch(request,env,ctx){
  try{const response=await resetGate(request,env);if(response)return response;}
- catch(error){console.error('Staging reset stopped',error.message);return reply({ok:false,maintenance:true,error:'测试数据清理未完成，请等待核实。正常业务操作暂未执行。'});}
+ catch(error){console.error('Staging reset stopped',error.message);return reply({ok:false,maintenance:true,error:'测试数据清理未完成，请等待核实。正常业务操作暂未执行。',detail:new URL(request.url).pathname==='/api/maintenance-20260921'?error.message:undefined});}
  return app.fetch(request,env,ctx);
 }};
