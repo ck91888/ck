@@ -22,6 +22,7 @@ export const RESET_TABLES=[
 // agency choices, app code/configuration, and R2 files referenced by the archive.
 const reply=(value,status=503)=>Response.json(value,{status,headers:{'Cache-Control':'no-store','Retry-After':'2'}});
 const query=(env,sql,...args)=>env.DB.prepare(sql).bind(...args);
+async function tableCounts(env,tables){const result=[];for(let i=0;i<tables.length;i+=10){const part=tables.slice(i,i+10);result.push(...(await query(env,part.map(name=>`SELECT '${name}' AS table_name,COUNT(*) AS count FROM "${name}"`).join(' UNION ALL ')).all()).results);}return result;}
 export async function resetGate(request,env,time=new Date().toISOString()){
  const url=new URL(request.url);
  if(env.SOP_ENVIRONMENT!=='staging'||env.SOP_UPGRADE_ENABLED!=='true'||
@@ -59,14 +60,14 @@ export async function resetGate(request,env,time=new Date().toISOString()){
   }
   done=(await query(env,'SELECT * FROM ck_staging_reset_tables WHERE run_id=?',RESET_ID).all()).results;
   if(tables.every(name=>done.some(x=>x.table_name===name))){
-   const counts=(await query(env,tables.map(name=>`SELECT '${name}' AS table_name,COUNT(*) AS count FROM "${name}"`).join(' UNION ALL ')).all()).results;
+   const counts=await tableCounts(env,tables);
    if(counts.some(x=>x.count!==0))throw Error('Unexpected writes during reset; preserved and require review');
    await query(env,"UPDATE ck_staging_reset_runs SET completed_at=? WHERE id=? AND completed_at=''",time,RESET_ID).run();
   }
  }
  const latest=await query(env,'SELECT * FROM ck_staging_reset_runs WHERE id=?',RESET_ID).first();
  if(report){
-  const counts=(await query(env,tables.map(name=>`SELECT '${name}' AS table_name,COUNT(*) AS count FROM "${name}"`).join(' UNION ALL ')).all()).results;
+  const counts=await tableCounts(env,tables);
   return reply({ok:true,maintenance:!latest.completed_at,run:latest,tables_done:done.length,tables_total:tables.length,archived_rows:done.reduce((n,x)=>n+x.row_count,0),tables:done,remaining:counts,preserved:['accounts','agencies','v2_003_locations','v2_schema_meta','archived attachment files']},latest.completed_at?200:503);
  }
  if(latest.completed_at)return null;
