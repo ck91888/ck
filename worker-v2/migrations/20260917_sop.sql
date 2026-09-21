@@ -16,13 +16,14 @@ BEGIN
  THEN RAISE(ABORT,'revision_conflict') END;
 END;
 -- Only SOP-owned tasks are protected; existing historic duplicate segments are not changed.
-CREATE TRIGGER IF NOT EXISTS sop_worker_busy_guard BEFORE INSERT ON v2_ops_job_workers
+DROP TRIGGER IF EXISTS sop_worker_busy_guard;
+CREATE TRIGGER sop_worker_busy_guard BEFORE INSERT ON v2_ops_job_workers
 WHEN NEW.left_at='' OR NEW.left_at IS NULL
 BEGIN
  SELECT CASE WHEN EXISTS (
   SELECT 1 FROM v2_ops_job_workers w
   WHERE w.worker_id=NEW.worker_id AND w.left_at=''
-  AND (EXISTS(SELECT 1 FROM sop_records WHERE id=NEW.job_id AND kind='task')
-       OR EXISTS(SELECT 1 FROM sop_records WHERE id=w.job_id AND kind='task'))
+  AND (EXISTS(SELECT 1 FROM sop_records WHERE id=NEW.job_id AND kind IN ('task','dispatch'))
+       OR EXISTS(SELECT 1 FROM sop_records WHERE id=w.job_id AND kind IN ('task','dispatch')))
  ) THEN RAISE(ABORT,'worker_busy') END;
 END;

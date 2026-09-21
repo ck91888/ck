@@ -1,24 +1,32 @@
 import { mkdir, copyFile, readFile, writeFile, rm } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
-
-const here = dirname(fileURLToPath(import.meta.url));
-const root = resolve(here, '..');
-const out = resolve(here, '.sop-staging-assets');
-// Publish only this explicit asset list, never repository files or secrets.
-await rm(out, { recursive: true, force: true });
-await mkdir(resolve(out, 'sop'), { recursive: true });
-await mkdir(resolve(out, 'shared'), { recursive: true });
-for (const file of ['index.html', 'style.css', 'app.js']) {
-  await copyFile(resolve(root, 'sop', file), resolve(out, 'sop', file));
+const here=dirname(fileURLToPath(import.meta.url)),root=resolve(here,'..'),out=resolve(here,'.sop-staging-assets');
+await rm(out,{recursive:true,force:true});await mkdir(out,{recursive:true});
+// Explicit original application allowlist. Never publish server code or credentials.
+const apps=['001','002','003','shuju'];
+const shared=['html5-qrcode.min.js','xlsx.full.min.js','qrcode.min.js','sop-entry.js','sop-native.js','sop-native.css','sop-session.js','sop-dispatch-ui.js'];
+await mkdir(resolve(out,'shared'),{recursive:true});
+for(const f of shared)await copyFile(resolve(root,'shared',f),resolve(out,'shared',f));
+await writeFile(resolve(out,'shared/sop-rollout.js'),"window.CK_SOP_ROLLOUT={enabled:true,staging:true};\nwindow.SOP_API=location.origin+'/api';\n");
+const head='<link rel="stylesheet" href="/shared/sop-native.css"><script src="/shared/sop-rollout.js"></script><script src="/shared/sop-session.js"></script>';
+for(const app of apps){
+ await mkdir(resolve(out,app),{recursive:true});
+ for(const f of ['index.html','app.js','config.js','style.css']){
+  let content=await readFile(resolve(root,app,f),'utf8');
+  if(f==='config.js')content=content.replace(/var V2_API\s*=\s*"[^"]+";/,"var V2_API=location.origin+'/api';").replace(/var OPS_KEY\s*=\s*"[^"]+";/,"var OPS_KEY='';");
+  if(f==='index.html'){
+   content=content.replace(/<script src="\.\.\/shared\/sop-(entry|rollout)\.js[^\"]*"><\/script>/g,'');
+   const libraries=['html5-qrcode.min.js','xlsx.full.min.js'].filter(name=>!content.includes(name)).map(name=>'<script src="/shared/'+name+'"></script>').join('');
+   content=content.replace('</head>',head+'</head>').replace('</body>',libraries+'<script src="/shared/sop-native.js"></script><script src="/shared/sop-dispatch-ui.js"></script><script src="/shared/sop-entry.js"></script></body>');
+  }
+  await writeFile(resolve(out,app,f),content);
+ }
 }
-for (const file of ['html5-qrcode.min.js', 'xlsx.full.min.js']) {
-  await copyFile(resolve(root, 'shared', file), resolve(out, 'shared', file));
-}
-await writeFile(resolve(out, 'sop/config.js'), "window.SOP_API = location.origin + '/api';\n");
-const page = resolve(out, 'sop/index.html');
-const html = await readFile(page, 'utf8');
-await writeFile(page, html.replace('<main>', '<main><p role="note" style="padding:12px;background:#fff0c2;color:#563b00;font-weight:bold">独立测试环境 · 仅使用虚拟订单和测试人员 / 테스트 전용</p>'));
-await writeFile(resolve(out, '_redirects'), '/ /sop/ 302\n');
-await writeFile(resolve(out, '_headers'), '/sop/*\n  Cache-Control: no-store\n');
-console.log('Prepared isolated SOP test assets; API uses same-origin /api.');
+let home=await readFile(resolve(root,'index.html'),'utf8');
+home=home.replace('<body>','<body class="ck-stage-home">').replace('</head>',head+'</head>').replace('</body>','<script src="/shared/sop-entry.js"></script></body>');
+await writeFile(resolve(out,'index.html'),home);
+await copyFile(resolve(root,'docs/sop-acceptance.html'),resolve(out,'验收说明.html'));
+await writeFile(resolve(out,'_redirects'),'/sop/ / 302\n/sop / 302\n');
+await writeFile(resolve(out,'_headers'),'/*\n  Cache-Control: no-store\n  X-Content-Type-Options: nosniff\n  Referrer-Policy: same-origin\n');
+console.log('Prepared original 001/002/003/shuju applications with isolated same-origin API.');

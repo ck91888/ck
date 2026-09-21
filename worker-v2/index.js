@@ -1,4 +1,7 @@
-import { handleSop, guardLegacy, linkedNeeds, outboundNeedStatements } from './sop.js';
+import { handleSop, guardLegacy, linkedNeeds, linkedCheck, outboundNeedStatements } from './sop.js';
+import { sessionUser, sessionAction } from './sop-session.js';
+import { prepareDemo } from './sop-demo.js';
+import { startNative, nativeOwner } from './sop-dispatch.js';
 /**
  * CK Warehouse V2 — Backend Workerer
  * Independent from V1. Uses v2_ table prefix in same D1 database.
@@ -480,6 +483,7 @@ function parseOpsResultForExport(job_type, resultRows) {
 }
 
 function isAuth(body, env) {
+  if (env.SOP_ENVIRONMENT === 'staging' && env.SOP_REQUEST_USER?.role === 'manager') return true;
   const k = String(body.k || "").trim();
   const secret = String(env.ADMINKEY || "").trim();
   if (secret && k && k === secret) return true;
@@ -489,6 +493,7 @@ function isAuth(body, env) {
 }
 
 function isAdmin(body, env) {
+  if (env.SOP_ENVIRONMENT === 'staging' && env.SOP_REQUEST_USER?.role === 'manager') return true;
   const k = String(body.k || "").trim();
   const secret = String(env.ADMINKEY || "").trim();
   return !!(secret && k && k === secret);
@@ -2769,7 +2774,7 @@ route("v2_outbound_order_create", async (body, env) => {
       `).bind("OBL-" + uid(), id, i + 1, String(ln.sku || ""), Number(ln.quantity || 0), String(ln.remark || "")));
     }
 
-    creationStatements.push(...outboundNeedStatements(env,body,id,display_no,t));
+    creationStatements.push(...await outboundNeedStatements(env,body,id,display_no,t));
     await env.DB.batch(creationStatements);
     return { ok: true, id, display_no };
   });
@@ -5002,7 +5007,7 @@ route("v2_unplanned_unload_finish", async (body, env) => {
       return { ok: true, left: true };
     }
 
-    if (realCount > 0) {
+    if (realCount > 0 && !env.SOP_GROUP_FINISH) {
       return { ok: false, error: "others_still_working",
         message: "您已退出此任务，还有 " + realCount + " 人继续作业",
         active_worker_count: realCount };
@@ -5416,7 +5421,7 @@ route("v2_unload_job_finish", async (body, env) => {
     const job = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
     if (!job) return { ok: false, error: "job not found" };
 
-    if (realCount > 0) {
+    if (realCount > 0 && !env.SOP_GROUP_FINISH) {
       return { ok: false, error: "others_still_working",
         message: "您已退出此任务，还有 " + realCount + " 人继续作业",
         active_worker_count: realCount };
@@ -5805,7 +5810,7 @@ route("v2_inbound_job_finish", async (body, env) => {
     ).bind(JSON.stringify(resultData), t, job_id).run();
 
     if (complete_job) {
-      if (realCount > 0) {
+      if (realCount > 0 && !env.SOP_GROUP_FINISH) {
         return { ok: false, error: "others_still_working",
           message: "您已退出此任务，还有 " + realCount + " 人继续作业",
           active_worker_count: realCount };
@@ -5959,7 +5964,7 @@ route("v2_import_delivery_job_finish", async (body, env) => {
     ).bind(JSON.stringify(resultData), t, job_id).run();
 
     if (complete_job) {
-      if (realCount > 0) {
+      if (realCount > 0 && !env.SOP_GROUP_FINISH) {
         return { ok: false, error: "others_still_working",
           message: "您已退出此任务，还有 " + realCount + " 人继续作业",
           active_worker_count: realCount };
@@ -8237,7 +8242,7 @@ route("v2_bulk_op_job_finish", async (body, env) => {
     const realCount = await recalcActiveCount(env, job_id, t);
 
     // 3. If others still working, this worker has been kicked out
-    if (realCount > 0) {
+    if (realCount > 0 && !env.SOP_GROUP_FINISH) {
       return { ok: false, error: "others_still_working",
         message: "您已退出此工单，还有 " + realCount + " 人继续作业",
         active_worker_count: realCount };
@@ -9764,6 +9769,7 @@ route("v2_verify_batch_list", async (body, env) => {
       abnormal_count: Number(s.abnormal_count || 0)
     };
   });
+  for(const item of items){const check=await linkedCheck(env,item.id);if(check){item.ship_date=check.ship_date;item.sop_check_id=check.id;item.scanned_ok_count=check.summary.scanned;item.abnormal_count=check.summary.pending+check.summary.unresolved;item.planned_qty=check.summary.planned;}}
   return json({ ok: true, items, ...pageMeta(total, limit, offset) });
 });
 
@@ -9798,6 +9804,8 @@ route("v2_verify_batch_detail", async (body, env) => {
   const logs = logsRs.results || [];
   const okByBc = {};
   (okByBcRs.results || []).forEach(r => { okByBc[r.barcode] = Number(r.c || 0); });
+  const currentCheck=await linkedCheck(env,id);
+  if(currentCheck){for(const key of Object.keys(okByBc))delete okByBc[key];for(const item of currentCheck.items.filter(x=>!x.removed))okByBc[item.barcode]=item.scanned;batch.ship_date=currentCheck.ship_date;batch.sop_check_id=currentCheck.id;}
 
   // 预聚合：每个 barcode 的托盘集合 / 最后扫描时间&人
   const barcodeMeta = {};
@@ -12447,7 +12455,7 @@ export default {
     const url = new URL(request.url);
 
     // Handle attachment file GET
-    if (url.pathname === "/file" && request.method === "GET") {
+    if (["/file", "/api/file"].includes(url.pathname) && request.method === "GET") {
       const fileKey = url.searchParams.get("key") || "";
       if (!fileKey) return err("missing key");
       const obj = await env.R2_BUCKET.get(fileKey);
@@ -12481,6 +12489,21 @@ export default {
     }
 
     const action = String(body.action || "").trim();
+
+    // Staging reuses the original pages and routes under one personal session.
+    // The principal is supplied only by a verified HttpOnly cookie, never request JSON.
+    env = { ...env, SOP_REQUEST_USER: await sessionUser(request, env) };
+    const authResponse = await sessionAction(body, env);
+    if (authResponse) return authResponse;
+    if(action==='sop_native_start'){
+      try{return json(await startNative(body,env,async input=>(await HANDLERS[input.action](input,env)).json(),guardLegacy));}
+      catch(e){return json({ok:false,error:e.message},400);}
+    }
+    env.SOP_GROUP_FINISH = /_finish$/.test(action) && !body.leave_only && await nativeOwner(body,env);
+    if(action==='sop_demo_prepare'){
+      try{return json(await prepareDemo(env,async input=>{const response=await HANDLERS[input.action](input,env);return response.json();},input=>handleSop(input,env)));}
+      catch(e){return json({ok:false,error:'虚拟数据准备失败：'+e.message},400);}
+    }
 
     // Special handling for multipart upload — formData already parsed above, pass it directly
     if (action === "v2_attachment_upload" || isMultipart) {

@@ -61,7 +61,7 @@ test('one requirement one task, approval to customer waiting, partial outbound a
  const {call,DB}=setup();const n=await call('sop_need_create',{department:'bulk',title:'清点',customer:'C',owner:'D',instructions:'100箱'});assert.equal(n.ok,true,n.error);
  const t=await task(call,{need_id:n.id});assert.equal((await call('sop_task_create',{department:'bulk',title:'再次',job_type:'bulk_op',need_id:n.id,workers:[{id:'W2',name:'乙'}],lead_id:'W2',estimated_minutes:20})).ok,false);
  await mutate(call,'sop_task_start',t.id);await mutate(call,'sop_task_finish',t.id,{result:{quantity:100,unit:'箱',description:'已清点',location:'A'}});await mutate(call,'sop_task_review',t.id,{decision:'pass',reason:'全检通过'});
- assert.equal((await get(call,n.id)).status,'waiting_customer');DB.raw.exec("INSERT INTO v2_outbound_orders(id,customer) VALUES('OB1','C'),('OB2','C')");
+ assert.equal((await get(call,n.id)).status,'waiting_customer');DB.raw.exec("INSERT INTO v2_outbound_orders(id,customer,biz_class) VALUES('OB1','C','bulk'),('OB2','C','bulk')");
  assert.equal((await mutate(call,'sop_need_link',n.id,{outbound_id:'OB1',quantity:60})).ok,true);
  assert.equal((await get(call,n.id)).status,'waiting_customer');assert.equal((await mutate(call,'sop_need_link',n.id,{outbound_id:'OB1',quantity:20})).ok,false);
  assert.equal((await mutate(call,'sop_need_link',n.id,{outbound_id:'OB2',quantity:50})).ok,false);
@@ -115,7 +115,7 @@ test('automatic outbound creates exactly one canonical need; changing shipping d
  env.SOP_AUTO_OUTBOUND='true';env.SOP_ROLLOUT_DEPARTMENTS='bulk';
  const body={customer:'C',biz_class:'bulk',uses_stock_operation:1,instruction:'清点',created_by:'客服'};
  DB.raw.exec("INSERT INTO v2_outbound_orders(id,customer,instruction,uses_stock_operation) VALUES('OB-AUTO','C','清点',1)");
- await DB.batch(outboundNeedStatements(env,body,'OB-AUTO','0901','2026-09-17T00:00:00Z'));
+ await DB.batch(await outboundNeedStatements(env,body,'OB-AUTO','0901','2026-09-17T00:00:00Z'));
  const need=await get(call,'NEED-OB-AUTO');assert.equal(need.instructions,'清点');
  assert.ok(await guardLegacy({action:'v2_outbound_stock_op_start',order_id:'OB-AUTO'},env));
  assert.equal(await guardLegacy({action:'v2_outbound_order_update',id:'OB-AUTO',instruction:'清点',uses_stock_operation:1,pickup_vehicle_no:'A'},env),null);
