@@ -8,15 +8,15 @@ const entry=new URLSearchParams(options);
 const labels={need:'作业需求 / 작업 요청',task:'负责人派工 / 작업 배정',issue:'问题沟通 / 이슈',check:'出库核对 / 출고 확인',dashboard:'管理看板 / 관리 현황'};
 const departments={bulk:'大货 / 대량',direct_ship:'代发 / 출고대행',import:'进口 / 수입'};
 const states={pending:'待安排',assigned:'已分配',working:'作业中',paused:'已暂停',awaiting_review:'待审核',rework:'待整改',completed:'审核通过',waiting_customer:'待客户安排',linked:'已关联出库',closed:'已关闭',cancelled:'已作废',open:'处理中',responded:'已反馈'};
-let user=window.CKSession?.user,tab=Object.hasOwn(labels,entry.get('tab'))?entry.get('tab'):'need',offset=0,current=null,scanner=null,people=[],poll=null,listSnapshot='',currentGroup='';
-async function api(action,data={}){return window.CKSession.request(action,data);}
-function notice(s){$('notice').textContent=s;}
+let user=window.CKSession?.user,tab=Object.hasOwn(labels,entry.get('tab'))?entry.get('tab'):'need',offset=0,current=null,scanner=null,staffPicker=null,poll=null,listSnapshot='',currentGroup='';
+async function api(action,data={}){const result=await window.CKSession.request(action,data);if(destroyed)throw Error('页面已切换');return result;}
+function notice(s){if(!destroyed)$('notice').textContent=s;}
 function btn(label,fn,cls=''){const b=document.createElement('button');b.textContent=label;b.className=cls;b.type='button';b.onclick=()=>Promise.resolve().then(fn).catch(e=>notice(e.message));return b;}
 function input(name,label,type='text',value='',required=true){return `<label>${esc(label)}<input name="${name}" type="${type}" value="${esc(value)}" ${required?'required':''}></label>`;}
 function area(name,label,value='',required=true){return `<label>${esc(label)}<textarea name="${name}" ${required?'required':''}>${esc(value)}</textarea></label>`;}
 function select(name,label,values,value=''){return `<label>${esc(label)}<select name="${name}">${Object.entries(values).map(([k,v])=>`<option value="${esc(k)}" ${k===value?'selected':''}>${esc(v)}</option>`).join('')}</select></label>`;}
 function depInput(){const ds=user.role==='manager'?departments:Object.fromEntries((user.departments||[]).map(k=>[k,departments[k]||k]));return select('department','部门 / 부서',ds);}
-async function closeModal(){if(scanner){await scanner.stop().catch(()=>{});scanner=null;}$('modal').close();}
+async function closeModal(){const modal=$('modal'),picker=staffPicker;staffPicker=null;if(picker)await picker.destroy();if(scanner){await scanner.stop().catch(()=>{});scanner=null;}modal?.close();}
 // Retry the identical request after a transport error. Never create a second mutation id.
 function form(title,html,action,build,after){
  $('editorTitle').textContent=title;$('fields').innerHTML=html;$('formError').textContent='';$('save').disabled=false;
@@ -66,14 +66,10 @@ function create(kind){current=null;
  if(kind==='check')form('建立出库日期总清单',input('ship_date','出库日期','date'),'sop_check_create',v=>v,r=>detail(r.id));
  if(kind==='issue')form('接入现有问题',input('legacy_id','现有问题系统ID')+'<p class="warn">只接入没有正在进行处理轮次的问题。接入后统一在新版沟通，历史保留。</p>','sop_issue_adopt',v=>v,r=>detail(r.id));
 }
-function peopleFields(existing=[]){people=existing.slice();return `<label>扫描工牌 / 명찰<input id="badge" placeholder="EMP-001|姓名"></label><div class="toolbar"><button type="button" id="addBadge">添加工牌</button><button type="button" id="camera">打开相机 / 카메라</button></div><div id="scanner"></div><div id="people"></div><label>主操作员<select name="lead_id" id="lead" required></select></label>`;}
-function setupPeople(lead){const render=()=>{$('people').innerHTML='';for(const w of people){const s=document.createElement('span');s.className='badge';s.textContent=w.name+' ('+w.id+') ';const b=btn('移除',()=>{people=people.filter(x=>x.id!==w.id);render();},'light');b.type='button';s.append(b);$('people').append(s);}$('lead').innerHTML=people.map(w=>`<option value="${esc(w.id)}" ${w.id===lead?'selected':''}>${esc(w.name)}</option>`).join('');};
- const add=raw=>{const parts=raw.trim().split('|');if(parts.length!==2||!parts[0]||!parts[1])throw Error('工牌格式应为 工号|姓名');if(people.some(x=>x.id===parts[0]))return;people.push({id:parts[0],name:parts[1]});render();$('badge').value='';};
- $('addBadge').onclick=()=>{try{add($('badge').value);}catch(e){$('formError').textContent=e.message;}};
- $('badge').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();$('addBadge').click();}};
- $('camera').onclick=async()=>{try{if(scanner){await scanner.stop();scanner=null;return;}scanner=new Html5Qrcode('scanner');await scanner.start({facingMode:'environment'},{fps:8,qrbox:220},s=>{try{add(s);}catch(e){$('formError').textContent=e.message;}},()=>{});}catch(e){$('formError').textContent='无法打开相机，可用扫码枪或手动输入工牌';scanner=null;}};render();}
+function peopleFields(){return CKPeopleFields();}
+function setupPeople(leadId='',workers=[]){staffPicker=CKPeoplePicker($('fields'),{workers,leadId,error:$('formError')});}
 function taskForm(need){const types={bulk_op:'大货操作',unload:'卸货',load_outbound:'装货',inbound_bulk:'大货理货上架',inbound_direct:'代发入库',pick_direct:'代发拣货',pack_direct:'代发打包',inbound_return:'退件',qc:'质检',scan_pallet:'进口扫码码托',pickup_delivery_import:'取送货',load_import:'装柜',other_internal:'跨组支援／整理'};
- form('负责人创建任务','<p>关联作业需求在此派工；卸货、入库、拣货、装货等带原单据业务，请从现场首页对应入口派工，以完成单据状态回写。</p>'+depInput()+input('title','任务名称','text',need?.title||'')+select('job_type','作业类型',{bulk_op:types.bulk_op,other_internal:types.other_internal})+input('need_id','关联作业需求','text',need?.id||'',false)+input('estimated_minutes','预计操作分钟','number','30')+input('deadline','预计完成时间','datetime-local','',false)+input('location','作业位置','text',need?.location||'',false)+peopleFields(),'sop_task_create',v=>({...v,workers:people}),r=>detail(r.id));setupPeople();if(need){$('editor').elements.department.value=need.department;$('editor').elements.need_id.readOnly=true;}}
+ form('负责人创建任务','<p>关联作业需求在此派工；卸货、入库、拣货、装货等带原单据业务，请从现场首页对应入口派工，以完成单据状态回写。</p>'+depInput()+input('title','任务名称','text',need?.title||'')+select('job_type','作业类型',{bulk_op:types.bulk_op,other_internal:types.other_internal})+input('need_id','关联作业需求','text',need?.id||'',false)+input('estimated_minutes','预计操作分钟','number','30')+input('deadline','预计完成时间','datetime-local','',false)+input('location','作业位置','text',need?.location||'',false)+peopleFields(),'sop_task_create',v=>({...v,...staffPicker.read()}),r=>detail(r.id));setupPeople();if(need){$('editor').elements.department.value=need.department;$('editor').elements.need_id.readOnly=true;}}
 async function detail(id,individual=false){const r=await api('sop_get',{id});if(r.record.kind==='need'&&!individual)return groupDetail({need_id:id});current=r.record;if(current.kind!=='need')currentGroup='';const x=current;$('updates').textContent='';const c=$('content');c.innerHTML=`<article><h2>${esc(x.title)} <span class="status">${esc(states[x.status]||x.status)}</span></h2><p>${esc(departments[x.department])} · ${esc(x.owner||'')} · ${esc(x.id)} · 版本 ${x.revision}</p><p>${esc(x.instructions||'')}</p><p>位置：${esc(x.location||'—')}　期限：${esc(x.deadline||'—')}</p><div class="actions" id="actions"></div></article><section id="detailBody"></section>`;
  const a=$('actions');a.append(btn(currentGroup?'← 返回本批作业指令':'返回列表',()=>currentGroup?groupDetail({group_key:currentGroup}):options.back?options.back():load(),'light'));
  const action=(label,action,html,build=v=>v)=>user.role==='viewer'?null:a.append(btn(label,()=>form(label,html,action,build)));
@@ -97,7 +93,7 @@ async function detail(id,individual=false){const r=await api('sop_get',{id});if(
   $('detailBody').innerHTML=`<article><h3>实际参与人员</h3><p>${x.workers.map(w=>esc(w.name)+(w.id===x.lead_id?'〔主操作员〕':'')).join('、')}</p><p>预计 ${x.estimated_minutes} 分钟；作业轮次 ${x.round}</p>${x.pause_reason?`<p class="warn">暂停原因：${esc(x.pause_reason)}</p>`:''}${x.result?`<h3>完成结果</h3><p>${esc(x.result.quantity)} ${esc(x.result.unit)} · ${esc(x.result.description)}</p><p>${esc(x.result.location)}</p>`:''}${x.review?`<p>审核：${esc(x.review.by)} · ${esc(x.review.reason)}</p>`:''}</article>`;
   if(['assigned','paused','rework'].includes(x.status))action('开始／继续作业','sop_task_start','<p>确认人员已经到位，从提交成功开始记录工时。</p>');
   if(['assigned','working','paused','rework'].includes(x.status)){
-   a.append(btn('调整参与人员',()=>{form('调整人员',peopleFields(x.workers)+input('reason','调整原因'),'sop_task_people',v=>({...v,workers:people}));setupPeople(x.lead_id);}));
+   a.append(btn('调整参与人员',()=>{form('调整人员',peopleFields(x.workers)+input('reason','调整原因'),'sop_task_people',v=>({...v,...staffPicker.read()}));setupPeople(x.lead_id,x.workers);}));
    action('授权本任务代办','sop_task_delegate',input('delegate_id','已配置派工权限的人员ID'));
   }
   if(x.status==='working'){action('报告并暂停','sop_task_pause',area('reason','暂停原因'));action('操作完成，交审核','sop_task_finish',input('quantity','完成数量','number')+select('unit','单位',{件:'件',箱:'箱',托:'托',单:'单',批:'批'})+[['label_count','贴标数量'],['packed_count','打包数量'],['operated_box_count','操作箱数'],['pallet_count','打托数'],['used_carton_large_count','大纸箱用量'],['used_carton_small_count','小纸箱用量']].map(([key,label])=>input(key,label,'number','0')).join('')+area('description','实际完成明细（贴标／打包／耗材等）')+input('location','货物实际位置'),v=>({result:v}));}

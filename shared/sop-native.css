@@ -7,6 +7,7 @@
 .ck-workflow{padding:12px;color:#203249;font:15px/1.55 'Microsoft YaHei',sans-serif;overflow-wrap:anywhere}
 .ck-workflow [hidden]{display:none!important}.ck-workflow input,.ck-workflow select,.ck-workflow textarea{box-sizing:border-box;min-width:0;max-width:100%}
 .ck-inline-heading{padding:14px;margin:12px 0;border-left:4px solid #2f6bb3;background:#edf4ff}.ck-inline-heading button{margin:4px;padding:8px 12px;cursor:pointer}
+.ck-workflow [data-staff-scanner]{max-width:340px;margin:8px auto}.ck-workflow [data-staff-count]{font-weight:700}.ck-workflow [data-staff-status]:not(:empty){padding:8px;background:#eef5fc;color:#234c74;border-radius:4px}.ck-buttons [aria-pressed=true]{background:#285786;color:#fff}
 .ck-updates{padding:12px;background:#fff1ce;color:#804100;border:1px solid #ebc776;margin:8px 12px}
 .ck-cross-nav{display:flex;flex-wrap:wrap;gap:12px;padding:10px 14px;background:#f0f3f7;font-size:14px}.ck-cross-nav a{color:#245d98}
 @media(max-width:600px){.ck-workflow{padding:8px}.ck-workflow button{min-height:44px}.ck-workflow article{padding:12px}.ck-workflow td,.ck-workflow th{min-width:80px}.ck-stage-banner{font-size:12px}.ck-workflow .split{display:block}}

@@ -5,7 +5,7 @@ const here=dirname(fileURLToPath(import.meta.url)),root=resolve(here,'..'),out=r
 await rm(out,{recursive:true,force:true});await mkdir(out,{recursive:true});
 // Explicit original application allowlist. Never publish server code or credentials.
 const apps=['001','002','003','shuju'];
-const shared=['html5-qrcode.min.js','xlsx.full.min.js','qrcode.min.js','sop-entry.js','sop-native.js','sop-native.css','sop-session.js','sop-dispatch-ui.js','sop-planning-ui.js'];
+const shared=['html5-qrcode.min.js','xlsx.full.min.js','qrcode.min.js','sop-entry.js','sop-native.js','sop-native.css','sop-session.js','sop-dispatch-ui.js','sop-planning-ui.js','sop-people.js'];
 await mkdir(resolve(out,'shared'),{recursive:true});
 for(const f of shared)await copyFile(resolve(root,'shared',f),resolve(out,'shared',f));
 await writeFile(resolve(out,'shared/sop-rollout.js'),"window.CK_SOP_ROLLOUT={enabled:true,staging:true,publicAccess:true};\nwindow.SOP_API=location.origin+'/api';\n");
@@ -18,7 +18,7 @@ for(const app of apps){
   if(f==='index.html'){
    content=content.replace(/<script src="\.\.\/shared\/sop-(entry|rollout)\.js[^\"]*"><\/script>/g,'');
    const libraries=['html5-qrcode.min.js','xlsx.full.min.js'].filter(name=>!content.includes(name)).map(name=>'<script src="/shared/'+name+'"></script>').join('');
-   content=content.replace('</head>',head+'</head>').replace('</body>',libraries+'<script src="/shared/sop-planning-ui.js"></script><script src="/shared/sop-native.js"></script><script src="/shared/sop-dispatch-ui.js"></script><script src="/shared/sop-entry.js"></script></body>');
+   content=content.replace('</head>',head+'</head>').replace('</body>',libraries+'<script src="/shared/sop-planning-ui.js"></script><script src="/shared/sop-people.js"></script><script src="/shared/sop-native.js"></script><script src="/shared/sop-dispatch-ui.js"></script><script src="/shared/sop-entry.js"></script></body>');
   }
   await writeFile(resolve(out,app,f),content);
  }
@@ -30,3 +30,4 @@ await copyFile(resolve(root,'docs/sop-acceptance.html'),resolve(out,'验收说�
 await writeFile(resolve(out,'_redirects'),'/sop/ / 302\n/sop / 302\n');
 await writeFile(resolve(out,'_headers'),'/*\n  Cache-Control: no-store\n  X-Content-Type-Options: nosniff\n  Referrer-Policy: same-origin\n');
 console.log('Prepared original 001/002/003/shuju applications with isolated same-origin API.');
+

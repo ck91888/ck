@@ -81,12 +81,19 @@
    window.CKInstallDispatch();
    const tasks=document.createElement('section');tasks.className='ck-inline-heading';tasks.innerHTML='<b>现场在途任务（点击继续原单据操作）</b><div class="ck-buttons"></div>';document.getElementById('page-home').append(tasks);
    window.initHome=async()=>{CKClearNativeJob();document.getElementById('myTaskBar')?.classList.add('hidden');window._unloadPlanData=null;
-    try{const r=await request('sop_dispatch_list');const list=tasks.querySelector('.ck-buttons');list.replaceChildren();for(const job of r.items)list.append(button((window.JOB_TYPE_LABEL?.[job.job_type]||job.job_type)+' · '+job.workers.map(w=>w.name).join('、')+' · '+job.id,()=>CKOpenNativeJob(job)));if(!r.items.length)list.textContent='暂无原业务在途派工；关联作业请进入负责人派工与审核。';}catch(e){tasks.querySelector('.ck-buttons').textContent=e.message;}
+    try{const r=await request('sop_dispatch_list');const list=tasks.querySelector('.ck-buttons');list.replaceChildren();for(const job of r.items)list.append(button((window.JOB_TYPE_LABEL?.[job.job_type]||job.job_type)+' · '+job.workers.map(w=>w.name).join('、')+' · '+job.id,()=>CKOpenNativeJob(job)));if(!r.items.length)list.textContent='暂无原业务在途派工；关联作业请进入按单操作 → 大货操作。';}catch(e){tasks.querySelector('.ck-buttons').textContent=e.message;}
    };
 
    document.getElementById('headerWorker').textContent=u.name+' · 负责人';document.getElementById('headerWorker').onclick=()=>{};
    const dispatch=document.createElement('div');dispatch.id='page-dispatch';dispatch.className='page';dispatch.innerHTML='<button class="nav-back" type="button">← 现场首页</button><div id="ck-dispatch-body"></div>';document.body.append(dispatch);dispatch.querySelector('button').onclick=()=>showPage('home');
-   const home=document.querySelector('.home-grid');const b=document.createElement('div');b.className='home-btn accent';b.innerHTML='<div class="icon">👥</div><div class="label">负责人派工与审核</div><div class="label-ko">담당자 배정·검수</div>';b.onclick=()=>{showPage('dispatch');mount(document.getElementById('ck-dispatch-body'),{tab:'task',context:'field'});};home.prepend(b);
+   // The existing order-operation path owns bulk dispatch and review.
+   const bulkSection=document.createElement('section');bulkSection.className='ck-inline-heading';bulkSection.id='ck-bulk-dispatch';
+   bulkSection.innerHTML='<b>负责人派工与审核 / 담당자 배정·검수</b><div class="ck-buttons"></div><div id="ck-bulk-dispatch-body"></div>';
+   document.getElementById('bulkStateIdle').prepend(bulkSection);
+   let bulkView={tab:'task'};
+   const openBulk=view=>{bulkView=view;for(const b of bulkSection.querySelectorAll('[data-bulk-view]'))b.setAttribute('aria-pressed',String(b.dataset.bulkView===view.tab));return mount(document.getElementById('ck-bulk-dispatch-body'),{context:'field',...view});};
+   for(const [tab,label] of [['task','派工任务与审核 / 배정·검수'],['need','查看作业需求 / 작업 요청']]){const b=button(label,()=>openBulk({tab}));b.dataset.bulkView=tab;bulkSection.querySelector('.ck-buttons').append(b);}
+   const originalBulkInit=window.initBulkOp;window.initBulkOp=function(){originalBulkInit();bulkSection.hidden=!!window._activeJobId;if(!window._activeJobId)openBulk(bulkView);};
    wrap('loadIssueDetail',issuePanel);
    const verifyStart=window.startVerifyScan;window.startVerifyScan=async function(btn){
     const id=document.getElementById('vsBatchSelect')?.value;if(!id)return verifyStart(btn);
@@ -95,7 +102,7 @@
     }catch(e){alert(e.message);}
    };
    showPage('home');
-   if(params.get('task')||params.get('need')){showPage('dispatch');mount(document.getElementById('ck-dispatch-body'),{tab:params.get('task')?'task':'need',id:params.get('task')||params.get('need'),context:'field'});}
+   if(params.get('task')||params.get('need')){bulkView={tab:params.get('task')?'task':'need',id:params.get('task')||params.get('need')};showPage('bulk_op');}
   }else if(app==='shuju'){
    localStorage.removeItem(SHUJU_KEY_STORAGE);showApp();
    const b=button('派工质量与待办',()=>{document.querySelectorAll('.tab-content').forEach(x=>x.style.display='none');window._currentTab='sop';host.style.display='';mount(host,{tab:'dashboard',context:'dashboard'});});
@@ -113,3 +120,4 @@
  }
  setup().catch(e=>{document.documentElement.classList.remove('ck-auth-pending');const el=document.createElement('p');el.className='ck-updates';el.textContent='页面初始化失败：'+e.message;document.body.prepend(el);});
 })();
+

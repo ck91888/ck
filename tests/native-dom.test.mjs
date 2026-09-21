@@ -44,8 +44,10 @@ test('original collaboration buttons open integrated needs and verification edit
 });
 test('original field and dashboard integrate added controls',opts,async()=>{
  const f=await fixture(),p=await f.page('/001/');try{
- p.d.querySelector('.home-grid .home-btn.accent').click();await until(()=>p.d.querySelector('#ck-dispatch-body #content .toolbar button'),p.errors);
- p.d.querySelector('#ck-dispatch-body #content .toolbar button').click();await until(()=>p.d.querySelector('#ck-dispatch-body dialog').open,p.errors);assert.deepEqual(p.errors,[]);
+ assert.ok(!p.d.querySelector('.home-grid').textContent.includes('负责人派工与审核'));
+ p.w.goPage('order_op_menu');p.d.querySelector('#page-order_op_menu button[onclick="goPage(\'bulk_op\')"]').click();await until(()=>p.d.querySelector('#ck-bulk-dispatch-body #content .toolbar button'),p.errors);
+ assert.ok(p.d.querySelector('#page-bulk_op').classList.contains('active'));
+ p.d.querySelector('#ck-bulk-dispatch-body #content .toolbar button').click();await until(()=>p.d.querySelector('#ck-bulk-dispatch-body dialog').open,p.errors);assert.deepEqual(p.errors,[]);
  }finally{p.w.close();}
  const q=await f.page('/shuju/');try{Array.from(q.d.querySelectorAll('.tab-bar button')).find(x=>x.textContent==='派工质量与待办').click();await until(()=>q.d.querySelector('#ck-dashboard article'),q.errors);assert.deepEqual(q.errors,[]);}finally{q.w.close();}
 });
