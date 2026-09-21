@@ -1,3 +1,4 @@
+import { handleAttendance, guardAttendance } from './attendance.js';
 import { workPlanStatements } from './sop-planning.js';
 import { handleSop, guardLegacy, linkedNeeds, linkedCheck, outboundNeedStatements } from './sop.js';
 import { sessionUser, sessionAction } from './sop-session.js';
@@ -12503,6 +12504,10 @@ export default {
     env = { ...env, SOP_REQUEST_USER: await sessionUser(request, env) };
     const authResponse = await sessionAction(body, env);
     if (authResponse) return authResponse;
+    if(action.startsWith('sop_attendance_')){
+      try{return json(await handleAttendance(body,env));}catch(e){return json({ok:false,error:e.message},400);}
+    }
+    try{const attendanceBlock=await guardAttendance(body,env);if(attendanceBlock)return json({ok:false,error:attendanceBlock},409);}catch(e){return json({ok:false,error:e.message},400);}
     if(action==='sop_native_start'){
       try{return json(await startNative(body,env,async input=>(await HANDLERS[input.action](input,env)).json(),guardLegacy));}
       catch(e){return json({ok:false,error:e.message},400);}

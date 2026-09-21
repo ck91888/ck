@@ -13,6 +13,7 @@ export async function startNative(body,env,invoke,guard){
  if(!p.client_req_id)return {ok:false,error:'缺少请求编号'};
  const prior=await env.DB.prepare('SELECT response_json FROM v2_idempotency_keys WHERE idem_key=?').bind(p.client_req_id).first();
  const allowed=prior?JSON.parse(prior.response_json).job_id:null;
+ if(allowed){const existing=await env.DB.prepare("SELECT state FROM sop_records WHERE id=? AND kind='dispatch'").bind(allowed).first();if(existing){const saved=JSON.parse(existing.state);if(saved.owner_id!==u.id)return {ok:false,error:'此任务已有其他负责人'};return {...JSON.parse(prior.response_json),lead:saved.workers.find(w=>w.id===saved.lead_id),assigned_workers:saved.workers};}}
  for(const w of workers){const busy=await env.DB.prepare("SELECT job_id FROM v2_ops_job_workers WHERE worker_id=? AND left_at='' AND job_id!=? LIMIT 1").bind(w.id,allowed||'').first();if(busy)return {ok:false,error:w.name+'仍在另一任务中，请先办理人员交接'};}
  p.worker_id=lead.id;p.worker_name=lead.name;p.handler_id=lead.id;p.handler_name=lead.name;
  const blocked=await guard(p,env);if(blocked)return {ok:false,error:blocked};

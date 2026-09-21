@@ -93,6 +93,17 @@ export async function handleSop(b,env) {
  try {
   if(env.SOP_ACCEPT_NEW==='false' && /_create$|_adopt$|_from_outbound$/.test(b.action))fail('新版已暂停接收新任务，现有任务仍可收尾');
   if(b.action==='sop_session') return {ok:true,user:{id:u.id,name:u.name,role:u.role,departments:u.departments||[]},mode:env.SOP_ENVIRONMENT||'pilot'};
+  if(b.action==='sop_field_resolve') {
+   const code=required(b.code,'作业单号').split('|'),id=code[0]==='CKWORK'?code[1]:code[0];
+   let row=await read(env,id);if(!row||!['need','task'].includes(row.kind))fail('未找到作业需求，请扫描订单处理组打印的作业单');
+   permit(u,row.department,['manager','dispatcher','reviewer']);
+   let task=row.kind==='task'?row:row.data.task_id?await read(env,row.data.task_id):null;
+   const need=row.kind==='need'?row:row.data.need_id?await read(env,row.data.need_id):null;
+   if(need?.data.needs_clarification)fail('要求未补充完整，请联系订单处理组');
+   const segments=task?await all(env,'SELECT worker_id,worker_name,joined_at,left_at,leave_reason FROM v2_ops_job_workers WHERE job_id=? ORDER BY joined_at',task.id):[];
+   let source=null;if(need?.data.source_id&&['inbound','outbound'].includes(need.data.source_type))source=await verifySource(env,need.data.source_type,need.data.source_id);
+   return {ok:true,need:need?publicState(need):null,task:task?publicState(task):null,source:source?{id:source.id,number:source.display_no||source.id,customer:source.customer}:null,segments,changed:code[0]==='CKWORK'&&Number(code[2])!==(need?.data.requirement_version||1)};
+  }
   if(b.action==='sop_need_groups')return await needGroups(env,u,b);
   if(b.action==='sop_list') {
    if(!kinds.includes(b.kind)) fail('无效类别');
@@ -166,7 +177,7 @@ export async function handleSop(b,env) {
    // save owns the requirement's event and record; optional outbound statements precede them.
    return await save(env,b,u,row,data,bundle.statements.slice(0,-2));
   }
-  if(b.action==='sop_task_create') {
+  if(b.action==='sop_task_create'||b.action==='sop_task_dispatch') {
    const department=required(b.department,'部门');permit(u,department,['manager','dispatcher']);
    const workers=validateWorkers(b.workers,b.lead_id);
    let need=null;
@@ -180,6 +191,7 @@ export async function handleSop(b,env) {
     result:null,review:null,round:1,delegates:[],waiting_reason:'',pause_reason:''};
    const flow={bulk_op:'order_op',pick_direct:'order_op',pack_direct:'internal',unload:'unload',load_outbound:'outbound',inbound_bulk:'inbound',inbound_direct:'inbound',inbound_return:'inbound',qc:'internal',scan_pallet:'import',load_import:'import',pickup_delivery_import:'import'}[data.job_type]||'internal';
    const extra=[stmt(env,`INSERT INTO v2_ops_jobs(id,flow_stage,biz_class,job_type,related_doc_type,related_doc_id,status,created_by,created_at,updated_at,active_worker_count) VALUES(?,?,?,?,?,?,'pending',?,?,?,0)`,row.id,flow,department,data.job_type,need?.data.source_type==='inbound'?'inbound_plan':need?.data.source_type==='outbound'?'outbound_order':'sop_need',need?.data.source_id||data.need_id,u.id,t,t)];
+   if(b.action==='sop_task_dispatch'){if(department!=='bulk')fail('此作业属于其他部门，请从对应现场入口办理');if(!need)fail('请先扫描作业需求');data.status='working';data.started_at=t;for(const w of workers)extra.push(stmt(env,"INSERT INTO v2_ops_job_workers(id,job_id,worker_id,worker_name,joined_at) VALUES(?,?,?,?,?)",uid('WS'),row.id,w.id,w.name,t));extra.push(stmt(env,"UPDATE v2_ops_jobs SET status='working',active_worker_count=? WHERE id=?",workers.length,row.id));}
    if(need){const nd={...need.data,status:'assigned',task_id:row.id};appendRelated(env,extra,key+'-need',u,need,nd,b.action,t);}
    return await save(env,b,u,row,data,extra);
   }
@@ -231,9 +243,10 @@ export async function handleSop(b,env) {
     if(!['assigned','working','paused','rework'].includes(d.status))fail('当前状态不能调整人员');
     const workers=validateWorkers(b.workers,b.lead_id);required(b.reason,'调整原因');
     if(d.status==='working') {
-     const removed=d.workers.filter(w=>!workers.some(n=>n.id===w.id));
+     const live=await all(env,"SELECT worker_id AS id FROM v2_ops_job_workers WHERE job_id=? AND left_at=''",row.id);
+     const removed=live.filter(w=>!workers.some(n=>n.id===w.id));
      for(const w of removed)extra.push(stmt(env,"UPDATE v2_ops_job_workers SET left_at=?,minutes_worked=MAX(0,ROUND((julianday(?)-julianday(joined_at))*1440,1)),leave_reason=? WHERE job_id=? AND worker_id=? AND left_at=''",t,t,text(b.reason),row.id,w.id));
-     for(const w of workers.filter(w=>!d.workers.some(o=>o.id===w.id)))extra.push(stmt(env,"INSERT INTO v2_ops_job_workers(id,job_id,worker_id,worker_name,joined_at) VALUES(?,?,?,?,?)",uid('WS'),row.id,w.id,w.name,t));
+     for(const w of workers.filter(w=>!live.some(o=>o.id===w.id)))extra.push(stmt(env,"INSERT INTO v2_ops_job_workers(id,job_id,worker_id,worker_name,joined_at) VALUES(?,?,?,?,?)",uid('WS'),row.id,w.id,w.name,t));
      extra.push(stmt(env,'UPDATE v2_ops_jobs SET active_worker_count=?,updated_at=? WHERE id=?',workers.length,t,row.id));
     }
     d.workers=workers;d.lead_id=text(b.lead_id);d.last_adjustment=text(b.reason);
@@ -245,14 +258,15 @@ export async function handleSop(b,env) {
    } else if(b.action==='sop_task_pause') {
     if(d.status!=='working')fail('只有作业中可以暂停');d.status='paused';d.pause_reason=required(b.reason,'暂停原因');
     extra.push(...closeSegments(env,row.id,t,'pause:'+d.pause_reason),stmt(env,"UPDATE v2_ops_jobs SET status='paused' WHERE id=?",row.id));
-   } else if(b.action==='sop_task_finish') {
+   } else if(b.action==='sop_task_finish'||b.action==='sop_task_complete_review') {
     if(d.status!=='working')fail('只有作业中可以完成');
     const result=b.result||{}; const quantity=positive(result.quantity);const unit=required(result.unit,'成果单位');
-    const counts={};for(const field of ['label_count','packed_count','operated_box_count','pallet_count','used_carton_large_count','used_carton_small_count']){const v=Number(result[field]||0);if(!Number.isSafeInteger(v)||v<0)fail('工耗数量必须为非负整数');counts[field]=v;}
+    const counts={};for(const field of ['label_count','packed_count','operated_box_count','pallet_count','used_carton_large_count','used_carton_small_count','packed_sku_count','repaired_box_count','reboxed_count','forklift_location_count']){const v=Number(result[field]||0);if(!Number.isSafeInteger(v)||v<0)fail('工耗数量必须为非负整数');counts[field]=v;}
     if(d.need_id){const need=await read(env,d.need_id);const planned=(need?.data.links||[]).filter(x=>x.phase==='planned');if(planned.some(x=>x.unit!==unit)||planned.reduce((n,x)=>n+x.quantity,0)>quantity)fail('实际成果不足以覆盖预先关联的出库计划，请先核实出库安排');}
-    d.result={quantity,unit,...counts,description:required(result.description,'操作明细'),location:required(result.location,'货物位置'),finished_at:t,by:u.name};
+    d.result={quantity,unit,...counts,used_forklift:!!result.used_forklift,description:required(result.description,'操作明细'),location:required(result.location,'货物位置'),finished_at:t,by:u.name};
     d.status='awaiting_review';extra.push(...closeSegments(env,row.id,t,'operation_finished'),stmt(env,"UPDATE v2_ops_jobs SET status='awaiting_close',shared_result_json=?,updated_at=? WHERE id=?",JSON.stringify(d.result),t,row.id));
-   } else if(b.action==='sop_task_review') {
+   }
+   if(b.action==='sop_task_review'||b.action==='sop_task_complete_review') {
     permit(u,row.department,['manager','reviewer','dispatcher']);if(u.role==='dispatcher'&&!allowedOwner)fail('只能审核本人派发或获授权的任务');if(d.status!=='awaiting_review')fail('仅待审核任务可审核');
     if(!['pass','return'].includes(b.decision))fail('审核结论无效');
     const reason=required(b.reason,'审核说明');d.review={decision:b.decision,reason,by:u.name,at:t,round:d.round};
@@ -273,12 +287,12 @@ export async function handleSop(b,env) {
     if(!['assigned','paused','rework'].includes(d.status))fail('请先暂停；已审核任务不能作废');
     d.status='cancelled';d.cancel_reason=required(b.reason,'作废原因');extra.push(stmt(env,"UPDATE v2_ops_jobs SET status='cancelled',updated_at=? WHERE id=?",t,row.id));
     if(d.need_id){const need=await read(env,d.need_id);if(need)appendRelated(env,extra,key+'-need',u,need,{...need.data,status:'pending',task_id:''},b.action,t);}
-   } else fail('未知任务操作');
+   } else if(!['sop_task_start','sop_task_people','sop_task_delegate','sop_task_pause','sop_task_finish'].includes(b.action))fail('未知任务操作');
   } else if(b.action.startsWith('sop_need_')) {
    if(row.kind!=='need')fail('记录类型错误');permit(u,row.department,['manager','service','dispatcher']);
    if(b.action==='sop_need_update') {
     if(d.status!=='pending')fail('已派工需求须先暂停并撤回任务；完成后追加请新建关联需求');
-    d.instructions=required(b.instructions,'要求');d.needs_clarification=false;d.location=text(b.location);d.owner=required(b.owner,'责任人');d.deadline=text(b.deadline);
+    d.requirement_version=(d.requirement_version||1)+1;d.instructions=required(b.instructions,'要求');d.needs_clarification=false;d.location=text(b.location);d.owner=required(b.owner,'责任人');d.deadline=text(b.deadline);
     for(const link of d.links||[])extra.push(stmt(env,'UPDATE v2_outbound_orders SET instruction=?,updated_at=? WHERE id=?',d.instructions,t,link.outbound_id));
     if(d.source_type==='outbound')extra.push(stmt(env,'UPDATE v2_outbound_orders SET instruction=?,updated_at=? WHERE id=?',d.instructions,t,d.source_id));
    } else if(b.action==='sop_need_plan_quantity') {

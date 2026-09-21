@@ -18,6 +18,7 @@ SOP_ACCEPT_NEW = "true"
 SOP_AUTO_OUTBOUND = "true"
 SOP_ROLLOUT_DEPARTMENTS = "bulk"
 SOP_ENVIRONMENT = "staging"
+SOP_ATTENDANCE_ENABLED = "true"
 # Explicitly authorized public, fictional-data acceptance environment only.
 SOP_PUBLIC_TEST_ACCESS = "true"
 

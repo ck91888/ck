@@ -2,32 +2,35 @@ import { mkdir, copyFile, readFile, writeFile, rm } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 const here=dirname(fileURLToPath(import.meta.url)),root=resolve(here,'..'),out=resolve(here,'.sop-staging-assets');
+if(!out.startsWith(root+'\\')&&!out.startsWith(root+'/'))throw Error('Unsafe build output');
 await rm(out,{recursive:true,force:true});await mkdir(out,{recursive:true});
 // Explicit original application allowlist. Never publish server code or credentials.
-const apps=['001','002','003','shuju'];
-const shared=['html5-qrcode.min.js','xlsx.full.min.js','qrcode.min.js','sop-entry.js','sop-native.js','sop-native.css','sop-session.js','sop-dispatch-ui.js','sop-planning-ui.js','sop-people.js'];
+const apps=['001','002','003','shuju','attendance'];
+const shared=['html5-qrcode.min.js','xlsx.full.min.js','qrcode.min.js','sop-entry.js','sop-native.js','sop-native.css','sop-session.js','sop-dispatch-ui.js','sop-planning-ui.js','sop-people.js','ck-design.css','attendance-ui.js','field-work.js'];
 await mkdir(resolve(out,'shared'),{recursive:true});
 for(const f of shared)await copyFile(resolve(root,'shared',f),resolve(out,'shared',f));
 await writeFile(resolve(out,'shared/sop-rollout.js'),"window.CK_SOP_ROLLOUT={enabled:true,staging:true,publicAccess:true};\nwindow.SOP_API=location.origin+'/api';\n");
-const head='<link rel="stylesheet" href="/shared/sop-native.css"><script src="/shared/sop-rollout.js"></script><script src="/shared/sop-session.js"></script>';
+const head='<link rel="stylesheet" href="/shared/sop-native.css"><link rel="stylesheet" href="/shared/ck-design.css"><script src="/shared/sop-rollout.js"></script><script src="/shared/sop-session.js"></script>';
 for(const app of apps){
  await mkdir(resolve(out,app),{recursive:true});
- for(const f of ['index.html','app.js','config.js','style.css']){
+ for(const f of app==='attendance'?['index.html','style.css']:['index.html','app.js','config.js','style.css']){
   let content=await readFile(resolve(root,app,f),'utf8');
   if(f==='config.js')content=content.replace(/var V2_API\s*=\s*"[^"]+";/,"var V2_API=location.origin+'/api';").replace(/var OPS_KEY\s*=\s*"[^"]+";/,"var OPS_KEY='';");
   if(f==='index.html'){
    content=content.replace(/<script src="\.\.\/shared\/sop-(entry|rollout)\.js[^\"]*"><\/script>/g,'');
-   const libraries=['html5-qrcode.min.js','xlsx.full.min.js'].filter(name=>!content.includes(name)).map(name=>'<script src="/shared/'+name+'"></script>').join('');
-   content=content.replace('</head>',head+'</head>').replace('</body>',libraries+'<script src="/shared/sop-planning-ui.js"></script><script src="/shared/sop-people.js"></script><script src="/shared/sop-native.js"></script><script src="/shared/sop-dispatch-ui.js"></script><script src="/shared/sop-entry.js"></script></body>');
+   const libraries=['html5-qrcode.min.js','xlsx.full.min.js','qrcode.min.js'].filter(name=>!content.includes(name)).map(name=>'<script src="/shared/'+name+'"></script>').join('');
+   content=content.replace('<body>','<body class="ck-system" data-app="'+app+'">');
+   content=content.replace('</head>',head+'</head>').replace('</body>',libraries+'<script src="/shared/sop-planning-ui.js"></script><script src="/shared/sop-people.js"></script><script src="/shared/sop-native.js"></script><script src="/shared/sop-dispatch-ui.js"></script><script src="/shared/attendance-ui.js"></script><script src="/shared/field-work.js"></script><script src="/shared/sop-entry.js"></script></body>');
   }
   await writeFile(resolve(out,app,f),content);
  }
 }
-let home=await readFile(resolve(root,'index.html'),'utf8');
-home=home.replace('<body>','<body class="ck-stage-home">').replace('</head>',head+'</head>').replace('</body>','<script src="/shared/sop-entry.js"></script></body>');
+let home=await readFile(resolve(root,'shared/ck-home.html'),'utf8');
+home=home.replace('<body>','<body class="ck-stage-home">').replace('</head>',head+'</head>').replace('</body>','<script src="/shared/attendance-ui.js"></script><script src="/shared/field-work.js"></script><script src="/shared/sop-entry.js"></script></body>');
 await writeFile(resolve(out,'index.html'),home);
 await copyFile(resolve(root,'docs/sop-acceptance.html'),resolve(out,'验收说明.html'));
 await writeFile(resolve(out,'_redirects'),'/sop/ / 302\n/sop / 302\n');
 await writeFile(resolve(out,'_headers'),'/*\n  Cache-Control: no-store\n  X-Content-Type-Options: nosniff\n  Referrer-Policy: same-origin\n');
-console.log('Prepared original 001/002/003/shuju applications with isolated same-origin API.');
+await writeFile(resolve(out,'release.json'),JSON.stringify({release:'20260921-attendance-design',builtAt:new Date().toISOString(),modules:apps}));
+console.log('Prepared five CK applications with attendance and unified design.');
 
