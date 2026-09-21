@@ -49,3 +49,12 @@ test('original field and dashboard integrate added controls',opts,async()=>{
  }finally{p.w.close();}
  const q=await f.page('/shuju/');try{Array.from(q.d.querySelectorAll('.tab-bar button')).find(x=>x.textContent==='派工质量与待办').click();await until(()=>q.d.querySelector('#ck-dashboard article'),q.errors);assert.deepEqual(q.errors,[]);}finally{q.w.close();}
 });
+test('inbound work rows and inventory need optional outbound fields use original forms',opts,async()=>{
+ const f=await fixture(),p=await f.page('/002/');try{
+ p.w.goView('inbound_create');p.d.querySelector('[data-add-work]').click();
+ const row=p.d.querySelector('[data-work-row]');row.querySelector('[data-work=title]').value='虚拟打托';row.querySelector('[data-work=instructions]').value='1–15打托';row.querySelector('[data-work=planned_quantity]').value='15';row.querySelector('[data-add-ob]').click();row.querySelector('[data-ob=expected_ship_at]').value='2026-09-25';row.querySelector('[data-ob=quantity]').value='15';
+ const data=p.w.CKInboundWorks.read();assert.equal(data.length,1);assert.equal(data[0].outbounds[0].quantity,'15');
+ p.d.querySelector('[data-tab=need]').click();await until(()=>p.d.querySelector('#view-need #content .toolbar button'),p.errors);p.d.querySelector('#view-need #content .toolbar button').click();await until(()=>p.d.querySelector('#view-need dialog').open,p.errors);
+ assert.equal(p.d.querySelector('#view-need [name=source_type]').value,'inventory');assert.ok(p.d.querySelector('#view-need #optionalOutbounds button'));assert.deepEqual(p.errors,[]);
+ }finally{p.w.close();}
+});

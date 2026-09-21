@@ -1,3 +1,4 @@
+import { workPlanStatements } from './sop-planning.js';
 import { handleSop, guardLegacy, linkedNeeds, linkedCheck, outboundNeedStatements } from './sop.js';
 import { sessionUser, sessionAction } from './sop-session.js';
 import { prepareDemo } from './sop-demo.js';
@@ -3709,7 +3710,7 @@ route("v2_inbound_plan_create", async (body, env) => {
     const created_by = String(body.created_by || "");
     const display_no = await nextDisplayNo(env, plan_date);
 
-    await env.DB.prepare(`
+    const inboundStatements = [env.DB.prepare(`
       INSERT INTO v2_inbound_plans(id, plan_date, customer, biz_class, biz_classes_json, cargo_summary,
         expected_arrival, purpose, remark, status, created_by, created_at, updated_at, display_no)
       VALUES(?,?,?,?,?,?,?,?,?,'pending',?,?,?,?)
@@ -3721,25 +3722,25 @@ route("v2_inbound_plan_create", async (body, env) => {
       String(body.purpose || ""),
       String(body.remark || ""),
       created_by, t, t, display_no
-    ).run();
+    )];
 
     // 为每个业务类型创建一条 biz_task（pending）
     for (const biz of bizNorm.list) {
       const taskId = "IBT-" + uid();
-      await env.DB.prepare(`
+      inboundStatements.push(env.DB.prepare(`
         INSERT OR IGNORE INTO v2_inbound_plan_biz_tasks
           (id, plan_id, biz_class, job_type, status, created_at, updated_at)
         VALUES(?,?,?,?, 'pending', ?, ?)
-      `).bind(taskId, id, biz, mapInboundBizToJobType(biz), t, t).run();
+      `).bind(taskId, id, biz, mapInboundBizToJobType(biz), t, t));
     }
 
     const lines = body.lines || [];
     for (let i = 0; i < lines.length; i++) {
       const ln = lines[i];
-      await env.DB.prepare(`
+      inboundStatements.push(env.DB.prepare(`
         INSERT INTO v2_inbound_plan_lines(id, plan_id, line_no, unit_type, planned_qty, remark)
         VALUES(?,?,?,?,?,?)
-      `).bind("IPL-" + uid(), id, i + 1, String(ln.unit_type || ""), Number(ln.planned_qty || 0), String(ln.remark || "")).run();
+      `).bind("IPL-" + uid(), id, i + 1, String(ln.unit_type || ""), Number(ln.planned_qty || 0), String(ln.remark || "")));
     }
 
     let outbound_id = null;
@@ -3749,7 +3750,7 @@ route("v2_inbound_plan_create", async (body, env) => {
       const ob_date = String(body.plan_date || kstToday());
       outbound_display_no = await nextOutboundDisplayNo(env, ob_date);
       // 口径调整：auto-create outbound 同步新字段；biz_class 固定 'bulk'，不再接 op_mode/remark
-      await env.DB.prepare(`
+      inboundStatements.push(env.DB.prepare(`
         INSERT INTO v2_outbound_orders(id, order_date, customer, biz_class, operation_mode,
           outbound_mode, instruction, remark, status, source_inbound_plan_id, created_by, created_at, updated_at,
           destination, po_no, wms_work_order_no,
@@ -3768,10 +3769,16 @@ route("v2_inbound_plan_create", async (body, env) => {
         Number(body.ob_planned_box_count || 0),
         Number(body.ob_planned_pallet_count || 0),
         outbound_display_no
-      ).run();
+      ));
     }
 
-    return { ok: true, id, display_no, outbound_id, outbound_display_no };
+    let workBundle={needs:[],outbounds:[],statements:[]};
+    if(body.work_requests?.length){
+      if(env.SOP_UPGRADE_ENABLED!=='true'||env.SOP_ACCEPT_NEW==='false')throw Error('作业需求功能未开启');
+      workBundle=workPlanStatements(env,body.work_requests,{type:'inbound',id,customer},env.SOP_REQUEST_USER||{id:'service',name:created_by},t);
+    }
+    await env.DB.batch([...inboundStatements,...workBundle.statements]);
+    return { ok: true, id, display_no, outbound_id, outbound_display_no, needs:workBundle.needs.map(n=>({id:n.id,title:n.title})), outbounds:workBundle.outbounds };
   });
 });
 
@@ -12555,6 +12562,12 @@ async function handleMultipartUpload(formData, env) {
       && v003IsPublicField(fieldBody);
     if (!isOpsAuth(fieldBody, env) && !publicArrival) return err("unauthorized", 401);
     if (!related_doc_type || !related_doc_id) return err("missing attachment target");
+    if(related_doc_type==='sop_need'){
+      if(env.SOP_UPGRADE_ENABLED!=='true')return err('作业需求功能未启用');
+      const need=await env.DB.prepare("SELECT state FROM sop_records WHERE id=? AND kind='need'").bind(related_doc_id).first();
+      if(!need||!JSON.parse(need.state).result)return err('须先完成作业审核');
+      if(!/\.xlsx?$/i.test(file.name)||Number(file.size)>20*1024*1024)return err('仅支持20MB以内的Excel明细');
+    }
     if (attachment_category === 'arrival_photo') {
       if (related_doc_type !== 'material_shipment') return err('invalid_arrival_photo_target');
       if (!String(file.type || '').startsWith('image/')) return err('image_required');

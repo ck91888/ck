@@ -2608,10 +2608,12 @@ async function submitInbound(btnEl) {
   var linesPre = getIbcLines();
   if (linesPre.length === 0) { alert("请至少填写一行货物明细 / 화물 명세를 1건 이상 입력하세요"); return; }
 
+  var workRequests=[];try{workRequests=window.CKInboundWorks?CKInboundWorks.read():[];}catch(e){alert(e.message);return;}
   // P1-4 关联出库计划行 — 校验
   var linkOb = document.getElementById("ibc-link-ob");
   var linkObOn = !!(linkOb && linkOb.checked);
   var linkObRows = linkObOn ? getIbcLinkObRows() : [];
+  if(workRequests.length&&linkObOn){alert('有作业需求时，请在对应需求下填写出库计划，避免重复创建');return;}
   if (linkObOn) {
     if (linkObRows.length === 0) { alert("已勾选'关联出库计划'但未添加任何行 / 출고 계획이 없습니다"); return; }
     for (var li = 0; li < linkObRows.length; li++) {
@@ -2639,6 +2641,7 @@ async function submitInbound(btnEl) {
     var ibRes = await api({
       action: "v2_inbound_plan_create",
       plan_date: date,
+      work_requests: workRequests,
       customer: customer,
       biz_class: biz,
       biz_classes: biz_classes,
@@ -2674,7 +2677,7 @@ async function submitInbound(btnEl) {
     }
 
     // 第二步：循环创建关联出库单
-    var createdObs = [];
+    var createdObs = (ibRes.outbounds||[]).map(function(x){return x.display_no||x.id;});
     var failedObs = [];
     for (var i = 0; i < linkObRows.length; i++) {
       var row = linkObRows[i];
@@ -2705,6 +2708,8 @@ async function submitInbound(btnEl) {
     }
 
     var msg = "已创建入库计划 / 입고 계획 생성: " + planDispNo;
+    if(ibRes.needs&&ibRes.needs.length)msg+="\n同步作业需求："+ibRes.needs.length+"条";
+    if(window.CKInboundWorks)CKInboundWorks.clear();
     if (matFiles.length > 0) {
       msg += "\n入库明细 / 입고 명세: 上传 " + (matFiles.length - matFailed.length) + "/" + matFiles.length;
     }
