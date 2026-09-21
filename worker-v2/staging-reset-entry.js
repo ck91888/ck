@@ -22,7 +22,7 @@ export const RESET_TABLES=[
 // agency choices, app code/configuration, and R2 files referenced by the archive.
 const reply=(value,status=503)=>Response.json(value,{status,headers:{'Cache-Control':'no-store','Retry-After':'2'}});
 const query=(env,sql,...args)=>env.DB.prepare(sql).bind(...args);
-async function tableCounts(env,tables){const result=[];for(let i=0;i<tables.length;i+=10){const part=tables.slice(i,i+10);result.push(...(await query(env,part.map(name=>`SELECT '${name}' AS table_name,COUNT(*) AS count FROM "${name}"`).join(' UNION ALL ')).all()).results);}return result;}
+async function tableCounts(env,tables){const result=[];for(let i=0;i<tables.length;i+=10){const part=tables.slice(i,i+10);const row=await query(env,'SELECT '+part.map((name,j)=>`(SELECT COUNT(*) FROM "${name}") AS c${j}`).join(',')).first();result.push(...part.map((name,j)=>({table_name:name,count:row['c'+j]})));}return result;}
 export async function resetGate(request,env,time=new Date().toISOString()){
  const url=new URL(request.url);
  if(env.SOP_ENVIRONMENT!=='staging'||env.SOP_UPGRADE_ENABLED!=='true'||
