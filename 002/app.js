@@ -2613,7 +2613,12 @@ async function submitInbound(btnEl) {
   var linkOb = document.getElementById("ibc-link-ob");
   var linkObOn = !!(linkOb && linkOb.checked);
   var linkObRows = linkObOn ? getIbcLinkObRows() : [];
-  if(workRequests.length&&linkObOn){alert('有作业需求时，请在对应需求下填写出库计划，避免重复创建');return;}
+  // Optional outbound rows left at their defaults do not constitute a shipping plan.
+  if(window.CKHasStandaloneOutbound){
+    linkObRows=linkObRows.filter(CKHasStandaloneOutbound);
+    linkObOn=linkObOn&&linkObRows.length>0;
+  }
+  if(workRequests.length&&linkObOn){alert('下方另填的出库资料尚未归属作业需求。请将其填到对应需求下，或取消下方“另建出库计划”的勾选。没有出库预约可以直接保存入库和作业需求。 / 출고 예약 없이 작업 요청만 저장할 수 있습니다.');return;}
   if (linkObOn) {
     if (linkObRows.length === 0) { alert("已勾选'关联出库计划'但未添加任何行 / 출고 계획이 없습니다"); return; }
     for (var li = 0; li < linkObRows.length; li++) {

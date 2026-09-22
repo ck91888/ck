@@ -110,6 +110,26 @@ test('inbound bundles zero/multiple textual needs and multiple planned outbounds
  dash=await call('sop_dashboard');assert.equal(dash.rankings.filter(x=>x.metric==='打托').reduce((n,x)=>n+x.quantity,0),3);
  assert.equal((await get(nd.id)).status,'linked');
 });
+test('Baodai pallets can be requested, reviewed and forwarded before the customer books outbound',async()=>{
+ const {login,call,get,change,DB}=setup();await login();
+ const ib=await call('v2_inbound_plan_create',{customer:'宝袋',biz_classes:['bulk'],cargo_summary:'50箱',lines:[{unit_type:'box',planned_qty:50}],work_requests:[{title:'BD001～015打托并反馈明细',scope_text:'BD001～015',instructions:'打托后反馈明细，客户收到明细后再约出库',department:'bulk',planned_quantity:15,planned_unit:'箱',outbounds:[]}]});
+ assert.equal(ib.ok,true,ib.error);assert.equal(ib.needs.length,1);assert.equal(ib.outbounds.length,0);
+ const id=ib.needs[0].id;assert.equal((await get(id)).status,'pending');
+ const task=await call('sop_task_create',{department:'bulk',need_id:id,title:'打托',job_type:'bulk_op',workers:[{id:'TEST-BD',name:'测试操作员'}],lead_id:'TEST-BD',estimated_minutes:30});assert.equal(task.ok,true,task.error);
+ assert.equal((await change('sop_task_start',task.id)).ok,true);
+ assert.equal((await change('sop_task_finish',task.id,{result:{quantity:15,unit:'箱',pallet_count:1,description:'测试打托15箱',location:'测试暂存位'}})).ok,true);
+ assert.equal((await change('sop_task_review',task.id,{decision:'pass',reason:'测试审核通过'})).ok,true);
+ assert.equal((await get(id)).status,'waiting_customer');
+ DB.raw.prepare("INSERT INTO v2_attachments(id,related_doc_type,related_doc_id,file_name,file_key) VALUES('BD-DETAIL','sop_need',?,'bd-fixture.xlsx','test')").run(id);
+ const rows=Array.from({length:15},(_,i)=>({pallet:'TEST-P01',mark:'BD'+String(i+1).padStart(3,'0'),quantity:1}));
+ assert.equal((await change('sop_need_details',id,{attachment_id:'BD-DETAIL',filename:'bd-fixture.xlsx',rows})).ok,true);
+ assert.equal((await change('sop_need_forward',id,{note:'已反馈打托明细，等待客户预约'})).ok,true);
+ assert.equal(DB.raw.prepare('SELECT count(*) n FROM v2_outbound_orders').get().n,0,'no phantom outbound while awaiting the customer');
+ assert.equal((await get(id)).status,'waiting_customer');
+ const ob=await call('v2_outbound_order_create',{customer:'宝袋',biz_class:'bulk',outbound_mode:'customer_pickup',uses_stock_operation:0,sop_existing_need_id:id,sop_link_quantity:15,planned_box_count:15,expected_ship_at:'2026-09-25'});assert.equal(ob.ok,true,ob.error);
+ assert.equal((await get(id)).status,'linked');
+ assert.equal(DB.raw.prepare("SELECT count(*) n FROM sop_records WHERE kind='need'").get().n,1,'later booking reuses the original work and results');
+});
 test('inventory work requires supply-chain reference; details preserve versions and CS forwarding',async()=>{
  const {login,call,get,change,DB}=setup();await login();const input={department:'bulk',customer:'虚拟客户',source_type:'inventory',title:'库存打托',instructions:'打托反馈',owner:'处理员'};
  assert.equal((await call('sop_need_create',input)).ok,false);

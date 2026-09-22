@@ -78,7 +78,7 @@
    wrap('loadVerifyList',async()=>{const view=document.getElementById('view-check');const head=block(view,'按出库日期管理总清单 · 11:00 / 13:00 / 16:00 分轮核对');if(!head.querySelector('button'))head.querySelector('.ck-buttons').append(button('打开日期清单／新建清单',()=>{const body=document.getElementById('checkListBody');mount(body,{tab:'check',context:'collab'});}));});
    document.getElementById('btnNewCheck').onclick=()=>{goView('check');mount(document.getElementById('checkListBody'),{tab:'check',context:'collab',create:'check'});};
    const originalGoView=window.goView;window.goView=function(name){originalGoView(name);if(name==='outbound_create')outboundPicker().catch(e=>alert(e.message));};
-   const wh=document.createElement('section');wh.className='ck-inline-heading ck-workflow ck-work-plans';document.getElementById('ibc-remark').closest('.form-group').after(wh);window.CKInboundWorks=CKWorkFields(wh);
+   const wh=document.createElement('section');wh.className='ck-inline-heading ck-workflow ck-work-plans';document.getElementById('ibc-remark').closest('.form-group').after(wh);window.CKInboundWorks=CKWorkFields(wh);CKConnectInboundOutbounds(wh);
    showMain();if(params.get('need')&&params.get('create_outbound'))goView('outbound_create');else if(params.get('need')){goTab('need');mount(v,{tab:'need',id:params.get('need'),context:'collab'});}else if(params.get('inbound'))openInboundDetail(params.get('inbound'));else if(params.get('issue'))openIssueDetail(params.get('issue'));else if(params.get('tab'))goTab(params.get('tab'));
   }else if(app==='001'){
    window.CKInstallDispatch();
