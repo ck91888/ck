@@ -1807,6 +1807,9 @@ async function startInbound(btnEl) {
 
   if (_ibResolvedKind === 'system') {
     payload.plan_id = _ibResolvedPlanId;
+    if (_ibResolvedPlan && _ibResolvedPlan.selected_external_inbound_no) {
+      payload.external_inbound_no = _ibResolvedPlan.selected_external_inbound_no;
+    }
   } else if (_ibResolvedKind === 'external') {
     var exNo = ((document.getElementById("inboundCodeInput") || {}).value || "").trim();
     var exCu = ((document.getElementById("inboundExternalCustomer") || {}).value || "").trim();
@@ -1951,9 +1954,12 @@ async function finishInbound(btnEl) {
     if (res && res.ok && !res.already_completed) {
       // Check plan status to show appropriate message
       var planAfter = null;
-      try { planAfter = await api({ action: "v2_inbound_plan_detail", plan_id: _inboundPlanData && _inboundPlanData.plan ? _inboundPlanData.plan.id : "" }); } catch(e) {}
-      var planStatus = (planAfter && planAfter.ok && planAfter.plan) ? planAfter.plan.status : "completed";
-      if (planStatus === "completed") {
+      try { planAfter = await api({ action: "v2_inbound_plan_detail", id: _inboundPlanData && _inboundPlanData.plan ? _inboundPlanData.plan.id : "" }); } catch(e) {}
+      var planStatus = (planAfter && planAfter.ok && planAfter.plan) ? planAfter.plan.status : "";
+      var referenceProgress = planAfter && planAfter.plan && planAfter.plan.inbound_progress;
+      if (referenceProgress && referenceProgress.completed < referenceProgress.total) {
+        alert("本次外部单理货已完成，本计划已完成 " + referenceProgress.completed + "/" + referenceProgress.total + "。\n待完成：" + referenceProgress.items.filter(function(x) { return x.status !== 'completed'; }).map(function(x) { return x.external_no; }).join('、') + "\n이번 입고 완료. 나머지 입고번호 작업을 계속해 주세요.");
+      } else if (planStatus === "completed") {
         alert("入库已完成，状态已更新为\u201C已入库\u201D\n입고 완료, 상태가 \u201C입고완료\u201D로 변경됨");
       } else if (planStatus === "unloading" || planStatus === "unloading_putting_away") {
         alert("本次理货已完成。卸货仍在进行中，如还有未理部分可后续继续理货。\n이번 입고 완료. 하차 진행 중이며, 미입고분은 이후 계속 가능합니다.");

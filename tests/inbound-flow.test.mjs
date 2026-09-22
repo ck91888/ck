@@ -82,6 +82,48 @@ test('legacy dynamic and generic feedback forms save external references instead
  assert.equal((await detail({id:converted.inbound_plan_id})).plan.external_inbound_no,'WMS-OLD-FB');
 });
 
+test('A1 and A2 complete independently; the plan closes only after both and keeps actual quantities',async()=>{
+ const {plan,unload,call,detail,DB}=setup();
+ const p=await plan(['direct_ship'],{external_inbound_nos:['A1','A2']});await unload(p);
+ const initial=await detail(p);assert.deepEqual(initial.plan.external_inbound_nos,['A1','A2']);assert.equal(initial.plan.inbound_progress.completed,0);
+ const ambiguous=await call('v2_inbound_resolve_code',{code:p.display_no,biz_class:'direct_ship'});assert.equal(ambiguous.kind,'status_not_allowed');assert.match(ambiguous.message,/多个/);
+ const scan=await call('v2_inbound_resolve_code',{code:'A1',biz_class:'direct_ship'});assert.equal(scan.plan.id,p.id);assert.equal(scan.plan.selected_external_inbound_no,'A1');
+ const a=await call('sop_native_start',{payload:{action:'v2_inbound_job_start',plan_id:p.id,external_inbound_no:'A1',job_type:'inbound_direct',biz_class:'direct_ship',client_req_id:'A1-start'},workers:[{id:'A1-W',name:'测试甲'}],lead_id:'A1-W',estimated_minutes:10});
+ await call('v2_inbound_job_finish',{job_id:a.job_id,worker_id:'A1-W',complete_job:true,result_lines:[{unit_type:'carton',putaway_qty:20}]});
+ const half=await detail(p);assert.equal(half.plan.status,'partially_completed');assert.equal(half.plan.inbound_progress.completed,1);assert.equal(half.plan.inbound_progress.total,2);assert.notEqual(half.biz_tasks[0].status,'completed');assert.equal(half.lines[0].putaway_qty,20);
+ const doneScan=await call('v2_inbound_resolve_code',{code:'A1',biz_class:'direct_ship'});assert.equal(doneScan.kind,'biz_already_completed');
+ const doneStart=await call('v2_inbound_job_start',{plan_id:p.id,external_inbound_no:'A1',job_type:'inbound_direct',biz_class:'direct_ship',worker_id:'REPEAT'},false);assert.equal(doneStart.ok,false);
+ const forced=await call('v2_inbound_plan_force_complete',{id:p.id,reason:'测试不能跳过A2'},false);assert.equal(forced.error,'external_inbounds_pending');
+ const b=await call('v2_inbound_job_start',{external_inbound_no:'A2',job_type:'inbound_direct',biz_class:'direct_ship',worker_id:'A2-W',worker_name:'测试乙'});assert.notEqual(a.job_id,b.job_id);
+ await call('v2_inbound_job_finish',{job_id:b.job_id,worker_id:'A2-W',complete_job:true,result_lines:[{unit_type:'carton',putaway_qty:30}]});
+ const all=await detail(p);assert.equal(all.plan.status,'completed');assert.equal(all.plan.inbound_progress.completed,2);assert.equal(all.biz_tasks[0].status,'completed');assert.equal(all.lines[0].putaway_qty,50);assert.match(all.biz_tasks[0].worker_names,/测试甲/);assert.match(all.biz_tasks[0].worker_names,/测试乙/);
+ await call('v2_inbound_job_finish',{job_id:b.job_id,worker_id:'A2-W',complete_job:true,result_lines:[{unit_type:'carton',putaway_qty:30}]});assert.equal((await detail(p)).lines[0].putaway_qty,50);
+ assert.equal(DB.raw.prepare("SELECT count(DISTINCT inbound_external_no) n FROM v2_ops_jobs WHERE related_doc_id=? AND job_type='inbound_direct'").get(p.id).n,2);
+});
+test('multiple references normalize paste, reject cross-plan conflicts, and preserve finished codes during amendments',async()=>{
+ const {plan,unload,call,detail}=setup();const p=await plan(['direct_ship','bulk'],{external_inbound_no:' Ａ1， A2;A3\nA2 '});assert.deepEqual((await detail(p)).plan.external_inbound_nos,['A1','A2','A3']);
+ const duplicate=await call('v2_inbound_plan_create',{customer:'重复',biz_classes:['direct_ship'],external_inbound_nos:['OTHER','A2']},false);assert.equal(duplicate.ok,false);assert.match(duplicate.error,/A2/);
+ await unload(p);const a=await call('v2_inbound_job_start',{plan_id:p.id,external_inbound_no:'A1',biz_class:'direct_ship',job_type:'inbound_direct',worker_id:'A'});
+ const busy=await call('v2_inbound_plan_bind_external',{id:p.id,previous_code:'A1\nA2\nA3',external_inbound_nos:['A1','A2']},false);assert.equal(busy.ok,false);
+ await call('v2_inbound_job_finish',{job_id:a.job_id,worker_id:'A',complete_job:true});
+ const removeDone=await call('v2_inbound_plan_bind_external',{id:p.id,previous_code:'A1\nA2\nA3',external_inbound_nos:['A2','A3']},false);assert.equal(removeDone.ok,false);assert.match(removeDone.error,/已完成/);
+ await call('v2_inbound_plan_bind_external',{id:p.id,previous_code:'A1\nA2\nA3',external_inbound_nos:['A1','A2','A4']});
+ const updated=await detail(p);assert.equal(updated.plan.inbound_progress.completed,1);assert.deepEqual(updated.plan.external_inbound_nos,['A1','A2','A4']);
+ assert.equal((await call('v2_inbound_resolve_code',{code:'A3',biz_class:'direct_ship'})).kind,'status_not_allowed');
+});
+test('parallel external bills never share a job; missing or mismatched bill cannot start',async()=>{
+ const {plan,unload,call,detail,DB}=setup();const p=await plan(['direct_ship','bulk'],{external_inbound_nos:['A1','A2']});await unload(p);
+ const missing=await call('v2_inbound_job_start',{plan_id:p.id,biz_class:'direct_ship',job_type:'inbound_direct',worker_id:'X'},false);assert.equal(missing.ok,false);
+ const wrong=await call('v2_inbound_job_start',{plan_id:p.id,external_inbound_no:'WRONG',biz_class:'direct_ship',job_type:'inbound_direct',worker_id:'X'},false);assert.equal(wrong.ok,false);
+ const start=(code,worker,type='inbound_direct',biz='direct_ship')=>call('v2_inbound_job_start',{plan_id:p.id,external_inbound_no:code,job_type:type,biz_class:biz,worker_id:worker});
+ const a=await start('A1','A'),b=await start('A2','B');assert.notEqual(a.job_id,b.job_id);
+ const join=await start('A1','C');assert.equal(join.job_id,a.job_id);
+ const other=await call('v2_inbound_job_start',{plan_id:p.id,external_inbound_no:'A1',job_type:'inbound_bulk',biz_class:'bulk',worker_id:'D'},false);assert.equal(other.error,'external_code_working');
+ const candidates=await call('v2_inbound_plan_ops_candidates',{scene:'putaway',biz_class:'direct_ship'});assert.equal(candidates.items[0].inbound_progress.items.filter(x=>x.status==='working').length,2);
+ assert.equal((await detail(p)).plan.inbound_progress.completed,0);
+ assert.throws(()=>DB.raw.prepare("INSERT INTO v2_ops_jobs(id,related_doc_type,related_doc_id,job_type,status,inbound_external_no) VALUES('RACE','inbound_plan',?,'inbound_direct','working','A1')").run(p.id),/UNIQUE/);
+ assert.throws(()=>DB.raw.prepare("INSERT INTO v2_ops_jobs(id,related_doc_type,related_doc_id,job_type,status,inbound_external_no) VALUES('STALE','inbound_plan',?,'inbound_direct','working','OLD')").run(p.id),/reference changed/);
+});
 test('new inbound rules are gated off outside staging upgrade',async()=>{
  const {env,plan,call,detail,unload}=setup();env.SOP_UPGRADE_ENABLED='false';env.ADMINKEY='local-fixture-only';
  // Use a local fixture key when the staging upgrade authentication wrapper is disabled.

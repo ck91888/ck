@@ -101,6 +101,7 @@
 .ck-external-field[hidden]{display:none!important}.ck-external-field{margin-top:12px}.ck-external-field p{font-size:12px;margin:5px 0 0}.ck-external-field input{max-width:540px}
 .ck-inbound-reference{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:12px 0;border-bottom:1px solid var(--ck-line);margin-bottom:12px}.ck-inbound-reference>form{flex-basis:100%}.ck-inbound-reference>form button{margin-right:8px}
 .ck-inbound-match{padding:10px;background:#e4f0eb;line-height:1.8;border-left:3px solid #18564a}
+.ck-external-field textarea{width:100%;min-height:84px;resize:vertical}.ck-inbound-progress{width:100%;min-width:0}.ck-inbound-progress table{margin-top:8px}.ck-inbound-progress td{overflow-wrap:anywhere}
 @media(min-width:701px){.ck-inbound-form>.card{display:grid;grid-template-columns:1fr 1fr;gap:0 20px}.ck-inbound-form>.card>*{grid-column:1/-1}.ck-inbound-form>.card>.ck-inbound-half{grid-column:auto}}
 @media(max-width:700px){.ck-system[data-app="002"] label.ck-inbound-choice{min-height:44px}.ck-inbound-reference{align-items:flex-start}.ck-inbound-reference>strong{width:100%}}
 

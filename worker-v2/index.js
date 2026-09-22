@@ -1,4 +1,4 @@
-import { inboundFlowEnabled, inboundCode, validateInboundCode, resolveInboundPlan, putawayTaskBiz, completeUnloadedDispositions, bindInboundCode, inboundLabels } from './inbound-flow.js';
+import { inboundFlowEnabled, inboundCode, inboundCodes, inboundReferenceValue, inboundCodeProgress, selectInboundReference, validateInboundCode, resolveInboundPlan, putawayTaskBiz, completeUnloadedDispositions, bindInboundCode, inboundLabels } from './inbound-flow.js';
 import { handleAttendance, guardAttendance } from './attendance.js';
 import { workPlanStatements } from './sop-planning.js';
 import { handleSop, guardLegacy, linkedNeeds, linkedCheck, outboundNeedStatements } from './sop.js';
@@ -1304,6 +1304,14 @@ const MIGRATIONS = [
   // ---- external WMS inbound number (for standard inbound started from external no) ----
   `ALTER TABLE v2_inbound_plans ADD COLUMN external_inbound_no TEXT DEFAULT ''`,
   `CREATE INDEX IF NOT EXISTS idx_v2_inbound_external_no ON v2_inbound_plans(external_inbound_no) WHERE external_inbound_no != ''`,
+  `ALTER TABLE v2_ops_jobs ADD COLUMN inbound_external_no TEXT DEFAULT ''`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_inbound_job_reference ON v2_ops_jobs(related_doc_id,inbound_external_no)
+    WHERE related_doc_type='inbound_plan' AND inbound_external_no!='' AND job_type IN ('inbound_direct','inbound_bulk') AND status IN ('pending','working','awaiting_close','completed')`,
+  `CREATE TRIGGER IF NOT EXISTS trg_v2_inbound_job_reference BEFORE INSERT ON v2_ops_jobs
+    WHEN NEW.inbound_external_no!='' AND NEW.related_doc_type='inbound_plan' AND NEW.job_type IN ('inbound_direct','inbound_bulk')
+    AND NOT EXISTS(SELECT 1 FROM v2_inbound_plans p WHERE p.id=NEW.related_doc_id AND p.status NOT IN ('completed','cancelled') AND COALESCE(p.is_deleted,0)=0
+      AND instr(char(10)||COALESCE(p.external_inbound_no,'')||char(10),char(10)||NEW.inbound_external_no||char(10))>0)
+    BEGIN SELECT RAISE(ABORT,'external inbound reference changed; refresh before starting'); END`,
 
   // ---- idempotency keys for create/start/convert class writes ----
   `CREATE TABLE IF NOT EXISTS v2_idempotency_keys (
@@ -1980,7 +1988,7 @@ const MIGRATIONS = [
 ];
 
 // 每次发布迁移变化时手动 +1（patch 段），冷启动只比对一次字符串即可跳过整段 MIGRATIONS
-const CURRENT_SCHEMA_VERSION = 'v2.20260808c';
+const CURRENT_SCHEMA_VERSION = 'v2.20260922a';
 
 let _migrated = false;
 async function ensureMigrated(db) {
@@ -3703,7 +3711,7 @@ route("v2_inbound_plan_create", async (body, env) => {
     return err("biz_classes 至少选择一个业务类型（代发/大货/退件）/ 업무 유형을 1개 이상 선택하세요");
   }
   return withIdem(env, body, "v2_inbound_plan_create", async () => {
-    const externalNo = await validateInboundCode(env,bizNorm.list,body.external_inbound_no);
+    const externalNo = await validateInboundCode(env,bizNorm.list,inboundReferenceValue(body));
     const id = "IB-" + uid();
     const t = now();
     const plan_date = String(body.plan_date || kstToday());
@@ -3935,6 +3943,16 @@ async function listInboundPlanBizTasks(env, plan_id) {
 // 把某个业务类型的 task 标完成（idempotent — 已 completed 不重复写）
 async function markInboundBizTaskCompleted(env, plan_id, biz_class, payload) {
   if (!plan_id || !biz_class) return;
+  if(inboundFlowEnabled(env)&&biz_class==='direct_ship'){
+    const plan=await env.DB.prepare('SELECT * FROM v2_inbound_plans WHERE id=?').bind(plan_id).first();
+    const progress=await inboundCodeProgress(env,plan);
+    if(progress?.total>1){
+      if(progress.completed<progress.total)return;
+      const ids=progress.items.map(x=>x.job_id);
+      const workers=(await env.DB.prepare('SELECT worker_name,minutes_worked,joined_at FROM v2_ops_job_workers WHERE job_id IN ('+ids.map(()=>'?').join(',')+')').bind(...ids).all()).results||[];
+      payload={...payload,worker_names:[...new Set(workers.map(x=>x.worker_name).filter(Boolean))].join('、'),total_minutes:Math.round(workers.reduce((s,x)=>s+(Number(x.minutes_worked)||0),0)),started_at:workers.map(x=>x.joined_at).filter(Boolean).sort()[0]||payload?.started_at};
+    }
+  }
   const t = now();
   const row = await env.DB.prepare(
     "SELECT id, status FROM v2_inbound_plan_biz_tasks WHERE plan_id=? AND biz_class=?"
@@ -3980,7 +3998,7 @@ async function markInboundBizTaskCompleted(env, plan_id, biz_class, payload) {
 async function recalcInboundPlanCompletion(env, plan_id, t, opts) {
   const ts = t || now();
   const plan = await env.DB.prepare(
-    "SELECT id, status, source_type FROM v2_inbound_plans WHERE id=?"
+    "SELECT * FROM v2_inbound_plans WHERE id=?"
   ).bind(plan_id).first();
   if (!plan) return null;
   if (plan.status === 'cancelled') return plan.status;
@@ -4005,11 +4023,12 @@ async function recalcInboundPlanCompletion(env, plan_id, t, opts) {
   }
 
   await completeUnloadedDispositions(env,plan_id,ts);
+  const referenceProgress=await inboundCodeProgress(env,plan);
   const tasks = await listInboundPlanBizTasks(env, plan_id);
   if (tasks.length > 0) {
     const completedCnt = tasks.filter(x => x.status === 'completed').length;
-    const allCompleted = (completedCnt === tasks.length);
-    const someCompleted = (completedCnt > 0);
+    const allCompleted = (completedCnt === tasks.length)&&(!referenceProgress?.total||referenceProgress.completed===referenceProgress.total);
+    const someCompleted = (completedCnt > 0)||(referenceProgress?.completed>0);
     let next;
     if (allCompleted && !otherInbound) {
       // 所有 biz 已完成 → 整单 completed
@@ -4288,7 +4307,7 @@ route("v2_inbound_plan_detail", async (body, env) => {
 
   return json({
     ok: true,
-    plan: { ...row, biz_classes },
+    plan: { ...row, biz_classes, ...(inboundFlowEnabled(env)?{external_inbound_nos:inboundCodes(row.external_inbound_no),inbound_progress:await inboundCodeProgress(env,row)}:{}) },
     biz_tasks,
     biz_classes,
     completed_biz_classes,
@@ -4423,7 +4442,8 @@ route("v2_inbound_plan_ops_candidates", async (body, env) => {
     }
     items.push({
       ...p,
-      biz_classes: extractPlanBizClasses(p)
+      biz_classes: extractPlanBizClasses(p),
+      ...(inboundFlowEnabled(env)&&scene==='putaway'?{external_inbound_nos:inboundCodes(p.external_inbound_no),inbound_progress:await inboundCodeProgress(env,p)}:{})
     });
     if (items.length >= limit) break;
   }
@@ -4565,7 +4585,7 @@ route("v2_inbound_plan_update", async (body, env) => {
     }
     const biz_class = bizNorm.primary;
     const biz_classes_json = JSON.stringify(bizNorm.list);
-    const externalNo = await validateInboundCode(env,bizNorm.list,body.external_inbound_no ?? plan.external_inbound_no,id);
+    const externalNo = await validateInboundCode(env,bizNorm.list,inboundReferenceValue(body,plan.external_inbound_no),id);
 
     await env.DB.prepare(
       `UPDATE v2_inbound_plans SET plan_date=?, customer=?, biz_class=?, biz_classes_json=?,
@@ -4875,7 +4895,7 @@ route("v2_inbound_dynamic_finalize", async (body, env) => {
     const bizNorm = normalizeInboundBizClasses({ biz_classes: body.biz_classes, biz_class: body.biz_class || plan.biz_class });
     const biz_class = bizNorm.primary || String(body.biz_class || plan.biz_class || "").trim();
     const biz_classes_json = bizNorm.list.length > 0 ? JSON.stringify(bizNorm.list) : (plan.biz_classes_json || '[]');
-    const externalNo=await validateInboundCode(env,bizNorm.list,body.external_inbound_no??plan.external_inbound_no,id);
+    const externalNo=await validateInboundCode(env,bizNorm.list,inboundReferenceValue(body,plan.external_inbound_no),id);
     if(inboundFlowEnabled(env)&&!bizNorm.list.length)throw Error("请选择入库业务分类");
     const cargo_summary = String(body.cargo_summary || plan.cargo_summary || "").trim();
     const expected_arrival = normalizeDateOnly(body.expected_arrival || plan.expected_arrival || "");
@@ -5221,7 +5241,7 @@ route("v2_feedback_finalize_to_inbound", async (body, env) => {
     const bizNorm = normalizeInboundBizClasses({ biz_classes: body.biz_classes, biz_class: body.biz_class });
     const biz_class = bizNorm.primary || String(body.biz_class || "").trim();
     const biz_classes_json = bizNorm.list.length > 0 ? JSON.stringify(bizNorm.list) : '[]';
-    const externalNo=await validateInboundCode(env,bizNorm.list,body.external_inbound_no);
+    const externalNo=await validateInboundCode(env,bizNorm.list,inboundReferenceValue(body));
     if(inboundFlowEnabled(env)&&!bizNorm.list.length)throw Error("请选择入库业务分类");
     const cargo_summary = String(body.cargo_summary || "").trim();
     const expected_arrival = normalizeDateOnly(body.expected_arrival);
@@ -5624,6 +5644,7 @@ route("v2_inbound_job_start", async (body, env) => {
 
   return withIdem(env, body, "v2_inbound_job_start", async () => {
     let plan_id = String(body.plan_id || "").trim();
+    let selectedExternal='';
     if(inboundFlowEnabled(env)&&isStandard&&!plan_id){
       const found=await resolveInboundPlan(env,external_inbound_no,biz_class);
       if(found.kind!=='system')return {ok:false,error:'inbound_reference_invalid',message:found.message};
@@ -5645,7 +5666,11 @@ route("v2_inbound_job_start", async (body, env) => {
       if(inboundFlowEnabled(env)&&Number(plan.is_deleted||0))return {ok:false,error:'plan_deleted'};
       const taskBiz=putawayTaskBiz(env,plan,biz_class);
       if(inboundFlowEnabled(env)&&!taskBiz)return {ok:false,error:'putaway_not_required',message:'此计划卸货完成后自动入库，无需理货'};
-      if(inboundFlowEnabled(env)&&external_inbound_no&&inboundCode(plan.external_inbound_no)!==inboundCode(external_inbound_no))return {ok:false,error:'external_code_mismatch',message:'外部单号与所选计划不一致'};
+      if(inboundFlowEnabled(env)){
+        try{selectedExternal=await selectInboundReference(env,plan,external_inbound_no);}catch(error){return {ok:false,error:'external_code_mismatch',message:error.message};}
+        const activeOther=await env.DB.prepare("SELECT id,job_type FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND inbound_external_no=? AND job_type!=? AND status IN ('pending','working','awaiting_close') LIMIT 1").bind(plan_id,selectedExternal,job_type).first();
+        if(activeOther)return {ok:false,error:'external_code_working',message:'此外部单号已有理货任务，请继续原任务',active_job_id:activeOther.id};
+      }
       const biz_classes = extractPlanBizClasses(plan);
       const inList = biz_classes.indexOf(taskBiz) !== -1;
       const legacyMatch = (plan.biz_class === taskBiz);
@@ -5738,8 +5763,8 @@ route("v2_inbound_job_start", async (body, env) => {
     // ===== Find / create job bound to plan_id =====
     let job = null;
     const existing = await env.DB.prepare(
-      "SELECT * FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type=? AND status IN ('pending','working') LIMIT 1"
-    ).bind(plan_id, job_type).first();
+      "SELECT * FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type=? AND status IN ('pending','working','awaiting_close') AND (?='' OR inbound_external_no=? OR COALESCE(inbound_external_no,'')='') LIMIT 1"
+    ).bind(plan_id, job_type,selectedExternal,selectedExternal).first();
     if (existing) job = existing;
 
     const busy = await checkWorkerBusy(env, worker_id, job ? job.id : null);
@@ -5748,6 +5773,7 @@ route("v2_inbound_job_start", async (body, env) => {
     let job_id, is_new_job = false;
     if (job) {
       job_id = job.id;
+      if(selectedExternal&&!job.inbound_external_no)await env.DB.prepare("UPDATE v2_ops_jobs SET inbound_external_no=? WHERE id=? AND COALESCE(inbound_external_no,'')=''").bind(selectedExternal,job_id).run();
       const dup = await findOpenSeg(env, job_id, worker_id);
       if (dup) return { ok: true, job_id, worker_seg_id: dup.id, is_new_job: false, already_joined: true, plan_id };
       await env.DB.prepare(
@@ -5758,9 +5784,9 @@ route("v2_inbound_job_start", async (body, env) => {
       is_new_job = true;
       await env.DB.prepare(`
         INSERT INTO v2_ops_jobs(id, flow_stage, biz_class, job_type, related_doc_type, related_doc_id,
-          status, created_by, created_at, updated_at, active_worker_count)
-        VALUES(?, 'inbound', ?, ?, 'inbound_plan', ?, 'working', ?, ?, ?, 1)
-      `).bind(job_id, biz_class, job_type, plan_id, worker_id, t, t).run();
+          status, created_by, created_at, updated_at, active_worker_count,inbound_external_no)
+        VALUES(?, 'inbound', ?, ?, 'inbound_plan', ?, 'working', ?, ?, ?, 1,?)
+      `).bind(job_id, biz_class, job_type, plan_id, worker_id, t, t,selectedExternal).run();
       if (isStandard) {
         // Parallel: if unloading → unloading_putting_away; if arrived_pending_putaway → putting_away
         await env.DB.prepare(
@@ -5778,7 +5804,7 @@ route("v2_inbound_job_start", async (body, env) => {
       VALUES(?,?,?,?,?)
     `).bind(seg_id, job_id, worker_id, worker_name, t).run();
 
-    return { ok: true, job_id, worker_seg_id: seg_id, is_new_job, plan_id };
+    return { ok: true, job_id, worker_seg_id: seg_id, is_new_job, plan_id,external_inbound_no:selectedExternal };
   });
 });
 
@@ -6103,6 +6129,8 @@ route("v2_inbound_plan_force_complete", async (body, env) => {
     if (!plan) return { ok: false, error: "not_found" };
     if (plan.status === 'completed') return { ok: false, error: "already_completed" };
     if (plan.status === 'cancelled') return { ok: false, error: "cancelled_cannot_complete" };
+    const referenceProgress=await inboundCodeProgress(env,plan);
+    if(referenceProgress?.total>1&&referenceProgress.completed<referenceProgress.total)return {ok:false,error:'external_inbounds_pending',message:'多个外部入库单须逐单完成：当前 '+referenceProgress.completed+'/'+referenceProgress.total+'，不能直接完结整张计划'};
 
     const ALLOWED = ['pending', 'arrived_pending_putaway', 'putting_away', 'partially_completed'];
     if (ALLOWED.indexOf(plan.status) === -1) {
@@ -7174,7 +7202,7 @@ route("v2_feedback_convert_to_inbound", async (body, env) => {
   const bizNorm = normalizeInboundBizClasses({ biz_classes: body.biz_classes, biz_class: body.biz_class });
   const biz_class = bizNorm.primary || String(body.biz_class || "");
   const biz_classes_json = bizNorm.list.length > 0 ? JSON.stringify(bizNorm.list) : '[]';
-  const externalNo=await validateInboundCode(env,bizNorm.list,body.external_inbound_no);
+  const externalNo=await validateInboundCode(env,bizNorm.list,inboundReferenceValue(body));
   if(inboundFlowEnabled(env)&&!bizNorm.list.length)throw Error("请选择入库业务分类");
   const created_by = String(body.created_by || "");
   const display_no = await nextDisplayNo(env, plan_date);
