@@ -120,7 +120,7 @@ export async function handleCourier(b,env,recalc){
   if(old.status==='handed_over'&&status!=='handed_over')fail('交接已完成，不能重复交接');
   const recipient=limited(b.handed_to||old.handed_to,100);if(status==='handed_over'&&!recipient)fail('请填写接收人 / 인수자를 입력하세요');
   const code=trackingNumber(b.tracking_no??old.tracking_no),changed=code!==old.tracking_no;
-  const note=limited(b.note),t=stamp();if((owner!==old.owner||changed)&&!note)fail('更正单号或所属请填写原因 / 변경 사유를 입력하세요');
+  const note=limited(b.note),storedNote=b.note===undefined?old.note:note,t=stamp();
   let oldPlan=null,newPlan=null,purchase=null;
   if(changed){
    if(await q(env,'SELECT 1 FROM ck_courier_receipts WHERE tracking_no=? AND id!=?',code,old.id).first())fail('该单号已经收过，不能覆盖另一条收货记录 / 이미 수령한 송장번호입니다');
@@ -135,7 +135,7 @@ export async function handleCourier(b,env,recalc){
   const eventId='CE-'+crypto.randomUUID();
   const result=await env.DB.batch([
    q(env,`INSERT INTO ck_courier_events(id,receipt_id,kind,actor_id,actor_name,detail,created_at) SELECT ?,id,'update',?,?,?,? FROM ck_courier_receipts WHERE id=? AND version=? ${changed?'AND '+correctionGuard:''}`,eventId,u.id,u.name,JSON.stringify({before:{tracking_no:old.tracking_no,owner:old.owner,status:old.status,handed_to:old.handed_to},after:{tracking_no:code,owner,status,handed_to:recipient},note}),t,old.id,old.version),
-   q(env,`UPDATE ck_courier_receipts SET tracking_no=?,shipment_id=?,owner=?,status=?,handed_to=?,handed_at=CASE WHEN handed_at='' AND ?='handed_over' THEN ? ELSE handed_at END,note=?,version=version+1 WHERE id=? AND version=? AND EXISTS(SELECT 1 FROM ck_courier_events WHERE id=?)`,code,changed?(purchase?.id||''):old.shipment_id,owner,status,recipient,status,t,note,old.id,old.version,eventId),
+   q(env,`UPDATE ck_courier_receipts SET tracking_no=?,shipment_id=?,owner=?,status=?,handed_to=?,handed_at=CASE WHEN handed_at='' AND ?='handed_over' THEN ? ELSE handed_at END,note=?,version=version+1 WHERE id=? AND version=? AND EXISTS(SELECT 1 FROM ck_courier_events WHERE id=?)`,code,changed?(purchase?.id||''):old.shipment_id,owner,status,recipient,status,t,storedNote,old.id,old.version,eventId),
    ...(changed&&oldPlan?rollbackArrivalStatements(env,oldPlan.plan_id,eventId,t):[])
   ]);
   if(result[1].meta.changes!==1)fail('记录已更新或已有后续作业，请刷新后核实');

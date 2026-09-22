@@ -15,12 +15,12 @@ test('owners match all eight workbook columns; full-string formats reject QR URL
  for(const x of ['12345678','1234567890','123456789012345','https://x.test/'+C1,C1+'已认领','XYZ1234','000000000000',C1+'\n'+C2])assert.throws(()=>trackingNumber(x));
 });
 test('scan is idempotent and preserves first actor/time/owner; correction and handoff retain audit history',async()=>{
- const {scan,call,DB}=setup();const a=await scan();assert.equal(a.item.scanner_name,'测试负责人');
+ const {scan,call,DB}=setup();const a=await scan(C1,'8-1',{note:'原收货备注'});assert.equal(a.item.scanner_name,'测试负责人');
  const dupe=await scan(C1,'8-4');assert.equal(dupe.duplicate,true);assert.equal(dupe.owner_conflict,true);assert.equal(dupe.item.owner,'8-1');assert.equal(dupe.item.received_at,a.item.received_at);
- const changed=await call('sop_courier_update',{id:a.item.id,version:1,owner:'8-4',note:'面单归属核实'});assert.equal(changed.item.version,2);
+ const changed=await call('sop_courier_update',{id:a.item.id,version:1,owner:'8-4'});assert.equal(changed.item.version,2);assert.equal(changed.item.note,'原收货备注');
  const stale=await call('sop_courier_update',{id:a.item.id,version:1,owner:'8-2',note:'过期页面'},false);assert.equal(stale.ok,false);
  const h=await call('sop_courier_update',{id:a.item.id,version:2,status:'handed_over',handed_to:'虚拟接收员',note:'按外包装交接'});assert.equal(h.item.status,'handed_over');assert.equal(h.item.received_at,a.item.received_at);
- const d=await call('sop_courier_detail',{id:a.item.id});assert.equal(d.events.length,3);assert.equal(DB.raw.prepare('SELECT COUNT(*) n FROM ck_courier_receipts').get().n,1);
+ const d=await call('sop_courier_detail',{id:a.item.id});assert.equal(d.events.length,3);const correction=d.events.find(e=>e.kind==='update'&&JSON.parse(e.detail).after.status==='received');assert.equal(correction.actor_name,'测试负责人');assert.ok(correction.created_at);assert.equal(JSON.parse(correction.detail).note,'');assert.equal(JSON.parse(correction.detail).before.owner,'8-1');assert.equal(JSON.parse(correction.detail).after.owner,'8-4');assert.equal(DB.raw.prepare('SELECT COUNT(*) n FROM ck_courier_receipts').get().n,1);
 });
 test('three non-putaway classes complete only after all planned courier numbers are received, without artificial jobs',async()=>{
  for(const biz of ['bulk','return','change_order']){const {plan,scan,detail,DB}=setup(),p=await plan([biz]);const first=await scan();assert.equal(first.plan.progress.received,1);assert.equal((await detail(p)).plan.status,'pending');
@@ -72,7 +72,7 @@ test('manual completion paths cannot bypass missing planned parcels',async()=>{
 test('wrong tracking correction reopens the old automatic arrival and completes the actual matching plan atomically',async()=>{
  const {plan,scan,call,detail}=setup();const oldPlan=await plan(['bulk'],[C1]),newPlan=await plan(['change_order'],[C2]);const first=await scan();
  assert.equal((await detail(oldPlan)).plan.status,'completed');
- const corrected=await call('sop_courier_update',{id:first.item.id,version:1,tracking_no:C2,owner:'8-2',note:'错扫相邻条码，核对实物更正'});
+ const corrected=await call('sop_courier_update',{id:first.item.id,version:1,tracking_no:C2,owner:'8-2'});
  assert.equal(corrected.item.received_at,first.item.received_at);assert.equal(corrected.item.scanner_name,first.item.scanner_name);assert.equal(corrected.item.tracking_no,C2);assert.equal(corrected.item.plan_id,newPlan.id);
  const old=await detail(oldPlan);assert.equal(old.plan.status,'pending');assert.equal(old.plan.courier_progress.received,0);assert.equal(old.lines[0].actual_qty,0);assert.equal(old.biz_tasks[0].status,'pending');
  assert.equal((await detail(newPlan)).plan.status,'completed');
@@ -80,9 +80,9 @@ test('wrong tracking correction reopens the old automatic arrival and completes 
  await scan(C1);assert.equal((await detail(oldPlan)).plan.status,'completed');
 });
 
-test('correction rejects duplicate numbers, missing reasons, invalid formats and stale versions without partial changes',async()=>{
+test('correction rejects duplicate numbers, invalid formats and stale versions without partial changes',async()=>{
  const {scan,call}=setup();const a=await scan(),b=await scan(C2);
- for(const change of [{tracking_no:C2,note:'错扫'},{tracking_no:'abc',note:'错扫'},{tracking_no:'301000000102'},{owner:'8-3'},{version:0,tracking_no:'301000000102',note:'旧页面'}]){
+ for(const change of [{tracking_no:C2},{tracking_no:'abc'},{version:0,tracking_no:'301000000102'}]){
   const r=await call('sop_courier_update',{id:a.item.id,version:1,...change},false);assert.equal(r.ok,false);
  }
  const after=await call('sop_courier_detail',{id:a.item.id});assert.equal(after.item.tracking_no,C1);assert.equal(after.events.length,1);assert.equal(after.item.version,1);
