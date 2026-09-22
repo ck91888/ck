@@ -1013,7 +1013,7 @@ async function initUnload() {
       goPage("home");
       return;
     }
-    if (res && res.ok && res.job && res.job.job_type === "unload" && res.job.status === "working") {
+    if (res && res.ok && res.job && res.job.job_type === "unload" && (res.job.status === "working" || res.can_manage_dispatch && ['pending','awaiting_close'].includes(res.job.status))) {
       // 仅 inbound_plan 关联才回灌 plan 数据；feedback-first 流程 _unloadPlanData 保持 null
       if (res.job.related_doc_type === "inbound_plan" && res.job.related_doc_id) {
         var planRes = await api({ action: "v2_inbound_plan_detail", id: res.job.related_doc_id });
@@ -1761,7 +1761,7 @@ async function initInbound() {
       goPage("home");
       return;
     }
-    if (res && res.ok && res.job && res.job.job_type && (res.job.job_type === 'inbound_direct' || res.job.job_type === 'inbound_bulk' || res.job.job_type === 'inbound_change_order') && res.job.status === "working") {
+    if (res && res.ok && res.job && res.job.job_type && (res.job.job_type === 'inbound_direct' || res.job.job_type === 'inbound_bulk' || res.job.job_type === 'inbound_change_order') && (res.job.status === "working" || res.can_manage_dispatch && ['pending','awaiting_close'].includes(res.job.status))) {
       document.getElementById("inboundEntryCard").style.display = "none";
       document.getElementById("inboundWorkingCard").style.display = "";
       loadInboundPlanInfo(res.job.related_doc_id);
@@ -2009,7 +2009,7 @@ async function initInboundReturn() {
       goPage("home");
       return;
     }
-    if (res && res.ok && res.job && res.job.job_type === 'inbound_return' && res.job.status === 'working') {
+    if (res && res.ok && res.job && res.job.job_type === 'inbound_return' && (res.job.status === 'working' || res.can_manage_dispatch && ['pending','awaiting_close'].includes(res.job.status))) {
       document.getElementById("inboundReturnEntryCard").style.display = "none";
       document.getElementById("inboundReturnWorkingCard").style.display = "";
       renderInboundReturnSession(res.job);
@@ -2127,7 +2127,7 @@ async function initImportDelivery() {
       goPage("home");
       return;
     }
-    if (res && res.ok && res.job && res.job.job_type === 'pickup_delivery_import' && res.job.status === 'working') {
+    if (res && res.ok && res.job && res.job.job_type === 'pickup_delivery_import' && (res.job.status === 'working' || res.can_manage_dispatch && ['pending','awaiting_close'].includes(res.job.status))) {
       document.getElementById("idEntryCard").style.display = "none";
       document.getElementById("idWorkingCard").style.display = "";
       renderImportDeliverySession(res.job);
@@ -2244,7 +2244,7 @@ async function initOutboundLoad() {
       goPage("home");
       return;
     }
-    if (res && res.ok && res.job && res.job.job_type === 'load_outbound' && res.job.status === 'working') {
+    if (res && res.ok && res.job && res.job.job_type === 'load_outbound' && (res.job.status === 'working' || res.can_manage_dispatch && ['pending','awaiting_close'].includes(res.job.status))) {
       showOutboundLoadWorking();
       refreshLoadWorkers();
       startJobPoll("load");
@@ -4716,7 +4716,7 @@ function initVerifyScan() {
   // 已在本人 verify_scan 任务中 — 直接回 working 态
   if (_activeJobId) {
     api({ action: "v2_ops_job_detail", job_id: _activeJobId }).then(function(res) {
-      if (res && res.ok && res.job && res.job.job_type === "verify_scan" && res.job.status === "working") {
+      if (res && res.ok && res.job && res.job.job_type === "verify_scan" && (res.job.status === "working" || res.can_manage_dispatch && ['pending','awaiting_close'].includes(res.job.status))) {
         _vsBatchId = res.job.related_doc_id || "";
         entry.style.display = "none";
         working.style.display = "";

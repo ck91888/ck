@@ -4,7 +4,8 @@
  window.CKInstallDispatch=function(){
   let lead=null;try{lead=JSON.parse(sessionStorage.getItem('ck_test_active_lead')||'null');}catch{}
   window.getWorkerId=()=>lead?.id||'';window.getWorkerName=()=>lead?.name||'';window.getBadge=()=>lead?lead.id+'|'+lead.name:'';
-  window.CKOpenNativeJob=function(job){lead=job.workers.find(w=>w.id===job.lead_id);sessionStorage.setItem('ck_test_active_lead',JSON.stringify(lead));saveActiveJob(job.id,null);if(job.job_type==='issue_handle')window._currentIssueId=job.source_id;goMyTask();};
+  window.CKSetNativeLead=function(person){if(person){lead=person;sessionStorage.setItem('ck_test_active_lead',JSON.stringify(lead));}};
+  window.CKOpenNativeJob=function(job){lead=job.workers.find(w=>w.id===job.lead_id)||job.workers[0]||job.last_lead;sessionStorage.setItem('ck_test_active_lead',JSON.stringify(lead));saveActiveJob(job.id,null);if(job.job_type==='issue_handle')window._currentIssueId=job.source_id;goMyTask();};
   window.CKClearNativeJob=function(){lead=null;sessionStorage.removeItem('ck_test_active_lead');clearActiveJob();};
   // The manager dispatches several crews; the backend still checks every worker's occupancy.
   window.hasOtherActiveJob=()=>false;

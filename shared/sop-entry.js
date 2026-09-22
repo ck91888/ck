@@ -95,7 +95,7 @@
    const renderPlan=window.renderUnloadPlanCard;window.renderUnloadPlanCard=function(data,no){renderPlan(data,no);const info=document.getElementById('unloadPlanInfo');const box=document.createElement('section');box.className='ck-inbound-work';box.innerHTML='<p>正在读取本批分货要求…</p>';info.append(box);request('sop_linked',{source_id:data.plan.id}).then(r=>{if(!box.isConnected)return;box.innerHTML=r.items.length?'<h3>卸货时的分货与操作要求</h3>'+CKWorkNeedsTable(r.items)+'<p class="ck-muted">打托货边卸边打托；散出货集中放置；入库代发货单独分出并交代发组。已完成内容在交接时说明，后续只做剩余操作。</p>':'<p class="ck-muted">本计划暂无单独作业要求。</p>';}).catch(e=>{box.textContent='作业要求读取失败：'+e.message;});};
    const tasks=document.createElement('section');tasks.className='ck-inline-heading';tasks.innerHTML='<b>现场在途任务（点击继续原单据操作）</b><div class="ck-buttons"></div>';document.getElementById('page-home').append(tasks);
    window.initHome=async()=>{CKClearNativeJob();document.getElementById('myTaskBar')?.classList.add('hidden');window._unloadPlanData=null;
-    try{const r=await request('sop_dispatch_list');const list=tasks.querySelector('.ck-buttons');list.replaceChildren();for(const job of r.items)list.append(button((window.JOB_TYPE_LABEL?.[job.job_type]||job.job_type)+' · '+job.workers.map(w=>w.name).join('、')+' · '+job.id,()=>CKOpenNativeJob(job)));if(!r.items.length)list.textContent='暂无原业务在途派工；关联作业请进入按单操作 → 大货操作。';}catch(e){tasks.querySelector('.ck-buttons').textContent=e.message;}
+    try{const r=await request('sop_dispatch_list');const list=tasks.querySelector('.ck-buttons');list.replaceChildren();for(const job of r.items)list.append(button((window.JOB_TYPE_LABEL?.[job.job_type]||job.job_type)+' · '+(job.workers.map(w=>w.name).join('、')||'待收尾 / 마감 대기')+' · '+job.id,()=>CKOpenNativeJob(job)));if(!r.items.length)list.textContent='暂无原业务在途派工；关联作业请进入按单操作 → 大货操作。';}catch(e){tasks.querySelector('.ck-buttons').textContent=e.message;}
    };
 
    document.getElementById('headerWorker').textContent=u.name+' · 负责人';document.getElementById('headerWorker').onclick=()=>{};
@@ -148,6 +148,7 @@
   }
   if(app==='001')window.CKInstallUnloadTrip?.();
   await window.CKInstallCourier?.(app);
+  if(app==='001')window.CKInstallNativeLifecycle?.();
   if(app==='001'||app==='002'){
    const notices=document.createElement('div');notices.className='ck-updates';notices.hidden=true;nav.after(notices);
    const update=async()=>{if(document.hidden)return;try{const r=await request('sop_updates');notices.hidden=!r.items.length;notices.innerHTML=r.items.length?'<b>有 '+r.items.length+' 条最新要求待仓库确认</b> '+r.items.slice(0,5).map(x=>'<a href="/002/?issue='+encodeURIComponent(x.legacy_id)+'">'+esc(x.title.slice(0,36))+'</a>').join(' · '):'';}catch(e){notices.hidden=false;notices.textContent='消息同步失败，请刷新检查网络：'+e.message;}};await update();setInterval(update,15000);window.addEventListener('focus',update);

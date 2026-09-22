@@ -1,3 +1,4 @@
+import {validateNativeMutation, nativePeople, finishNativePick, finishNativeOutbound} from './native-lifecycle.js';
 import {findUnloadPlan, startUnloadTrip, finishUnloadTrip, tripPlans} from './unload-trip.js';
 import {handleCourier,validateCourierLines,courierPlanStatements,courierProgress,courierReady,protectCourierEdit,syncCourierArrival} from './courier.js';
 import { inboundFlowEnabled, inboundCode, inboundCodes, inboundReferenceValue, inboundCodeProgress, selectInboundReference, validateInboundCode, resolveInboundPlan, putawayTaskBiz, completeUnloadedDispositions, bindInboundCode, inboundLabels } from './inbound-flow.js';
@@ -963,8 +964,8 @@ async function recalcActiveCount(env, jobId, t) {
   ).bind(jobId).first();
   const real = cnt ? cnt.c : 0;
   await env.DB.prepare(
-    "UPDATE v2_ops_jobs SET active_worker_count=?, updated_at=? WHERE id=?"
-  ).bind(real, t, jobId).run();
+    "UPDATE v2_ops_jobs SET active_worker_count=? WHERE id=? AND active_worker_count!=?"
+  ).bind(real, jobId, real).run();
   return real;
 }
 
@@ -2010,7 +2011,7 @@ const MIGRATIONS = [
 ];
 
 // 每次发布迁移变化时手动 +1（patch 段），冷启动只比对一次字符串即可跳过整段 MIGRATIONS
-const CURRENT_SCHEMA_VERSION = 'v2.20260922c';
+const CURRENT_SCHEMA_VERSION = 'v2.20260922d';
 
 let _migrated = false;
 async function ensureMigrated(db) {
@@ -3422,7 +3423,7 @@ route("v2_outbound_load_start", async (body, env) => {
     let job = null;
     if (order_id) {
       const existing = await env.DB.prepare(
-        "SELECT * FROM v2_ops_jobs WHERE related_doc_type='outbound_order' AND related_doc_id=? AND status IN ('pending','working') LIMIT 1"
+        "SELECT * FROM v2_ops_jobs WHERE job_type='load_outbound' AND related_doc_type='outbound_order' AND related_doc_id=? AND status IN ('pending','working') LIMIT 1"
       ).bind(order_id).first();
       if (existing) job = existing;
     }
@@ -3467,6 +3468,7 @@ route("v2_outbound_load_start", async (body, env) => {
 
 route("v2_outbound_load_finish", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  if(env.SOP_GROUP_FINISH && body.complete_job===true)return json(await finishNativeOutbound(body,env));
   const job_id = String(body.job_id || "").trim();
   const worker_id = String(body.worker_id || "").trim();
   if (!job_id) return err("missing job_id");
@@ -3506,7 +3508,7 @@ route("v2_outbound_load_finish", async (body, env) => {
 
   // Complete job if requested — 基于 realCount 判断
   if (complete_job) {
-    if (realCount <= 0) {
+    if (realCount <= 0 || env.SOP_GROUP_FINISH) {
       // 防御性收口：关闭所有遗留 open segment（多人任务即使 realCount=0 也确保 left_at 全部写入）
       await closeOpenWorkerSegmentsForJob(env, job_id, t, 'job_completed');
       await env.DB.prepare(
@@ -3616,6 +3618,7 @@ route("v2_outbound_stock_op_start", async (body, env) => {
 // 仓库完成库内操作（写 result，关闭 segs，推 order.status='pending_outbound_update'）
 route("v2_outbound_stock_op_finish", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  if(env.SOP_GROUP_FINISH && body.complete_job!==false)return json(await finishNativeOutbound(body,env));
   const job_id = String(body.job_id || "").trim();
   const worker_id = String(body.worker_id || "").trim();
   const worker_name = String(body.worker_name || "").trim();
@@ -3661,7 +3664,7 @@ route("v2_outbound_stock_op_finish", async (body, env) => {
 
     const complete_job = body.complete_job !== false; // 默认完成
 
-    if (complete_job && realCount <= 0) {
+    if (complete_job && (realCount <= 0 || env.SOP_GROUP_FINISH)) {
       // 防御性收口：关闭所有遗留 open segment
       await closeOpenWorkerSegmentsForJob(env, job_id, t, 'job_completed');
       // 关闭 job
@@ -5997,7 +6000,7 @@ route("v2_import_delivery_job_start", async (body, env) => {
     const t = now();
     const job_type = "pickup_delivery_import";
 
-    const existing = await env.DB.prepare(
+    const existing = env.SOP_NATIVE_START ? null : await env.DB.prepare(
       "SELECT * FROM v2_ops_jobs WHERE job_type=? AND status IN ('pending','working') LIMIT 1"
     ).bind(job_type).first();
 
@@ -6838,7 +6841,7 @@ route("v2_ops_job_detail", async (body, env) => {
     "SELECT * FROM v2_attachments WHERE related_doc_type='ops_job' AND related_doc_id=? ORDER BY created_at DESC"
   ).bind(job_id).all();
   return json({
-    ok: true, job, can_manage_dispatch: await nativeOwner(body,env), unload_plans: await tripPlans(env,job_id),
+    ok: true, dispatch: inboundFlowEnabled(env) ? await env.DB.prepare("SELECT revision,state FROM sop_records WHERE id=? AND kind='dispatch'").bind(job_id).first() : null, job, can_manage_dispatch: await nativeOwner(body,env), unload_plans: await tripPlans(env,job_id),
     workers: workers.results || [],
     results: results.results || [],
     attachments: atts.results || []
@@ -7840,6 +7843,7 @@ route("v2_pick_job_add_docs", async (body, env) => {
 // =====================================================
 route("v2_pick_job_finish", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  if(env.SOP_GROUP_FINISH)return json(await finishNativePick(body,env));
   const job_id = String(body.job_id || "").trim();
   const worker_id = String(body.worker_id || "").trim();
   if (!job_id) return err("missing job_id");
@@ -7948,6 +7952,8 @@ route("v2_pick_job_finalize", async (body, env) => {
       return { ok: false, error: "already_cancelled", message: "趟次已取消" };
     }
 
+    if (env.SOP_GROUP_FINISH) return finishNativePick(body,env);
+
     // ---- 权限收口：仅 ADMINKEY 或 趟次创建人 可整趟完成 ----
     // OPSKEY 调用时必须 worker_id === job.created_by，否则拒绝
     const isAdminCall = isAdmin(body, env);
@@ -7969,7 +7975,7 @@ route("v2_pick_job_finalize", async (body, env) => {
       "SELECT COUNT(*) as c, GROUP_CONCAT(worker_name, '、') as names FROM v2_ops_job_workers WHERE job_id=? AND left_at=''"
     ).bind(job_id).first();
     const activeCount = (activeRs && activeRs.c) || 0;
-    if (activeCount > 0) {
+    if (activeCount > 0 && !env.SOP_GROUP_FINISH) {
       return { ok: false, error: "active_workers_still_working",
         message: "仍有人员正在拣货，请先让所有人完成本次拣货后再整趟完成 / 아직 작업 중인 인원이 있습니다. 모두 완료 후 다시 시도하세요",
         active_worker_count: activeCount,
@@ -8009,7 +8015,7 @@ route("v2_pick_job_finalize", async (body, env) => {
       `SELECT COUNT(DISTINCT worker_id) as worker_count,
               COUNT(*) as pwd_count,
               COALESCE(SUM(minutes_worked), 0) as total_minutes
-       FROM v2_pick_worker_docs WHERE job_id=?`
+       FROM v2_ops_job_workers WHERE job_id=?`
     ).bind(job_id).first();
     const result_id = "RES-" + uid();
     await env.DB.prepare(`
@@ -8335,7 +8341,7 @@ route("v2_bulk_op_job_finish", async (body, env) => {
     ).bind(job_id, worker_id).first();
     const willBeLastPerson = (Number((othersRow && othersRow.c) || 0) === 0);
 
-    if (willBeLastPerson) {
+    if (willBeLastPerson || env.SOP_GROUP_FINISH) {
       const numFields = [
         Number(body.packed_sku_count || 0),
         Number(body.packed_box_count || 0),
@@ -12623,11 +12629,13 @@ export default {
       try{return json(await handleAttendance(body,env));}catch(e){return json({ok:false,error:e.message},400);}
     }
     try{const attendanceBlock=await guardAttendance(body,env);if(attendanceBlock)return json({ok:false,error:attendanceBlock},409);}catch(e){return json({ok:false,error:e.message},400);}
+    if(action==='sop_native_people'){try{return json(await nativePeople(body,env));}catch(e){return json({ok:false,error:e.message},409);}}
     if(action==='sop_native_start'){
       try{return json(await startNative(body,env,async input=>(await HANDLERS[input.action](input,env)).json(),guardLegacy));}
       catch(e){return json({ok:false,error:e.message},400);}
     }
-    env.SOP_GROUP_FINISH = /_finish$/.test(action) && !body.leave_only && await nativeOwner(body,env);
+    env.SOP_GROUP_FINISH = /_(finish|finalize)$/.test(action) && !body.leave_only && await nativeOwner(body,env);
+    try{await validateNativeMutation(body,env);}catch(e){return json({ok:false,error:e.message},409);}
     if(action==='sop_demo_prepare'){
       try{return json(await prepareDemo(env,async input=>{const response=await HANDLERS[input.action](input,env);return response.json();},input=>handleSop(input,env)));}
       catch(e){return json({ok:false,error:'虚拟数据准备失败：'+e.message},400);}

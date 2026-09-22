@@ -61,7 +61,7 @@ window.CKInstallUnloadTrip=function(){
   if(_activeJobId){
    try{const r=await request({action:'v2_ops_job_detail',job_id:_activeJobId});
     if(r.job.related_doc_type==='field_feedback')localStorage.setItem('v2_unplanned_fb_id',r.job.related_doc_id);else localStorage.removeItem('v2_unplanned_fb_id');
-    if(r.unload_plans?.length&&r.job.status==='working'){await showTrip(r);return;}
+    if(r.unload_plans?.length&&['pending','working','awaiting_close'].includes(r.job.status)){await showTrip(r);return;}
    }catch(e){message(e.message,true);}
   }
   return originalInit();

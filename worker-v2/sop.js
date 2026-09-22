@@ -139,7 +139,7 @@ export async function handleSop(b,env) {
   if(b.action==='sop_dispatch_list'){
    if(u.role!=='manager')fail('仅负责人可查看现场派工');
    const rows=await all(env,"SELECT s.state,j.* FROM sop_records s JOIN v2_ops_jobs j ON j.id=s.id WHERE s.kind='dispatch' AND j.status NOT IN ('completed','cancelled') ORDER BY j.updated_at DESC LIMIT 200");
-   return {ok:true,items:rows.map(r=>{const d=JSON.parse(r.state);return {id:r.id,job_type:r.job_type,status:r.status,source_id:r.related_doc_id,lead_id:d.lead_id,workers:d.workers,owner:d.owner,estimated_minutes:d.estimated_minutes};})};
+   return {ok:true,items:rows.map(r=>{const d=JSON.parse(r.state);return {id:r.id,job_type:r.job_type,status:r.status,source_id:r.related_doc_id,lead_id:d.lead_id,last_lead:d.last_lead,display_no:r.display_no,workers:d.workers,owner:d.owner,estimated_minutes:d.estimated_minutes};})};
   }
   if(b.action==='sop_dashboard') return await dashboard(env,u,b);
   if(b.action==='sop_updates'){

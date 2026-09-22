@@ -22,7 +22,7 @@
  window.CKPeopleSelection=selection;
  window.CKPeopleFields=function(){return '<label>扫描工牌 / 명찰<input data-staff-badge placeholder="TEST-A|测试操作员甲" autocomplete="off"></label><div class="toolbar"><button type="button" data-staff-add>添加工牌</button><button type="button" data-staff-camera>相机扫码 / 카메라</button></div><div data-staff-scanner></div><p data-staff-count></p><p data-staff-status role="status" aria-live="polite"></p><div data-staff-people></div><label>主操作员 / 주 작업자<select name="lead_id" data-staff-lead required></select></label>';};
  let scannerSequence=0;
- window.CKPeoplePicker=function(root,{workers=[],leadId='',error}={}){
+ window.CKPeoplePicker=function(root,{workers=[],leadId='',error,allowEmpty=false}={}){
   const find=s=>root.querySelector('[data-staff-'+s+']'),input=find('badge'),lead=find('lead'),status=find('status'),camera=find('camera'),model=selection(workers,leadId);
   const scannerBox=find('scanner');scannerBox.id='ck-staff-scanner-'+(++scannerSequence);
   let scanner=null,starting=false,closed=false,lastCamera='',lastCameraAt=0;
@@ -31,7 +31,7 @@
   function render(){
    find('people').replaceChildren();lead.replaceChildren(new Option('请选择主操作员 / 주 작업자 선택',''));
    for(const p of model.people){const item=document.createElement('span');item.className='badge';item.textContent=p.name+' ('+p.id+') ';const remove=document.createElement('button');remove.type='button';remove.className='light';remove.textContent='移除';remove.setAttribute('aria-label','移除 '+p.name+' ('+p.id+')');remove.onclick=()=>{model.select(lead.value);report(model.remove(p.id));if(error)error.textContent='';render();};item.append(remove);find('people').append(item);lead.add(new Option(p.name+' ('+p.id+')',p.id));}
-   lead.value=model.lead;find('count').textContent='已选 '+model.people.length+' 人 / 선택 '+model.people.length+'명';
+   lead.required=!allowEmpty||model.people.length>0;lead.value=model.lead;find('count').textContent='已选 '+model.people.length+' 人 / 선택 '+model.people.length+'명';
   }
   function add(raw){if(closed)return;try{model.select(lead.value);const result=model.add(raw);render();report(result.message);if(error)error.textContent='';input.value='';input.focus();}catch(e){showError(e);input.focus();}}
   find('add').onclick=()=>add(input.value);input.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();add(input.value);}};lead.onchange=()=>{model.select(lead.value);if(error)error.textContent='';};
@@ -44,6 +44,6 @@
    finally{starting=false;}
   };
   render();input.focus();
-  return {read(){model.select(lead.value);return model.read();},async destroy(){closed=true;await stop();}};
+  return {read(){if(allowEmpty&&!model.people.length)return {workers:[],lead_id:''};model.select(lead.value);return model.read();},async destroy(){closed=true;await stop();}};
  };
 })();

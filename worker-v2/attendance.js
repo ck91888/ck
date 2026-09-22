@@ -181,7 +181,7 @@ export async function handleAttendance(b,env){
 export async function guardAttendance(body,env){
  if(!attendanceEnabled(env))return null;
  const action=body.action||'',native=action==='sop_native_start',source=native?body.payload||{}:body;
- if(!(native||['sop_task_start','sop_task_people','sop_task_dispatch'].includes(action)||/^v2_.*_(start|resume|join)$/.test(action)||action==='v2_pick_job_start_by_docs'))return null;
+ if(!(native||['sop_task_start','sop_task_people','sop_task_dispatch','sop_native_people'].includes(action)||/^v2_.*_(start|resume|join)$/.test(action)||action==='v2_pick_job_start_by_docs'))return null;
  // A committed retry must reach the original action's idempotent response.
  if(body.client_req_id){const done=await q(env,'SELECT action,actor_id FROM sop_events WHERE request_id=?',body.client_req_id).first();if(done&&done.action===action&&done.actor_id===env.SOP_REQUEST_USER?.id)return null;}
  let workers=body.workers||[],jobId=body.id||source.job_id;
