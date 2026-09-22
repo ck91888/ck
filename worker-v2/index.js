@@ -3723,7 +3723,7 @@ route("v2_inbound_plan_create", async (body, env) => {
     const externalNo = await validateInboundCode(env,bizNorm.list,inboundReferenceValue(body));
     const id = "IB-" + uid();
     const t = now();
-    const plan_date = String(body.plan_date || kstToday());
+    const plan_date = env.SOP_ENVIRONMENT==='staging'&&env.SOP_UPGRADE_ENABLED==='true' ? kstToday() : String(body.plan_date || kstToday());
     const customer = String(body.customer || "");
     const biz_class = bizNorm.primary; // 兼容旧字段，存第一个
     const biz_classes_json = JSON.stringify(bizNorm.list);
@@ -4610,7 +4610,7 @@ route("v2_inbound_plan_update", async (body, env) => {
       `UPDATE v2_inbound_plans SET plan_date=?, customer=?, biz_class=?, biz_classes_json=?,
         cargo_summary=?, expected_arrival=?, purpose=?, remark=?, external_inbound_no=?, updated_at=? WHERE id=?`
     ).bind(
-      String(body.plan_date || plan.plan_date),
+      env.SOP_ENVIRONMENT==='staging'&&env.SOP_UPGRADE_ENABLED==='true' ? plan.plan_date : String(body.plan_date || plan.plan_date),
       String(body.customer || plan.customer),
       biz_class, biz_classes_json,
       String(body.cargo_summary != null ? body.cargo_summary : (plan.cargo_summary || "")),
@@ -8120,6 +8120,10 @@ route("v2_bulk_op_job_start", async (body, env) => {
     // ---- Phase 1: 查询关联出库单（校验前置，不再先建后回滚） ----
     const linkedOb = await findOutboundByWorkOrder(env, work_order_no);
     const obId = linkedOb ? linkedOb.id : "";
+    if(env.SOP_UPGRADE_ENABLED==='true'){
+      if(/^(CKWORK\||NEED-|SOPJOB-)/i.test(work_order_no))return {ok:false,error:'这是需求作业单，请从需求作业单入口打开'};
+      if(obId&&(await linkedNeeds(env,obId)).length)return {ok:false,error:'此出库计划已关联作业需求，请打开原需求，避免重复记录产出'};
+    }
     const obStatus = linkedOb ? (linkedOb.status || "") : "";
 
     // 出库单状态校验（前置于 job 创建）
@@ -12651,7 +12655,7 @@ async function handleMultipartUpload(formData, env) {
     const related_doc_type = v003Text(formData.get("related_doc_type"), 80);
     const related_doc_id = v003Text(formData.get("related_doc_id"), 120);
     const attachment_category = v003Text(formData.get("attachment_category"), 80);
-    const uploaded_by = v003Text(formData.get("uploaded_by"), 120);
+    const uploaded_by = related_doc_type==='sop_task' ? env.SOP_REQUEST_USER?.name||'' : v003Text(formData.get("uploaded_by"), 120);
     const fieldBody = {
       k,
       operator_id: v003Text(formData.get("operator_id"), 80),
@@ -12661,6 +12665,18 @@ async function handleMultipartUpload(formData, env) {
       && v003IsPublicField(fieldBody);
     if (!isOpsAuth(fieldBody, env) && !publicArrival) return err("unauthorized", 401);
     if (!related_doc_type || !related_doc_id) return err("missing attachment target");
+    if(related_doc_type==='sop_task'){
+      if(env.SOP_UPGRADE_ENABLED!=='true'||attachment_category!=='location_photo')return err('无效货位照片');
+      const task=await env.DB.prepare("SELECT state,department FROM sop_records WHERE id=? AND kind='task'").bind(related_doc_id).first(),u=env.SOP_REQUEST_USER;
+      if(!task||!u)return err('任务不存在或未授权',403);
+      const data=JSON.parse(task.state),allowed=u.role==='manager'||u.role==='dispatcher'&&(u.departments||[]).includes(task.department)&&(data.owner_id===u.id||(data.delegates||[]).includes(u.id));
+      if(!allowed||data.status!=='working')return err('只有本任务派审员可在作业中上传货位照片',403);
+      if(!['image/jpeg','image/png','image/webp'].includes(file.type)||!file.size||file.size>10*1024*1024)return err('仅支持10MB以内的JPG、PNG、WebP照片');
+      const bytes=new Uint8Array(await file.slice(0,12).arrayBuffer());
+      const valid=file.type==='image/jpeg'?bytes[0]===255&&bytes[1]===216&&bytes[2]===255:file.type==='image/png'?[137,80,78,71,13,10,26,10].every((v,i)=>bytes[i]===v):String.fromCharCode(...bytes.slice(0,4))==='RIFF'&&String.fromCharCode(...bytes.slice(8,12))==='WEBP';
+      if(!valid)return err('照片格式无效');
+      const count=await env.DB.prepare("SELECT COUNT(*) n FROM v2_attachments WHERE related_doc_type='sop_task' AND related_doc_id=? AND attachment_category='location_photo'").bind(related_doc_id).first();if(count.n>=8)return err('每个任务最多8张货位照片');
+    }
     if(related_doc_type==='sop_need'){
       if(env.SOP_UPGRADE_ENABLED!=='true')return err('作业需求功能未启用');
       const need=await env.DB.prepare("SELECT state FROM sop_records WHERE id=? AND kind='need'").bind(related_doc_id).first();

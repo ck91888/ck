@@ -1806,7 +1806,7 @@ async function loadOutboundDetail() {
     html += '<div class="detail-section"><b>关联作业 / 연결 작업:</b>';
     res.sop_needs.forEach(function(n) {
       html += '<div class="remark-block"><b>' + esc(n.title) + '</b><br>' + esc(n.instructions) + '<br>' + esc(n.status) +
-        ' <a href="../sop/?tab=need&source=outbound&source_id=' + encodeURIComponent(o.id) + '">查看统一作业 / 작업 보기</a></div>';
+        ' <a href="../002/?need=' + encodeURIComponent(n.id) + '&individual=1">查看关联作业 / 작업 보기</a></div>';
     });
     html += '</div>';
   } else {
@@ -2379,7 +2379,7 @@ async function loadInboundList() {
     }
     html += ' ' + esc(p.display_no || p.id) + ' · ' + esc(p.customer || "--") + ' · ' + esc(p.cargo_summary || "");
     html += '</div>';
-    var ibMeta = esc(p.plan_date || "") + ' · ' + esc(dateOnly(p.expected_arrival) || "") + ' · ' + esc(fmtTime(p.created_at));
+    var ibMeta = (window.CK_SOP_ROLLOUT?.staging ? '预计到达 ' + esc(dateOnly(p.expected_arrival) || '待定') : esc(p.plan_date || '') + ' · ' + esc(dateOnly(p.expected_arrival) || '')) + ' · ' + esc(fmtTime(p.created_at));
     // line summary：箱/托/件 — 仅显示有数量的项
     var lineSum = p.line_summary || {};
     var lineParts = [];
@@ -2822,7 +2822,7 @@ async function loadInboundDetail() {
     bizTagsHtml += '<span class="biz-tag biz-' + esc(detailBizArr[dbi]) + '" style="margin-right:4px;">' + esc((window.CKInboundLabel ? CKInboundLabel(detailBizArr[dbi]) : bizLabel(detailBizArr[dbi]))) + '</span>';
   }
   html += '<div><b>' + L("biz_class") + ':</b> ' + (bizTagsHtml || '--') + '</div>';
-  html += '<div><b>' + L("plan_date") + ':</b> ' + esc(p.plan_date) + '</div>';
+  if (!window.CK_SOP_ROLLOUT?.staging) html += '<div><b>' + L("plan_date") + ':</b> ' + esc(p.plan_date) + '</div>';
   html += '<div><b>' + L("customer") + ':</b> ' + esc(p.customer) + '</div>';
   html += '<div><b>' + L("cargo_summary") + ':</b> ' + esc(p.cargo_summary) + '</div>';
   html += '<div><b>' + L("expected_arrival") + ':</b> ' + esc(dateOnly(p.expected_arrival) || '--') + '</div>';
@@ -3987,7 +3987,7 @@ async function printIbQr() {
     '<div class="info-grid">' +
       '<div><span class="label">入库单号：</span>' + esc(displayNo) + '</div>' +
       '<div><span class="label">货物摘要：</span>' + esc(plan.cargo_summary || '') + '</div>' +
-      '<div><span class="label">计划日期：</span>' + esc(plan.plan_date || '') + '</div>' +
+      (window.CK_SOP_ROLLOUT?.staging ? '' : '<div><span class="label">计划日期：</span>' + esc(plan.plan_date || '') + '</div>') +
       '<div><span class="label">预计到达日期 / 입고 예정일：</span>' + esc(dateOnly(plan.expected_arrival) || '--') + '</div>' +
       '<div><span class="label">客户：</span>' + esc(plan.customer || '') + '</div>' +
       '<div><span class="label">提出人：</span>' + esc(plan.created_by || '') + '</div>' +

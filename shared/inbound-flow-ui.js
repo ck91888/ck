@@ -31,9 +31,12 @@ window.CKInstallInboundFlow=function(app){
   const note=document.getElementById('ibc-biz-classes').nextElementSibling.nextElementSibling;
   if(note)note.textContent='理货上架需完成实际理货；其余类型卸货完成后自动入库 / 검수·적치 외 유형은 하차 완료 시 자동 입고';
   const create=document.getElementById('view-inbound_create');create.classList.add('ck-inbound-form');
-  for(const id of ['ibc-date','ibc-customer'])document.getElementById(id).closest('.form-group').classList.add('ck-inbound-half');
+  document.getElementById('ibc-date').closest('.form-group').hidden=true;
+  const customerGroup=document.getElementById('ibc-customer').closest('.form-group'),arrivalGroup=document.getElementById('ibc-arrival').closest('.form-group');
+  customerGroup.classList.add('ck-inbound-half');arrivalGroup.classList.add('ck-inbound-half');customerGroup.after(arrivalGroup);
+  document.querySelector('#view-inbound .filter-label b').textContent='建单日期 / 등록일';
   for(const opt of document.getElementById('ibFilterBizClass').options)if(labels[opt.value])opt.textContent=CKInboundLabel(opt.value);
-  const edit=window.openInboundEditForm;window.openInboundEditForm=function(){edit();const first=document.querySelector('#ibEditOverlay .ib-edit-biz');if(first)choices(first.closest('label').parentElement,'.ib-edit-biz','ck-ib-edit-external',window._currentInboundPlan?.external_inbound_no||'');};
+  const edit=window.openInboundEditForm;window.openInboundEditForm=function(){edit();document.getElementById('ib-edit-date').parentElement.hidden=true;const first=document.querySelector('#ibEditOverlay .ib-edit-biz');if(first)choices(first.closest('label').parentElement,'.ib-edit-biz','ck-ib-edit-external',window._currentInboundPlan?.external_inbound_no||'');};
   const detail=window.loadInboundDetail;window.loadInboundDetail=async function(...args){await detail(...args);const p=window._currentInboundPlan,host=document.getElementById('inboundDetailBody');if(!p||!host)return;
    const box=document.createElement('section');box.className='ck-inbound-reference';box.innerHTML=progressHtml(p)||'<strong>外部系统入库单号 / 외부 입고번호</strong><span>'+esc(p.external_inbound_no||'未填写 / 미등록')+'</span>';
    if(!['completed','cancelled'].includes(p.status)&&p.source_type!=='return_session'){

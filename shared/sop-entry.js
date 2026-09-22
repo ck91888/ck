@@ -87,7 +87,7 @@
    document.getElementById('btnNewCheck').onclick=()=>{goView('check');mount(document.getElementById('checkListBody'),{tab:'check',context:'collab',create:'check'});};
    const originalGoView=window.goView;window.goView=function(name){originalGoView(name);if(name==='outbound_create')outboundPicker().catch(e=>alert(e.message));};
    const wh=document.createElement('section');wh.className='ck-inline-heading ck-workflow ck-work-plans';document.getElementById('ibc-remark').closest('.form-group').after(wh);window.CKInboundWorks=CKWorkFields(wh);CKConnectInboundOutbounds(wh);
-   showMain();if(params.get('need')&&params.get('create_outbound'))goView('outbound_create');else if(params.get('need')){goTab('need');mount(v,{tab:'need',id:params.get('need'),context:'collab'});}else if(params.get('inbound'))openInboundDetail(params.get('inbound'));else if(params.get('issue'))openIssueDetail(params.get('issue'));else if(params.get('tab'))goTab(params.get('tab'));
+   showMain();if(params.get('need')&&params.get('create_outbound'))goView('outbound_create');else if(params.get('need')){goTab('need');mount(v,{tab:'need',id:params.get('need'),individual:params.get('individual')==='1',context:'collab'});}else if(params.get('inbound'))openInboundDetail(params.get('inbound'));else if(params.get('issue'))openIssueDetail(params.get('issue'));else if(params.get('tab'))goTab(params.get('tab'));
   }else if(app==='001'){
    window.CKInstallDispatch();
    const iconPaths=['M2 6h12v11H2z M14 10h4l4 4v3h-8 M7 18a2 2 0 1 1-4 0 2 2 0 0 1 4 0 M21 18a2 2 0 1 1-4 0 2 2 0 0 1 4 0','M3 7l9-4 9 4v11l-9 4-9-4z M3 7l9 4 9-4 M12 11v11','M8 5H4v17h16V5h-4 M8 2h8v5H8z M8 12h8 M8 17h6','M3 4h11v15H3z M14 11h8 M18 7l4 4-4 4','M4 7h16 M4 12h16 M4 17h16 M8 4v6 M16 9v6 M10 14v6','M12 3L2 21h20z M12 9v5 M12 17v1','M3 12l7 2 2 7 2-7 7-11z M10 14l11-11','M4 3v18h18 M8 16v-5 M13 16V7 M18 16V4','M9 15l6-6 M8 17l-2 2a4 4 0 0 1-5-5l5-5 M16 7l2-2a4 4 0 0 1 5 5l-5 5'];
@@ -102,11 +102,20 @@
    const dispatch=document.createElement('div');dispatch.id='page-dispatch';dispatch.className='page';dispatch.innerHTML='<button class="nav-back" type="button">← 现场首页</button><div id="ck-dispatch-body"></div>';document.body.append(dispatch);dispatch.querySelector('button').onclick=()=>showPage('home');
    let fieldWork=null;
    const bulkPage=document.getElementById('page-bulk_op'),bulkHost=document.createElement('div');bulkPage.append(bulkHost);
+   const modes=document.createElement('div');modes.className='ck-bulk-modes';modes.innerHTML='<button type="button" data-mode="need">需求作业单 / 작업 요청서</button><button type="button" data-mode="external">外部作业单 / 외부 작업서</button>';bulkPage.querySelector('.topbar').after(modes);
+   modes.querySelectorAll('button').forEach(b=>b.onclick=()=>goPage('bulk_op',{external:b.dataset.mode==='external'}));
+   const menu=document.querySelector('#page-order_op_menu .btn:last-child');menu.after(button('外部作业单 / 외부 작업서',()=>goPage('bulk_op',{external:true})));
    const originalBulkInit=window.initBulkOp;window.initBulkOp=function(){
-    if(window._activeJobId&&!String(window._activeJobId).startsWith('SOPJOB-')){bulkHost.hidden=true;return originalBulkInit();}
+    const external=!!window._pageParams?.external||!!(window._activeJobId&&!String(window._activeJobId).startsWith('SOPJOB-'));
+    modes.querySelectorAll('button').forEach(b=>{b.setAttribute('aria-pressed',String((b.dataset.mode==='external')===external));b.disabled=!!window._activeJobId;});
+    if(fieldWork){fieldWork.destroy();fieldWork=null;}window.stopBulkScan?.();window._bulkStopElapsedTimer?.();
+    if(external){bulkHost.hidden=true;return originalBulkInit();}
     for(const node of ['bulkStateIdle','bulkStateWorking'])document.getElementById(node).style.display='none';
     bulkHost.hidden=false;if(fieldWork)fieldWork.destroy();fieldWork=CKFieldWork(bulkHost,params.get('task')||params.get('need')||'');
    };
+   document.querySelector('#bulkStateIdle .card-title').textContent='外部作业单号 / 외부 작업번호';
+   document.getElementById('bulkOrderInput').placeholder='扫描或输入外部系统作业单号 / 외부 작업번호';
+   const hint=document.createElement('p');hint.className='ck-external-hint';hint.textContent='无需先建协同中心需求；扫描外部单号后分配人员，记录本次工时和产出。 / 외부 작업서로 인원·작업시간·산출 기록';document.getElementById('bulkStateIdle').prepend(hint);
    const labor=document.createElement('div');labor.id='page-labor';labor.className='page';labor.innerHTML='<div class="topbar"><button class="back-btn">← 现场首页</button><div class="page-title">人员与休息 / 인원·휴식</div></div><div id="ck-field-labor" style="padding:0 16px"></div>';document.body.append(labor);labor.querySelector('button').onclick=()=>showPage('home');
    window.CKOpenFieldLabor=async()=>{showPage('labor');await CKLabor(document.getElementById('ck-field-labor'),{field:true});};
    const laborButton=button('现场人员与休息 / 인원·휴식',window.CKOpenFieldLabor);laborButton.className='btn btn-outline';document.getElementById('page-home').prepend(laborButton);
