@@ -68,3 +68,39 @@ test('manual completion paths cannot bypass missing planned parcels',async()=>{
  const marked=await call('v2_inbound_mark_completed',{inbound_plan_id:p.id},false);assert.equal(marked.error,'courier_not_received');
  assert.equal(DB.raw.prepare('SELECT status FROM v2_inbound_plans WHERE id=?').get(p.id).status,'arrived_pending_putaway');
 });
+
+test('wrong tracking correction reopens the old automatic arrival and completes the actual matching plan atomically',async()=>{
+ const {plan,scan,call,detail}=setup();const oldPlan=await plan(['bulk'],[C1]),newPlan=await plan(['change_order'],[C2]);const first=await scan();
+ assert.equal((await detail(oldPlan)).plan.status,'completed');
+ const corrected=await call('sop_courier_update',{id:first.item.id,version:1,tracking_no:C2,owner:'8-2',note:'错扫相邻条码，核对实物更正'});
+ assert.equal(corrected.item.received_at,first.item.received_at);assert.equal(corrected.item.scanner_name,first.item.scanner_name);assert.equal(corrected.item.tracking_no,C2);assert.equal(corrected.item.plan_id,newPlan.id);
+ const old=await detail(oldPlan);assert.equal(old.plan.status,'pending');assert.equal(old.plan.courier_progress.received,0);assert.equal(old.lines[0].actual_qty,0);assert.equal(old.biz_tasks[0].status,'pending');
+ assert.equal((await detail(newPlan)).plan.status,'completed');
+ const audit=await call('sop_courier_detail',{id:first.item.id});const event=JSON.parse(audit.events.at(-1).detail);assert.equal(event.before.tracking_no,C1);assert.equal(event.after.tracking_no,C2);
+ await scan(C1);assert.equal((await detail(oldPlan)).plan.status,'completed');
+});
+
+test('correction rejects duplicate numbers, missing reasons, invalid formats and stale versions without partial changes',async()=>{
+ const {scan,call}=setup();const a=await scan(),b=await scan(C2);
+ for(const change of [{tracking_no:C2,note:'错扫'},{tracking_no:'abc',note:'错扫'},{tracking_no:'301000000102'},{owner:'8-3'},{version:0,tracking_no:'301000000102',note:'旧页面'}]){
+  const r=await call('sop_courier_update',{id:a.item.id,version:1,...change},false);assert.equal(r.ok,false);
+ }
+ const after=await call('sop_courier_detail',{id:a.item.id});assert.equal(after.item.tracking_no,C1);assert.equal(after.events.length,1);assert.equal(after.item.version,1);
+ assert.equal((await call('sop_courier_detail',{id:b.item.id})).item.tracking_no,C2);
+});
+
+test('completed or active putaway blocks tracking rewrites but still allows audited ownership correction',async()=>{
+ const {plan,scan,call,detail}=setup();const p=await plan(['direct_ship'],[C1],{external_inbound_no:'WMS-CORRECTION'}),r=await scan();
+ const j=await call('v2_inbound_job_start',{source:'system',plan_id:p.id,external_inbound_no:'WMS-CORRECTION',biz_class:'direct_ship',worker_id:'TEST',worker_name:'虚拟人员'});
+ for(const finished of [false,true]){
+  if(finished)await call('v2_inbound_job_finish',{job_id:j.job_id,worker_id:'TEST',complete_job:true,result_lines:[{unit_type:'courier',putaway_qty:1}]});
+  const bad=await call('sop_courier_update',{id:r.item.id,version:1,tracking_no:C2,note:'不得覆盖实际理货'},false);assert.equal(bad.ok,false);
+ }
+ const good=await call('sop_courier_update',{id:r.item.id,version:1,owner:'8-4',note:'所属纠错'});assert.equal(good.item.owner,'8-4');assert.equal((await detail(p)).plan.status,'completed');
+});
+
+test('mixed-plan tracking correction preserves genuine truck unloading while reopening parcel arrival',async()=>{
+ const {plan,scan,call,detail}=setup();const p=await plan(['bulk'],[C1],{lines:[{unit_type:'courier',tracking_nos:[C1],planned_qty:1},{unit_type:'carton',planned_qty:5}]}),r=await scan();
+ const j=await call('v2_unload_job_start',{plan_id:p.id,worker_id:'TEST',worker_name:'虚拟卸货员'});await call('v2_unload_job_finish',{job_id:j.job_id,worker_id:'TEST',complete_job:true,result_lines:[{unit_type:'carton',actual_qty:5}]});const before=(await detail(p)).plan;
+ await call('sop_courier_update',{id:r.item.id,version:1,tracking_no:C2,note:'更正实物单号'});const after=await detail(p);assert.equal(after.plan.status,'arrived_pending_putaway');assert.equal(after.plan.unload_completed_at,before.unload_completed_at);assert.equal(after.lines.find(x=>x.unit_type==='carton').actual_qty,5);assert.equal(after.lines.find(x=>x.unit_type==='courier').actual_qty,0);
+});

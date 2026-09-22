@@ -32,5 +32,5 @@ await writeFile(resolve(out,'index.html'),home);
 await copyFile(resolve(root,'docs/sop-acceptance.html'),resolve(out,'验收说明.html'));
 await writeFile(resolve(out,'_redirects'),'/sop/ / 302\n/sop / 302\n');
 await writeFile(resolve(out,'_headers'),'/*\n  Cache-Control: no-store\n  X-Content-Type-Options: nosniff\n  Referrer-Policy: same-origin\n');
-await writeFile(resolve(out,'release.json'),JSON.stringify({release:'20260922-courier-receiving',builtAt:new Date().toISOString(),modules:apps}));
+await writeFile(resolve(out,'release.json'),JSON.stringify({release:'20260922-courier-inline-correction',builtAt:new Date().toISOString(),modules:apps}));
 console.log('Prepared five CK applications with attendance and unified design.');
