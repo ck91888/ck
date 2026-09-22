@@ -1875,7 +1875,7 @@ async function loadInboundPlanInfo(planId) {
         var actualQty = ln.actual_qty || 0;
         var actualDisplay = unloadNotDone ? '<span style="color:#e67e22;font-weight:700;">卸货中/하차중</span>' : String(actualQty);
         html += '<tr>';
-        html += '<td style="padding:4px 6px;">' + esc(ln.unit_type || '--') + '</td>';
+        html += '<td style="padding:4px 6px;">' + esc(unitLabel(ln.unit_type) || '--') + '</td>';
         html += '<td style="padding:4px 6px;text-align:center;">' + actualDisplay + '</td>';
         html += '<td style="padding:4px 6px;"><input type="number" class="input ib-putaway-input" data-unit="' + esc(ln.unit_type || '') + '" value="' + (unloadNotDone ? '' : actualQty) + '" min="0" style="width:80px;text-align:center;" placeholder="' + (unloadNotDone ? '待卸货完成' : '') + '"></td>';
         html += '</tr>';

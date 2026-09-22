@@ -2868,8 +2868,10 @@ async function loadInboundDetail() {
     html += '</div>';
   }
 
+  // Pure courier plans use the scanned arrival progress instead of a truck-unloading card.
+  var courierOnly = p.courier_progress && !lines.some(function(x){return x.unit_type !== 'courier' && Number(x.planned_qty)>0;});
   // --- 到仓卸货状态卡片（plan 级别，仅一次卸货） ---
-  if (!isReturnSession) {
+  if (!isReturnSession && !courierOnly) {
     var us = res.unload_summary || null;
     var unloadDone = us && us.completed;
     var unloadingNow = us && us.status === 'unloading';
@@ -2926,7 +2928,7 @@ async function loadInboundDetail() {
       var stText = (t.status === 'completed') ? (getLang() === 'ko' ? '완료' : '已完成') : (getLang() === 'ko' ? '미완료' : '未完成');
       html += '<tr>';
       html += '<td><span class="biz-tag biz-' + esc(t.biz_class) + '">' + esc(window.CKInboundLabel ? CKInboundLabel(t.biz_class) : bizLabel(t.biz_class)) + '</span></td>';
-      html += '<td>' + esc(window.CKInboundLabel && p.source_type !== 'return_session' && p.source_type !== 'external_inbound' ? (t.biz_class === 'direct_ship' ? '现场理货入库 / 현장 검수·입고' : '卸货后自动入库 / 하차 후 자동 입고') : inboundBizTaskLabel(t.biz_class)) + '</td>';
+      html += '<td>' + esc(window.CKInboundLabel && p.source_type !== 'return_session' && p.source_type !== 'external_inbound' ? (t.biz_class === 'direct_ship' ? '现场理货入库 / 현장 검수·입고' : (courierOnly ? '快递收齐后入库 / 택배 수령 완료 후 입고' : '卸货后自动入库 / 하차 후 자동 입고')) : inboundBizTaskLabel(t.biz_class)) + '</td>';
       html += '<td><span class="st ' + stClass + '">' + esc(stText) + '</span></td>';
       // 完成人优先显示 worker_names（姓名串），fallback 到 completed_by（worker_id）
       var doneBy = t.worker_names || t.completed_by || '';
@@ -3947,6 +3949,9 @@ async function printIbQr() {
   var linesHtml='<h2>入库货物明细 / 입고 화물 명세</h2><table class="inbound-cargo"><thead><tr><th>类型</th><th>计划数量</th><th>备注</th></tr></thead><tbody>';
   (latest.lines||[]).forEach(function(ln){linesHtml+='<tr><td>'+esc(unitTypeLabel(ln.unit_type))+'</td><td>'+esc(ln.planned_qty)+'</td><td>'+esc(ln.remark||'—')+'</td></tr>';});
   linesHtml+='</tbody></table>';
+  if(plan.courier_progress){
+    linesHtml+='<h2>快递单号 / 택배 송장번호</h2><p style="overflow-wrap:anywhere">'+plan.courier_progress.items.map(function(x){return esc(x.tracking_no);}).join(' · ')+'</p>';
+  }
 
   var bizMap = { direct_ship: '直发/직배송', bulk: '大货/대량', return_op: '退件/반품', inventory_op: '库内/창고' };
   var bizText = (plan.biz_classes||[plan.biz_class]).map(function(b){return window.CKInboundLabel ? CKInboundLabel(b) : (bizMap[b]||b);}).join('、');

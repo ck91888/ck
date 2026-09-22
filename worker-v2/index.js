@@ -1,3 +1,4 @@
+import {handleCourier,validateCourierLines,courierPlanStatements,courierProgress,courierReady,protectCourierEdit,syncCourierArrival} from './courier.js';
 import { inboundFlowEnabled, inboundCode, inboundCodes, inboundReferenceValue, inboundCodeProgress, selectInboundReference, validateInboundCode, resolveInboundPlan, putawayTaskBiz, completeUnloadedDispositions, bindInboundCode, inboundLabels } from './inbound-flow.js';
 import { handleAttendance, guardAttendance } from './attendance.js';
 import { workPlanStatements } from './sop-planning.js';
@@ -1062,6 +1063,14 @@ async function nextOutboundDisplayNo(env, orderDate) {
 
 // ===== Auto-migration =====
 const MIGRATIONS = [
+  `CREATE TABLE IF NOT EXISTS ck_courier_receipts(id TEXT PRIMARY KEY,tracking_no TEXT NOT NULL UNIQUE,owner TEXT NOT NULL,received_at TEXT NOT NULL,scanner_id TEXT NOT NULL,scanner_name TEXT NOT NULL,actor_id TEXT NOT NULL,actor_name TEXT NOT NULL,location TEXT NOT NULL DEFAULT '',note TEXT NOT NULL DEFAULT '',shipment_id TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'received' CHECK(status IN ('received','handed_over')),handed_to TEXT NOT NULL DEFAULT '',handed_at TEXT NOT NULL DEFAULT '',version INTEGER NOT NULL DEFAULT 1)`,
+  `CREATE INDEX IF NOT EXISTS idx_ck_courier_received ON ck_courier_receipts(received_at,id)`,
+  `CREATE INDEX IF NOT EXISTS idx_ck_courier_owner_received ON ck_courier_receipts(owner,received_at,id)`,
+  `CREATE TABLE IF NOT EXISTS ck_courier_plan_items(tracking_no TEXT PRIMARY KEY,plan_id TEXT NOT NULL,line_id TEXT NOT NULL)`,
+  `CREATE INDEX IF NOT EXISTS idx_ck_courier_plan ON ck_courier_plan_items(plan_id,line_id)`,
+  `CREATE TABLE IF NOT EXISTS ck_courier_events(id TEXT PRIMARY KEY,receipt_id TEXT NOT NULL,kind TEXT NOT NULL,actor_id TEXT NOT NULL,actor_name TEXT NOT NULL,detail TEXT NOT NULL,created_at TEXT NOT NULL)`,
+  `CREATE INDEX IF NOT EXISTS idx_ck_courier_event ON ck_courier_events(receipt_id,created_at)`,
+
   // v2_inbound_plans
   `CREATE TABLE IF NOT EXISTS v2_inbound_plans (
     id TEXT PRIMARY KEY,
@@ -1988,7 +1997,7 @@ const MIGRATIONS = [
 ];
 
 // 每次发布迁移变化时手动 +1（patch 段），冷启动只比对一次字符串即可跳过整段 MIGRATIONS
-const CURRENT_SCHEMA_VERSION = 'v2.20260922a';
+const CURRENT_SCHEMA_VERSION = 'v2.20260922b';
 
 let _migrated = false;
 async function ensureMigrated(db) {
@@ -3745,13 +3754,14 @@ route("v2_inbound_plan_create", async (body, env) => {
       `).bind(taskId, id, biz, mapInboundBizToJobType(biz), t, t));
     }
 
-    const lines = body.lines || [];
+    const lines = await validateCourierLines(env,body.lines);
     for (let i = 0; i < lines.length; i++) {
-      const ln = lines[i];
+      const ln = lines[i], lineId = "IPL-" + uid();
       inboundStatements.push(env.DB.prepare(`
         INSERT INTO v2_inbound_plan_lines(id, plan_id, line_no, unit_type, planned_qty, remark)
         VALUES(?,?,?,?,?,?)
-      `).bind("IPL-" + uid(), id, i + 1, String(ln.unit_type || ""), Number(ln.planned_qty || 0), String(ln.remark || "")));
+      `).bind(lineId, id, i + 1, String(ln.unit_type || ""), Number(ln.planned_qty || 0), String(ln.remark || "")));
+      inboundStatements.push(...courierPlanStatements(env,id,lineId,ln));
     }
 
     let outbound_id = null;
@@ -3789,6 +3799,7 @@ route("v2_inbound_plan_create", async (body, env) => {
       workBundle=workPlanStatements(env,body.work_requests,{type:'inbound',id,customer},env.SOP_REQUEST_USER||{id:'service',name:created_by},t);
     }
     await env.DB.batch([...inboundStatements,...workBundle.statements]);
+    if(lines.some(x=>x.unit_type==='courier'))await syncCourierArrival(env,id,recalcInboundPlanCompletion);
     return { ok: true, id, display_no, outbound_id, outbound_display_no, needs:workBundle.needs.map(n=>({id:n.id,title:n.title})), outbounds:workBundle.outbounds };
   });
 });
@@ -4022,6 +4033,12 @@ async function recalcInboundPlanCompletion(env, plan_id, t, opts) {
     return next;
   }
 
+  // A truck milestone cannot complete a mixed plan while declared parcels are missing.
+  if(!await courierReady(env,plan_id)){
+    const next=plan.unload_completed_at?(otherInbound?'putting_away':'arrived_pending_putaway'):plan.status;
+    if(next!==plan.status)await env.DB.prepare('UPDATE v2_inbound_plans SET status=?,updated_at=? WHERE id=?').bind(next,ts,plan_id).run();
+    return next;
+  }
   await completeUnloadedDispositions(env,plan_id,ts);
   const referenceProgress=await inboundCodeProgress(env,plan);
   const tasks = await listInboundPlanBizTasks(env, plan_id);
@@ -4307,7 +4324,7 @@ route("v2_inbound_plan_detail", async (body, env) => {
 
   return json({
     ok: true,
-    plan: { ...row, biz_classes, ...(inboundFlowEnabled(env)?{external_inbound_nos:inboundCodes(row.external_inbound_no),inbound_progress:await inboundCodeProgress(env,row)}:{}) },
+    plan: { ...row, biz_classes, ...(inboundFlowEnabled(env)?{external_inbound_nos:inboundCodes(row.external_inbound_no),inbound_progress:await inboundCodeProgress(env,row),courier_progress:await courierProgress(env,id)}:{}) },
     biz_tasks,
     biz_classes,
     completed_biz_classes,
@@ -4567,6 +4584,8 @@ route("v2_inbound_plan_update", async (body, env) => {
   return withIdem(env, body, "v2_inbound_plan_update", async () => {
     const plan = await env.DB.prepare("SELECT * FROM v2_inbound_plans WHERE id=?").bind(id).first();
     if (!plan) return { ok: false, error: "not_found" };
+    await protectCourierEdit(env,id);
+    if(Array.isArray(body.lines))body.lines=await validateCourierLines(env,body.lines,id);
     if (plan.status !== 'pending') {
       return { ok: false, error: "cannot_edit_after_started", message: "已开工/完成的入库单不能修改：" + plan.status };
     }
@@ -4629,16 +4648,15 @@ route("v2_inbound_plan_update", async (body, env) => {
       }
     }
 
-    // lines 全量替换（如果传了）
+    // Replace expected waybills and lines atomically.
     if (Array.isArray(body.lines)) {
-      await env.DB.prepare("DELETE FROM v2_inbound_plan_lines WHERE plan_id=?").bind(id).run();
-      for (let i = 0; i < body.lines.length; i++) {
-        const ln = body.lines[i];
-        await env.DB.prepare(
-          `INSERT INTO v2_inbound_plan_lines(id, plan_id, line_no, unit_type, planned_qty, remark)
-           VALUES(?,?,?,?,?,?)`
-        ).bind("IPL-" + uid(), id, i + 1, String(ln.unit_type || ""), Number(ln.planned_qty || 0), String(ln.remark || "")).run();
+      const statements=[env.DB.prepare("DELETE FROM ck_courier_plan_items WHERE plan_id=?").bind(id),env.DB.prepare("DELETE FROM v2_inbound_plan_lines WHERE plan_id=?").bind(id)];
+      for(let i=0;i<body.lines.length;i++){
+        const ln=body.lines[i],lineId="IPL-"+uid();
+        statements.push(env.DB.prepare("INSERT INTO v2_inbound_plan_lines(id,plan_id,line_no,unit_type,planned_qty,remark) VALUES(?,?,?,?,?,?)").bind(lineId,id,i+1,String(ln.unit_type||''),Number(ln.planned_qty||0),String(ln.remark||'')),...courierPlanStatements(env,id,lineId,ln));
       }
+      await env.DB.batch(statements);
+      if(body.lines.some(x=>x.unit_type==='courier'))await syncCourierArrival(env,id,recalcInboundPlanCompletion);
     }
 
     return { ok: true, id, biz_classes: bizNorm.list };
@@ -5584,6 +5602,7 @@ route("v2_unload_job_finish", async (body, env) => {
         await ensureInboundPlanBizTasks(env, await env.DB.prepare(
           "SELECT id, status, biz_class, biz_classes_json, source_type FROM v2_inbound_plans WHERE id=?"
         ).bind(plan_id).first());
+        await syncCourierArrival(env,plan_id,recalcInboundPlanCompletion);
         await recalcInboundPlanCompletion(env, plan_id, t);
       }
     }
@@ -5843,6 +5862,7 @@ route("v2_inbound_job_finish", async (body, env) => {
     const isReturnJob = (jobRow.job_type === 'inbound_return');
 
     if (complete_job && !leave_only && !isReturnJob) {
+      if(jobRow.related_doc_id&&!await courierReady(env,jobRow.related_doc_id))return {ok:false,error:"courier_not_received",message:"关联快递尚未收齐，不能完成理货 / 택배 수령이 완료되지 않았습니다"};
       if (jobRow.related_doc_id) {
         const planCheck = await env.DB.prepare("SELECT status FROM v2_inbound_plans WHERE id=?").bind(jobRow.related_doc_id).first();
         // Hard block: unload not done → cannot finish inbound
@@ -6068,6 +6088,7 @@ route("v2_inbound_mark_completed", async (body, env) => {
     const plan = await env.DB.prepare("SELECT * FROM v2_inbound_plans WHERE id=?").bind(plan_id).first();
     if (!plan) return { ok: false, error: "plan not found" };
     const markCompletedAllowed = ['arrived_pending_putaway', 'putting_away', 'partially_completed'];
+    if(!await courierReady(env,plan_id))return {ok:false,error:'courier_not_received',message:'快递尚未收齐，不能完结 / 택배 미수령'};
     if (markCompletedAllowed.indexOf(plan.status) === -1) {
       return { ok: false, error: "status_invalid", message: "only arrived_pending_putaway/putting_away/partially_completed can be marked completed, current: " + plan.status };
     }
@@ -6129,6 +6150,7 @@ route("v2_inbound_plan_force_complete", async (body, env) => {
     if (!plan) return { ok: false, error: "not_found" };
     if (plan.status === 'completed') return { ok: false, error: "already_completed" };
     if (plan.status === 'cancelled') return { ok: false, error: "cancelled_cannot_complete" };
+    if(!await courierReady(env,id))return {ok:false,error:'courier_not_received',message:'快递尚未收齐，不能完结 / 택배 미수령'};
     const referenceProgress=await inboundCodeProgress(env,plan);
     if(referenceProgress?.total>1&&referenceProgress.completed<referenceProgress.total)return {ok:false,error:'external_inbounds_pending',message:'多个外部入库单须逐单完成：当前 '+referenceProgress.completed+'/'+referenceProgress.total+'，不能直接完结整张计划'};
 
@@ -6223,6 +6245,11 @@ route("v2_admin_force_complete_partial_inbounds", async (body, env) => {
 
   for (const plan of rows) {
     checked_count++;
+
+    if(!await courierReady(env,plan.id)){
+      if(examples.length<50)examples.push({plan_id:plan.id,display_no:plan.display_no,skipped_reason:'courier_not_received'});
+      continue;
+    }
 
     // active job 探测
     const activeJob = await env.DB.prepare(
@@ -12566,6 +12593,10 @@ export default {
     env = { ...env, SOP_REQUEST_USER: await sessionUser(request, env) };
     const authResponse = await sessionAction(body, env);
     if (authResponse) return authResponse;
+    if(action.startsWith('sop_courier_')){
+      if(!['sop_courier_config','sop_courier_list','sop_courier_detail'].includes(action)&&(request.method!=='POST'||request.headers.get('Origin')&&request.headers.get('Origin')!==url.origin))return err('Invalid request origin',403);
+      try{return json(await handleCourier(body,env,recalcInboundPlanCompletion));}catch(e){return json({ok:false,error:e.message},400);}
+    }
     if(action.startsWith('sop_attendance_')){
       try{return json(await handleAttendance(body,env));}catch(e){return json({ok:false,error:e.message},400);}
     }

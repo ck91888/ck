@@ -46,7 +46,8 @@ test('failed table deletion rolls back backup and marker, then resumes after fai
 });
 test('active reset blocks ordinary business mutations and preserves unexpected new writes',async()=>{
  const env=setup();const {run}=await act(env,'start',input());const r=await entry.fetch(request('/api','POST',{action:'v2_inbound_plan_create',customer:'unwanted'}),env);assert.equal(r.status,503);assert.equal(env.DB.raw.prepare('SELECT COUNT(*) n FROM v2_inbound_plans').get().n,1);
- await act(env,'step',{runId:run.id});await act(env,'step',{runId:run.id});env.DB.raw.exec("INSERT INTO ck_attendance_people(id,badge_id,name,agency,kind,created_at) VALUES('unexpected','unexpected','late write','test','daily','')");
+ while(!env.DB.raw.prepare("SELECT 1 FROM ck_test_reset_items WHERE run_id=? AND table_name='ck_attendance_people'").get(run.id))await act(env,'step',{runId:run.id});
+ env.DB.raw.exec("INSERT INTO ck_attendance_people(id,badge_id,name,agency,kind,created_at) VALUES('unexpected','unexpected','late write','test','daily','')");
  await assert.rejects(complete(env,run.id),/新增记录/);assert.equal(env.DB.raw.prepare('SELECT COUNT(*) n FROM ck_attendance_people').get().n,1);assert.equal((await act(env,'status')).run.completedAt,'');
 });
 test('concurrent start and step requests share one run and archive each table once',async()=>{

@@ -137,6 +137,7 @@
   }else{
    const guide=document.createElement('div');guide.className='ck-demo-control';guide.innerHTML='<p>测试准备 / 테스트 준비 · 使用虚拟单据检验完整流程。</p><p id="ck-demo-result"></p>';guide.append(button('准备一组虚拟验收单据',async()=>{const r=await request('sop_demo_prepare',{client_req_id:'demo-v2'});document.getElementById('ck-demo-result').innerHTML='虚拟数据已准备。<a href="/002/?tab=inbound">从协同中心入库计划开始</a>。<br>工牌：TEST-A|测试操作员甲、TEST-B|测试操作员乙。';}));document.querySelector('.nav').append(guide);
   }
+  await window.CKInstallCourier?.(app);
   if(app==='001'||app==='002'){
    const notices=document.createElement('div');notices.className='ck-updates';notices.hidden=true;nav.after(notices);
    const update=async()=>{if(document.hidden)return;try{const r=await request('sop_updates');notices.hidden=!r.items.length;notices.innerHTML=r.items.length?'<b>有 '+r.items.length+' 条最新要求待仓库确认</b> '+r.items.slice(0,5).map(x=>'<a href="/002/?issue='+encodeURIComponent(x.legacy_id)+'">'+esc(x.title.slice(0,36))+'</a>').join(' · '):'';}catch(e){notices.hidden=false;notices.textContent='消息同步失败，请刷新检查网络：'+e.message;}};await update();setInterval(update,15000);window.addEventListener('focus',update);
