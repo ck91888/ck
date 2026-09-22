@@ -9,7 +9,9 @@ export const isEmployee=badge=>String(badge||'').startsWith('EMP-');
 const q=(env,sql,...a)=>env.DB.prepare(sql).bind(...a),rows=async(env,sql,...a)=>(await q(env,sql,...a).all()).results;
 const select='SELECT p.*,e.employee_no,e.department,e.version FROM ck_attendance_people p JOIN ck_employee_profiles e ON e.person_id=p.id';
 const person=p=>({id:p.id,badgeId:p.badge_id,name:p.name,employeeNo:p.employee_no,department:p.department,agency:p.department,badgeType:'permanent',personType:'employee',enabled:!!p.enabled,version:p.version});
+import { employeeImport } from './employee-import.js';
 export async function employeeAction(b,env,h){
+ if(b.action==='sop_attendance_employee_import_preview'||b.action==='sop_attendance_employee_import')return employeeImport(b,env,h,employeeDepartments);
  const {access,fail,nameOf,text,commit,u,t}=h;
  if(b.action==='sop_attendance_employee_people'){access(env,['manager']);return {ok:true,items:(await rows(env,select+' ORDER BY p.enabled DESC,p.name,e.employee_no')).map(person)};}
  if(b.action==='sop_attendance_employee_search'){

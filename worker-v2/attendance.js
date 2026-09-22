@@ -87,7 +87,7 @@ export async function handleAttendance(b,env){
  await ensureAttendance(env);const u=access(env),t=new Date().toISOString(),day=kstDay(t),action=b.action;
  if(action==='sop_attendance_config')return {ok:true,day,asOf:t,agencies,employeeDepartments,user:{id:u.id,name:u.name,role:u.role},publicTest:!!u.public_test};
  if(action==='sop_attendance_summary'){access(env,['manager','dispatcher','reviewer','viewer']);return overview(env,dateOf(b.date||day),t,b.scope);}
- if(['sop_attendance_employee_people','sop_attendance_employee_search'].includes(action))return employeeAction(b,env,{access,fail,nameOf,text,commit,u,t});
+ if(['sop_attendance_employee_people','sop_attendance_employee_search','sop_attendance_employee_import_preview'].includes(action))return employeeAction(b,env,{access,fail,nameOf,text,commit,u,t});
  if(action==='sop_attendance_lookup'){
   const badge=badgeOf(b.badge),p=await q(env,'SELECT * FROM ck_attendance_people WHERE badge_id=? AND enabled=1',badge).first();
   if(!p)fail('工牌未登记，请联系工作人员 / 등록되지 않은 명찰입니다');
