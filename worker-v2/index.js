@@ -1,3 +1,4 @@
+import {findUnloadPlan, startUnloadTrip, finishUnloadTrip, tripPlans} from './unload-trip.js';
 import {handleCourier,validateCourierLines,courierPlanStatements,courierProgress,courierReady,protectCourierEdit,syncCourierArrival} from './courier.js';
 import { inboundFlowEnabled, inboundCode, inboundCodes, inboundReferenceValue, inboundCodeProgress, selectInboundReference, validateInboundCode, resolveInboundPlan, putawayTaskBiz, completeUnloadedDispositions, bindInboundCode, inboundLabels } from './inbound-flow.js';
 import { handleAttendance, guardAttendance } from './attendance.js';
@@ -831,27 +832,27 @@ async function repairInboundPlanWorkState(env, planId, reason) {
 
   // 查 active unload / putaway job
   const activeUnload = await env.DB.prepare(
-    `SELECT id FROM v2_ops_jobs
-       WHERE related_doc_type='inbound_plan' AND related_doc_id=?
+    `SELECT id FROM v2_inbound_plan_jobs
+       WHERE related_doc_type='inbound_plan' AND plan_id=?
          AND job_type='unload' AND status IN ('pending','working','awaiting_close')
        LIMIT 1`
   ).bind(planId).first();
   const activePutaway = await env.DB.prepare(
-    `SELECT id FROM v2_ops_jobs
-       WHERE related_doc_type='inbound_plan' AND related_doc_id=?
+    `SELECT id FROM v2_inbound_plan_jobs
+       WHERE related_doc_type='inbound_plan' AND plan_id=?
          AND job_type IN ('inbound_direct','inbound_bulk','inbound_change_order')
          AND status IN ('pending','working','awaiting_close')
        LIMIT 1`
   ).bind(planId).first();
   const hasUnloadCompleted = await env.DB.prepare(
-    `SELECT id FROM v2_ops_jobs
-       WHERE related_doc_type='inbound_plan' AND related_doc_id=?
+    `SELECT id FROM v2_inbound_plan_jobs
+       WHERE related_doc_type='inbound_plan' AND plan_id=?
          AND job_type='unload' AND status='completed'
        LIMIT 1`
   ).bind(planId).first();
   const hasPutawayCompleted = await env.DB.prepare(
-    `SELECT id FROM v2_ops_jobs
-       WHERE related_doc_type='inbound_plan' AND related_doc_id=?
+    `SELECT id FROM v2_inbound_plan_jobs
+       WHERE related_doc_type='inbound_plan' AND plan_id=?
          AND job_type IN ('inbound_direct','inbound_bulk','inbound_change_order')
          AND status='completed'
        LIMIT 1`
@@ -1994,10 +1995,22 @@ const MIGRATIONS = [
     ON v2_003_material_txns(department, txn_type, created_at)`,
   `CREATE INDEX IF NOT EXISTS idx_v2_003_asset_keeper_department
     ON v2_003_assets(keeper_department, status)`,
+
+  // Vehicle unloading: one native labor job, separately linked plan receipts.
+  `CREATE TABLE IF NOT EXISTS ck_unload_trips(job_id TEXT PRIMARY KEY,request_id TEXT NOT NULL UNIQUE,plan_ids_json TEXT NOT NULL,owner_id TEXT NOT NULL,created_at TEXT NOT NULL,finished_at TEXT NOT NULL DEFAULT '')`,
+  `CREATE TABLE IF NOT EXISTS ck_unload_plan_links(job_id TEXT NOT NULL,plan_id TEXT NOT NULL,position INTEGER NOT NULL,plan_version TEXT NOT NULL,lines_snapshot TEXT NOT NULL,result_json TEXT NOT NULL DEFAULT '',PRIMARY KEY(job_id,plan_id))`,
+  `CREATE INDEX IF NOT EXISTS ck_unload_plan_lookup ON ck_unload_plan_links(plan_id,job_id)`,
+  // Used only by plan-scoped reads. Global labor/output queries continue to use v2_ops_jobs.
+  `CREATE VIEW IF NOT EXISTS v2_inbound_plan_jobs AS SELECT j.*,COALESCE(l.plan_id,j.related_doc_id) AS plan_id FROM v2_ops_jobs j LEFT JOIN ck_unload_plan_links l ON l.job_id=j.id WHERE j.related_doc_type='inbound_plan'`,
+  `CREATE TRIGGER IF NOT EXISTS ck_unload_link_guard BEFORE INSERT ON ck_unload_plan_links BEGIN
+    SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM v2_inbound_plans p WHERE p.id=NEW.plan_id AND p.status='pending' AND COALESCE(p.is_deleted,0)=0 AND p.updated_at=NEW.plan_version) THEN RAISE(ABORT,'unload_plan_changed') END;
+    SELECT CASE WHEN EXISTS(SELECT 1 FROM v2_inbound_plan_jobs j WHERE j.plan_id=NEW.plan_id AND j.id!=NEW.job_id AND j.job_type='unload' AND j.status IN ('pending','working','awaiting_close','completed')) THEN RAISE(ABORT,'unload_plan_busy') END;
+  END`,
+  `CREATE TRIGGER IF NOT EXISTS ck_unload_legacy_guard BEFORE INSERT ON v2_ops_jobs WHEN NEW.job_type='unload' AND NEW.related_doc_type='inbound_plan' AND EXISTS(SELECT 1 FROM ck_unload_plan_links l JOIN v2_ops_jobs j ON j.id=l.job_id WHERE l.plan_id=NEW.related_doc_id AND j.status IN ('pending','working','awaiting_close','completed')) BEGIN SELECT RAISE(ABORT,'unload_plan_busy'); END`,
 ];
 
 // 每次发布迁移变化时手动 +1（patch 段），冷启动只比对一次字符串即可跳过整段 MIGRATIONS
-const CURRENT_SCHEMA_VERSION = 'v2.20260922b';
+const CURRENT_SCHEMA_VERSION = 'v2.20260922c';
 
 let _migrated = false;
 async function ensureMigrated(db) {
@@ -3809,7 +3822,7 @@ route("v2_inbound_plan_create", async (body, env) => {
 async function checkPlanFullyCompleted(env, plan_id) {
   // 1. Check unload is done: no active unload jobs
   const activeUnload = await env.DB.prepare(
-    "SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type='unload' AND status IN ('pending','working') LIMIT 1"
+    "SELECT id FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type='unload' AND status IN ('pending','working') LIMIT 1"
   ).bind(plan_id).first();
   const unloadDone = !activeUnload;
 
@@ -4016,10 +4029,10 @@ async function recalcInboundPlanCompletion(env, plan_id, t, opts) {
   if (plan.source_type === 'return_session') return plan.status;
 
   const activeUnload = await env.DB.prepare(
-    "SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type='unload' AND status IN ('pending','working','awaiting_close') LIMIT 1"
+    "SELECT id FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type='unload' AND status IN ('pending','working','awaiting_close') LIMIT 1"
   ).bind(plan_id).first();
   const otherInbound = await env.DB.prepare(
-    "SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type IN ('inbound_direct','inbound_bulk','inbound_return','inbound_change_order') AND status IN ('pending','working','awaiting_close') LIMIT 1"
+    "SELECT id FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type IN ('inbound_direct','inbound_bulk','inbound_return','inbound_change_order') AND status IN ('pending','working','awaiting_close') LIMIT 1"
   ).bind(plan_id).first();
 
   // 卸货还在 → 不进入完成态。若仍有理货并行 → unloading_putting_away；否则 unloading
@@ -4185,7 +4198,7 @@ route("v2_inbound_plan_list", async (body, env) => {
 
   // 5) 物理卸货是否完成（同一 plan 仅一次卸货 → 任意 unload job completed = 卸货已完成）
   const unloadDoneRows = await batchSelectInGlobal(env,
-    "SELECT related_doc_id AS plan_id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND job_type='unload' AND status='completed' AND related_doc_id IN (PLACEHOLDER) GROUP BY related_doc_id",
+    "SELECT plan_id AS plan_id FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND job_type='unload' AND status='completed' AND plan_id IN (PLACEHOLDER) GROUP BY plan_id",
     planIds);
   const unloadDoneByPlan = {};
   for (const r of unloadDoneRows) unloadDoneByPlan[r.plan_id] = 1;
@@ -4239,7 +4252,7 @@ route("v2_inbound_plan_detail", async (body, env) => {
     "SELECT * FROM v2_inbound_plan_lines WHERE plan_id=? ORDER BY line_no"
   ).bind(id).all();
   const jobs = await env.DB.prepare(
-    "SELECT * FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? ORDER BY created_at DESC"
+    "SELECT * FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? ORDER BY created_at DESC"
   ).bind(id).all();
   const atts = await env.DB.prepare(
     "SELECT * FROM v2_attachments WHERE related_doc_type='inbound_plan' AND related_doc_id=? ORDER BY created_at DESC"
@@ -4264,6 +4277,8 @@ route("v2_inbound_plan_detail", async (body, env) => {
     if (latestResult && latestResult.result_lines_json) {
       try { resultLines = JSON.parse(latestResult.result_lines_json); } catch(e) {}
     }
+    const ownUnload = job.job_type==='unload' ? await env.DB.prepare('SELECT result_json FROM ck_unload_plan_links WHERE job_id=? AND plan_id=?').bind(job.id,id).first() : null;
+    if(ownUnload?.result_json){const own=JSON.parse(ownUnload.result_json);resultLines=own.result_lines||[];if(latestResult)latestResult.diff_note=own.diff_note||'';}
     let resultNote = "";
     let extraOps = null;
     let isReturnFlag = false;
@@ -4345,6 +4360,7 @@ route("v2_inbound_plan_find_by_code", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
   const code = String(body.code || "").trim();
   if (!code) return err("missing code");
+  if(inboundFlowEnabled(env)&&body.scene==='unload_trip')return json(await findUnloadPlan(env,code));
   // 先查"是否存在但已被软删除"——给现场一个友好提示，而不是笼统的 not_found
   const probeSel = "SELECT id, display_no, status, is_deleted FROM v2_inbound_plans WHERE (display_no=? OR id=?) ORDER BY created_at DESC LIMIT 1";
   const probe = await env.DB.prepare(probeSel).bind(code, code).first();
@@ -4421,8 +4437,8 @@ route("v2_inbound_plan_ops_candidates", async (body, env) => {
     for (const p of rows) {
       if (p.status === 'unloading' || p.status === 'unloading_putting_away') {
         const hasActive = await env.DB.prepare(
-          `SELECT id FROM v2_ops_jobs
-             WHERE related_doc_type='inbound_plan' AND related_doc_id=?
+          `SELECT id FROM v2_inbound_plan_jobs
+             WHERE related_doc_type='inbound_plan' AND plan_id=?
                AND job_type='unload' AND status IN ('pending','working','awaiting_close') LIMIT 1`
         ).bind(p.id).first();
         if (!hasActive) {
@@ -4591,7 +4607,7 @@ route("v2_inbound_plan_update", async (body, env) => {
     }
     // 关联的已 active/completed inbound job → 拒（兜底）
     const anyJob = await env.DB.prepare(
-      "SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND status IN ('working','pending','awaiting_close','completed') LIMIT 1"
+      "SELECT id FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND status IN ('working','pending','awaiting_close','completed') LIMIT 1"
     ).bind(id).first();
     if (anyJob) {
       return { ok: false, error: "has_jobs_cannot_edit", message: "该入库单已有现场作业关联，不能修改" };
@@ -4710,7 +4726,7 @@ route("v2_inbound_plan_cancel", async (body, env) => {
 
   // 检查是否有进行中的 unload 或 inbound job
   const activeJob = await env.DB.prepare(
-    "SELECT id, job_type FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND status IN ('pending','working','awaiting_close') LIMIT 1"
+    "SELECT id, job_type FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND status IN ('pending','working','awaiting_close') LIMIT 1"
   ).bind(id).first();
   if (activeJob) {
     return json({ ok: false, error: "active_job_exists", message: "当前仍有进行中的现场任务（" + (activeJob.job_type || "") + "），不能取消" });
@@ -4744,14 +4760,14 @@ route("v2_inbound_plan_delete", async (body, env) => {
     }
     // 在制 / 待续作业 → 拒（按规范要求二次校验）
     const activeJob = await env.DB.prepare(
-      "SELECT id, job_type FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND status IN ('pending','working','awaiting_close') LIMIT 1"
+      "SELECT id, job_type FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND status IN ('pending','working','awaiting_close') LIMIT 1"
     ).bind(id).first();
     if (activeJob) {
       return { ok: false, error: "active_job_exists", message: "仍有进行中的现场任务，不能删除" };
     }
     // 已存在 completed ops 历史 → 拒，避免误删正式数据
     const histJob = await env.DB.prepare(
-      "SELECT id, job_type FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND status='completed' LIMIT 1"
+      "SELECT id, job_type FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND status='completed' LIMIT 1"
     ).bind(id).first();
     if (histJob) {
       return { ok: false, error: "has_ops_history_cannot_delete", message: "该入库计划存在已完成作业历史，不允许删除" };
@@ -4808,7 +4824,7 @@ route("v2_inbound_plan_delete_converted_feedback", async (body, env) => {
     }
     // 在制作业 → 拒（保护现场正在进行的任务）
     const activeJob = await env.DB.prepare(
-      "SELECT id, job_type FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND status IN ('pending','working','awaiting_close') LIMIT 1"
+      "SELECT id, job_type FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND status IN ('pending','working','awaiting_close') LIMIT 1"
     ).bind(id).first();
     if (activeJob) {
       return { ok: false, error: "active_job_exists",
@@ -5344,6 +5360,7 @@ route("v2_unload_dynamic_start", async (body, env) => {
 });
 
 route("v2_unload_job_start", async (body, env) => {
+  if(inboundFlowEnabled(env)&&Array.isArray(body.plan_ids)){if(!isOpsAuth(body,env))return err('unauthorized',401);return json(await startUnloadTrip(env,body));}
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
   const plan_id = String(body.plan_id || "").trim();
   const worker_id = String(body.worker_id || "").trim();
@@ -5375,7 +5392,7 @@ route("v2_unload_job_start", async (body, env) => {
 
     let job = null;
     const existing = await env.DB.prepare(
-      "SELECT * FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type='unload' AND status IN ('pending','working') LIMIT 1"
+      "SELECT * FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type='unload' AND status IN ('pending','working') LIMIT 1"
     ).bind(plan_id).first();
     if (existing) job = existing;
 
@@ -5438,6 +5455,7 @@ route("v2_unload_job_start", async (body, env) => {
 });
 
 route("v2_unload_job_finish", async (body, env) => {
+  if(inboundFlowEnabled(env)){if(!isOpsAuth(body,env))return err('unauthorized',401);const trip=await finishUnloadTrip(env,body,{ensureTasks:ensureInboundPlanBizTasks,recalc:recalcInboundPlanCompletion,syncCourier:syncCourierArrival});if(trip)return json(trip);}
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
   const job_id = String(body.job_id || "").trim();
   const worker_id = String(body.worker_id || "").trim();
@@ -5687,7 +5705,7 @@ route("v2_inbound_job_start", async (body, env) => {
       if(inboundFlowEnabled(env)&&!taskBiz)return {ok:false,error:'putaway_not_required',message:'此计划卸货完成后自动入库，无需理货'};
       if(inboundFlowEnabled(env)){
         try{selectedExternal=await selectInboundReference(env,plan,external_inbound_no);}catch(error){return {ok:false,error:'external_code_mismatch',message:error.message};}
-        const activeOther=await env.DB.prepare("SELECT id,job_type FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND inbound_external_no=? AND job_type!=? AND status IN ('pending','working','awaiting_close') LIMIT 1").bind(plan_id,selectedExternal,job_type).first();
+        const activeOther=await env.DB.prepare("SELECT id,job_type FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND inbound_external_no=? AND job_type!=? AND status IN ('pending','working','awaiting_close') LIMIT 1").bind(plan_id,selectedExternal,job_type).first();
         if(activeOther)return {ok:false,error:'external_code_working',message:'此外部单号已有理货任务，请继续原任务',active_job_id:activeOther.id};
       }
       const biz_classes = extractPlanBizClasses(plan);
@@ -5782,7 +5800,7 @@ route("v2_inbound_job_start", async (body, env) => {
     // ===== Find / create job bound to plan_id =====
     let job = null;
     const existing = await env.DB.prepare(
-      "SELECT * FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type=? AND status IN ('pending','working','awaiting_close') AND (?='' OR inbound_external_no=? OR COALESCE(inbound_external_no,'')='') LIMIT 1"
+      "SELECT * FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type=? AND status IN ('pending','working','awaiting_close') AND (?='' OR inbound_external_no=? OR COALESCE(inbound_external_no,'')='') LIMIT 1"
     ).bind(plan_id, job_type,selectedExternal,selectedExternal).first();
     if (existing) job = existing;
 
@@ -6094,7 +6112,7 @@ route("v2_inbound_mark_completed", async (body, env) => {
     }
 
     const activeJob = await env.DB.prepare(
-      "SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type LIKE 'inbound%' AND status IN ('pending','working','awaiting_close') LIMIT 1"
+      "SELECT id FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type LIKE 'inbound%' AND status IN ('pending','working','awaiting_close') LIMIT 1"
     ).bind(plan_id).first();
     if (activeJob) {
       return { ok: false, error: "inbound_job_still_active", message: "当前仍有进行中的入库任务，不能直接完结" };
@@ -6161,7 +6179,7 @@ route("v2_inbound_plan_force_complete", async (body, env) => {
 
     // active job 存在 → 不允许（避免和现场作业冲突）
     const activeJob = await env.DB.prepare(
-      "SELECT id, job_type FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND status IN ('pending','working','awaiting_close') LIMIT 1"
+      "SELECT id, job_type FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND status IN ('pending','working','awaiting_close') LIMIT 1"
     ).bind(id).first();
     if (activeJob) {
       return { ok: false, error: "active_job_cannot_force_complete", active_job_id: activeJob.id, active_job_type: activeJob.job_type };
@@ -6253,7 +6271,7 @@ route("v2_admin_force_complete_partial_inbounds", async (body, env) => {
 
     // active job 探测
     const activeJob = await env.DB.prepare(
-      "SELECT id, job_type FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND status IN ('pending','working','awaiting_close') LIMIT 1"
+      "SELECT id, job_type FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND status IN ('pending','working','awaiting_close') LIMIT 1"
     ).bind(plan.id).first();
     if (activeJob) {
       skipped_active_job_count++;
@@ -6820,7 +6838,7 @@ route("v2_ops_job_detail", async (body, env) => {
     "SELECT * FROM v2_attachments WHERE related_doc_type='ops_job' AND related_doc_id=? ORDER BY created_at DESC"
   ).bind(job_id).all();
   return json({
-    ok: true, job,
+    ok: true, job, can_manage_dispatch: await nativeOwner(body,env), unload_plans: await tripPlans(env,job_id),
     workers: workers.results || [],
     results: results.results || [],
     attachments: atts.results || []
@@ -9207,10 +9225,10 @@ route("v2_admin_cleanup_inbound_plan_states", async (body, env) => {
     // 简化：dryRun 时跳过 helper，直接探测应转目标
     if (dryRun) {
       const hasActiveUnload = await env.DB.prepare(
-        `SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type='unload' AND status IN ('pending','working','awaiting_close') LIMIT 1`
+        `SELECT id FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type='unload' AND status IN ('pending','working','awaiting_close') LIMIT 1`
       ).bind(p.id).first();
       const hasActivePutaway = await env.DB.prepare(
-        `SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type IN ('inbound_direct','inbound_bulk','inbound_change_order') AND status IN ('pending','working','awaiting_close') LIMIT 1`
+        `SELECT id FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type IN ('inbound_direct','inbound_bulk','inbound_change_order') AND status IN ('pending','working','awaiting_close') LIMIT 1`
       ).bind(p.id).first();
       if (p.status === 'unloading' && !hasActiveUnload) {
         repaired++;
@@ -9273,13 +9291,13 @@ route("v2_admin_cleanup_inbound_unload_scope", async (body, env) => {
 
     // 已完成的 unload job 数 + 各 biz_task 状态
     const unloadDone = await env.DB.prepare(
-      "SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type='unload' AND status='completed' LIMIT 1"
+      "SELECT id FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type='unload' AND status='completed' LIMIT 1"
     ).bind(p.id).first();
     const activeUnload = await env.DB.prepare(
-      "SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type='unload' AND status IN ('pending','working','awaiting_close') LIMIT 1"
+      "SELECT id FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type='unload' AND status IN ('pending','working','awaiting_close') LIMIT 1"
     ).bind(p.id).first();
     const activePutaway = await env.DB.prepare(
-      "SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type IN ('inbound_direct','inbound_bulk','inbound_change_order') AND status IN ('pending','working','awaiting_close') LIMIT 1"
+      "SELECT id FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type IN ('inbound_direct','inbound_bulk','inbound_change_order') AND status IN ('pending','working','awaiting_close') LIMIT 1"
     ).bind(p.id).first();
 
     // 确保 biz_task 行齐全
@@ -9370,7 +9388,7 @@ route("v2_admin_backfill_inbound_unload_completed_at", async (body, env) => {
     checked_count++;
     // 取最后一个 completed unload job（更精确的"卸货完成时间"= updated_at）
     const job = await env.DB.prepare(
-      "SELECT id, updated_at FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type='unload' AND status='completed' ORDER BY updated_at DESC LIMIT 1"
+      "SELECT id, updated_at FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type='unload' AND status='completed' ORDER BY updated_at DESC LIMIT 1"
     ).bind(p.id).first();
     if (!job) continue;
     // 汇总工人名（卸货人员）

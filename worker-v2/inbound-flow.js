@@ -8,7 +8,7 @@ export function inboundCodes(value){return [...new Set((Array.isArray(value)?val
 export async function inboundCodeProgress(env,plan){
  if(!inboundFlowEnabled(env)||!plan||!planClasses(plan).includes('direct_ship'))return null;
  const codes=inboundCodes(plan.external_inbound_no);
- const jobs=(await env.DB.prepare("SELECT id,job_type,status,inbound_external_no,created_at,updated_at FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type IN ('inbound_direct','inbound_bulk') AND status!='cancelled' ORDER BY created_at DESC").bind(plan.id).all()).results||[];
+ const jobs=(await env.DB.prepare("SELECT id,job_type,status,inbound_external_no,created_at,updated_at FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type IN ('inbound_direct','inbound_bulk') AND status!='cancelled' ORDER BY created_at DESC").bind(plan.id).all()).results||[];
  const items=codes.map(code=>{
   const matches=jobs.filter(j=>j.inbound_external_no===code||(!j.inbound_external_no&&codes.length===1));
   const job=matches.find(j=>j.status==='completed')||matches.find(j=>['pending','working','awaiting_close'].includes(j.status));
@@ -60,9 +60,9 @@ export async function completeUnloadedDispositions(env,planId,t){
  if(!inboundFlowEnabled(env))return;
  const plan=await env.DB.prepare('SELECT * FROM v2_inbound_plans WHERE id=?').bind(planId).first();
  if(!plan||['return_session','external_inbound'].includes(plan.source_type)||['pending','cancelled','completed'].includes(plan.status)||plan.is_deleted)return;
- const active=await env.DB.prepare("SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type='unload' AND status IN ('pending','working','awaiting_close') LIMIT 1").bind(planId).first();
+ const active=await env.DB.prepare("SELECT id FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type='unload' AND status IN ('pending','working','awaiting_close') LIMIT 1").bind(planId).first();
  if(active)return;
- const unloaded=await env.DB.prepare("SELECT id,updated_at FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type='unload' AND status='completed' ORDER BY updated_at DESC LIMIT 1").bind(planId).first();
+ const unloaded=await env.DB.prepare("SELECT id,updated_at FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type='unload' AND status='completed' ORDER BY updated_at DESC LIMIT 1").bind(planId).first();
  if(!plan.unload_completed_at&&!unloaded)return;
  const completedAt=plan.unload_completed_at||unloaded.updated_at;
  // No synthetic putaway jobs, output, or labor time: this is only a plan milestone.
@@ -76,7 +76,7 @@ export async function completeUnloadedDispositions(env,planId,t){
 export async function bindInboundCode(env,body){
  const plan=await env.DB.prepare('SELECT * FROM v2_inbound_plans WHERE id=?').bind(String(body.id||'')).first();
  if(!plan||plan.is_deleted||['completed','cancelled'].includes(plan.status)||plan.source_type==='return_session')throw Error('此计划不能修改外部入库单号');
- const active=await env.DB.prepare("SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type LIKE 'inbound%' AND status IN ('pending','working','awaiting_close') LIMIT 1").bind(plan.id).first();
+ const active=await env.DB.prepare("SELECT id FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type LIKE 'inbound%' AND status IN ('pending','working','awaiting_close') LIMIT 1").bind(plan.id).first();
  if(active)throw Error('理货任务正在进行，不能更换关联单号 / 진행 중에는 입고번호를 변경할 수 없습니다');
  if(String(body.previous_code??'')!==String(plan.external_inbound_no||''))throw Error('单号已被其他人修改，请刷新 / 새로고침 후 다시 시도하세요');
  const code=await validateInboundCode(env,planClasses(plan),inboundReferenceValue(body),plan.id),t=new Date().toISOString();
@@ -85,8 +85,8 @@ export async function bindInboundCode(env,body){
  const statements=[];
  // Attribute the one historical completed job before expanding a single-code plan.
  if(progress?.total===1&&progress.completed===1)statements.push(env.DB.prepare("UPDATE v2_ops_jobs SET inbound_external_no=? WHERE id=? AND COALESCE(inbound_external_no,'')='' AND EXISTS(SELECT 1 FROM v2_inbound_plans WHERE id=? AND COALESCE(external_inbound_no,'')=?)").bind(progress.items[0].external_no,progress.items[0].job_id,plan.id,plan.external_inbound_no||''));
- if(progress?.completed&&nextCodes.some(x=>!progress.items.some(i=>i.external_no===x&&i.status==='completed')))statements.push(env.DB.prepare("UPDATE v2_inbound_plan_biz_tasks SET status='pending',completed_at='',completed_by='',updated_at=? WHERE plan_id=? AND biz_class='direct_ship' AND EXISTS(SELECT 1 FROM v2_inbound_plans WHERE id=? AND COALESCE(external_inbound_no,'')=?) AND NOT EXISTS(SELECT 1 FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type LIKE 'inbound%' AND status IN ('pending','working','awaiting_close'))").bind(t,plan.id,plan.id,plan.external_inbound_no||'',plan.id));
- statements.push(env.DB.prepare("UPDATE v2_inbound_plans SET external_inbound_no=?,updated_at=? WHERE id=? AND COALESCE(external_inbound_no,'')=? AND NOT EXISTS(SELECT 1 FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type LIKE 'inbound%' AND status IN ('pending','working','awaiting_close'))").bind(code,t,plan.id,plan.external_inbound_no||'',plan.id));
+ if(progress?.completed&&nextCodes.some(x=>!progress.items.some(i=>i.external_no===x&&i.status==='completed')))statements.push(env.DB.prepare("UPDATE v2_inbound_plan_biz_tasks SET status='pending',completed_at='',completed_by='',updated_at=? WHERE plan_id=? AND biz_class='direct_ship' AND EXISTS(SELECT 1 FROM v2_inbound_plans WHERE id=? AND COALESCE(external_inbound_no,'')=?) AND NOT EXISTS(SELECT 1 FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type LIKE 'inbound%' AND status IN ('pending','working','awaiting_close'))").bind(t,plan.id,plan.id,plan.external_inbound_no||'',plan.id));
+ statements.push(env.DB.prepare("UPDATE v2_inbound_plans SET external_inbound_no=?,updated_at=? WHERE id=? AND COALESCE(external_inbound_no,'')=? AND NOT EXISTS(SELECT 1 FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type LIKE 'inbound%' AND status IN ('pending','working','awaiting_close'))").bind(code,t,plan.id,plan.external_inbound_no||'',plan.id));
  const results=await env.DB.batch(statements),updated=results[results.length-1];
  if(updated.meta?.changes!==1)throw Error('记录已变化，请刷新后重试');
  return {ok:true,id:plan.id,external_inbound_no:code};

@@ -508,6 +508,7 @@ export async function linkedNeeds(env,id){
 export async function guardLegacy(b,env){
  if(env.SOP_UPGRADE_ENABLED!=='true')return null;
  const task=b.job_id||b.active_job_id;
+ if(task&&['v2_ops_job_finish','v2_ops_job_manual_finalize','v2_ops_job_result_update'].includes(b.action)&&await stmt(env,'SELECT job_id FROM ck_unload_trips WHERE job_id=?',task).first())return '请从整车卸货任务中逐单填写结果并完成 / 차량 하차 작업에서 완료하세요';
  const batch=b.batch_id||b.id;
  if(b.action?.startsWith('v2_verify_')&& !/list|detail/.test(b.action)){
   let id=batch;if(!id&&task){const j=await stmt(env,'SELECT related_doc_id FROM v2_ops_jobs WHERE id=?',task).first();id=j?.related_doc_id;}
