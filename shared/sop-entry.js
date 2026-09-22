@@ -1,6 +1,14 @@
 /* Upgrade features mounted in the original applications; no separate workbench. */
 (function(){
  'use strict';if(!window.CK_SOP_ROLLOUT?.enabled||!window.CKSession)return;
+ // Delegate to cover dates added later in filters, work requests and dialogs.
+ // Keep native date validation and keyboard editing; only enlarge the click target.
+ const calendarTypes=new Set(['date','datetime-local','month','week']);
+ document.addEventListener('click',event=>{
+  const input=event.target;
+  if(!(input instanceof HTMLInputElement)||!calendarTypes.has(input.type)||input.matches(':disabled')||input.readOnly||typeof input.showPicker!=='function')return;
+  try{input.showPicker();event.preventDefault();}catch{/* Native icon/keyboard remain available on unsupported platforms. */}
+ },true);
  const app=location.pathname.split('/').filter(Boolean)[0]||'home';
  const params=new URLSearchParams(location.search);const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
  let instance=null,activeRoot=null;
