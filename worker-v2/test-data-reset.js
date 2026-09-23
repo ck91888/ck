@@ -1,3 +1,4 @@
+import {ensureSchema} from './schema-ready.js';
 // Manager-triggered maintenance for the isolated staging database only.
 // Every table is archived and cleared in one D1 transaction. No scheduled reset.
 export const STAGING_HOST = 'ck-v2-api-sop-staging.ck91888.workers.dev';
@@ -17,11 +18,13 @@ const rows=async(env,sql,...args)=>(await q(env,sql,...args).all()).results;
 const fail=(message,status=400)=>{throw Object.assign(Error(message),{status});};
 export const enabled=(request,env)=>new URL(request.url).hostname===STAGING_HOST&&env.SOP_ENVIRONMENT==='staging'&&env.SOP_UPGRADE_ENABLED==='true'&&env.SOP_TEST_RESET_ENABLED==='true'&&env.SOP_TEST_RESET_DATABASE===STAGING_DATABASE;
 export async function ensureResetSchema(env){
+ return ensureSchema(env.DB,'ensureResetSchema-v1',async()=>{
  await env.DB.batch([
   env.DB.prepare("CREATE TABLE IF NOT EXISTS ck_test_resets(id TEXT PRIMARY KEY,request_id TEXT NOT NULL UNIQUE,actor TEXT NOT NULL,started_at TEXT NOT NULL,completed_at TEXT NOT NULL DEFAULT '',tables_json TEXT NOT NULL,last_error TEXT NOT NULL DEFAULT '')"),
   env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS ck_test_reset_single_active ON ck_test_resets((1)) WHERE completed_at=''"),
   env.DB.prepare('CREATE TABLE IF NOT EXISTS ck_test_reset_items(run_id TEXT NOT NULL,table_name TEXT NOT NULL,archive_name TEXT NOT NULL,row_count INTEGER NOT NULL,PRIMARY KEY(run_id,table_name))')
  ]);
+ });
 }
 export const activeReset=env=>q(env,"SELECT * FROM ck_test_resets WHERE completed_at='' LIMIT 1").first();
 const knownTables=async env=>{const names=(await rows(env,"SELECT name FROM sqlite_master WHERE type='table'")).map(x=>x.name);return TABLES.filter(x=>names.includes(x));};

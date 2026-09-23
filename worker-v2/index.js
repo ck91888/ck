@@ -2032,9 +2032,9 @@ const MIGRATIONS = [
 // 每次发布迁移变化时手动 +1（patch 段），冷启动只比对一次字符串即可跳过整段 MIGRATIONS
 const CURRENT_SCHEMA_VERSION = 'v2.20260923a';
 
-let _migrated = false;
+const migratedDatabases = new WeakSet();
 async function ensureMigrated(db) {
-  if (_migrated) return;
+  if (migratedDatabases.has(db)) return;
   // 1. 先确保 v2_schema_meta 存在（轻量幂等 DDL）
   try {
     await db.prepare(`CREATE TABLE IF NOT EXISTS v2_schema_meta (
@@ -2050,7 +2050,7 @@ async function ensureMigrated(db) {
       "SELECT value FROM v2_schema_meta WHERE key='schema_version'"
     ).first();
     if (row && row.value === CURRENT_SCHEMA_VERSION) {
-      _migrated = true;
+      migratedDatabases.add(db);
       return;
     }
   } catch (e) { /* 表刚建好/读失败一律走完整迁移 */ }
@@ -2072,7 +2072,7 @@ async function ensureMigrated(db) {
     ).bind(CURRENT_SCHEMA_VERSION, now()).run();
   } catch (e) { /* 写入失败不影响功能 */ }
 
-  _migrated = true;
+  migratedDatabases.add(db);
 }
 
 // ===== Route dispatcher =====
@@ -3940,13 +3940,13 @@ function extractPlanBizClasses(plan) {
 
 // 懒加载创建 biz_tasks：plan 第一次被读到 / 操作时确保 task 行齐全
 // 旧已 completed 的计划：自动把 task 标 completed，避免显示"未完成"
-async function ensureInboundPlanBizTasks(env, plan) {
+async function ensureInboundPlanBizTasks(env, plan, knownTasks) {
   if (!plan || !plan.id) return [];
   // return_session 不是协同中心口径，不生成 biz_task
   if (plan.source_type === 'return_session') return [];
   const list = extractPlanBizClasses(plan);
   if (list.length === 0) return [];
-  const existing = await env.DB.prepare(
+  const existing = knownTasks ? {results:knownTasks} : await env.DB.prepare(
     "SELECT biz_class FROM v2_inbound_plan_biz_tasks WHERE plan_id=?"
   ).bind(plan.id).all();
   const has = {};
@@ -4267,39 +4267,53 @@ route("v2_inbound_plan_detail", async (body, env) => {
   if (!row) return err("not found", 404);
   // 退件入库会话不属于正式入库计划口径，协同中心不应打开
   if (row.source_type === 'return_session') return err("not found", 404);
-  await ensureInboundPlanBizTasks(env, row);
-  const biz_tasks = await listInboundPlanBizTasks(env, id);
+  // Independent detail reads share one D1 round trip. Job history is fetched in
+  // sets, so the number of queries does not grow with the number of jobs.
+  const inPlan = "SELECT id FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=?";
+  const [reads, courier_progress, existing_feedback_link, sop_needs] = await Promise.all([
+    env.DB.batch([
+      env.DB.prepare('SELECT * FROM v2_inbound_plan_biz_tasks WHERE plan_id=? ORDER BY biz_class').bind(id),
+      env.DB.prepare('SELECT * FROM v2_inbound_plan_lines WHERE plan_id=? ORDER BY line_no').bind(id),
+      env.DB.prepare("SELECT * FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? ORDER BY created_at DESC").bind(id),
+      env.DB.prepare("SELECT * FROM v2_attachments WHERE related_doc_type='inbound_plan' AND related_doc_id=? ORDER BY created_at DESC").bind(id),
+      env.DB.prepare('SELECT job_id,worker_name,minutes_worked,left_at FROM v2_ops_job_workers WHERE job_id IN ('+inPlan+') ORDER BY joined_at').bind(id),
+      env.DB.prepare('SELECT * FROM (SELECT job_id,result_lines_json,diff_note,remark,result_json,created_at,ROW_NUMBER() OVER (PARTITION BY job_id ORDER BY created_at DESC,rowid DESC) AS latest FROM v2_ops_job_results WHERE job_id IN ('+inPlan+')) WHERE latest=1').bind(id),
+      env.DB.prepare('SELECT job_id,result_json FROM ck_unload_plan_links WHERE plan_id=?').bind(id),
+      env.DB.prepare('SELECT id, display_no, status, customer, biz_class, outbound_mode, expected_ship_at, planned_box_count, planned_pallet_count, order_date, uses_stock_operation FROM v2_outbound_orders WHERE source_inbound_plan_id=? ORDER BY created_at ASC').bind(id)
+    ]),
+    inboundFlowEnabled(env)?courierProgress(env,id):null,
+    inboundFlowEnabled(env)?feedbackLinkDetail(env,id):null,
+    linkedNeeds(env,id)
+  ]);
+  const [taskRows, planLines, jobs, atts, workers, results, unloadLinks, linkedObRs] = reads;
+  let biz_tasks = taskRows.results || [];
   const biz_classes = extractPlanBizClasses(row);
-  const planLines = await env.DB.prepare(
-    "SELECT * FROM v2_inbound_plan_lines WHERE plan_id=? ORDER BY line_no"
-  ).bind(id).all();
-  const jobs = await env.DB.prepare(
-    "SELECT * FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? ORDER BY created_at DESC"
-  ).bind(id).all();
-  const atts = await env.DB.prepare(
-    "SELECT * FROM v2_attachments WHERE related_doc_type='inbound_plan' AND related_doc_id=? ORDER BY created_at DESC"
-  ).bind(id).all();
-
-  // Enrich each job with workers + results summary
+  // Older plans still receive missing business tasks; ordinary reads never write.
+  if(biz_classes.some(biz=>!biz_tasks.some(task=>task.biz_class===biz))){
+    await ensureInboundPlanBizTasks(env,row,biz_tasks);
+    biz_tasks = await listInboundPlanBizTasks(env,id);
+  }
+  const inbound_progress = await inboundCodeProgress(env,row,jobs.results || []);
+  const workersByJob = new Map();
+  for(const worker of workers.results || []){
+    if(!workersByJob.has(worker.job_id))workersByJob.set(worker.job_id,[]);
+    workersByJob.get(worker.job_id).push(worker);
+  }
+  const resultsByJob = new Map((results.results || []).map(r=>[r.job_id,r]));
+  const unloadByJob = new Map((unloadLinks.results || []).map(r=>[r.job_id,r]));
   const enrichedJobs = [];
   for (const job of (jobs.results || [])) {
-    const workers = await env.DB.prepare(
-      "SELECT worker_name, minutes_worked, left_at FROM v2_ops_job_workers WHERE job_id=? ORDER BY joined_at"
-    ).bind(job.id).all();
-    const workerRows = workers.results || [];
+    const workerRows = workersByJob.get(job.id) || [];
     const names = [...new Set(workerRows.map(w => w.worker_name).filter(Boolean))];
     const totalMin = workerRows.reduce((s, w) => s + (Number(w.minutes_worked) || 0), 0);
     const maxLeft = workerRows.reduce((m, w) => (w.left_at && w.left_at > m ? w.left_at : m), "");
-
-    const latestResult = await env.DB.prepare(
-      "SELECT result_lines_json, diff_note, remark, result_json, created_at FROM v2_ops_job_results WHERE job_id=? ORDER BY created_at DESC LIMIT 1"
-    ).bind(job.id).first();
+    const latestResult = resultsByJob.get(job.id);
 
     let resultLines = [];
     if (latestResult && latestResult.result_lines_json) {
       try { resultLines = JSON.parse(latestResult.result_lines_json); } catch(e) {}
     }
-    const ownUnload = job.job_type==='unload' ? await env.DB.prepare('SELECT result_json FROM ck_unload_plan_links WHERE job_id=? AND plan_id=?').bind(job.id,id).first() : null;
+    const ownUnload = job.job_type==='unload' ? unloadByJob.get(job.id) : null;
     if(ownUnload?.result_json){const own=JSON.parse(ownUnload.result_json);resultLines=own.result_lines||[];if(latestResult)latestResult.diff_note=own.diff_note||'';}
     let resultNote = "";
     let extraOps = null;
@@ -4354,26 +4368,21 @@ route("v2_inbound_plan_detail", async (body, env) => {
     diff_note: lastCompletedUnload ? (lastCompletedUnload.diff_note || '') : ''
   };
 
-  // P1-4：关联出库单（source_inbound_plan_id 反查）
-  const linkedObRs = await env.DB.prepare(
-    "SELECT id, display_no, status, customer, biz_class, outbound_mode, expected_ship_at, planned_box_count, planned_pallet_count, order_date, uses_stock_operation FROM v2_outbound_orders WHERE source_inbound_plan_id=? ORDER BY created_at ASC"
-  ).bind(id).all();
-
   return json({
     ok: true,
-    plan: { ...row, biz_classes, ...(inboundFlowEnabled(env)?{external_inbound_nos:inboundCodes(row.external_inbound_no),inbound_progress:await inboundCodeProgress(env,row),courier_progress:await courierProgress(env,id)}:{}) },
+    plan: { ...row, biz_classes, ...(inboundFlowEnabled(env)?{external_inbound_nos:inboundCodes(row.external_inbound_no),inbound_progress,courier_progress}:{}) },
     biz_tasks,
     biz_classes,
     completed_biz_classes,
     pending_biz_classes,
     missing_biz_classes: pending_biz_classes,
     unload_summary,
-    existing_feedback_link: inboundFlowEnabled(env)?await feedbackLinkDetail(env,id):null,
+    existing_feedback_link,
     lines: planLines.results || [],
     jobs: enrichedJobs,
     attachments: atts.results || [],
     inbound_materials: (atts.results || []).filter(a => a.attachment_category === 'inbound_material'),
-    sop_needs: await linkedNeeds(env,id),
+    sop_needs,
     linked_outbound_orders: linkedObRs.results || []
   });
 });

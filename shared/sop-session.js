@@ -31,7 +31,8 @@
  document.addEventListener('DOMContentLoaded',async()=>{
   const banner=document.createElement('div');banner.className='ck-stage-banner';banner.innerHTML='<b>CK · 测试环境 / 테스트</b><span>'+(scope==='field'?'现场执行专用 / 현장 전용':scope==='kiosk'?'上下班签到点 / 출퇴근 등록':'办公室管理 / 사무실 관리')+'</span>';document.body.prepend(banner);
   showGate();try{complete(await request('sop_identity'));}catch(e){if(!e.unauthorized)gate.querySelector('[role=alert]').textContent=e.message;}
-  const check=async()=>{if(!completed||locked||document.hidden)return;try{await request('sop_identity');}catch(e){if(e.unauthorized)lock();}};
+  let checking=false;
+  const check=async()=>{if(!completed||locked||document.hidden||checking)return;checking=true;try{await request('sop_identity');}catch(e){if(e.unauthorized)lock();}finally{checking=false;}};
   setInterval(check,15000);window.addEventListener('focus',check);document.addEventListener('visibilitychange',check);
   if(scope==='field'){
    const clean=()=>document.querySelectorAll('a[href]').forEach(a=>{const u=new URL(a.href,location.href);if(u.origin!==location.origin||!u.pathname.startsWith('/001/')){const span=document.createElement('span');span.textContent=a.textContent;span.className=a.className;a.replaceWith(span);}});

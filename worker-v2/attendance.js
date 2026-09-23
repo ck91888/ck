@@ -1,3 +1,4 @@
+import {ensureSchema} from './schema-ready.js';
 // Attendance is enabled only in the isolated staging rollout. Production routes stay unchanged.
 import { attendanceReport, kstDay } from './attendance-time.js';
 import { EMPLOYEE_SCHEMA, employeeDepartments, employeeAction, isEmployee } from './employee-attendance.js';
@@ -32,7 +33,7 @@ const badgeOf=value=>text(String(value||'').split('|')[0]);
 function dateOf(value){const d=String(value||'');if(!/^\d{4}-\d{2}-\d{2}$/.test(d)||Number.isNaN(Date.parse(d+'T00:00:00+09:00'))||new Date(d+'T00:00:00Z').toISOString().slice(0,10)!==d)fail('日期无效');return d;}
 const publicPerson=p=>({id:p.id,badgeId:p.badge_id,name:p.name,agency:p.agency,badgeType:p.kind,enabled:!!p.enabled,personType:isEmployee(p.badge_id)?'employee':'daily',employeeNo:isEmployee(p.badge_id)?p.badge_id.slice(4):'',department:isEmployee(p.badge_id)?p.agency:''});
 const publicDay=r=>({id:r.id,personId:r.person_id,badgeId:r.worker_id,name:r.name,agency:r.agency,day:r.day,inAt:r.signed_in,outAt:r.signed_out,version:r.version,badgeType:r.worker_id.startsWith('DAF-')||isEmployee(r.worker_id)?'permanent':'daily',personType:isEmployee(r.worker_id)?'employee':'daily',employeeNo:isEmployee(r.worker_id)?r.worker_id.slice(4):'',department:isEmployee(r.worker_id)?r.agency:''});
-export async function ensureAttendance(env){if(!attendanceEnabled(env))return;await env.DB.batch(ATTENDANCE_SCHEMA.map(sql=>env.DB.prepare(sql)));}
+export async function ensureAttendance(env){if(!attendanceEnabled(env))return;await ensureSchema(env.DB,'attendance-v1',()=>env.DB.batch(ATTENDANCE_SCHEMA.map(sql=>env.DB.prepare(sql))));}
 function access(env,allowed=roles){const u=env.SOP_REQUEST_USER;if(!u||!allowed.includes(u.role))fail('无此操作权限 / 권한이 없습니다');return u;}
 const readDay=(env,id)=>q(env,'SELECT * FROM ck_attendance_days WHERE id=?',id).first();
 const todayRecord=(env,badge,t)=>q(env,'SELECT * FROM ck_attendance_days WHERE worker_id=? AND day=?',badge,kstDay(t)).first();

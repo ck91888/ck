@@ -5,10 +5,10 @@ export const inboundFlowEnabled=env=>env.SOP_ENVIRONMENT==='staging'&&env.SOP_UP
 export const inboundCode=value=>String(value??'').normalize('NFKC').trim();
 export const inboundReferenceValue=(body,fallback='')=>body.external_inbound_nos??body.external_inbound_no??fallback;
 export function inboundCodes(value){return [...new Set((Array.isArray(value)?value:[value]).flatMap(x=>inboundCode(x).split(/[\n\r,;，；\t]+/)).map(inboundCode).filter(Boolean))];}
-export async function inboundCodeProgress(env,plan){
+export async function inboundCodeProgress(env,plan,knownJobs){
  if(!inboundFlowEnabled(env)||!plan||!planClasses(plan).includes('direct_ship'))return null;
  const codes=inboundCodes(plan.external_inbound_no);
- const jobs=(await env.DB.prepare("SELECT id,job_type,status,inbound_external_no,created_at,updated_at FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type IN ('inbound_direct','inbound_bulk') AND status!='cancelled' ORDER BY created_at DESC").bind(plan.id).all()).results||[];
+ const jobs=knownJobs ? knownJobs.filter(j=>['inbound_direct','inbound_bulk'].includes(j.job_type)&&j.status!=='cancelled') : (await env.DB.prepare("SELECT id,job_type,status,inbound_external_no,created_at,updated_at FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type IN ('inbound_direct','inbound_bulk') AND status!='cancelled' ORDER BY created_at DESC").bind(plan.id).all()).results||[];
  const items=codes.map(code=>{
   const matches=jobs.filter(j=>j.inbound_external_no===code||(!j.inbound_external_no&&codes.length===1));
   const job=matches.find(j=>j.status==='completed')||matches.find(j=>['pending','working','awaiting_close'].includes(j.status));

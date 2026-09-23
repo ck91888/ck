@@ -12,6 +12,7 @@
  const app=location.pathname.split('/').filter(Boolean)[0]||'home';
  const params=new URLSearchParams(location.search);const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
  let instance=null,activeRoot=null;
+ const detailNeeds={};
  const request=(action,data={})=>CKSession.request(action,data);
  function mount(root,options){if(instance)instance.destroy();activeRoot=root;instance=CKWorkflow(root,options);return instance;}
  function button(label,fn){const b=document.createElement('button');b.type='button';b.className='btn btn-outline';b.textContent=label;b.onclick=async()=>{if(b.disabled)return;b.disabled=true;try{await fn();}catch(e){alert(e.message);}finally{b.disabled=false;}};return b;}
@@ -20,7 +21,8 @@
  function wrap(name,after){const original=window[name];if(typeof original!=='function')return;window[name]=async function(...args){const out=await original.apply(this,args);await after(...args);return out;};}
  async function sourcePanel(type,id,target){
   const body=document.getElementById(target);if(!body||!id)return;
-  const r=await request('sop_linked',{source_id:id});
+  const fresh=detailNeeds[type];
+  const r=fresh?.id===id?{items:fresh.items}:await request('sop_linked',{source_id:id});
   const head=block(body,'关联作业：操作要求、结果和数量在这里统一追踪');const buttons=head.querySelector('.ck-buttons');buttons.replaceChildren();
   if(type==='inbound'&&r.items.length){
    head.className='ck-inline-heading ck-inbound-work card';head.innerHTML='<div class="card-title">本批作业要求 / 작업 지시</div><div class="ck-work-preview">'+CKWorkNeedsTable(r.items)+'</div><div class="ck-buttons"></div>';
@@ -65,7 +67,11 @@
    const id=document.getElementById('ck-completed-need')?.value;
    if(id&&document.getElementById('view-outbound_create')?.style.display!=='none'){body.sop_existing_need_id=id;body.sop_link_quantity=Number(document.getElementById('ck-link-quantity').value);body.uses_stock_operation=0;}
   }
-  return nativeApi(body);
+  const type=body.action==='v2_inbound_plan_detail'?'inbound':body.action==='v2_outbound_order_detail'?'outbound':'';
+  if(type)delete detailNeeds[type];
+  const result=await nativeApi(body);
+  if(type&&result.ok&&Array.isArray(result.sop_needs))detailNeeds[type]={id:body.id,items:result.sop_needs};
+  return result;
  };
  async function setup(){
   const u=await CKSession.ready;

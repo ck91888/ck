@@ -1,3 +1,4 @@
+import {ensureSchema} from './schema-ready.js';
 // Separate, revocable sessions for office, field dispatch and the fixed attendance terminal.
 // Raw session tokens and administrator codes are never stored in D1 or sent to assets.
 import { kstDay } from './attendance-time.js';
@@ -19,8 +20,10 @@ export const ACCESS_SCHEMA=[
  'CREATE TABLE IF NOT EXISTS ck_access_attempts(bucket TEXT PRIMARY KEY,attempts INTEGER NOT NULL,expires_at INTEGER NOT NULL)'
 ];
 export async function ensureAccess(env){
+ return ensureSchema(env.DB,'ensureAccess-v1',async()=>{
  const present=await q(env,"SELECT COUNT(*) n FROM sqlite_master WHERE type='table' AND name IN ('ck_access_sessions','ck_field_access','ck_access_events','ck_access_attempts')").first();
  if(present?.n!==4)await env.DB.batch(ACCESS_SCHEMA.map(s=>env.DB.prepare(s)));
+ });
 }
 function rawToken(request,scope){return (request.headers.get('Cookie')||'').split(';').map(s=>s.trim()).find(s=>s.startsWith(cookieName(scope)+'='))?.slice(cookieName(scope).length+1)||'';}
 function safeUser(s){return {id:s.user_id,name:s.name,role:s.role,departments:JSON.parse(s.departments),scope:s.scope};}
@@ -40,7 +43,7 @@ async function credentialCurrent(s,env){
  return false;
 }
 export async function accessUser(request,env){
- await ensureAccess(env);const scope=accessScope(request),raw=rawToken(request,scope);if(!/^[a-f0-9]{64}$/.test(raw))return null;
+ const scope=accessScope(request),raw=rawToken(request,scope);if(!/^[a-f0-9]{64}$/.test(raw))return null;await ensureAccess(env);
  const s=await q(env,'SELECT * FROM ck_access_sessions WHERE token_hash=? AND scope=? AND expires_at>?',await digest(raw),scope,Date.now()).first();if(!s)return null;
  if(scope==='field'){
   const row=await q(env,`SELECT p.name,p.badge_id FROM ck_attendance_people p JOIN ck_employee_profiles e ON e.person_id=p.id LEFT JOIN ck_field_access a ON a.person_id=p.id JOIN ck_attendance_days d ON d.person_id=p.id
