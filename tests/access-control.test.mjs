@@ -18,13 +18,37 @@ async function setup(){
  const login=p=>ok('field','sop_login',{badge:p.badgeId+'|伪造名称'});
  return {DB,env,cookies,raw,call,ok,employee,grant,checkin,login};
 }
-test('field requires employee, explicit authorization and today check-in; the server supplies the name',async()=>{
- const {call,employee,grant,checkin,login}=await setup();
+test('registered employees have default field access but still require today check-in; server supplies the name',async()=>{
+ const {call,ok,employee,checkin,login}=await setup();
  assert.equal((await call('field','sop_identity')).ok,false);
  assert.equal((await call('field','sop_login',{badge:'DA-20260101-X|临时工'})).ok,false);
- const p=await employee();await checkin(p);assert.equal((await call('field','sop_login',{badge:p.badgeId})).ok,false);
- await grant(p);const r=await login(p);assert.equal(r.user.name,p.name);assert.equal(r.user.role,'dispatcher');assert.equal(r.user.scope,'field');
- const other=await employee('FIXTURE-B');await grant(other);assert.equal((await call('field','sop_login',{badge:other.badgeId})).ok,false);
+ assert.equal((await call('field','sop_login',{badge:'EMP-NOT-REGISTERED'})).ok,false);
+ const p=await employee();assert.equal((await call('field','sop_login',{badge:p.badgeId})).ok,false);
+ const effective=(await ok('office','sop_access_list')).items.find(x=>x.person_id===p.id);assert.equal(effective.enabled,1);assert.equal(effective.version,0);assert.equal(effective.default_grant,1);
+ await checkin(p);const r=await login(p);assert.equal(r.user.name,p.name);assert.equal(r.user.role,'dispatcher');assert.equal(r.user.scope,'field');
+ assert.equal((await ok('field','sop_identity')).user.id,p.id);
+ const other=await employee('FIXTURE-B');assert.equal((await call('field','sop_login',{badge:other.badgeId})).ok,false);
+});
+
+test('default access covers existing and imported staff without adding punches or reviving explicit revocations',async()=>{
+ const {DB,call,ok,employee,grant,checkin,login,cookies}=await setup();
+ const existing=await employee('EXISTING');assert.equal(DB.raw.prepare('SELECT COUNT(*) n FROM ck_field_access').get().n,0);
+ await checkin(existing);await login(existing);const old=cookies.field;
+ await grant(existing,false,0);assert.equal((await call('field','sop_identity',{}, {cookie:old})).ok,false);
+ assert.equal((await call('field','sop_login',{badge:existing.badgeId})).ok,false);
+ const rows=[{name:'Existing renamed',employeeNo:'EXISTING',department:'bulk',enabled:true},{name:'Imported active',employeeNo:'NEW-A',department:'office',enabled:true},{name:'Imported disabled',employeeNo:'NEW-D',department:'bulk',enabled:false}];
+ const preview=await ok('office','sop_attendance_employee_import_preview',{rows});await ok('office','sop_attendance_employee_import',{rows,previewToken:preview.previewToken});
+ assert.equal(DB.raw.prepare('SELECT COUNT(*) n FROM ck_attendance_days').get().n,1,'import must not check staff in');
+ const people=(await ok('office','sop_attendance_employee_people')).items,active=people.find(p=>p.employeeNo==='NEW-A'),disabled=people.find(p=>p.employeeNo==='NEW-D');
+ const grants=(await ok('office','sop_access_list')).items;
+ assert.equal(grants.find(g=>g.person_id===existing.id).enabled,0);assert.equal(grants.find(g=>g.person_id===existing.id).version,1);
+ assert.equal(grants.find(g=>g.person_id===active.id).enabled,1);assert.equal(grants.find(g=>g.person_id===active.id).default_grant,1);
+ assert.equal(grants.find(g=>g.person_id===disabled.id).enabled,0);
+ assert.equal((await call('field','sop_login',{badge:disabled.badgeId})).ok,false);assert.equal((await call('field','sop_login',{badge:active.badgeId})).ok,false);
+ await checkin(active);await login(active);
+ assert.equal((await call('field','sop_attendance_employee_people')).ok,false,'default field access does not grant office access');
+ assert.equal((await call('field','sop_login',{badge:existing.badgeId})).ok,false);
+ await grant(existing,true,1);await login(existing);assert.equal((await call('field','sop_identity',{}, {cookie:old})).ok,false);
 });
 test('office, field and kiosk sessions cannot be exchanged; legacy/public access cannot bypass the gate',async()=>{
  const {call,ok,employee,grant,checkin,login,cookies}=await setup();const p=await employee();await grant(p);await checkin(p);await login(p);

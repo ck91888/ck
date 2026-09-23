@@ -43,8 +43,8 @@ export async function accessUser(request,env){
  await ensureAccess(env);const scope=accessScope(request),raw=rawToken(request,scope);if(!/^[a-f0-9]{64}$/.test(raw))return null;
  const s=await q(env,'SELECT * FROM ck_access_sessions WHERE token_hash=? AND scope=? AND expires_at>?',await digest(raw),scope,Date.now()).first();if(!s)return null;
  if(scope==='field'){
-  const row=await q(env,`SELECT p.name,p.badge_id FROM ck_attendance_people p JOIN ck_employee_profiles e ON e.person_id=p.id JOIN ck_field_access a ON a.person_id=p.id JOIN ck_attendance_days d ON d.person_id=p.id
-   WHERE p.id=? AND p.enabled=1 AND a.enabled=1 AND a.version=? AND d.id=? AND d.day=? AND d.signed_out='' AND d.signed_in<=?`,s.user_id,s.grant_version,s.attendance_id,kstDay(new Date().toISOString()),new Date().toISOString()).first();
+  const row=await q(env,`SELECT p.name,p.badge_id FROM ck_attendance_people p JOIN ck_employee_profiles e ON e.person_id=p.id LEFT JOIN ck_field_access a ON a.person_id=p.id JOIN ck_attendance_days d ON d.person_id=p.id
+   WHERE p.id=? AND p.enabled=1 AND COALESCE(a.enabled,1)=1 AND COALESCE(a.version,0)=? AND d.id=? AND d.day=? AND d.signed_out='' AND d.signed_in<=?`,s.user_id,s.grant_version,s.attendance_id,kstDay(new Date().toISOString()),new Date().toISOString()).first();
   if(!row){await q(env,'DELETE FROM ck_access_sessions WHERE token_hash=?',s.token_hash).run();return null;}
   return {...safeUser(s),name:row.name,badge:row.badge_id,attendance_id:s.attendance_id};
  }
@@ -63,8 +63,10 @@ export async function accessSessionAction(b,env,request){
  if(scope==='field'){
   const badge=String(b.badge||'').trim().split('|')[0].toUpperCase();
   if(!/^EMP-[A-Z0-9_-]{1,32}$/.test(badge))return denied('请扫描已授权的职员工牌；日当工牌用于加入作业 / 권한이 있는 직원 명찰을 스캔하세요',403);
-  const p=await q(env,`SELECT p.id,p.name,a.version FROM ck_attendance_people p JOIN ck_employee_profiles e ON e.person_id=p.id JOIN ck_field_access a ON a.person_id=p.id WHERE p.badge_id=? AND p.enabled=1 AND a.enabled=1`,badge).first();
-  if(!p)return denied('此职员尚未获现场登录授权，请联系管理员 / 현장 로그인 권한을 확인하세요',403);
+  // Registered employees have field access by default. An explicit revocation
+  // remains authoritative across edits, imports and deployments.
+  const p=await q(env,`SELECT p.id,p.name,COALESCE(a.version,0) AS version FROM ck_attendance_people p JOIN ck_employee_profiles e ON e.person_id=p.id LEFT JOIN ck_field_access a ON a.person_id=p.id WHERE p.badge_id=? AND p.enabled=1 AND COALESCE(a.enabled,1)=1`,badge).first();
+  if(!p)return denied('职员未登记、已停用或现场权限已关闭，请联系管理员 / 직원 등록·재직 상태와 현장 권한을 확인하세요',403);
   const day=await q(env,"SELECT id FROM ck_attendance_days WHERE person_id=? AND day=? AND signed_out='' AND signed_in<=?",p.id,kstDay(new Date().toISOString()),new Date().toISOString()).first();
   if(!day)return denied('今天尚未上班签到或已经签退，请先在签到点打卡 / 오늘 출근 등록을 먼저 해주세요',403);
   u={id:p.id,name:p.name,role:'dispatcher',departments:['bulk','direct_ship','import','other']};attendance=day.id;version=p.version;
@@ -122,7 +124,11 @@ export function accessGuard(b,env,request){
 export async function accessAdminAction(b,env){
  if(!b.action?.startsWith('sop_access_'))return null;
  const u=env.SOP_REQUEST_USER;if(u?.scope!=='office'||u.role!=='manager')return denied('仅办公室管理员可授权',403);
- if(b.action==='sop_access_list')return response({ok:true,items:(await q(env,'SELECT * FROM ck_field_access').all()).results});
+ if(b.action==='sop_access_list')return response({ok:true,items:(await q(env,`SELECT p.id AS person_id,
+  CASE WHEN p.enabled=1 THEN COALESCE(a.enabled,1) ELSE 0 END AS enabled,
+  COALESCE(a.version,0) AS version,CASE WHEN a.person_id IS NULL THEN 1 ELSE 0 END AS default_grant,
+  COALESCE(a.updated_by,'') AS updated_by,COALESCE(a.updated_at,'') AS updated_at
+  FROM ck_attendance_people p JOIN ck_employee_profiles e ON e.person_id=p.id LEFT JOIN ck_field_access a ON a.person_id=p.id`).all()).results});
  if(b.action!=='sop_access_update')return denied('Unknown action',404);
  if(typeof b.enabled!=='boolean'||!Number.isSafeInteger(b.version)||b.version<0)return denied('权限设置无效',400);
  const p=await q(env,'SELECT p.* FROM ck_attendance_people p JOIN ck_employee_profiles e ON e.person_id=p.id WHERE p.id=?',b.person_id).first();
