@@ -69,6 +69,55 @@ test('rejects cross-origin, unsafe GET, invalid content types and unregistered f
  assert.equal((await raw('office',null,{method:'GET',path:'/file?key=fixture',cookie:''})).status,401);
  assert.equal((await raw('field',null,{method:'GET',path:'/001/api/file?key=unregistered',cookie:cookies.field})).status,401);
 });
+
+test('a checked-in authorized crew member can reopen and finish the same dispatch after switching login',async()=>{
+ const {DB,ok,call,employee,grant,checkin,login}=await setup();
+ const a=await employee('CREW-A'),b=await employee('CREW-B'),c=await employee('CREW-C');
+ for(const p of [a,b,c]){await grant(p);await checkin(p);}await login(a);
+ const crew=[a,b].map(p=>({id:p.badgeId,name:p.name}));
+ const j=await ok('field','sop_native_start',{payload:{action:'v2_unplanned_unload_start',cargo_summary:'Fixture cargo',client_req_id:crypto.randomUUID()},workers:crew,lead_id:a.badgeId,estimated_minutes:20});
+ const segment=()=>DB.raw.prepare('SELECT * FROM v2_ops_job_workers WHERE job_id=? AND worker_id=?').get(j.job_id,b.badgeId);
+ const original=segment();
+ await ok('field','sop_native_people',{job_id:j.job_id,revision:1,workers:[crew[1]],lead_id:b.badgeId});
+ // Removing the original dispatcher's work segment does not remove ownership.
+ assert.equal((await ok('field','v2_ops_job_detail',{job_id:j.job_id})).can_manage_dispatch,true);
+ await ok('field','sop_logout');await login(b);
+ for(let i=0;i<2;i++){
+  const list=await ok('field','sop_dispatch_list'),item=list.items.find(x=>x.id===j.job_id);
+  assert.ok(item);assert.equal(item.source_type,'field_feedback');assert.deepEqual(item.workers,[crew[1]]);
+  assert.equal((await ok('field','v2_ops_job_detail',{job_id:j.job_id})).can_manage_dispatch,true);
+ }
+ assert.deepEqual(segment(),original,'reopening preserves the original timing segment');
+ assert.equal(DB.raw.prepare('SELECT COUNT(*) n FROM v2_ops_jobs').get().n,1);
+ assert.equal(DB.raw.prepare('SELECT COUNT(*) n FROM v2_ops_job_workers').get().n,2);
+ // Forging badge/worker fields on an unrelated authorized session grants nothing.
+ await login(c);assert.equal((await ok('field','sop_dispatch_list',{badge:b.badgeId,worker_id:b.badgeId})).items.length,0);
+ assert.equal((await ok('field','v2_ops_job_detail',{job_id:j.job_id,worker_id:b.badgeId})).can_manage_dispatch,false);
+ assert.equal((await call('field','sop_native_people',{job_id:j.job_id,revision:2,workers:[crew[1]],lead_id:b.badgeId})).ok,false);
+ await login(b);await ok('field','sop_native_people',{job_id:j.job_id,revision:2,workers:[crew[1]],lead_id:b.badgeId});
+ assert.deepEqual(segment(),original);
+ await ok('field','v2_unplanned_unload_finish',{job_id:j.job_id,worker_id:b.badgeId,complete_job:true,result_lines:[{unit_type:'carton',actual_qty:10}]});
+ assert.equal(DB.raw.prepare('SELECT status FROM v2_ops_jobs WHERE id=?').get(j.job_id).status,'completed');
+ assert.equal(DB.raw.prepare('SELECT COUNT(*) n FROM v2_ops_job_results WHERE job_id=?').get(j.job_id).n,1);
+});
+
+test('past crew snapshots do not grant access after a worker leaves; list filters before its limit',async()=>{
+ const {DB,ok,employee,grant,checkin,login}=await setup();const a=await employee('OWNER'),b=await employee('CREW');
+ for(const p of [a,b]){await grant(p);await checkin(p);}await login(a);
+ const crew=[{id:b.badgeId,name:b.name}];
+ const j=await ok('field','sop_native_start',{payload:{action:'v2_unplanned_unload_start',client_req_id:crypto.randomUUID()},workers:crew,lead_id:b.badgeId,estimated_minutes:20});
+ // More than 200 unrelated newer jobs must not hide this person's ongoing work.
+ const record=DB.raw.prepare('SELECT * FROM sop_records WHERE id=?').get(j.job_id);
+ for(let i=0;i<205;i++){
+  const id='UNRELATED-'+i;
+  DB.raw.prepare("INSERT INTO v2_ops_jobs(id,job_type,status,updated_at) VALUES(?,'unload','working','2099-01-01')").run(id);
+  DB.raw.prepare("INSERT INTO sop_records VALUES(?,'dispatch',1,'bulk',?,'2099-01-01')").run(id,JSON.stringify({...JSON.parse(record.state),owner_id:'unrelated'}));
+ }
+ await login(b);assert.equal((await ok('field','sop_dispatch_list')).items[0].id,j.job_id);
+ DB.raw.prepare("UPDATE v2_ops_job_workers SET left_at='2099-01-01' WHERE job_id=?").run(j.job_id);
+ assert.equal((await ok('field','sop_dispatch_list')).items.length,0);
+ assert.equal((await ok('field','v2_ops_job_detail',{job_id:j.job_id})).can_manage_dispatch,false);
+});
 test('static office pages require office login while the separate field and attendance entrances stay reachable',async()=>{
  const {raw,cookies}=await setup();for(const path of ['/','/002/','/003/','/shuju/','/templates/employees.xlsx']){const r=await raw('office',null,{path,method:'GET',cookie:'',entry:true});assert.equal(r.status,302,path);assert.match(r.headers.get('location'),/office-login/);}
  for(const path of ['/001/','/attendance/','/office-login/','/shared/sop-session.js'])assert.equal((await raw('office',null,{path,method:'GET',cookie:'',entry:true})).status,200);

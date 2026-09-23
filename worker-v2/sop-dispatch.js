@@ -1,4 +1,5 @@
 import {pickTeamStatements} from './native-lifecycle.js';
+import {dispatchAccess} from './dispatch-access.js';
 // Responsible-person assignment around existing operation handlers. Documents,
 // result forms and status transitions remain owned by those handlers.
 import { laborDepartment,startDepartment,departments } from '../shared/labor-department.js';
@@ -44,8 +45,8 @@ export async function startNative(body,env,invoke,guard){
 }
 export async function nativeOwner(body,env){
  if(env.SOP_ENVIRONMENT!=='staging'||!env.SOP_REQUEST_USER||!body.job_id)return false;
- const row=await env.DB.prepare("SELECT state FROM sop_records WHERE id=? AND kind='dispatch'").bind(body.job_id).first();
- return !!row&&(env.SOP_REQUEST_USER.role==='manager'||JSON.parse(row.state).owner_id===env.SOP_REQUEST_USER.id);
+ const access=dispatchAccess(env.SOP_REQUEST_USER);
+ return !!await env.DB.prepare("SELECT s.id FROM sop_records s WHERE s.id=? AND s.kind='dispatch' AND "+access.sql).bind(body.job_id,...access.args).first();
 }
 
 // A fresh dispatch must not silently join only the new lead to an existing crew.

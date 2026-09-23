@@ -1,4 +1,5 @@
 import { workPlanStatements } from './sop-planning.js';
+import { dispatchAccess } from './dispatch-access.js';
 /* SOP pilot: explicit opt-in, revision checked atomic mutations, immutable history.
  * No production migration or legacy job conversion on request paths.
  */
@@ -138,8 +139,13 @@ export async function handleSop(b,env) {
   }
   if(b.action==='sop_dispatch_list'){
    if(!['manager','dispatcher'].includes(u.role))fail('仅派审员可查看现场派工');
-   const rows=await all(env,"SELECT s.state,j.* FROM sop_records s JOIN v2_ops_jobs j ON j.id=s.id WHERE s.kind='dispatch' AND j.status NOT IN ('completed','cancelled') ORDER BY j.updated_at DESC LIMIT 200");
-   return {ok:true,items:rows.filter(r=>u.role==='manager'||JSON.parse(r.state).owner_id===u.id).map(r=>{const d=JSON.parse(r.state);return {id:r.id,job_type:r.job_type,status:r.status,source_id:r.related_doc_id,lead_id:d.lead_id,last_lead:d.last_lead,display_no:r.display_no,workers:d.workers,owner:d.owner,estimated_minutes:d.estimated_minutes};})};
+   const access=dispatchAccess(u);
+   const rows=await all(env,`SELECT s.state,j.*,
+    (SELECT json_group_array(json_object('id',w.worker_id,'name',w.worker_name)) FROM v2_ops_job_workers w WHERE w.job_id=j.id AND w.left_at='') AS active_crew
+    FROM sop_records s JOIN v2_ops_jobs j ON j.id=s.id
+    WHERE s.kind='dispatch' AND j.status NOT IN ('completed','cancelled') AND ${access.sql}
+    ORDER BY j.updated_at DESC LIMIT 200`,...access.args);
+   return {ok:true,items:rows.map(r=>{const d=JSON.parse(r.state);return {id:r.id,job_type:r.job_type,status:r.status,source_type:r.related_doc_type,source_id:r.related_doc_id,lead_id:d.lead_id,last_lead:d.last_lead,display_no:r.display_no,workers:JSON.parse(r.active_crew||'[]'),owner:d.owner,estimated_minutes:d.estimated_minutes};})};
   }
   if(b.action==='sop_dashboard') return await dashboard(env,u,b);
   if(b.action==='sop_updates'){

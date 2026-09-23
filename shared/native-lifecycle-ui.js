@@ -65,5 +65,36 @@
    const host=$('pickActiveList');if(!host)return;host.textContent='加载中 / 로딩 중';
    try{const r=await CKSession.request('sop_dispatch_list'),jobs=r.items.filter(j=>j.job_type==='pick_direct');host.replaceChildren();for(const job of jobs){const b=document.createElement('button');b.type='button';b.className='btn btn-outline';b.textContent=(job.display_no||job.title||job.id)+' · '+job.workers.map(w=>w.name).join('、')+' · 继续管理 / 작업 관리';b.onclick=()=>CKOpenNativeJob(job);host.append(b);}if(!jobs.length)host.textContent='暂无进行中拣货 / 진행 중인 피킹 없음';}catch(e){host.textContent=e.message;}
   };
+  // Opening an existing dispatch must never call the old worker-join route.
+  // The signed-in dispatcher may already be a member of this exact crew.
+  window.joinUnplannedUnload=async function(feedbackId,button){
+   if(button)button.disabled=true;
+   try{
+    const r=await CKSession.request('sop_dispatch_list');
+    const job=r.items.find(j=>j.job_type==='unload'&&j.source_type==='field_feedback'&&j.source_id===feedbackId);
+    if(!job)throw Error('你已不在此任务中，请联系派工人 / 배정 담당자에게 문의하세요');
+    await CKOpenNativeJob(job);
+   }catch(e){alert(e.message);}finally{if(button)button.disabled=false;}
+  };
+  window.loadUnplannedActiveList=async function(){
+   const wrap=$('unplannedActiveList'),box=$('unplannedActiveItems'),hint=$('unplannedActiveHint');if(!wrap||!box)return;
+   wrap.style.display='';box.textContent='加载中 / 로딩 중';
+   if(hint){hint.style.display='';hint.textContent='本人派工或正在参与的任务可直接继续；需要增减人员请进入任务后调整。 / 배정했거나 참여 중인 작업을 열어 인원을 변경하세요.';}
+   try{
+    const [all,mine]=await Promise.all([api({action:'v2_unplanned_unload_active_list'}),CKSession.request('sop_dispatch_list')]);
+    if(!all?.ok)throw Error(all?.error||'加载失败 / 로딩 실패');
+    box.replaceChildren();wrap.style.display=all.items?.length?'':'none';
+    for(const item of all.items||[]){
+     const job=mine.items.find(j=>j.job_type==='unload'&&j.source_type==='field_feedback'&&j.source_id===item.feedback_id);
+     const row=document.createElement('section');row.className='ck-unplanned-resume';
+     const title=document.createElement('b');title.textContent=item.display_no||item.feedback_id;
+     const info=document.createElement('p');info.textContent='派工 / 배정: '+(job?.owner||item.submitted_by||'—')+' · '+(item.cargo_summary||'')+' · '+(item.worker_names||[]).join('、');
+     row.append(title,info);
+     if(job){const button=document.createElement('button');button.type='button';button.className='btn btn-outline';button.textContent='继续作业 / 작업 계속';button.onclick=()=>joinUnplannedUnload(item.feedback_id,button);row.append(button);}
+     else{const note=document.createElement('small');note.textContent='由原派工人管理；加入人员请联系派工人 / 인원 추가는 배정 담당자에게 요청하세요';row.append(note);}
+     box.append(row);
+    }
+   }catch(e){box.textContent=e.message;}
+  };
  };
 })();

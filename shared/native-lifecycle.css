@@ -1,3 +1,4 @@
 .ck-dispatch-controls{margin:0 16px 16px;padding:12px 16px;background:#e5f1ed;border-left:3px solid #1b5c50;border-radius:4px;display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap}
 .ck-dispatch-controls[hidden]{display:none!important}.ck-dispatch-controls p{margin:4px 0;font-size:13px}.ck-dispatch-controls button{min-height:40px;padding:8px 12px}.ck-dispatch-controls .ck-buttons{display:flex;flex-wrap:wrap;gap:8px}
 .ck-native-people{width:min(620px,94vw);max-height:90vh;overflow:auto;padding:20px;border:1px solid #ccd6e0;border-radius:8px}.ck-native-people::backdrop{background:#123a3455}
+.ck-unplanned-resume{padding:12px 0;border-bottom:1px solid #cdded9}.ck-unplanned-resume p{margin:5px 0 9px;font-size:13px;line-height:1.6}.ck-unplanned-resume small{color:#506a63}

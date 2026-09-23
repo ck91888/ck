@@ -5,7 +5,20 @@
   let lead=null;try{lead=JSON.parse(sessionStorage.getItem('ck_test_active_lead')||'null');}catch{}
   window.getWorkerId=()=>lead?.id||'';window.getWorkerName=()=>lead?.name||'';window.getBadge=()=>lead?lead.id+'|'+lead.name:'';
   window.CKSetNativeLead=function(person){if(person){lead=person;sessionStorage.setItem('ck_test_active_lead',JSON.stringify(lead));}};
-  window.CKOpenNativeJob=function(job){lead=job.workers.find(w=>w.id===job.lead_id)||job.workers[0]||job.last_lead;sessionStorage.setItem('ck_test_active_lead',JSON.stringify(lead));saveActiveJob(job.id,null);if(job.job_type==='issue_handle')window._currentIssueId=job.source_id;goMyTask();};
+  window.CKOpenNativeJob=async function(job){
+   try{
+    const r=await api({action:'v2_ops_job_detail',job_id:job.id});
+    if(!r?.ok||!r.can_manage_dispatch)throw Error(r?.error||'你已不在此任务中，请联系派工人 / 배정 담당자에게 문의하세요');
+    if(!['pending','working','awaiting_close'].includes(r.job.status))throw Error('任务已结束，请刷新列表 / 작업 종료, 목록을 새로고침하세요');
+    const state=JSON.parse(r.dispatch.state),crew=r.workers.filter(w=>!w.left_at).map(w=>({id:w.worker_id,name:w.worker_name}));
+    lead=crew.find(w=>w.id===state.lead_id)||crew[0]||state.last_lead;
+    if(!lead)throw Error('任务人员信息缺失，请联系管理员 / 작업자 정보를 확인하세요');
+    sessionStorage.setItem('ck_test_active_lead',JSON.stringify(lead));
+    if(r.job.job_type==='unload'&&r.job.related_doc_type==='field_feedback')localStorage.setItem('v2_unplanned_fb_id',r.job.related_doc_id);
+    else localStorage.removeItem('v2_unplanned_fb_id');
+    saveActiveJob(job.id,null);if(r.job.job_type==='issue_handle')window._currentIssueId=r.job.related_doc_id;goMyTask();
+   }catch(e){alert(e.message);}
+  };
   window.CKClearNativeJob=function(){lead=null;sessionStorage.removeItem('ck_test_active_lead');clearActiveJob();};
   // The manager dispatches several crews; the backend still checks every worker's occupancy.
   window.hasOtherActiveJob=()=>false;
