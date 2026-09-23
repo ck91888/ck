@@ -1802,9 +1802,18 @@ async function loadOutboundDetail() {
   html += '<div class="detail-section"><b>' + L("outbound_requirement") + ':</b>'
        + (o.outbound_requirement ? '<div class="remark-block">' + esc(o.outbound_requirement) + '</div>' : ' --')
        + '</div>';
+  if (res.sop_needs && res.sop_needs.length) {
+    html += '<div class="detail-section"><b>关联作业 / 연결 작업:</b>';
+    res.sop_needs.forEach(function(n) {
+      html += '<div class="remark-block"><b>' + esc(n.title) + '</b><br>' + esc(n.instructions) + '<br>' + esc(n.status) +
+        ' <a href="../002/?need=' + encodeURIComponent(n.id) + '&individual=1">查看关联作业 / 작업 보기</a></div>';
+    });
+    html += '</div>';
+  } else {
   html += '<div class="detail-section"><b>' + L("instruction") + ':</b>'
        + (o.instruction ? '<div class="remark-block">' + esc(o.instruction) + '</div>' : ' --')
        + '</div>';
+  }
   html += '<div class="detail-section"><b>' + L("remark") + ':</b>'
        + (o.remark ? '<div class="remark-block">' + esc(o.remark) + '</div>' : ' --')
        + '</div>';
@@ -2366,11 +2375,11 @@ async function loadInboundList() {
     // 多业务类型 tag（兼容老数据：列表后端注入 biz_classes，缺则回退 biz_class 单值）
     var bizArr = (p.biz_classes && p.biz_classes.length) ? p.biz_classes : (p.biz_class ? [p.biz_class] : []);
     for (var bi = 0; bi < bizArr.length; bi++) {
-      html += '<span class="biz-tag biz-' + esc(bizArr[bi]) + '" style="margin-right:4px;">' + esc(bizLabel(bizArr[bi])) + '</span>';
+      html += '<span class="biz-tag biz-' + esc(bizArr[bi]) + '" style="margin-right:4px;">' + esc((window.CKInboundLabel ? CKInboundLabel(bizArr[bi]) : bizLabel(bizArr[bi]))) + '</span>';
     }
     html += ' ' + esc(p.display_no || p.id) + ' · ' + esc(p.customer || "--") + ' · ' + esc(p.cargo_summary || "");
     html += '</div>';
-    var ibMeta = esc(p.plan_date || "") + ' · ' + esc(dateOnly(p.expected_arrival) || "") + ' · ' + esc(fmtTime(p.created_at));
+    var ibMeta = (window.CK_SOP_ROLLOUT?.staging ? '预计到达 ' + esc(dateOnly(p.expected_arrival) || '待定') : esc(p.plan_date || '') + ' · ' + esc(dateOnly(p.expected_arrival) || '')) + ' · ' + esc(fmtTime(p.created_at));
     // line summary：箱/托/件 — 仅显示有数量的项
     var lineSum = p.line_summary || {};
     var lineParts = [];
@@ -2594,15 +2603,22 @@ async function submitInbound(btnEl) {
   if (!customer) { alert("请填写客户 / 고객을 입력하세요"); return; }
   // 业务类型至少选一个
   var bizArr = getIbcBizClasses();
-  if (bizArr.length === 0) { alert("请至少选择一个业务类型（代发/大货/退件）/ 업무 유형을 1개 이상 선택하세요"); return; }
+  if (bizArr.length === 0) { alert("请至少选择一个入库业务分类 / 입고 유형을 1개 이상 선택하세요"); return; }
   // 严格校验：必须至少有一行 planned_qty>0 的明细
   var linesPre = getIbcLines();
   if (linesPre.length === 0) { alert("请至少填写一行货物明细 / 화물 명세를 1건 이상 입력하세요"); return; }
 
+  var workRequests=[];try{workRequests=window.CKInboundWorks?CKInboundWorks.read():[];}catch(e){alert(e.message);return;}
   // P1-4 关联出库计划行 — 校验
   var linkOb = document.getElementById("ibc-link-ob");
   var linkObOn = !!(linkOb && linkOb.checked);
   var linkObRows = linkObOn ? getIbcLinkObRows() : [];
+  // Optional outbound rows left at their defaults do not constitute a shipping plan.
+  if(window.CKHasStandaloneOutbound){
+    linkObRows=linkObRows.filter(CKHasStandaloneOutbound);
+    linkObOn=linkObOn&&linkObRows.length>0;
+  }
+  if(workRequests.length&&linkObOn){alert('下方另填的出库资料尚未归属作业需求。请将其填到对应需求下，或取消下方“另建出库计划”的勾选。没有出库预约可以直接保存入库和作业需求。 / 출고 예약 없이 작업 요청만 저장할 수 있습니다.');return;}
   if (linkObOn) {
     if (linkObRows.length === 0) { alert("已勾选'关联出库计划'但未添加任何行 / 출고 계획이 없습니다"); return; }
     for (var li = 0; li < linkObRows.length; li++) {
@@ -2630,6 +2646,7 @@ async function submitInbound(btnEl) {
     var ibRes = await api({
       action: "v2_inbound_plan_create",
       plan_date: date,
+      work_requests: workRequests,
       customer: customer,
       biz_class: biz,
       biz_classes: biz_classes,
@@ -2665,7 +2682,7 @@ async function submitInbound(btnEl) {
     }
 
     // 第二步：循环创建关联出库单
-    var createdObs = [];
+    var createdObs = (ibRes.outbounds||[]).map(function(x){return x.display_no||x.id;});
     var failedObs = [];
     for (var i = 0; i < linkObRows.length; i++) {
       var row = linkObRows[i];
@@ -2696,6 +2713,8 @@ async function submitInbound(btnEl) {
     }
 
     var msg = "已创建入库计划 / 입고 계획 생성: " + planDispNo;
+    if(ibRes.needs&&ibRes.needs.length)msg+="\n同步作业需求："+ibRes.needs.length+"条";
+    if(window.CKInboundWorks)CKInboundWorks.clear();
     if (matFiles.length > 0) {
       msg += "\n入库明细 / 입고 명세: 上传 " + (matFiles.length - matFailed.length) + "/" + matFiles.length;
     }
@@ -2800,10 +2819,10 @@ async function loadInboundDetail() {
                      ((p.biz_classes && p.biz_classes.length) ? p.biz_classes : (p.biz_class ? [p.biz_class] : []));
   var bizTagsHtml = '';
   for (var dbi = 0; dbi < detailBizArr.length; dbi++) {
-    bizTagsHtml += '<span class="biz-tag biz-' + esc(detailBizArr[dbi]) + '" style="margin-right:4px;">' + esc(bizLabel(detailBizArr[dbi])) + '</span>';
+    bizTagsHtml += '<span class="biz-tag biz-' + esc(detailBizArr[dbi]) + '" style="margin-right:4px;">' + esc((window.CKInboundLabel ? CKInboundLabel(detailBizArr[dbi]) : bizLabel(detailBizArr[dbi]))) + '</span>';
   }
   html += '<div><b>' + L("biz_class") + ':</b> ' + (bizTagsHtml || '--') + '</div>';
-  html += '<div><b>' + L("plan_date") + ':</b> ' + esc(p.plan_date) + '</div>';
+  if (!window.CK_SOP_ROLLOUT?.staging) html += '<div><b>' + L("plan_date") + ':</b> ' + esc(p.plan_date) + '</div>';
   html += '<div><b>' + L("customer") + ':</b> ' + esc(p.customer) + '</div>';
   html += '<div><b>' + L("cargo_summary") + ':</b> ' + esc(p.cargo_summary) + '</div>';
   html += '<div><b>' + L("expected_arrival") + ':</b> ' + esc(dateOnly(p.expected_arrival) || '--') + '</div>';
@@ -2849,8 +2868,10 @@ async function loadInboundDetail() {
     html += '</div>';
   }
 
+  // Pure courier plans use the scanned arrival progress instead of a truck-unloading card.
+  var courierOnly = p.courier_progress && !lines.some(function(x){return x.unit_type !== 'courier' && Number(x.planned_qty)>0;});
   // --- 到仓卸货状态卡片（plan 级别，仅一次卸货） ---
-  if (!isReturnSession) {
+  if (!isReturnSession && !courierOnly) {
     var us = res.unload_summary || null;
     var unloadDone = us && us.completed;
     var unloadingNow = us && us.status === 'unloading';
@@ -2906,8 +2927,8 @@ async function loadInboundDetail() {
       var stClass = (t.status === 'completed') ? 'st-completed' : 'st-pending';
       var stText = (t.status === 'completed') ? (getLang() === 'ko' ? '완료' : '已完成') : (getLang() === 'ko' ? '미완료' : '未完成');
       html += '<tr>';
-      html += '<td><span class="biz-tag biz-' + esc(t.biz_class) + '">' + esc(bizLabel(t.biz_class)) + '</span></td>';
-      html += '<td>' + esc(inboundBizTaskLabel(t.biz_class)) + '</td>';
+      html += '<td><span class="biz-tag biz-' + esc(t.biz_class) + '">' + esc(window.CKInboundLabel ? CKInboundLabel(t.biz_class) : bizLabel(t.biz_class)) + '</span></td>';
+      html += '<td>' + esc(window.CKInboundLabel && p.source_type !== 'return_session' && p.source_type !== 'external_inbound' ? (t.biz_class === 'direct_ship' ? '现场理货入库 / 현장 검수·입고' : (courierOnly ? '快递收齐后入库 / 택배 수령 완료 후 입고' : '卸货后自动入库 / 하차 후 자동 입고')) : inboundBizTaskLabel(t.biz_class)) + '</td>';
       html += '<td><span class="st ' + stClass + '">' + esc(stText) + '</span></td>';
       // 完成人优先显示 worker_names（姓名串），fallback 到 completed_by（worker_id）
       var doneBy = t.worker_names || t.completed_by || '';
@@ -3901,23 +3922,40 @@ function buildInboundQrHtml(text, cellSize) {
 }
 
 // 入库计划单 A4 打印：左上抬头 + 右上小二维码 + 双列信息 + 明细表 + 签字行
-function printIbQr() {
-  var displayNo = window._currentInboundPretty || _currentInboundId || '';
+async function printIbQr() {
   var planId = _currentInboundId || '';
-  var plan = window._currentInboundPlanCache || {};
+  if(!planId){alert('请先打开入库计划');return;}
+  var win = window.open('', '_blank');
+  if(!win){alert('请允许浏览器打开打印窗口');return;}
+  win.document.write('<p>正在读取最新入库计划和作业要求…</p>');
+  var latest;
+  try{latest=await api({action:'v2_inbound_plan_detail',id:planId});if(!latest||!latest.ok)throw Error(latest&&(latest.error||latest.message)||'读取失败');}
+  catch(e){win.close();alert('未能读取最新作业要求，未打印旧版。请重试：'+e.message);return;}
+  var plan = latest.plan;
+  var displayNo = plan.display_no || planId;
+  var printNeeds=latest.sop_needs||[];
+  var printStatus={pending:'待安排',assigned:'已分配',working:'作业中',paused:'已暂停',awaiting_review:'待审核',rework:'待整改',waiting_customer:'已审核·待客户安排',linked:'已关联出库',closed:'已关闭',cancelled:'已取消·不得执行'};
+  var workHtml='<h2>本批作业要求及卸货分货依据 / 작업·분류 지시</h2>';
+  if(printNeeds.length){
+   workHtml+='<table class="work-requirements"><thead><tr><th>序号</th><th>箱唛／货物范围</th><th>计划数量</th><th>作业要求</th><th>状态／版本</th></tr></thead><tbody>';
+   printNeeds.forEach(function(n,i){workHtml+='<tr><td>'+(i+1)+'</td><td>'+esc(n.scope_text||'见作业要求')+'</td><td>'+esc(n.planned_quantity?n.planned_quantity+' '+(n.planned_unit||''):'见要求')+'</td><td><b>'+esc(n.title)+'</b><div class="work-text">'+esc(n.instructions)+'</div>'+(n.location?'<div>位置：'+esc(n.location)+'</div>':'')+'</td><td>'+esc(printStatus[n.status]||n.status)+'<br>V'+esc(n.revision||1)+'</td></tr>';});
+   workHtml+='</tbody></table><p class="work-note">卸货前按本表确认货物范围及处理去向，再分别卸货、分货；要求不清或实物不符时，报告负责人确认。已取消要求不得执行。</p>';
+  }else workHtml+='<p class="work-note">当前未填写作业要求；按入库计划卸货。后续如新增要求，请重新打印最新版本。</p>';
 
   var qrHtml = '';
   try { qrHtml = buildInboundQrHtml(displayNo || planId, 3); }
   catch (e) { qrHtml = '<div style="color:red;font-size:10px;">QR error</div>'; }
 
-  var detailBody = document.getElementById('inboundDetailBody');
-  var tables = detailBody ? detailBody.querySelectorAll('table.line-table') : [];
-  var linesHtml = tables.length ? tables[0].outerHTML : '';
+  var linesHtml='<h2>入库货物明细 / 입고 화물 명세</h2><table class="inbound-cargo"><thead><tr><th>类型</th><th>计划数量</th><th>备注</th></tr></thead><tbody>';
+  (latest.lines||[]).forEach(function(ln){linesHtml+='<tr><td>'+esc(unitTypeLabel(ln.unit_type))+'</td><td>'+esc(ln.planned_qty)+'</td><td>'+esc(ln.remark||'—')+'</td></tr>';});
+  linesHtml+='</tbody></table>';
+  if(plan.courier_progress){
+    linesHtml+='<h2>快递单号 / 택배 송장번호</h2><p style="overflow-wrap:anywhere">'+plan.courier_progress.items.map(function(x){return esc(x.tracking_no);}).join(' · ')+'</p>';
+  }
 
   var bizMap = { direct_ship: '直发/직배송', bulk: '大货/대량', return_op: '退件/반품', inventory_op: '库内/창고' };
-  var bizText = bizMap[plan.biz_class] || plan.biz_class || '';
+  var bizText = (plan.biz_classes||[plan.biz_class]).map(function(b){return window.CKInboundLabel ? CKInboundLabel(b) : (bizMap[b]||b);}).join('、');
 
-  var win = window.open('', '_blank');
   var html = '<!doctype html><html><head><meta charset="utf-8"/><title>' + esc(displayNo) + '</title>' +
     '<style>' +
     'body{font-family:"Microsoft YaHei","Helvetica Neue",Arial,sans-serif;margin:20px 30px;color:#000;}' +
@@ -3932,6 +3970,7 @@ function printIbQr() {
     'table{width:100%;border-collapse:collapse;font-size:12px;margin-bottom:14px;}' +
     'th,td{border:1px solid #333;padding:5px 6px;text-align:left;}' +
     'th{background:#eee;font-weight:700;}' +
+    'h2{font-size:15px;margin:16px 0 8px}.work-text{white-space:pre-wrap;overflow-wrap:anywhere;margin-top:4px}.work-note{font-size:12px;line-height:1.6}thead{display:table-header-group}tr{break-inside:avoid}td{vertical-align:top;overflow-wrap:anywhere}.work-requirements th:nth-child(4){width:43%}' +
     '.sig-row{display:flex;gap:40px;margin-top:30px;font-size:13px;}' +
     '.sig-item{flex:1;}' +
     '.sig-line{border-bottom:1px solid #333;height:30px;margin-top:4px;}' +
@@ -3948,24 +3987,26 @@ function printIbQr() {
     '<div class="info-grid">' +
       '<div><span class="label">入库单号：</span>' + esc(displayNo) + '</div>' +
       '<div><span class="label">货物摘要：</span>' + esc(plan.cargo_summary || '') + '</div>' +
-      '<div><span class="label">计划日期：</span>' + esc(plan.plan_date || '') + '</div>' +
+      (window.CK_SOP_ROLLOUT?.staging ? '' : '<div><span class="label">计划日期：</span>' + esc(plan.plan_date || '') + '</div>') +
       '<div><span class="label">预计到达日期 / 입고 예정일：</span>' + esc(dateOnly(plan.expected_arrival) || '--') + '</div>' +
       '<div><span class="label">客户：</span>' + esc(plan.customer || '') + '</div>' +
       '<div><span class="label">提出人：</span>' + esc(plan.created_by || '') + '</div>' +
       '<div><span class="label">业务分类：</span>' + esc(bizText) + '</div>' +
+      (window.CKInboundLabel ? '<div><span class="label">外部系统入库单号：</span>' + esc(plan.external_inbound_no || '—') + '</div>' : '') +
       (plan.remark ? '<div><span class="label">备注：</span>' + esc(plan.remark) + '</div>' : '') +
       (plan.purpose ? '<div style="grid-column:1/-1;"><span class="label">入库目的：</span>' + esc(plan.purpose) + '</div>' : '') +
     '</div>' +
-    linesHtml +
+    linesHtml + workHtml +
     '<div class="sig-row">' +
       '<div class="sig-item"><span class="label">制单人：</span>' + esc(plan.created_by || '') + '<div class="sig-line"></div></div>' +
       '<div class="sig-item"><span class="label">仓库确认：</span><div class="sig-line"></div></div>' +
       '<div class="sig-item"><span class="label">客户签收：</span><div class="sig-line"></div></div>' +
       '<div class="sig-item"><span class="label">日期：</span><div class="sig-line"></div></div>' +
     '</div>' +
-    '<div class="footer">Printed from CK Warehouse V2</div>' +
+    '<div class="footer">Printed from CK Warehouse V2 · ' + esc(new Date().toLocaleString('zh-CN',{timeZone:'Asia/Seoul'})) + ' KST</div>' +
     '<script>window.onload=function(){window.print();}<\/script>' +
     '</body></html>';
+  win.document.open();
   win.document.write(html);
   win.document.close();
 }

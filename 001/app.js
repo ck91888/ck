@@ -1013,7 +1013,7 @@ async function initUnload() {
       goPage("home");
       return;
     }
-    if (res && res.ok && res.job && res.job.job_type === "unload" && res.job.status === "working") {
+    if (res && res.ok && res.job && res.job.job_type === "unload" && (res.job.status === "working" || res.can_manage_dispatch && ['pending','awaiting_close'].includes(res.job.status))) {
       // 仅 inbound_plan 关联才回灌 plan 数据；feedback-first 流程 _unloadPlanData 保持 null
       if (res.job.related_doc_type === "inbound_plan" && res.job.related_doc_id) {
         var planRes = await api({ action: "v2_inbound_plan_detail", id: res.job.related_doc_id });
@@ -1761,7 +1761,7 @@ async function initInbound() {
       goPage("home");
       return;
     }
-    if (res && res.ok && res.job && res.job.job_type && (res.job.job_type === 'inbound_direct' || res.job.job_type === 'inbound_bulk' || res.job.job_type === 'inbound_change_order') && res.job.status === "working") {
+    if (res && res.ok && res.job && res.job.job_type && (res.job.job_type === 'inbound_direct' || res.job.job_type === 'inbound_bulk' || res.job.job_type === 'inbound_change_order') && (res.job.status === "working" || res.can_manage_dispatch && ['pending','awaiting_close'].includes(res.job.status))) {
       document.getElementById("inboundEntryCard").style.display = "none";
       document.getElementById("inboundWorkingCard").style.display = "";
       loadInboundPlanInfo(res.job.related_doc_id);
@@ -1807,6 +1807,9 @@ async function startInbound(btnEl) {
 
   if (_ibResolvedKind === 'system') {
     payload.plan_id = _ibResolvedPlanId;
+    if (_ibResolvedPlan && _ibResolvedPlan.selected_external_inbound_no) {
+      payload.external_inbound_no = _ibResolvedPlan.selected_external_inbound_no;
+    }
   } else if (_ibResolvedKind === 'external') {
     var exNo = ((document.getElementById("inboundCodeInput") || {}).value || "").trim();
     var exCu = ((document.getElementById("inboundExternalCustomer") || {}).value || "").trim();
@@ -1872,7 +1875,7 @@ async function loadInboundPlanInfo(planId) {
         var actualQty = ln.actual_qty || 0;
         var actualDisplay = unloadNotDone ? '<span style="color:#e67e22;font-weight:700;">卸货中/하차중</span>' : String(actualQty);
         html += '<tr>';
-        html += '<td style="padding:4px 6px;">' + esc(ln.unit_type || '--') + '</td>';
+        html += '<td style="padding:4px 6px;">' + esc(unitLabel(ln.unit_type) || '--') + '</td>';
         html += '<td style="padding:4px 6px;text-align:center;">' + actualDisplay + '</td>';
         html += '<td style="padding:4px 6px;"><input type="number" class="input ib-putaway-input" data-unit="' + esc(ln.unit_type || '') + '" value="' + (unloadNotDone ? '' : actualQty) + '" min="0" style="width:80px;text-align:center;" placeholder="' + (unloadNotDone ? '待卸货完成' : '') + '"></td>';
         html += '</tr>';
@@ -1951,9 +1954,12 @@ async function finishInbound(btnEl) {
     if (res && res.ok && !res.already_completed) {
       // Check plan status to show appropriate message
       var planAfter = null;
-      try { planAfter = await api({ action: "v2_inbound_plan_detail", plan_id: _inboundPlanData && _inboundPlanData.plan ? _inboundPlanData.plan.id : "" }); } catch(e) {}
-      var planStatus = (planAfter && planAfter.ok && planAfter.plan) ? planAfter.plan.status : "completed";
-      if (planStatus === "completed") {
+      try { planAfter = await api({ action: "v2_inbound_plan_detail", id: _inboundPlanData && _inboundPlanData.plan ? _inboundPlanData.plan.id : "" }); } catch(e) {}
+      var planStatus = (planAfter && planAfter.ok && planAfter.plan) ? planAfter.plan.status : "";
+      var referenceProgress = planAfter && planAfter.plan && planAfter.plan.inbound_progress;
+      if (referenceProgress && referenceProgress.completed < referenceProgress.total) {
+        alert("本次外部单理货已完成，本计划已完成 " + referenceProgress.completed + "/" + referenceProgress.total + "。\n待完成：" + referenceProgress.items.filter(function(x) { return x.status !== 'completed'; }).map(function(x) { return x.external_no; }).join('、') + "\n이번 입고 완료. 나머지 입고번호 작업을 계속해 주세요.");
+      } else if (planStatus === "completed") {
         alert("入库已完成，状态已更新为\u201C已入库\u201D\n입고 완료, 상태가 \u201C입고완료\u201D로 변경됨");
       } else if (planStatus === "unloading" || planStatus === "unloading_putting_away") {
         alert("本次理货已完成。卸货仍在进行中，如还有未理部分可后续继续理货。\n이번 입고 완료. 하차 진행 중이며, 미입고분은 이후 계속 가능합니다.");
@@ -2003,7 +2009,7 @@ async function initInboundReturn() {
       goPage("home");
       return;
     }
-    if (res && res.ok && res.job && res.job.job_type === 'inbound_return' && res.job.status === 'working') {
+    if (res && res.ok && res.job && res.job.job_type === 'inbound_return' && (res.job.status === 'working' || res.can_manage_dispatch && ['pending','awaiting_close'].includes(res.job.status))) {
       document.getElementById("inboundReturnEntryCard").style.display = "none";
       document.getElementById("inboundReturnWorkingCard").style.display = "";
       renderInboundReturnSession(res.job);
@@ -2121,7 +2127,7 @@ async function initImportDelivery() {
       goPage("home");
       return;
     }
-    if (res && res.ok && res.job && res.job.job_type === 'pickup_delivery_import' && res.job.status === 'working') {
+    if (res && res.ok && res.job && res.job.job_type === 'pickup_delivery_import' && (res.job.status === 'working' || res.can_manage_dispatch && ['pending','awaiting_close'].includes(res.job.status))) {
       document.getElementById("idEntryCard").style.display = "none";
       document.getElementById("idWorkingCard").style.display = "";
       renderImportDeliverySession(res.job);
@@ -2238,7 +2244,7 @@ async function initOutboundLoad() {
       goPage("home");
       return;
     }
-    if (res && res.ok && res.job && res.job.job_type === 'load_outbound' && res.job.status === 'working') {
+    if (res && res.ok && res.job && res.job.job_type === 'load_outbound' && (res.job.status === 'working' || res.can_manage_dispatch && ['pending','awaiting_close'].includes(res.job.status))) {
       showOutboundLoadWorking();
       refreshLoadWorkers();
       startJobPoll("load");
@@ -4710,7 +4716,7 @@ function initVerifyScan() {
   // 已在本人 verify_scan 任务中 — 直接回 working 态
   if (_activeJobId) {
     api({ action: "v2_ops_job_detail", job_id: _activeJobId }).then(function(res) {
-      if (res && res.ok && res.job && res.job.job_type === "verify_scan" && res.job.status === "working") {
+      if (res && res.ok && res.job && res.job.job_type === "verify_scan" && (res.job.status === "working" || res.can_manage_dispatch && ['pending','awaiting_close'].includes(res.job.status))) {
         _vsBatchId = res.job.related_doc_id || "";
         entry.style.display = "none";
         working.style.display = "";
