@@ -71,6 +71,7 @@
   const u=await CKSession.ready;
   const nav=document.createElement('nav');nav.className='ck-cross-nav';nav.innerHTML='<a href="/">CK</a><a href="/001/">现场执行</a><a href="/002/">协同中心</a><a href="/003/">耗材与物品</a><a href="/shuju/">数据看板</a><a href="/attendance/">上下班签到</a>';for(const a of nav.querySelectorAll('a'))if(a.getAttribute('href')===(app==='home'?'/':'/'+app+'/'))a.setAttribute('aria-current','page');document.body.insertBefore(nav,document.body.children[1]||null);
   window.CKInstallInboundFlow?.(app);
+  window.CKInstallFeedbackLink?.(app);
   if(app==='002'){
    const originalPager=window.renderPager;window.renderPager=function(key,res,reload){const html=originalPager(key,res,reload),p=getPager(key);return p.total<=p.limit?html.replace('class="pager-bar"','class="pager-bar pager-single"'):html;};
    document.querySelectorAll('.filter-bar').forEach(bar=>{const drawer=document.createElement('details');drawer.className='ck-filter-drawer';drawer.open=matchMedia('(min-width:701px)').matches;const summary=document.createElement('summary');summary.textContent='查询筛选 / 검색 필터';drawer.append(summary);bar.before(drawer);drawer.append(bar);});

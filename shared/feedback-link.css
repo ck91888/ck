@@ -1,0 +1,17 @@
+.ck-feedback-link h3{font-size:17px;margin:0 0 8px;color:var(--ck-primary,#175c50)}
+.ck-feedback-link p{margin:8px 0;line-height:1.6}
+.ck-feedback-search>div{display:flex;gap:8px;align-items:center}
+.ck-feedback-search label{font-weight:600;font-size:13px}
+.ck-feedback-search input{flex:1;min-width:0;margin:4px 0}
+.ck-feedback-search button{white-space:nowrap;flex:none}
+.ck-feedback-candidate{display:grid!important;grid-template-columns:minmax(220px,1.3fr) minmax(120px,1fr) auto;align-items:center;gap:16px;width:100%;text-align:left!important;background:transparent!important;color:var(--ck-text,#173b3f)!important;border:0!important;border-bottom:1px solid var(--ck-line,#d2dfdb)!important;border-radius:0!important;padding:10px 4px!important;margin:0!important;font-weight:400!important}
+.ck-feedback-candidate>span:first-child{display:flex;gap:8px;flex-wrap:wrap;align-items:center}.ck-feedback-candidate small{flex-basis:100%;color:var(--ck-muted,#506e70)}
+.ck-feedback-candidate:hover{background:#eef5f1!important}.ck-feedback-candidate:focus-visible{outline:2px solid #b5863e;outline-offset:1px}
+.ck-feedback-pages{display:flex;gap:8px;justify-content:flex-end;padding-top:8px}
+.ck-feedback-preview:not(:empty){border-top:3px solid var(--ck-primary,#175c50);margin-top:16px;padding-top:12px}
+.ck-feedback-selected,.ck-feedback-origin{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.ck-feedback-preview .line-table{margin:8px 0}.ck-feedback-table{overflow-x:auto}.ck-feedback-preview input[type=number]{width:110px;min-height:34px;margin:0}.ck-feedback-preview input[readonly]{border-color:transparent;background:transparent;padding-left:0}
+.ck-feedback-confirm{display:flex!important;gap:8px;align-items:center;margin:12px 0!important}.ck-feedback-confirm input{width:auto!important;margin:0!important}
+.ck-feedback-new{margin:14px 0}.ck-feedback-new>summary{cursor:pointer;padding:12px 0;color:var(--ck-muted,#506e70)}.ck-feedback-origin{padding:10px 14px;margin-bottom:12px;background:#e6f0ea;border-left:3px solid #175c50}
+.ck-feedback-link [role=alert]{color:#a33c26}
+@media(max-width:640px){.ck-feedback-candidate{grid-template-columns:1fr auto;gap:5px 10px}.ck-feedback-candidate>span:first-child{grid-column:1/-1}.ck-feedback-search>div{flex-wrap:wrap}.ck-feedback-search input{flex-basis:100%}.ck-feedback-link{padding:14px!important}}

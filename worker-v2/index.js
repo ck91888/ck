@@ -1,3 +1,4 @@
+import {handleFeedbackLink,feedbackLinkDetail} from './feedback-link.js';
 import {validateNativeMutation, nativePeople, finishNativePick, finishNativeOutbound} from './native-lifecycle.js';
 import {findUnloadPlan, startUnloadTrip, finishUnloadTrip, tripPlans} from './unload-trip.js';
 import {handleCourier,validateCourierLines,courierPlanStatements,courierProgress,courierReady,protectCourierEdit,syncCourierArrival} from './courier.js';
@@ -1997,6 +1998,8 @@ const MIGRATIONS = [
   `CREATE INDEX IF NOT EXISTS idx_v2_003_asset_keeper_department
     ON v2_003_assets(keeper_department, status)`,
 
+  // Retrospective attribution preserves the original completed job and its labor.
+  `CREATE TABLE IF NOT EXISTS ck_feedback_plan_links(feedback_id TEXT PRIMARY KEY,plan_id TEXT NOT NULL UNIQUE,job_id TEXT NOT NULL UNIQUE,feedback_version TEXT NOT NULL,plan_version TEXT NOT NULL,job_version TEXT NOT NULL,linked_by TEXT NOT NULL,linked_name TEXT NOT NULL,linked_at TEXT NOT NULL,snapshot_json TEXT NOT NULL)`,
   // Vehicle unloading: one native labor job, separately linked plan receipts.
   `CREATE TABLE IF NOT EXISTS ck_unload_trips(job_id TEXT PRIMARY KEY,request_id TEXT NOT NULL UNIQUE,plan_ids_json TEXT NOT NULL,owner_id TEXT NOT NULL,created_at TEXT NOT NULL,finished_at TEXT NOT NULL DEFAULT '')`,
   `CREATE TABLE IF NOT EXISTS ck_unload_plan_links(job_id TEXT NOT NULL,plan_id TEXT NOT NULL,position INTEGER NOT NULL,plan_version TEXT NOT NULL,lines_snapshot TEXT NOT NULL,result_json TEXT NOT NULL DEFAULT '',PRIMARY KEY(job_id,plan_id))`,
@@ -2007,11 +2010,23 @@ const MIGRATIONS = [
     SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM v2_inbound_plans p WHERE p.id=NEW.plan_id AND p.status='pending' AND COALESCE(p.is_deleted,0)=0 AND p.updated_at=NEW.plan_version) THEN RAISE(ABORT,'unload_plan_changed') END;
     SELECT CASE WHEN EXISTS(SELECT 1 FROM v2_inbound_plan_jobs j WHERE j.plan_id=NEW.plan_id AND j.id!=NEW.job_id AND j.job_type='unload' AND j.status IN ('pending','working','awaiting_close','completed')) THEN RAISE(ABORT,'unload_plan_busy') END;
   END`,
+  `CREATE TRIGGER IF NOT EXISTS ck_feedback_link_guard BEFORE INSERT ON ck_feedback_plan_links BEGIN
+    SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM v2_field_feedbacks f JOIN v2_ops_jobs j ON j.id=f.related_doc_id WHERE f.id=NEW.feedback_id AND f.updated_at=NEW.feedback_version AND f.status IN ('unloaded_pending_info','open') AND f.feedback_type IN ('unplanned_unload','unload_no_doc') AND COALESCE(f.is_deleted,0)=0 AND COALESCE(f.inbound_plan_id,'')='' AND j.id=NEW.job_id AND j.related_doc_type='field_feedback' AND j.related_doc_id=f.id AND j.status='completed' AND j.updated_at=NEW.job_version AND j.job_type='unload') THEN RAISE(ABORT,'feedback_link_changed') END;
+    SELECT CASE WHEN EXISTS(SELECT 1 FROM v2_ops_job_workers WHERE job_id=NEW.job_id AND COALESCE(left_at,'')='') OR EXISTS(SELECT 1 FROM v2_inbound_plans WHERE source_feedback_id=NEW.feedback_id) THEN RAISE(ABORT,'feedback_link_changed') END;
+    SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM v2_inbound_plans p WHERE p.id=NEW.plan_id AND p.updated_at=NEW.plan_version AND p.status='pending' AND COALESCE(p.is_deleted,0)=0 AND COALESCE(p.accounted,0)=0 AND COALESCE(p.unload_completed_at,'')='' AND p.source_type NOT IN ('return_session','external_inbound')) THEN RAISE(ABORT,'feedback_link_changed') END;
+    SELECT CASE WHEN EXISTS(SELECT 1 FROM v2_inbound_plan_jobs WHERE plan_id=NEW.plan_id AND status IN ('pending','working','awaiting_close','completed')) THEN RAISE(ABORT,'feedback_link_changed') END;
+  END`,
+  `CREATE TRIGGER IF NOT EXISTS ck_feedback_no_duplicate_plan BEFORE INSERT ON v2_inbound_plans WHEN EXISTS(SELECT 1 FROM ck_feedback_plan_links WHERE feedback_id=NEW.source_feedback_id) BEGIN SELECT RAISE(ABORT,'feedback_already_linked'); END`,
+  `CREATE TRIGGER IF NOT EXISTS ck_feedback_keep_link BEFORE UPDATE OF status,inbound_plan_id ON v2_field_feedbacks WHEN EXISTS(SELECT 1 FROM ck_feedback_plan_links l WHERE l.feedback_id=OLD.id AND (NEW.status!='converted' OR NEW.inbound_plan_id!=l.plan_id OR NEW.inbound_plan_id IS NULL)) BEGIN SELECT RAISE(ABORT,'feedback_already_linked'); END`,
+  `CREATE TRIGGER IF NOT EXISTS ck_feedback_keep_job BEFORE DELETE ON v2_ops_jobs WHEN EXISTS(SELECT 1 FROM ck_feedback_plan_links WHERE job_id=OLD.id) BEGIN SELECT RAISE(ABORT,'feedback_already_linked'); END`,
+  `CREATE TRIGGER IF NOT EXISTS ck_feedback_keep_workers BEFORE DELETE ON v2_ops_job_workers WHEN EXISTS(SELECT 1 FROM ck_feedback_plan_links WHERE job_id=OLD.job_id) BEGIN SELECT RAISE(ABORT,'feedback_already_linked'); END`,
+  `CREATE TRIGGER IF NOT EXISTS ck_feedback_keep_results BEFORE DELETE ON v2_ops_job_results WHEN EXISTS(SELECT 1 FROM ck_feedback_plan_links WHERE job_id=OLD.job_id) BEGIN SELECT RAISE(ABORT,'feedback_already_linked'); END`,
+  `CREATE TRIGGER IF NOT EXISTS ck_feedback_keep_source BEFORE DELETE ON v2_field_feedbacks WHEN EXISTS(SELECT 1 FROM ck_feedback_plan_links WHERE feedback_id=OLD.id) BEGIN SELECT RAISE(ABORT,'feedback_already_linked'); END`,
   `CREATE TRIGGER IF NOT EXISTS ck_unload_legacy_guard BEFORE INSERT ON v2_ops_jobs WHEN NEW.job_type='unload' AND NEW.related_doc_type='inbound_plan' AND EXISTS(SELECT 1 FROM ck_unload_plan_links l JOIN v2_ops_jobs j ON j.id=l.job_id WHERE l.plan_id=NEW.related_doc_id AND j.status IN ('pending','working','awaiting_close','completed')) BEGIN SELECT RAISE(ABORT,'unload_plan_busy'); END`,
 ];
 
 // 每次发布迁移变化时手动 +1（patch 段），冷启动只比对一次字符串即可跳过整段 MIGRATIONS
-const CURRENT_SCHEMA_VERSION = 'v2.20260922d';
+const CURRENT_SCHEMA_VERSION = 'v2.20260923a';
 
 let _migrated = false;
 async function ensureMigrated(db) {
@@ -4349,6 +4364,7 @@ route("v2_inbound_plan_detail", async (body, env) => {
     pending_biz_classes,
     missing_biz_classes: pending_biz_classes,
     unload_summary,
+    existing_feedback_link: inboundFlowEnabled(env)?await feedbackLinkDetail(env,id):null,
     lines: planLines.results || [],
     jobs: enrichedJobs,
     attachments: atts.results || [],
@@ -7202,7 +7218,8 @@ route("v2_feedback_list", async (body, env) => {
     ? await env.DB.prepare("SELECT COUNT(*) AS c FROM v2_field_feedbacks" + where).bind(...binds).first()
     : await env.DB.prepare("SELECT COUNT(*) AS c FROM v2_field_feedbacks" + where).first();
   const total = Number((countRow && countRow.c) || 0);
-  const listSql = "SELECT * FROM v2_field_feedbacks" + where + " ORDER BY created_at DESC LIMIT ? OFFSET ?";
+  const linkedColumn=inboundFlowEnabled(env)?", (SELECT p.display_no FROM ck_feedback_plan_links l JOIN v2_inbound_plans p ON p.id=l.plan_id WHERE l.feedback_id=v2_field_feedbacks.id) AS linked_plan_no":"";
+  const listSql = "SELECT *" + linkedColumn + " FROM v2_field_feedbacks" + where + " ORDER BY created_at DESC LIMIT ? OFFSET ?";
   const rs = await env.DB.prepare(listSql).bind(...binds, limit, offset).all();
   return json({ ok: true, items: rs.results || [], ...pageMeta(total, limit, offset) });
 });
@@ -7224,7 +7241,7 @@ route("v2_feedback_detail", async (body, env) => {
   // Parse result_lines from feedback itself (unplanned_unload flow)
   let feedbackResultLines = [];
   try { feedbackResultLines = JSON.parse(row.result_lines_json || "[]"); } catch(e) {}
-  return json({ ok: true, feedback: row, job_results: jobResults, feedback_result_lines: feedbackResultLines });
+  return json({ ok: true, feedback: row, job_results: jobResults, feedback_result_lines: feedbackResultLines, existing_plan_link: inboundFlowEnabled(env)?await feedbackLinkDetail(env,id):null });
 });
 
 // ===== [DEPRECATED] Generic feedback-to-inbound conversion =====
@@ -7338,6 +7355,20 @@ route("v2_feedback_delete", async (body, env) => {
     const relatedJobIds = (relatedJobsRs.results || []).map(r => r.id);
 
     let deleted = { feedback: 0, attachments: 0, jobs: 0, job_workers: 0, job_results: 0 };
+
+    // Attribution and feedback cleanup must not interleave partial worker/result deletes.
+    if(inboundFlowEnabled(env)){
+      const statements=[],keys=[];
+      for(const jobId of relatedJobIds){
+        for(const [table,key] of [['v2_ops_job_workers','job_workers'],['v2_ops_job_results','job_results'],['v2_ops_jobs','jobs']]){
+          statements.push(env.DB.prepare('DELETE FROM '+table+' WHERE '+(key==='jobs'?'id':'job_id')+'=?').bind(jobId));keys.push(key);
+        }
+      }
+      statements.push(env.DB.prepare("DELETE FROM v2_attachments WHERE related_doc_type='field_feedback' AND related_doc_id=?").bind(id));keys.push('attachments');
+      statements.push(env.DB.prepare('DELETE FROM v2_field_feedbacks WHERE id=?').bind(id));keys.push('feedback');
+      const results=await env.DB.batch(statements);results.forEach((r,i)=>deleted[keys[i]]+=r.meta?.changes||0);
+      return {ok:true,id,deleted};
+    }
 
     // 反馈关联 job 通常 1 条；逐个清 workers/results 再删 job 主体（小循环不影响性能）
     for (const jobId of relatedJobIds) {
@@ -12621,6 +12652,10 @@ export default {
     env = { ...env, SOP_REQUEST_USER: await sessionUser(request, env) };
     const authResponse = await sessionAction(body, env);
     if (authResponse) return authResponse;
+    if(action.startsWith('sop_feedback_link_')){
+      if(action==='sop_feedback_link_save'&&(request.method!=='POST'||request.headers.get('Origin')&&request.headers.get('Origin')!==url.origin))return err('Invalid request origin',403);
+      try{return json(await handleFeedbackLink(body,env,{ensureTasks:ensureInboundPlanBizTasks,recalc:recalcInboundPlanCompletion,syncCourier:syncCourierArrival}));}catch(e){return json({ok:false,error:e.message},409);}
+    }
     if(action.startsWith('sop_courier_')){
       if(!['sop_courier_config','sop_courier_list','sop_courier_detail'].includes(action)&&(request.method!=='POST'||request.headers.get('Origin')&&request.headers.get('Origin')!==url.origin))return err('Invalid request origin',403);
       try{return json(await handleCourier(body,env,recalcInboundPlanCompletion));}catch(e){return json({ok:false,error:e.message},400);}
