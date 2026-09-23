@@ -10,7 +10,8 @@ compatibility_date = "2026-03-03"
 
 [assets]
 directory = "./.sop-staging-assets"
-run_worker_first = ["/api", "/api/*", "/file"]
+binding = "ASSETS"
+run_worker_first = true
 
 [vars]
 SOP_TEST_RESET_ENABLED = "true"
@@ -22,7 +23,10 @@ SOP_ROLLOUT_DEPARTMENTS = "bulk"
 SOP_ENVIRONMENT = "staging"
 SOP_ATTENDANCE_ENABLED = "true"
 # Explicitly authorized public, fictional-data acceptance environment only.
-SOP_PUBLIC_TEST_ACCESS = "true"
+SOP_PUBLIC_TEST_ACCESS = "false"
+SOP_ACCESS_CONTROL = "true"
+# Verifier only; the 256-bit administrator recovery code is kept outside the repository.
+SOP_ADMIN_CODE_SHA256 = "41d2eb04a16717e14a8907af1c2644b634972f5c10b7bfd41660477b92f518bf"
 
 [[d1_databases]]
 binding = "DB"

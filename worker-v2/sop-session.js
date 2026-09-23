@@ -1,3 +1,4 @@
+import {accessEnabled,accessUser,accessSessionAction} from './access-control.js';
 // Same-origin session for the isolated, full-system acceptance environment.
 // Personal keys stay on the server after sign-in; never placed in URLs or browser storage.
 import { principal, handleSop } from './sop.js';
@@ -9,6 +10,7 @@ async function signingKey(env){return crypto.subtle.importKey('raw',enc.encode(e
 async function sign(value,env){return b64(new Uint8Array(await crypto.subtle.sign('HMAC',await signingKey(env),enc.encode(value))));}
 function cookie(value,seconds){return `${cookieName}=${value}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${seconds}`;}
 export async function sessionUser(request,env){
+ if(accessEnabled(env))return accessUser(request,env);
  if(env.SOP_ENVIRONMENT!=='staging'||env.SOP_UPGRADE_ENABLED!=='true')return null;
  if(env.SOP_PUBLIC_TEST_ACCESS==='true')return {id:'staging-demo-manager',name:'测试负责人',role:'manager',departments:['bulk','direct_ship','import'],public_test:true};
  const value=(request.headers.get('Cookie')||'').split(';').map(x=>x.trim()).find(x=>x.startsWith(cookieName+'='))?.slice(cookieName.length+1);
@@ -22,7 +24,8 @@ export async function sessionUser(request,env){
   const users=JSON.parse(env.SOP_USERS_JSON);return users.find(x=>x.id===p.id)||null;
  }catch{return null;}
 }
-export async function sessionAction(body,env){
+export async function sessionAction(body,env,request){
+ if(accessEnabled(env))return accessSessionAction(body,env,request);
  if(env.SOP_ENVIRONMENT!=='staging'||env.SOP_UPGRADE_ENABLED!=='true')return null;
  const headers={'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'};
  const response=(value)=>new Response(JSON.stringify(value),{headers});

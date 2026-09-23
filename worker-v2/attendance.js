@@ -41,6 +41,8 @@ const fingerprint=b=>JSON.stringify(canonical(b));
 async function cached(env,b){const r=await q(env,'SELECT response_json,fingerprint FROM ck_attendance_events WHERE request_id=?',b.client_req_id).first();if(!r)return null;if(r.fingerprint!==fingerprint(b))fail('请求编号已使用，请刷新后重试');return JSON.parse(r.response_json);}
 async function commit(env,b,u,before,after,statements,result){
  const version=after.version||1,recordId=after.id,t=new Date().toISOString();
+ if(env.SOP_ACCESS_CONTROL==='true'&&['sop_attendance_checkout','sop_attendance_correct'].includes(b.action))statements.push(q(env,"DELETE FROM ck_access_sessions WHERE scope='field' AND attendance_id=?",recordId));
+ if(env.SOP_ACCESS_CONTROL==='true'&&b.action==='sop_attendance_employee_update'&&!after.enabled)statements.push(q(env,"DELETE FROM ck_access_sessions WHERE scope='field' AND user_id=?",recordId));
  const event=q(env,'INSERT INTO ck_attendance_events VALUES(?,?,?,?,?,?,?,?,?,?,?)',uid('ATE'),b.client_req_id,recordId,version,b.action,u.id,t,JSON.stringify(before||{}),JSON.stringify(after),JSON.stringify(result),fingerprint(b));
  try{await env.DB.batch([event,...statements]);}catch(e){const prior=await cached(env,b);if(prior)return prior;throw Error('记录已变化或请求冲突，请刷新后重试 / 기록이 변경되었습니다');}
  return result;

@@ -5,7 +5,7 @@ import { laborDepartment,startDepartment,departments } from '../shared/labor-dep
 const starts=new Set(['v2_unload_job_start','v2_unplanned_unload_start','v2_inbound_job_start','v2_import_delivery_job_start','v2_outbound_load_start','v2_outbound_stock_op_start','v2_issue_handle_start','v2_pick_job_start','v2_pick_job_start_by_docs','v2_bulk_op_job_start','v2_ops_job_start','v2_verify_job_start']);
 export async function startNative(body,env,invoke,guard){
  const u=env.SOP_REQUEST_USER;
- if(env.SOP_ENVIRONMENT!=='staging'||u?.role!=='manager')return {ok:false,error:'请以测试负责人登录'};
+ if(env.SOP_ENVIRONMENT!=='staging'||!['manager','dispatcher'].includes(u?.role))return {ok:false,error:'请以已授权的派审员登录 / 배정 담당자로 로그인하세요'};
  const p={...body.payload};if(!starts.has(p.action))return {ok:false,error:'无效作业类型'};
  if(p.action==='v2_ops_job_start'&&!String(p.biz_class??'').trim()){
   const department=laborDepartment(p);if(department!=='other')p.biz_class=department;

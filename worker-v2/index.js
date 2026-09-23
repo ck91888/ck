@@ -1,3 +1,4 @@
+import {accessEnabled,accessGuard,accessAdminAction,accessFileAllowed} from './access-control.js';
 import {handleFeedbackLink,feedbackLinkDetail} from './feedback-link.js';
 import {validateNativeMutation, nativePeople, finishNativePick, finishNativeOutbound} from './native-lifecycle.js';
 import {findUnloadPlan, startUnloadTrip, finishUnloadTrip, tripPlans} from './unload-trip.js';
@@ -490,6 +491,7 @@ function parseOpsResultForExport(job_type, resultRows) {
 }
 
 function isAuth(body, env) {
+  if(accessEnabled(env))return env.SOP_REQUEST_USER?.scope==='office'&&env.SOP_REQUEST_USER.role==='manager';
   if (env.SOP_ENVIRONMENT === 'staging' && env.SOP_REQUEST_USER?.role === 'manager') return true;
   const k = String(body.k || "").trim();
   const secret = String(env.ADMINKEY || "").trim();
@@ -500,6 +502,7 @@ function isAuth(body, env) {
 }
 
 function isAdmin(body, env) {
+  if(accessEnabled(env))return env.SOP_REQUEST_USER?.scope==='office'&&env.SOP_REQUEST_USER.role==='manager';
   if (env.SOP_ENVIRONMENT === 'staging' && env.SOP_REQUEST_USER?.role === 'manager') return true;
   const k = String(body.k || "").trim();
   const secret = String(env.ADMINKEY || "").trim();
@@ -515,6 +518,7 @@ function isOpsKey(body, env) {
 
 // isOpsAuth = ADMINKEY | VIEWKEY | OPSKEY（ops 接口用）
 function isOpsAuth(body, env) {
+  if(accessEnabled(env))return isAuth(body,env)||env.SOP_REQUEST_USER?.scope==='field'&&env.SOP_REQUEST_USER.role==='dispatcher';
   return isAuth(body, env) || isOpsKey(body, env);
 }
 
@@ -12610,6 +12614,12 @@ export default {
     }
 
     const url = new URL(request.url);
+    if(accessEnabled(env)&&request.method==='GET'&&(url.pathname.endsWith('/file')||url.searchParams.get('action')==='v2_attachment_get')){
+      const key=url.searchParams.get('key')||url.searchParams.get('file_key')||'';
+      if(!key||!await accessFileAllowed(request,env,key))return err('请登录有权限的系统 / 로그인 권한을 확인하세요',401);
+      const obj=await env.R2_BUCKET.get(key);if(!obj)return err('not found',404);
+      return new Response(obj.body,{headers:{'Content-Type':obj.httpMetadata?.contentType||'application/octet-stream','Content-Disposition':/^image\/(png|jpeg|webp)$/.test(obj.httpMetadata?.contentType||'')?'inline':'attachment','Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff'}});
+    }
 
     // Handle attachment file GET
     if (["/file", "/api/file"].includes(url.pathname) && request.method === "GET") {
@@ -12650,8 +12660,15 @@ export default {
     // Staging reuses the original pages and routes under one personal session.
     // The principal is supplied only by a verified HttpOnly cookie, never request JSON.
     env = { ...env, SOP_REQUEST_USER: await sessionUser(request, env) };
-    const authResponse = await sessionAction(body, env);
+    if(accessEnabled(env)&&env.SOP_REQUEST_USER?.scope==='field'&&isMultipart){
+      const doc=formData.get('related_doc_type'),id=formData.get('related_doc_id');
+      if(!['inbound_plan','outbound_order','field_feedback','ops_job','issue_ticket','sop_task'].includes(doc))return err('现场无此附件上传权限',403);
+      if(doc==='ops_job'&&!await nativeOwner({job_id:id},env))return err('仅本任务派审员可上传附件',403);
+    }
+    const accessBlock=accessGuard(body,env,request);if(accessBlock)return accessBlock;
+    const authResponse = await sessionAction(body, env,request);
     if (authResponse) return authResponse;
+    if(accessEnabled(env)){const adminAction=await accessAdminAction(body,env);if(adminAction)return adminAction;}
     if(action.startsWith('sop_feedback_link_')){
       if(action==='sop_feedback_link_save'&&(request.method!=='POST'||request.headers.get('Origin')&&request.headers.get('Origin')!==url.origin))return err('Invalid request origin',403);
       try{return json(await handleFeedbackLink(body,env,{ensureTasks:ensureInboundPlanBizTasks,recalc:recalcInboundPlanCompletion,syncCourier:syncCourierArrival}));}catch(e){return json({ok:false,error:e.message},409);}

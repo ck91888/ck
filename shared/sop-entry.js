@@ -69,7 +69,7 @@
  };
  async function setup(){
   const u=await CKSession.ready;
-  const nav=document.createElement('nav');nav.className='ck-cross-nav';nav.innerHTML='<a href="/">CK</a><a href="/001/">现场执行</a><a href="/002/">协同中心</a><a href="/003/">耗材与物品</a><a href="/shuju/">数据看板</a><a href="/attendance/">上下班签到</a>';for(const a of nav.querySelectorAll('a'))if(a.getAttribute('href')===(app==='home'?'/':'/'+app+'/'))a.setAttribute('aria-current','page');document.body.insertBefore(nav,document.body.children[1]||null);
+  const nav=document.createElement('nav');nav.className='ck-cross-nav';nav.innerHTML='<a href="/">CK</a><a href="/001/">现场执行</a><a href="/002/">协同中心</a><a href="/003/">耗材与物品</a><a href="/shuju/">数据看板</a><a href="/attendance/">上下班签到</a>';for(const a of nav.querySelectorAll('a'))if(a.getAttribute('href')===(app==='home'?'/':'/'+app+'/'))a.setAttribute('aria-current','page');document.body.insertBefore(nav,document.body.children[1]||null);if(app==='001'||app==='attendance'){nav.replaceChildren();nav.hidden=true;}
   window.CKInstallInboundFlow?.(app);
   window.CKInstallFeedbackLink?.(app);
   if(app==='002'){
@@ -99,7 +99,7 @@
     try{const r=await request('sop_dispatch_list');const list=tasks.querySelector('.ck-buttons');list.replaceChildren();for(const job of r.items)list.append(button((window.JOB_TYPE_LABEL?.[job.job_type]||job.job_type)+' · '+(job.workers.map(w=>w.name).join('、')||'待收尾 / 마감 대기')+' · '+job.id,()=>CKOpenNativeJob(job)));if(!r.items.length)list.textContent='暂无原业务在途派工；关联作业请进入按单操作 → 大货操作。';}catch(e){tasks.querySelector('.ck-buttons').textContent=e.message;}
    };
 
-   document.getElementById('headerWorker').textContent=u.name+' · 负责人';document.getElementById('headerWorker').onclick=()=>{};
+   document.getElementById('headerWorker').textContent=u.name+' · 派审员 / 배정·검수';document.getElementById('headerWorker').onclick=()=>{};
    const dispatch=document.createElement('div');dispatch.id='page-dispatch';dispatch.className='page';dispatch.innerHTML='<button class="nav-back" type="button">← 现场首页</button><div id="ck-dispatch-body"></div>';document.body.append(dispatch);dispatch.querySelector('button').onclick=()=>showPage('home');
    let fieldWork=null;
    const bulkPage=document.getElementById('page-bulk_op'),bulkHost=document.createElement('div');bulkPage.append(bulkHost);
@@ -150,7 +150,7 @@
   if(app==='001')window.CKInstallUnloadTrip?.();
   await window.CKInstallCourier?.(app);
   if(app==='001')window.CKInstallNativeLifecycle?.();
-  if(app==='001'||app==='002'){
+  if(app==='002'){
    const notices=document.createElement('div');notices.className='ck-updates';notices.hidden=true;nav.after(notices);
    const update=async()=>{if(document.hidden)return;try{const r=await request('sop_updates');notices.hidden=!r.items.length;notices.innerHTML=r.items.length?'<b>有 '+r.items.length+' 条最新要求待仓库确认</b> '+r.items.slice(0,5).map(x=>'<a href="/002/?issue='+encodeURIComponent(x.legacy_id)+'">'+esc(x.title.slice(0,36))+'</a>').join(' · '):'';}catch(e){notices.hidden=false;notices.textContent='消息同步失败，请刷新检查网络：'+e.message;}};await update();setInterval(update,15000);window.addEventListener('focus',update);
   }

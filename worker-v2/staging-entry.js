@@ -1,9 +1,19 @@
+import {accessEnabled,accessScope} from './access-control.js';
 import app from './index.js';
 import {sessionUser} from './sop-session.js';
 import {enabled,ensureResetSchema,activeReset,resetAction} from './test-data-reset.js';
 const response=(body,status=200)=>Response.json(body,{status,headers:{'Cache-Control':'no-store'}});
 export default {async fetch(request,env,ctx){
  const url=new URL(request.url),maintenance=url.pathname.startsWith('/api/test-data/');
+ if(accessEnabled(env)){
+  const api=['/api','/file','/api/file','/001/api','/001/api/file','/001/file','/attendance/api'].includes(url.pathname)||maintenance;
+  if(!api){
+   const publicAsset=url.pathname.startsWith('/shared/')||url.pathname.startsWith('/001/')||url.pathname.startsWith('/attendance/')||url.pathname.startsWith('/office-login/')||url.pathname==='/release.json';
+   if(!publicAsset&&!await sessionUser(request,env))return Response.redirect(url.origin+'/office-login/?next='+encodeURIComponent(url.pathname+url.search),302);
+   const asset=await env.ASSETS.fetch(request);const headers=new Headers(asset.headers);headers.set('Cache-Control','no-store');headers.set('X-Content-Type-Options','nosniff');headers.set('Referrer-Policy','same-origin');headers.set('Content-Security-Policy',"frame-ancestors 'none'");return new Response(asset.body,{status:asset.status,headers});
+  }
+ }
+
  if(!enabled(request,env))return maintenance?response({ok:false,error:'Not available'},404):app.fetch(request,env,ctx);
  if(maintenance){
   try{
