@@ -2619,7 +2619,7 @@ async function submitInbound(btnEl) {
     linkObRows=linkObRows.filter(CKHasStandaloneOutbound);
     linkObOn=linkObOn&&linkObRows.length>0;
   }
-  if(workRequests.length&&linkObOn){alert('下方另填的出库资料尚未归属作业需求。请将其填到对应需求下，或取消下方“另建出库计划”的勾选。没有出库预约可以直接保存入库和作业需求。 / 출고 예약 없이 작업 요청만 저장할 수 있습니다.');return;}
+  if(workRequests.length&&linkObOn){alert('下方另填的出库资料尚未归属作业计划。请将其填到对应需求下，或取消下方“另建出库计划”的勾选。没有出库预约可以直接保存入库和作业计划。 / 출고 예약 없이 작업 계획만 저장할 수 있습니다.');return;}
   if (linkObOn) {
     if (linkObRows.length === 0) { alert("已勾选'关联出库计划'但未添加任何行 / 출고 계획이 없습니다"); return; }
     for (var li = 0; li < linkObRows.length; li++) {
@@ -2714,7 +2714,7 @@ async function submitInbound(btnEl) {
     }
 
     var msg = "已创建入库计划 / 입고 계획 생성: " + planDispNo;
-    if(ibRes.needs&&ibRes.needs.length)msg+="\n同步作业需求："+ibRes.needs.length+"条";
+    if(ibRes.needs&&ibRes.needs.length)msg+="\n同步作业计划："+ibRes.needs.length+"条";
     if(window.CKInboundWorks)CKInboundWorks.clear();
     if (matFiles.length > 0) {
       msg += "\n入库明细 / 입고 명세: 上传 " + (matFiles.length - matFailed.length) + "/" + matFiles.length;

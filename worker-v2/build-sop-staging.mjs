@@ -6,7 +6,7 @@ if(!out.startsWith(root+'\\')&&!out.startsWith(root+'/'))throw Error('Unsafe bui
 await rm(out,{recursive:true,force:true});await mkdir(out,{recursive:true});
 // Explicit original application allowlist. Never publish server code or credentials.
 const apps=['001','002','003','shuju','attendance'];
-const shared=['html5-qrcode.min.js','xlsx.full.min.js','qrcode.min.js','work-chain-ui.js','work-chain.css','sop-entry.js','sop-native.js','sop-native.css','sop-session.js','sop-dispatch-ui.js','sop-planning-ui.js','sop-people.js','ck-design.css','ck-office.css','labor-department.js','inbound-flow-ui.js','courier-ui.js','courier-rules.js','courier.css','attendance-ui.js','field-work.js','work-result-ui.js','test-data-reset.js','test-data-reset.css','employee-attendance.js','employee-attendance.css','employee-import.js','unload-trip-ui.js','unload-trip.css','native-lifecycle-ui.js','native-lifecycle.css','feedback-link-ui.js','feedback-link.css','access-ui.css'];
+const shared=['html5-qrcode.min.js','xlsx.full.min.js','qrcode.min.js','work-plan-language.js','work-chain-ui.js','work-chain.css','sop-entry.js','sop-native.js','sop-native.css','sop-session.js','sop-dispatch-ui.js','sop-planning-ui.js','sop-people.js','ck-design.css','ck-office.css','labor-department.js','inbound-flow-ui.js','courier-ui.js','courier-rules.js','courier.css','attendance-ui.js','field-work.js','work-result-ui.js','test-data-reset.js','test-data-reset.css','employee-attendance.js','employee-attendance.css','employee-import.js','unload-trip-ui.js','unload-trip.css','native-lifecycle-ui.js','native-lifecycle.css','feedback-link-ui.js','feedback-link.css','access-ui.css'];
 await mkdir(resolve(out,'shared'),{recursive:true});
 for(const f of shared)await copyFile(resolve(root,'shared',f),resolve(out,'shared',f));
 await mkdir(resolve(out,'templates'),{recursive:true});
@@ -24,7 +24,7 @@ for(const app of apps){
    content=content.replace(/<script src="\.\.\/shared\/sop-(entry|rollout)\.js[^\"]*"><\/script>/g,'');
    const libraries=['html5-qrcode.min.js','xlsx.full.min.js','qrcode.min.js'].filter(name=>!content.includes(name)).map(name=>'<script src="/shared/'+name+'"></script>').join('');
    content=content.replace('<body>','<body class="ck-system" data-app="'+app+'">');
-   content=content.replace('</head>',head+'</head>').replace('</body>',libraries+'<script src="/shared/work-chain-ui.js"></script><script src="/shared/sop-planning-ui.js"></script><script src="/shared/sop-people.js"></script><script src="/shared/sop-native.js"></script><script src="/shared/sop-dispatch-ui.js"></script><script src="/shared/attendance-ui.js"></script><script src="/shared/employee-import.js"></script><script src="/shared/employee-attendance.js"></script><script src="/shared/work-result-ui.js"></script><script src="/shared/field-work.js"></script><script src="/shared/inbound-flow-ui.js"></script><script src="/shared/courier-ui.js"></script><script src="/shared/unload-trip-ui.js"></script><script src="/shared/native-lifecycle-ui.js"></script><script src="/shared/feedback-link-ui.js"></script><script src="/shared/sop-entry.js"></script></body>');
+   content=content.replace('</head>',head+'</head>').replace('</body>',libraries+'<script src="/shared/work-plan-language.js"></script><script src="/shared/work-chain-ui.js"></script><script src="/shared/sop-planning-ui.js"></script><script src="/shared/sop-people.js"></script><script src="/shared/sop-native.js"></script><script src="/shared/sop-dispatch-ui.js"></script><script src="/shared/attendance-ui.js"></script><script src="/shared/employee-import.js"></script><script src="/shared/employee-attendance.js"></script><script src="/shared/work-result-ui.js"></script><script src="/shared/field-work.js"></script><script src="/shared/inbound-flow-ui.js"></script><script src="/shared/courier-ui.js"></script><script src="/shared/unload-trip-ui.js"></script><script src="/shared/native-lifecycle-ui.js"></script><script src="/shared/feedback-link-ui.js"></script><script src="/shared/sop-entry.js"></script></body>');
   }
   await writeFile(resolve(out,app,f),content);
  }
@@ -38,5 +38,5 @@ await writeFile(resolve(out,'office-login/index.html'),'<!doctype html><html lan
 await copyFile(resolve(root,'docs/sop-acceptance.html'),resolve(out,'验收说明.html'));
 await writeFile(resolve(out,'_redirects'),'/sop/ / 302\n/sop / 302\n');
 await writeFile(resolve(out,'_headers'),'/*\n  Cache-Control: no-store\n  X-Content-Type-Options: nosniff\n  Referrer-Policy: same-origin\n');
-await writeFile(resolve(out,'release.json'),JSON.stringify({release:'20260928-work-chain',builtAt:new Date().toISOString(),modules:apps}));
+await writeFile(resolve(out,'release.json'),JSON.stringify({release:'20260928-work-plan-language',builtAt:new Date().toISOString(),modules:apps}));
 console.log('Prepared five CK applications with attendance and unified design.');

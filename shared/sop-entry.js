@@ -31,8 +31,8 @@
    head.querySelector('.ck-buttons').append(button('追加本批作业要求',()=>{goView('need');mount(document.getElementById('view-need'),{tab:'need',source:type,source_id:id,supplement:true,context:'collab'});}));return;
   }
   for(const n of r.items){const b=button(n.title+' · '+n.status,()=>{goView('need');mount(document.getElementById('view-need'),{tab:'need',id:n.id,context:'collab'});});buttons.append(b);}
-  if(type==='outbound'&&window.CKWorkChain?.enabled()){if(!r.items.length)buttons.append('历史出库计划暂无作业需求，请在作业需求中关联这张历史单据。');return;}
-  buttons.append(button(r.items.length?'新增补充作业（需说明原因）':'建立到货后作业需求',()=>{goView('need');mount(document.getElementById('view-need'),{tab:'need',source:type,source_id:id,supplement:r.items.length>0,context:'collab'});}));
+  if(type==='outbound'&&window.CKWorkChain?.enabled()){if(!r.items.length)buttons.append('历史出库计划暂无作业计划，请在作业计划中关联这张历史单据。');return;}
+  buttons.append(button(r.items.length?'新增补充作业（需说明原因）':'建立到货后作业计划',()=>{goView('need');mount(document.getElementById('view-need'),{tab:'need',source:type,source_id:id,supplement:r.items.length>0,context:'collab'});}));
  }
  async function issuePanel(){
   const id=window._currentIssueId,body=document.getElementById('issueDetailBody');if(!id||!body)return;
@@ -51,7 +51,7 @@
   if(window.CKWorkChain?.enabled())return CKWorkChain.outboundPicker(params.get('need')||'');
   if(document.getElementById('ck-completed-need'))return;
   const field=document.getElementById('oc-instruction');if(!field)return;
-  const box=document.createElement('div');box.className='ck-inline-heading';box.innerHTML='<label>操作需求来源 / 작업 요청 출처<select id="ck-completed-need"><option value="">本次新增操作，或无需操作</option></select></label><label id="ck-link-quantity-label" hidden>使用已完成成果数量<input id="ck-link-quantity" type="number" min="1"></label><p id="ck-link-note">新操作按出库计划要求建立一份关联作业；已有成果请在这里选择，避免重复操作。</p>';
+  const box=document.createElement('div');box.className='ck-inline-heading';box.innerHTML='<label>操作需求来源 / 작업 계획 출처<select id="ck-completed-need"><option value="">本次新增操作，或无需操作</option></select></label><label id="ck-link-quantity-label" hidden>使用已完成成果数量<input id="ck-link-quantity" type="number" min="1"></label><p id="ck-link-note">新操作按出库计划要求建立一份关联作业；已有成果请在这里选择，避免重复操作。</p>';
   field.closest('.form-group').before(box);
   const list=await request('sop_list',{kind:'need'});const select=document.getElementById('ck-completed-need');
   for(const x of list.items.filter(x=>x.result&&['waiting_customer','linked'].includes(x.status))){const remaining=x.result.quantity-(x.links||[]).reduce((n,v)=>n+v.quantity,0);if(remaining<=0)continue;const option=document.createElement('option');option.value=x.id;option.textContent=x.customer+' · '+x.title+' · 剩余 '+remaining+x.result.unit;option._need=x;select.append(option);}
@@ -87,8 +87,8 @@
    document.querySelectorAll('.filter-bar').forEach(bar=>{const drawer=document.createElement('details');drawer.className='ck-filter-drawer';drawer.open=matchMedia('(min-width:701px)').matches;const summary=document.createElement('summary');summary.textContent='查询筛选 / 검색 필터';drawer.append(summary);bar.before(drawer);drawer.append(bar);});
    localStorage.removeItem(V2_KEY_STORAGE);setUser(u.name);window.promptUserName=()=>{};
    const tabs=document.getElementById('mainTabs'),inbound=tabs.querySelector('[data-tab=inbound]'),outbound=tabs.querySelector('[data-tab=outbound]');tabs.insertBefore(inbound,outbound);
-   LANG.zh.tab_outbound='出库计划';LANG.ko.tab_outbound='출고 계획';LANG.zh.app_subtitle='入库计划 · 作业需求 · 出库计划 · 问题沟通 · 核对';
-   const needButton=button('作业需求 / 작업 요청',()=>goTab('need'));needButton.dataset.tab='need';tabs.insertBefore(needButton,outbound);
+   LANG.zh.tab_outbound='出库计划';LANG.ko.tab_outbound='출고 계획';LANG.zh.app_subtitle='入库计划 · 作业计划 · 出库计划 · 问题沟通 · 核对';LANG.ko.app_subtitle='입고 계획 · 작업 계획 · 출고 계획 · 이슈 · 확인';LANG.zh.tab_need='作业计划';LANG.ko.tab_need='작업 계획';
+   const needButton=button(L('tab_need'),()=>goTab('need'));needButton.dataset.tab='need';needButton.dataset.i18n='tab_need';tabs.insertBefore(needButton,outbound);
    const v=document.createElement('div');v.id='view-need';v.className='view';v.style.display='none';document.getElementById('page-main').append(v);
    const originalGoTab=window.goTab;window.goTab=function(tab,b){originalGoTab(tab,b);if(tab==='need')mount(v,{tab:'need',context:'collab'});};
    wrap('loadInboundDetail',()=>sourcePanel('inbound',_currentInboundId,'inboundDetailBody'));
@@ -113,7 +113,7 @@
    const dispatch=document.createElement('div');dispatch.id='page-dispatch';dispatch.className='page';dispatch.innerHTML='<button class="nav-back" type="button">← 现场首页</button><div id="ck-dispatch-body"></div>';document.body.append(dispatch);dispatch.querySelector('button').onclick=()=>showPage('home');
    let fieldWork=null;
    const bulkPage=document.getElementById('page-bulk_op'),bulkHost=document.createElement('div');bulkPage.append(bulkHost);
-   const modes=document.createElement('div');modes.className='ck-bulk-modes';modes.innerHTML='<button type="button" data-mode="need">需求作业单 / 작업 요청서</button><button type="button" data-mode="external">外部作业单 / 외부 작업서</button>';bulkPage.querySelector('.topbar').after(modes);
+   const modes=document.createElement('div');modes.className='ck-bulk-modes';modes.innerHTML='<button type="button" data-mode="need">需求作业单 / 작업 계획서</button><button type="button" data-mode="external">外部作业单 / 외부 작업서</button>';bulkPage.querySelector('.topbar').after(modes);
    modes.querySelectorAll('button').forEach(b=>b.onclick=()=>goPage('bulk_op',{external:b.dataset.mode==='external'}));
    const menu=document.querySelector('#page-order_op_menu .btn:last-child');menu.after(button('外部作业单 / 외부 작업서',()=>goPage('bulk_op',{external:true})));
    const originalBulkInit=window.initBulkOp;window.initBulkOp=function(){

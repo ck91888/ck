@@ -73,7 +73,7 @@ window.CKInstallCourier=async function(app){
  if(!window.CK_SOP_ROLLOUT?.staging||!['001','002'].includes(app))return;
  rules=await import('/shared/courier-rules.js');owners=rules.courierOwners;
  if(app==='002'){
-  installPlanFields();const tabs=document.getElementById('mainTabs'),b=document.createElement('button');b.type='button';b.dataset.tab='courier';b.textContent='到仓快递 / 도착 택배';tabs.append(b);
+  installPlanFields();LANG.zh.tab_courier='到仓快递';LANG.ko.tab_courier='도착 택배';const tabs=document.getElementById('mainTabs'),b=document.createElement('button');b.type='button';b.dataset.tab='courier';b.dataset.i18n='tab_courier';b.textContent=L('tab_courier');tabs.append(b);
   const view=document.createElement('div');view.id='view-courier';view.className='view';view.style.display='none';document.getElementById('page-main').append(view);b.onclick=()=>{goView('courier');tabs.querySelectorAll('button').forEach(x=>x.classList.toggle('active',x===b));office(view);};
   if(new URLSearchParams(location.search).get('tab')==='courier')b.click();
   }else{
