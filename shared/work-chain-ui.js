@@ -1,0 +1,83 @@
+(function(){
+'use strict';
+const enabled=()=>!!window.CK_SOP_ROLLOUT?.workChain;
+const e=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const api=(action,data={})=>CKSession.request(action,data);
+const kinds={work_material:'作业说明／明细 · 작업 자료',pallet_label:'托唛 · 팔레트 라벨',shipping_document:'出库单 · 출고 서류',product_label:'产品条码标签 · 상품 바코드'};
+const fileUrl=f=>window.SOP_API+'?action=v2_attachment_get&file_key='+encodeURIComponent(f.file_key);
+const button=(label,fn)=>{const b=document.createElement('button');b.type='button';b.textContent=label;b.onclick=async()=>{b.disabled=true;try{await fn();}catch(x){alert(x.message);}finally{b.disabled=false;}};return b;};
+function viewLink(need){return '/002/?need='+encodeURIComponent(need.id)+'&individual=1';}
+async function allocation(need){const r=await api('sop_work_need_search',{search:need.id});return r.items.find(n=>n.id===need.id);}
+function filesTable(files){return files.length?'<div class="chain-scroll"><table class="chain-files"><thead><tr><th>资料 / 자료</th><th>类型</th><th>上传人 · 时间</th><th></th></tr></thead><tbody>'+files.map(f=>'<tr><td><a href="'+e(fileUrl(f))+'" target="_blank" rel="noopener">'+e(f.file_name)+'</a>'+(f.historical?'<small>历史来源资料 · 원본 자료</small>':'')+'</td><td>'+e(kinds[f.material_kind]||'打托／货物明细')+'</td><td>'+e(f.uploaded_by)+'<small>'+e(new Date(f.created_at).toLocaleString('zh-CN',{timeZone:'Asia/Seoul',hour12:false}))+'</small></td><td><a href="'+e(fileUrl(f))+'" download="'+e(f.file_name)+'">下载 / 다운로드</a><span data-remove-file="'+e(f.id)+'"></span></td></tr>').join('')+'</tbody></table></div>':'<p class="muted">暂无作业资料。托唛、出库单、产品条码等在这里统一上传。<br>작업에 필요한 자료를 이곳에서 관리합니다.</p>';}
+async function materials(host,need,{field=false,onChange=()=>{},items=null}={}){
+ host.className='chain-materials';host.innerHTML='<h3>作业资料 / 작업 자료</h3><p>正在读取…</p>';
+ const r=items?{items,revision:need.revision}:await api('sop_work_materials',{id:need.id});if(!host.isConnected)return;
+ let revision=r.revision;
+ host.innerHTML='<h3>作业资料 / 작업 자료</h3>'+filesTable(r.items)+'<p class="muted">出库计划和现场执行共用这些资料。 / 출고 계획·현장 작업에서 같은 자료를 사용합니다.</p>';
+ const writable=!field&&!['closed','cancelled'].includes(need.status)&&CKSession.user?.role!=='viewer';
+ if(!writable)return;
+ host.querySelectorAll('[data-remove-file]').forEach(span=>{const f=r.items.find(f=>f.id===span.dataset.removeFile);if(f.historical||f.id===need.details?.attachment_id)return;span.append(button('撤下 / 해제',async()=>{if(!confirm('撤下这份资料？历史记录仍会保留。 / 이 자료를 해제할까요?'))return;await api('sop_work_material_remove',{id:need.id,revision,attachment_id:f.id,client_req_id:crypto.randomUUID()});await onChange();}));});
+ const form=document.createElement('form');form.className='chain-upload';form.innerHTML='<label>资料类型 / 자료 종류<select data-kind>'+Object.entries(kinds).map(([k,v])=>'<option value="'+k+'">'+v+'</option>').join('')+'</select></label><label>选择文件 / 파일 선택<input data-files type="file" multiple accept=".pdf,.xlsx,.xls,.csv,.jpg,.jpeg,.png,.webp" required></label><button type="submit">上传资料 / 업로드</button><p class="muted">每个文件不超过20MB，可连续追加。 / 파일당 20MB 이하</p><p data-status role="status"></p>';host.append(form);
+ let pending=[];
+ form.querySelector('[data-files]').onchange=()=>{pending=[];};
+ form.onsubmit=async ev=>{ev.preventDefault();const submit=form.querySelector('[type=submit]'),status=form.querySelector('[data-status]');submit.disabled=true;
+  if(!pending.length)pending=Array.from(form.querySelector('[data-files]').files).map(file=>({file,request:crypto.randomUUID(),kind:form.querySelector('[data-kind]').value,done:false}));
+  try{for(const item of pending.filter(x=>!x.done)){status.textContent='正在上传 / 업로드 중：'+item.file.name;const data=new FormData();for(const [k,v] of Object.entries({action:'v2_attachment_upload',related_doc_type:'sop_need',related_doc_id:need.id,attachment_category:'work_material',material_kind:item.kind,revision,client_req_id:item.request}))data.set(k,v);data.set('file',item.file);const response=await fetch(window.SOP_API,{method:'POST',credentials:'include',body:data}),result=await response.json();if(!result.ok)throw Error(result.error||'上传失败');revision=result.revision;item.done=true;}
+   status.textContent='资料已上传 / 업로드 완료';pending=[];await onChange();
+  }catch(x){status.textContent=x.message+'。已成功的文件会保留，请刷新确认后重试。';}finally{submit.disabled=false;}
+ };
+}
+async function mountNeed(host,need,options={}){
+ if(!enabled())return;host.classList.add('chain-need');
+ const docs=document.createElement('section');host.append(docs);await materials(docs,need,options);
+ if(options.field)return;
+ const plan=document.createElement('section');plan.className='chain-schedule';plan.innerHTML='<h3>出库安排 / 출고 예약</h3><p class="muted">可以提前预约；完成审核后才能装货。 / 사전 예약 가능, 작업 확인 후 상차</p>';host.append(plan);
+ const shipping=await allocation(need);
+ if(!['closed','cancelled'].includes(need.status)){
+  const a=shipping;if(a){const info=document.createElement('p');info.textContent='可安排 '+a.remaining+' '+a.schedule_unit+' / 예약 가능';plan.append(info);const link=document.createElement('a');link.className='btn btn-primary';link.href='/002/?create_outbound=1&need='+encodeURIComponent(need.id);link.textContent='安排出库 / 출고 예약';plan.append(link);}
+ }
+ for(const l of need.links||[]){const row=document.createElement('p');row.innerHTML='<a href="/002/?outbound='+encodeURIComponent(l.outbound_id)+'">'+e(shipping?.shipping_plans?.find(o=>o.id===l.outbound_id)?.display_no||l.outbound_id)+'</a> · '+e(shipping?.shipping_plans?.find(o=>o.id===l.outbound_id)?.expected_ship_at||'')+' · '+e(shipping?.shipping_plans?.find(o=>o.id===l.outbound_id)?.status==='cancelled'?'已取消 · ':'')+e(l.quantity)+' '+e(l.unit);plan.append(row);}
+ if(need.operation_kind==='direct_forward'&&need.status==='pending'){
+  const section=document.createElement('section');section.className='chain-forward';section.innerHTML='<h3>直接转发 / 작업 없이 전달</h3><p>收货后核对可发货数量；此确认不生成加工工时。</p><label>可发货数量 / 출고 가능 수량<input type="number" min="1" step="1" value="'+e(need.planned_quantity)+'"></label>';section.append(button('确认收货，可安排发货 / 출고 준비 확인',async()=>{await api('sop_need_forward_ready',{id:need.id,revision:need.revision,quantity:Number(section.querySelector('input').value),client_req_id:crypto.randomUUID()});await options.onChange?.();}));host.prepend(section);
+ }
+}
+let selected=null,pickerRun=0,pickerRoot=null;
+async function outboundPicker(preselect=''){
+ if(!enabled())return;const root=document.getElementById('view-outbound_create'),card=root.querySelector('.card');
+ if(!pickerRoot){pickerRoot=document.createElement('section');pickerRoot.className='chain-picker';card.querySelector('.card-title').after(pickerRoot);}
+ selected=null;pickerRoot.innerHTML='<h3>关联作业需求 / 연결 작업 요청</h3><p class="muted">入库计划／库内库存 → 作业需求 → 出库计划</p><form data-search-form class="chain-search"><input data-search placeholder="客户、作业名称或单号 / 고객·작업명·번호" aria-label="查找作业需求"><button>查找 / 검색</button></form><div data-results></div><div data-selection hidden></div>';
+ card.querySelector('.card-title').textContent='安排出库 / 출고 예약';
+ for(const id of ['oc-customer','oc-biz-class','oc-uses-stock-op','oc-wms-wo','oc-instruction','oc-materials','oc-planned-box','oc-planned-pallet'])document.getElementById(id).closest('.form-group').hidden=true;
+ const lines=document.getElementById('ocLinesTable');lines.hidden=true;lines.previousElementSibling.hidden=true;lines.nextElementSibling.hidden=true;document.getElementById('ocLinesBody').replaceChildren();
+ const req=document.getElementById('oc-outbound-requirement');req.previousElementSibling.removeAttribute('data-i18n');req.previousElementSibling.textContent='运输／提货备注（选填）/ 운송·픽업 메모';req.placeholder='车辆、提货交接等；加工要求和标签请在作业需求维护';
+ const date=document.getElementById('oc-expected-ship-at');date.required=true;date.nextElementSibling.textContent='按客户预约填写 / 고객 예약일';
+ async function choose(n){selected=n;const box=pickerRoot.querySelector('[data-selection]');box.hidden=false;box.innerHTML='<div class="chain-selected"><strong>'+e(n.customer)+' · '+e(n.title)+'</strong><a href="'+e(viewLink(n))+'" target="_blank">查看要求与资料 / 자료 보기</a><p>'+e(n.scope_text||n.instructions)+'</p><small>'+e(n.source_type==='inbound'?'来源入库计划：'+n.source_id:'来源：库内库存')+'</small></div><label>本次出库数量 / 출고 수량 · '+e(n.schedule_unit||n.result?.unit||n.planned_unit||'未填单位')+'<input id="ck-link-quantity" type="number" min="1" step="1" required max="'+e(n.remaining)+'" value="'+e(n.remaining)+'"></label><p class="muted">剩余可安排 '+e(n.remaining)+' '+e(n.schedule_unit)+'。'+(n.result?'作业已审核。':'作业完成前可预约，暂不可装货。')+'</p>';document.getElementById('oc-customer').value=n.customer;document.getElementById('oc-biz-class').value=n.department==='import'?'bulk':n.department;document.getElementById('oc-instruction').value=n.instructions;document.getElementById('oc-uses-stock-op').value='0';document.getElementById('oc-wms-wo').value=n.supply_chain_no||'';pickerRoot.querySelector('[data-results]').replaceChildren();}
+ async function search(offset=0){const run=++pickerRun,results=pickerRoot.querySelector('[data-results]');results.textContent='正在查找…';try{const r=await api('sop_work_need_search',{search:pickerRoot.querySelector('[data-search]').value.trim(),offset});if(run!==pickerRun)return;results.replaceChildren();for(const n of r.items){const b=button(n.customer+' · '+n.title+' · 可安排 '+n.remaining+' '+n.schedule_unit,()=>choose(n));b.className='chain-choice';results.append(b);}if(!r.items.length)results.innerHTML='<p>没有可安排的作业需求，请先从入库计划或库存建立需求。直接转发也需要一条需求。</p><a href="/002/?tab=need">打开作业需求 / 작업 요청</a>';const pages=document.createElement('div');pages.className='chain-search';if(offset)pages.append(button('上一页',()=>search(Math.max(0,offset-30))));if(r.more)pages.append(button('下一页',()=>search(offset+30)));results.append(pages);}catch(x){results.textContent=x.message;}}
+ pickerRoot.querySelector('[data-search-form]').onsubmit=ev=>{ev.preventDefault();search();};
+ if(preselect){const r=await api('sop_get',{id:preselect}),a=await allocation(r.record);if(a)await choose(a);else await search();}else await search();
+}
+function prepareOutbound(body){
+ if(!enabled())return body;
+ if(!selected||!document.getElementById('view-outbound_create')||document.getElementById('view-outbound_create').style.display==='none')throw Error('请先选择关联作业需求');
+ const quantity=Number(document.getElementById('ck-link-quantity')?.value),unit=selected.schedule_unit;
+ if(!Number.isSafeInteger(quantity)||quantity<1||quantity>selected.remaining)throw Error('请输入剩余可安排范围内的出库数量');
+ if(!body.expected_ship_at)throw Error('请填写出库日期');
+ return Object.assign(body,{sop_existing_need_id:selected.id,sop_need_revision:selected.revision,sop_link_quantity:quantity,customer:selected.customer,biz_class:selected.department==='import'?'bulk':selected.department,instruction:selected.instructions,uses_stock_operation:0,lines:[],planned_box_count:unit==='箱'?quantity:0,planned_pallet_count:unit==='托'?quantity:0});
+}
+function hideFileControls(root,type){
+ if(!enabled()||!root)return;
+ const selectors=type==='inbound'?'[id^="ib-"][type="file"],button[onclick*="InboundMaterial"],button[onclick*="ib-detail-material-input"],button[onclick*="ib-edit-material-input"]':'[id^="ob-"][type="file"],button[onclick*="OutboundMaterial"],button[onclick*="ob-detail-upload-input"],button[onclick*="ob-edit-material-input"]';
+ root.querySelectorAll(selectors).forEach(x=>x.hidden=true);
+ const edit=document.getElementById(type==='inbound'?'ib-edit-materials':'ob-edit-materials');if(edit&&root.contains(edit)){edit.parentElement.hidden=true;}
+ if(type==='outbound')for(const id of ['ob-edit-customer','ob-edit-biz','ob-edit-uses-stock','ob-edit-wms','ob-edit-instruction','ob-edit-box','ob-edit-pallet']){const x=document.getElementById(id);if(x&&root.contains(x)){if(x.tagName==='SELECT')x.disabled=true;else x.readOnly=true;x.parentElement.hidden=true;}}
+}
+function installOffice(){
+ if(!enabled())return;
+ LANG.zh.new_outbound='+ 出库计划';LANG.ko.new_outbound='+ 출고 계획';document.getElementById('btnNewOutbound').textContent=LANG.zh.new_outbound;document.getElementById('obFilterUsesStockOp').hidden=true;
+ const file=document.getElementById('ibc-materials');file.closest('.form-group').hidden=true;
+ const old=document.getElementById('ibc-link-ob');old.checked=false;old.closest('.form-group').hidden=true;document.getElementById('ibcLinkObPanel').style.display='none';
+ const wrap=(name,after)=>{const original=window[name];if(typeof original!=='function')return;window[name]=function(...args){const r=original.apply(this,args);if(r?.then)return r.then(v=>{after();return v;});after();return r;};};
+ wrap('openInboundEditForm',()=>hideFileControls(document.body,'inbound'));wrap('openOutboundEditForm',()=>hideFileControls(document.body,'outbound'));
+}
+window.CKWorkChain={enabled,mountNeed,materials,outboundPicker,prepareOutbound,hideFileControls,installOffice};
+})();

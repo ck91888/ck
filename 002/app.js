@@ -1539,6 +1539,7 @@ function clearOcMaterials() {
 }
 
 async function submitOutbound(btnEl) {
+  if(window.CKWorkChain?.enabled()){try{CKWorkChain.prepareOutbound({expected_ship_at:document.getElementById('oc-expected-ship-at').value});}catch(e){alert(e.message);return;}}
   var customer = document.getElementById("oc-customer").value.trim();
   if (!customer) { alert(L("customer") + "!"); return; }
   var bizSel = document.getElementById("oc-biz-class");

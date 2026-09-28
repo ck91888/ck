@@ -23,6 +23,7 @@
   const body=document.getElementById(target);if(!body||!id)return;
   const fresh=detailNeeds[type];
   const r=fresh?.id===id?{items:fresh.items}:await request('sop_linked',{source_id:id});
+  window.CKWorkChain?.hideFileControls(body,type);
   const head=block(body,'关联作业：操作要求、结果和数量在这里统一追踪');const buttons=head.querySelector('.ck-buttons');buttons.replaceChildren();
   if(type==='inbound'&&r.items.length){
    head.className='ck-inline-heading ck-inbound-work card';head.innerHTML='<div class="card-title">本批作业要求 / 작업 지시</div><div class="ck-work-preview">'+CKWorkNeedsTable(r.items)+'</div><div class="ck-buttons"></div>';
@@ -30,6 +31,7 @@
    head.querySelector('.ck-buttons').append(button('追加本批作业要求',()=>{goView('need');mount(document.getElementById('view-need'),{tab:'need',source:type,source_id:id,supplement:true,context:'collab'});}));return;
   }
   for(const n of r.items){const b=button(n.title+' · '+n.status,()=>{goView('need');mount(document.getElementById('view-need'),{tab:'need',id:n.id,context:'collab'});});buttons.append(b);}
+  if(type==='outbound'&&window.CKWorkChain?.enabled()){if(!r.items.length)buttons.append('历史出库计划暂无作业需求，请在作业需求中关联这张历史单据。');return;}
   buttons.append(button(r.items.length?'新增补充作业（需说明原因）':'建立到货后作业需求',()=>{goView('need');mount(document.getElementById('view-need'),{tab:'need',source:type,source_id:id,supplement:r.items.length>0,context:'collab'});}));
  }
  async function issuePanel(){
@@ -46,6 +48,7 @@
   else {const head=block(body,'按出库日期追加、撤销和分轮核对');head.querySelector('.ck-buttons').append(button('设置出库日期并继续此批次',()=>mount(panel(body),{tab:'check',source:'check',source_id:id})));}
  }
  async function outboundPicker(){
+  if(window.CKWorkChain?.enabled())return CKWorkChain.outboundPicker(params.get('need')||'');
   if(document.getElementById('ck-completed-need'))return;
   const field=document.getElementById('oc-instruction');if(!field)return;
   const box=document.createElement('div');box.className='ck-inline-heading';box.innerHTML='<label>操作需求来源 / 작업 요청 출처<select id="ck-completed-need"><option value="">本次新增操作，或无需操作</option></select></label><label id="ck-link-quantity-label" hidden>使用已完成成果数量<input id="ck-link-quantity" type="number" min="1"></label><p id="ck-link-note">新操作按出库计划要求建立一份关联作业；已有成果请在这里选择，避免重复操作。</p>';
@@ -64,6 +67,7 @@
  const nativeApi=window.api;
  if(nativeApi&&app==='002')window.api=async function(body){
   if(body.action==='v2_outbound_order_create'){
+   if(window.CKWorkChain?.enabled())body=CKWorkChain.prepareOutbound(body);
    const id=document.getElementById('ck-completed-need')?.value;
    if(id&&document.getElementById('view-outbound_create')?.style.display!=='none'){body.sop_existing_need_id=id;body.sop_link_quantity=Number(document.getElementById('ck-link-quantity').value);body.uses_stock_operation=0;}
   }
@@ -93,8 +97,8 @@
    wrap('loadVerifyList',async()=>{const view=document.getElementById('view-check');const head=block(view,'按出库日期管理总清单 · 11:00 / 13:00 / 16:00 分轮核对');if(!head.querySelector('button'))head.querySelector('.ck-buttons').append(button('打开日期清单／新建清单',()=>{const body=document.getElementById('checkListBody');mount(body,{tab:'check',context:'collab'});}));});
    document.getElementById('btnNewCheck').onclick=()=>{goView('check');mount(document.getElementById('checkListBody'),{tab:'check',context:'collab',create:'check'});};
    const originalGoView=window.goView;window.goView=function(name){originalGoView(name);if(name==='outbound_create')outboundPicker().catch(e=>alert(e.message));};
-   const wh=document.createElement('section');wh.className='ck-inline-heading ck-workflow ck-work-plans';document.getElementById('ibc-remark').closest('.form-group').after(wh);window.CKInboundWorks=CKWorkFields(wh);CKConnectInboundOutbounds(wh);
-   showMain();if(params.get('need')&&params.get('create_outbound'))goView('outbound_create');else if(params.get('need')){goTab('need');mount(v,{tab:'need',id:params.get('need'),individual:params.get('individual')==='1',context:'collab'});}else if(params.get('inbound'))openInboundDetail(params.get('inbound'));else if(params.get('issue'))openIssueDetail(params.get('issue'));else if(params.get('tab'))goTab(params.get('tab'));
+   const wh=document.createElement('section');wh.className='ck-inline-heading ck-workflow ck-work-plans';document.getElementById('ibc-remark').closest('.form-group').after(wh);window.CKInboundWorks=CKWorkFields(wh);CKConnectInboundOutbounds(wh);window.CKWorkChain?.installOffice();
+   showMain();if(params.get('need')&&params.get('create_outbound'))goView('outbound_create');else if(params.get('need')){goTab('need');mount(v,{tab:'need',id:params.get('need'),individual:params.get('individual')==='1',context:'collab'});}else if(params.get('outbound'))openOutboundDetail(params.get('outbound'));else if(params.get('inbound'))openInboundDetail(params.get('inbound'));else if(params.get('issue'))openIssueDetail(params.get('issue'));else if(params.get('tab'))goTab(params.get('tab'));
   }else if(app==='001'){
    window.CKInstallDispatch();
    const iconPaths=['M2 6h12v11H2z M14 10h4l4 4v3h-8 M7 18a2 2 0 1 1-4 0 2 2 0 0 1 4 0 M21 18a2 2 0 1 1-4 0 2 2 0 0 1 4 0','M3 7l9-4 9 4v11l-9 4-9-4z M3 7l9 4 9-4 M12 11v11','M8 5H4v17h16V5h-4 M8 2h8v5H8z M8 12h8 M8 17h6','M3 4h11v15H3z M14 11h8 M18 7l4 4-4 4','M4 7h16 M4 12h16 M4 17h16 M8 4v6 M16 9v6 M10 14v6','M12 3L2 21h20z M12 9v5 M12 17v1','M3 12l7 2 2 7 2-7 7-11z M10 14l11-11','M4 3v18h18 M8 16v-5 M13 16V7 M18 16V4','M9 15l6-6 M8 17l-2 2a4 4 0 0 1-5-5l5-5 M16 7l2-2a4 4 0 0 1 5 5l-5 5'];

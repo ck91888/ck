@@ -5,6 +5,7 @@ import {findUnloadPlan, startUnloadTrip, finishUnloadTrip, tripPlans} from './un
 import {handleCourier,validateCourierLines,courierPlanStatements,courierProgress,courierReady,protectCourierEdit,syncCourierArrival} from './courier.js';
 import { inboundFlowEnabled, inboundCode, inboundCodes, inboundReferenceValue, inboundCodeProgress, selectInboundReference, validateInboundCode, resolveInboundPlan, putawayTaskBiz, completeUnloadedDispositions, bindInboundCode, inboundLabels } from './inbound-flow.js';
 import { handleAttendance, guardAttendance } from './attendance.js';
+import { workChainEnabled, guardWorkChain, chainLinked, workMaterials, uploadWorkMaterial, workMaterialCountSql } from './work-chain.js';
 import { workPlanStatements } from './sop-planning.js';
 import { handleSop, guardLegacy, linkedNeeds, linkedCheck, outboundNeedStatements } from './sop.js';
 import { sessionUser, sessionAction } from './sop-session.js';
@@ -2862,7 +2863,8 @@ route("v2_outbound_order_list", async (body, env) => {
   if (customer_keyword) { where += " AND customer LIKE ?"; binds.push('%' + customer_keyword + '%'); }
   if (usesStockRaw === "1") { where += " AND uses_stock_operation=1"; }
   else if (usesStockRaw === "0") { where += " AND (uses_stock_operation IS NULL OR uses_stock_operation=0)"; }
-  if (hasMaterialRaw === "1") {
+  if(workChainEnabled(env)&&['0','1'].includes(hasMaterialRaw)) {where+=' AND '+workMaterialCountSql+(hasMaterialRaw==='1'?'>0':'=0');}
+  else if (hasMaterialRaw === "1") {
     where += " AND EXISTS (SELECT 1 FROM v2_attachments a WHERE a.related_doc_type='outbound_order' AND a.related_doc_id=v2_outbound_orders.id AND a.attachment_category='outbound_material')";
   } else if (hasMaterialRaw === "0") {
     where += " AND NOT EXISTS (SELECT 1 FROM v2_attachments a WHERE a.related_doc_type='outbound_order' AND a.related_doc_id=v2_outbound_orders.id AND a.attachment_category='outbound_material')";
@@ -2871,7 +2873,7 @@ route("v2_outbound_order_list", async (body, env) => {
     ? await env.DB.prepare("SELECT COUNT(*) AS c FROM v2_outbound_orders" + where).bind(...binds).first()
     : await env.DB.prepare("SELECT COUNT(*) AS c FROM v2_outbound_orders" + where).first();
   const total = Number((countRow && countRow.c) || 0);
-  const listSql = "SELECT * FROM v2_outbound_orders" + where + " ORDER BY " + _dateExpr + " DESC, created_at DESC LIMIT ? OFFSET ?";
+  const listSql = "SELECT *"+(workChainEnabled(env)?", "+workMaterialCountSql+" AS material_count":"")+" FROM v2_outbound_orders" + where + " ORDER BY " + _dateExpr + " DESC, created_at DESC LIMIT ? OFFSET ?";
   const rs = await env.DB.prepare(listSql).bind(...binds, limit, offset).all();
   const items = rs.results || [];
   // 注入 material_count（CHUNK=80 防 D1 too many SQL variables）
@@ -2884,7 +2886,7 @@ route("v2_outbound_order_list", async (body, env) => {
       ids);
     const map = {};
     for (const r of matRows) map[r.id] = Number(r.c || 0);
-    for (const it of items) it.material_count = Number(map[it.id] || 0);
+    if(!workChainEnabled(env))for (const it of items) it.material_count = Number(map[it.id] || 0);
 
     // 注入 latest_change_summary（每单最新一条 change_log 摘要，用于列表 hover/小字显示）
     const ackIds = items.filter(o => Number(o.warehouse_ack_required) === 1).map(o => o.id);
@@ -2931,8 +2933,10 @@ route("v2_outbound_order_detail", async (body, env) => {
     ).bind(jid).all();
     allAtts = allAtts.concat(jAtts.results || []);
   }
+  // Canonical work documents are shared with the field loading screen.
+  if(workChainEnabled(env)){const files=await workMaterials(env,await chainLinked(env,id));const byId=new Map(allAtts.map(f=>[f.id,f]));for(const f of files)byId.set(f.id,{...f,attachment_category:'outbound_material',canonical_material:true});allAtts=[...byId.values()];}
   // 注入 material_count
-  const materialCount = (orderAtts.results || []).filter(a => a.attachment_category === 'outbound_material').length;
+  const materialCount = allAtts.filter(a => a.attachment_category === 'outbound_material').length;
   row.material_count = materialCount;
 
   // 修改日志（按 revision_no DESC）
@@ -3431,6 +3435,7 @@ route("v2_outbound_order_resolve_code", async (body, env) => {
 });
 
 route("v2_outbound_load_start", async (body, env) => {
+  const chainError=await guardWorkChain(body,env);if(chainError)return err(chainError);
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
   const order_id = String(body.order_id || "").trim();
   const worker_id = String(body.worker_id || "").trim();
@@ -3486,6 +3491,7 @@ route("v2_outbound_load_start", async (body, env) => {
 });
 
 route("v2_outbound_load_finish", async (body, env) => {
+  const chainError=await guardWorkChain(body,env);if(chainError)return err(chainError);
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
   if(env.SOP_GROUP_FINISH && body.complete_job===true)return json(await finishNativeOutbound(body,env));
   const job_id = String(body.job_id || "").trim();
@@ -4368,6 +4374,8 @@ route("v2_inbound_plan_detail", async (body, env) => {
     diff_note: lastCompletedUnload ? (lastCompletedUnload.diff_note || '') : ''
   };
 
+  const inboundFiles=workChainEnabled(env)?await workMaterials(env,sop_needs):[];
+  const allInboundAttachments=[...new Map([...(atts.results||[]),...inboundFiles.map(f=>({...f,attachment_category:'inbound_material',canonical_material:true}))].map(f=>[f.id,f])).values()];
   return json({
     ok: true,
     plan: { ...row, biz_classes, ...(inboundFlowEnabled(env)?{external_inbound_nos:inboundCodes(row.external_inbound_no),inbound_progress,courier_progress}:{}) },
@@ -4380,8 +4388,8 @@ route("v2_inbound_plan_detail", async (body, env) => {
     existing_feedback_link,
     lines: planLines.results || [],
     jobs: enrichedJobs,
-    attachments: atts.results || [],
-    inbound_materials: (atts.results || []).filter(a => a.attachment_category === 'inbound_material'),
+    attachments: allInboundAttachments,
+    inbound_materials: allInboundAttachments.filter(a => a.attachment_category === 'inbound_material'),
     sop_needs,
     linked_outbound_orders: linkedObRs.results || []
   });
@@ -7094,6 +7102,7 @@ route("v2_attachment_list", async (body, env) => {
   const doc_type = String(body.related_doc_type || "").trim();
   const doc_id = String(body.related_doc_id || "").trim();
   if (!doc_type || !doc_id) return err("missing related_doc_type or related_doc_id");
+  if(workChainEnabled(env)&&doc_type==='outbound_order'){const base=(await env.DB.prepare('SELECT * FROM v2_attachments WHERE related_doc_type=? AND related_doc_id=?').bind(doc_type,doc_id).all()).results||[];const files=await workMaterials(env,await chainLinked(env,doc_id));const items=new Map(base.map(f=>[f.id,f]));for(const f of files)items.set(f.id,{...f,attachment_category:'outbound_material',canonical_material:true});return json({ok:true,items:[...items.values()]});}
   const rs = await env.DB.prepare(
     "SELECT * FROM v2_attachments WHERE related_doc_type=? AND related_doc_id=? ORDER BY created_at DESC"
   ).bind(doc_type, doc_id).all();
@@ -7122,6 +7131,7 @@ route("v2_attachment_delete", async (body, env) => {
   return withIdem(env, body, "v2_attachment_delete", async () => {
     const att = await env.DB.prepare("SELECT * FROM v2_attachments WHERE id=?").bind(id).first();
     if (!att) return { ok: false, error: "not_found", message: "附件不存在或已被删除" };
+    if(workChainEnabled(env)&&(att.related_doc_type==='sop_need'||['inbound_material','outbound_material'].includes(att.attachment_category)))return {ok:false,error:'作业资料请在关联作业需求中管理；历史来源资料保留只读'};
 
     // 已 frozen 的出库单不允许删除其资料
     if (att.related_doc_type === 'outbound_order' && att.attachment_category === 'outbound_material') {
@@ -12752,6 +12762,10 @@ async function handleMultipartUpload(formData, env) {
       && v003IsPublicField(fieldBody);
     if (!isOpsAuth(fieldBody, env) && !publicArrival) return err("unauthorized", 401);
     if (!related_doc_type || !related_doc_id) return err("missing attachment target");
+    if(workChainEnabled(env)){
+      if(['inbound_plan','outbound_order'].includes(related_doc_type)&&!['vehicle_photo','load_vehicle_photo','arrival_photo'].includes(attachment_category))return err('资料统一在作业需求中上传 / 작업 요청에서 자료를 업로드하세요');
+      if(related_doc_type==='sop_need'&&attachment_category!=='inbound_material'&&attachment_category!=='pallet_details')return json(await uploadWorkMaterial(formData,env));
+    }
     if(related_doc_type==='sop_task'){
       if(env.SOP_UPGRADE_ENABLED!=='true'||attachment_category!=='location_photo')return err('无效货位照片');
       const task=await env.DB.prepare("SELECT state,department FROM sop_records WHERE id=? AND kind='task'").bind(related_doc_id).first(),u=env.SOP_REQUEST_USER;
