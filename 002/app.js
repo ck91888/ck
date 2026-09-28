@@ -2929,7 +2929,7 @@ async function loadInboundDetail() {
       var stText = (t.status === 'completed') ? (getLang() === 'ko' ? '완료' : '已完成') : (getLang() === 'ko' ? '미완료' : '未完成');
       html += '<tr>';
       html += '<td><span class="biz-tag biz-' + esc(t.biz_class) + '">' + esc(window.CKInboundLabel ? CKInboundLabel(t.biz_class) : bizLabel(t.biz_class)) + '</span></td>';
-      html += '<td>' + esc(window.CKInboundLabel && p.source_type !== 'return_session' && p.source_type !== 'external_inbound' ? (t.biz_class === 'direct_ship' ? '现场理货入库 / 현장 검수·입고' : (courierOnly ? '快递收齐后入库 / 택배 수령 완료 후 입고' : '卸货后自动入库 / 하차 후 자동 입고')) : inboundBizTaskLabel(t.biz_class)) + '</td>';
+      html += '<td>' + esc(window.CKInboundLabel && p.source_type !== 'return_session' && p.source_type !== 'external_inbound' ? (['direct_ship','bulk_putaway'].includes(t.biz_class) ? '现场理货入库 / 현장 검수·입고' : (courierOnly ? '快递收齐后入库 / 택배 수령 완료 후 입고' : '卸货后自动入库 / 하차 후 자동 입고')) : inboundBizTaskLabel(t.biz_class)) + '</td>';
       html += '<td><span class="st ' + stClass + '">' + esc(stText) + '</span></td>';
       // 完成人优先显示 worker_names（姓名串），fallback 到 completed_by（worker_id）
       var doneBy = t.worker_names || t.completed_by || '';

@@ -8,7 +8,7 @@ const fileUrl=f=>window.SOP_API+'?action=v2_attachment_get&file_key='+encodeURIC
 const button=(label,fn)=>{const b=document.createElement('button');b.type='button';if(window.CKPlanCopy)CKPlanCopy.bind(b,label);else b.textContent=label;b.onclick=async()=>{b.disabled=true;try{await fn();}catch(x){alert(x.message);}finally{b.disabled=false;}};return b;};
 function viewLink(need){return '/002/?need='+encodeURIComponent(need.id)+'&individual=1';}
 async function allocation(need){const r=await api('sop_work_need_search',{search:need.id});return r.items.find(n=>n.id===need.id);}
-function filesTable(files){return files.length?'<div class="chain-scroll"><table class="chain-files"><thead><tr><th><span data-i18n="ck_plan_59">资料 / 자료</span></th><th><span data-i18n="ck_plan_60">类型</span></th><th><span data-i18n="ck_plan_61">上传人 · 时间</span></th><th></th></tr></thead><tbody>'+files.map(f=>'<tr><td><a href="'+e(fileUrl(f))+'" target="_blank" rel="noopener">'+e(f.file_name)+'</a>'+(f.historical?'<small><span data-i18n="ck_plan_63">历史来源资料 · 원본 자료</span></small>':'')+'</td><td>'+(window.CKPlanCopy?CKPlanCopy.html(kinds[f.material_kind]||'打托／货物明细'):e(kinds[f.material_kind]||'打托／货物明细'))+'</td><td>'+e(f.uploaded_by)+'<small>'+e(new Date(f.created_at).toLocaleString('zh-CN',{timeZone:'Asia/Seoul',hour12:false}))+'</small></td><td><a href="'+e(fileUrl(f))+'" download="'+e(f.file_name)+'"><span data-i18n="ck_plan_62">下载 / 다운로드</span></a><span data-remove-file="'+e(f.id)+'"></span></td></tr>').join('')+'</tbody></table></div>':'<p class="muted"><span data-i18n="ck_plan_85">暂无作业资料。托唛、出库单、产品条码等在这里统一上传。</span></p>';}
+function filesTable(files){return files.length?'<div class="chain-scroll"><table class="chain-files"><thead><tr><th><span data-i18n="ck_plan_59">资料 / 자료</span></th><th><span data-i18n="ck_plan_60">类型</span></th><th><span data-i18n="ck_plan_61">上传人 · 时间</span></th><th></th></tr></thead><tbody>'+files.map(f=>'<tr><td><a href="'+e(fileUrl(f))+'" target="_blank" rel="noopener">'+e(f.file_name)+'</a>'+(f.historical?'<small><span data-i18n="ck_plan_63">历史来源资料 · 원본 자료</span></small>':'')+'</td><td>'+(window.CKPlanCopy?CKPlanCopy.html((f.batch?'本批总作业明细':kinds[f.material_kind])||'打托／货物明细'):e((f.batch?(window.getLang?.()==='ko'?'입고 건 전체 작업 명세':'本批总作业明细'):kinds[f.material_kind])||'打托／货物明细'))+'</td><td>'+e(f.uploaded_by)+'<small>'+e(new Date(f.created_at).toLocaleString('zh-CN',{timeZone:'Asia/Seoul',hour12:false}))+'</small></td><td><a href="'+e(fileUrl(f))+'" download="'+e(f.file_name)+'"><span data-i18n="ck_plan_62">下载 / 다운로드</span></a><span data-remove-file="'+e(f.id)+'"></span></td></tr>').join('')+'</tbody></table></div>':'<p class="muted"><span data-i18n="ck_plan_85">暂无作业资料。托唛、出库单、产品条码等在这里统一上传。</span></p>';}
 async function materials(host,need,{field=false,onChange=()=>{},items=null}={}){
  host.className='chain-materials';host.innerHTML='<h3><span data-i18n="ck_plan_58">作业资料 / 작업 자료</span></h3><p>正在读取…</p>';
  const r=items?{items,revision:need.revision}:await api('sop_work_materials',{id:need.id});if(!host.isConnected)return;
@@ -16,7 +16,7 @@ async function materials(host,need,{field=false,onChange=()=>{},items=null}={}){
  host.innerHTML='<h3><span data-i18n="ck_plan_58">作业资料 / 작업 자료</span></h3>'+filesTable(r.items)+'<p class="muted"><span data-i18n="ck_plan_73">出库计划和现场执行共用这些资料。 / 출고 계획·현장 작업에서 같은 자료를 사용합니다.</span></p>';
  const writable=!field&&!['closed','cancelled'].includes(need.status)&&CKSession.user?.role!=='viewer';
  if(!writable)return;
- host.querySelectorAll('[data-remove-file]').forEach(span=>{const f=r.items.find(f=>f.id===span.dataset.removeFile);if(f.historical||f.id===need.details?.attachment_id)return;span.append(button('撤下 / 해제',async()=>{if(!confirm('撤下这份资料？历史记录仍会保留。 / 이 자료를 해제할까요?'))return;await api('sop_work_material_remove',{id:need.id,revision,attachment_id:f.id,client_req_id:crypto.randomUUID()});await onChange();}));});
+ host.querySelectorAll('[data-remove-file]').forEach(span=>{const f=r.items.find(f=>f.id===span.dataset.removeFile);if(f.historical||f.batch||f.id===need.details?.attachment_id)return;span.append(button('撤下 / 해제',async()=>{if(!confirm('撤下这份资料？历史记录仍会保留。 / 이 자료를 해제할까요?'))return;await api('sop_work_material_remove',{id:need.id,revision,attachment_id:f.id,client_req_id:crypto.randomUUID()});await onChange();}));});
  const form=document.createElement('form');form.className='chain-upload';form.innerHTML='<label><span data-i18n="ck_plan_68">资料类型 / 자료 종류</span><select data-kind>'+Object.entries(kinds).map(([k,v])=>'<option'+(window.CKPlanCopy?CKPlanCopy.attrs(v):'')+' value="'+k+'">'+(window.CKPlanCopy?CKPlanCopy.text(v):v)+'</option>').join('')+'</select></label><label><span data-i18n="ck_plan_69">选择文件 / 파일 선택</span><input data-files type="file" multiple accept=".pdf,.xlsx,.xls,.csv,.jpg,.jpeg,.png,.webp" required></label><button type="submit"><span data-i18n="ck_plan_70">上传资料 / 업로드</span></button><p class="muted"><span data-i18n="ck_plan_72">每个文件不超过20MB，可连续追加。 / 파일당 20MB 이하</span></p><p data-status role="status"></p>';host.append(form);
  let pending=[];
  form.querySelector('[data-files]').onchange=()=>{pending=[];};
@@ -79,5 +79,21 @@ function installOffice(){
  const wrap=(name,after)=>{const original=window[name];if(typeof original!=='function')return;window[name]=function(...args){const r=original.apply(this,args);if(r?.then)return r.then(v=>{after();return v;});after();return r;};};
  wrap('openInboundEditForm',()=>hideFileControls(document.body,'inbound'));wrap('openOutboundEditForm',()=>hideFileControls(document.body,'outbound'));
 }
-window.CKWorkChain={enabled,mountNeed,materials,outboundPicker,prepareOutbound,hideFileControls,installOffice};
+async function batchMaterials(host,group,{field=false}={}){
+ if(!enabled()||group.source_type!=='inbound'||!group.items?.length)return;
+ const text=(zh,ko)=>window.CKPlanCopy?CKPlanCopy.html(zh):e(window.getLang?.()==='ko'?ko:zh);
+ const need=group.items[0];
+ const r=await api('sop_batch_work_materials',{id:need.id});if(!host.isConnected)return;
+ host.className='chain-batch-materials';host.innerHTML='<h3>'+text('本批总作业明细','입고 건 전체 작업 명세')+'</h3><p class="muted">'+text('本入库计划下所有作业共用，点文件名或“下载”即可获取。','이 입고계획의 모든 작업에서 공유합니다. 파일명 또는 다운로드를 누르세요.')+'</p><div data-batch-files>'+ (r.items.length?filesTable(r.items):'<p class="muted">'+text('暂未上传总作业明细','전체 작업 명세가 없습니다')+'</p>')+'</div>';
+ if(field||!['manager','service'].includes(CKSession.user?.role))return;
+ const form=document.createElement('form');form.className='chain-upload';form.innerHTML='<label>'+text('选择总作业明细（可多选）','전체 작업 명세 선택（복수 가능）')+'<input type="file" multiple required accept=".xlsx,.xls,.csv,.pdf,.jpg,.jpeg,.png,.webp"></label><button type="submit">'+text('上传总作业明细','전체 명세 업로드')+'</button><p class="muted">'+text('支持 Excel、CSV、PDF、图片，每个文件不超过 20MB。','Excel, CSV, PDF, 이미지 · 파일당 최대 20MB')+'</p><p role="status"></p>';host.append(form);
+ let pending=[];const input=form.querySelector('input');input.onchange=()=>{pending=[];};
+ form.onsubmit=async event=>{event.preventDefault();const submit=form.querySelector('button'),status=form.querySelector('[role=status]');submit.disabled=true;input.disabled=true;
+  if(!pending.length)pending=[...input.files].map(file=>({file,request:crypto.randomUUID(),done:false}));
+  try{for(const item of pending.filter(x=>!x.done)){status.textContent=(window.getLang?.()==='ko'?'업로드 중: ':'正在上传：')+item.file.name;const data=new FormData();for(const [k,v] of Object.entries({action:'v2_attachment_upload',related_doc_type:'inbound_plan',related_doc_id:group.source_id,need_id:need.id,attachment_category:'batch_work_material',client_req_id:item.request}))data.set(k,v);data.set('file',item.file);const response=await fetch(window.SOP_API,{method:'POST',credentials:'include',body:data}),result=await response.json();if(!result.ok)throw Error(result.error||'上传失败');item.done=true;}
+   await batchMaterials(host,group,{field});
+  }catch(error){status.textContent=error.message;}finally{submit.disabled=false;input.disabled=false;}
+ };
+}
+window.CKWorkChain={enabled,mountNeed,materials,batchMaterials,outboundPicker,prepareOutbound,hideFileControls,installOffice};
 })();

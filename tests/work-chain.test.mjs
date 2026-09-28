@@ -96,6 +96,25 @@ test('work files upload before work, retry once, flow to outbound list/detail, n
  for(const related_doc_type of ['inbound_plan','outbound_order'])assert.equal((await s.upload(await s.get(n.id),{related_doc_type,related_doc_id:ob.id,attachment_category:'outbound_material'})).ok,false);
  await assert.rejects(()=>chainNeed(s.env,n.id,{role:'viewer',departments:['bulk']},true),/权限/);
 });
+test('batch files upload once, download from group and every related need, and notify downstream work',async()=>{
+ const s=setup();await s.login();const p=await s.call('v2_inbound_plan_create',{customer:'Fixture customer',biz_classes:['bulk']});
+ let a=await s.need({source_type:'inbound',source_id:p.id}),b=await s.need({source_type:'inbound',source_id:p.id,department:'direct_ship',reason:'second part'});const other=await s.need();
+ const ob=await s.schedule(a,4);a=await s.get(a.id);
+ const request=crypto.randomUUID(),form=new FormData();for(const [k,v] of Object.entries({action:'v2_attachment_upload',related_doc_type:'inbound_plan',related_doc_id:p.id,need_id:a.id,attachment_category:'batch_work_material',client_req_id:request}))form.set(k,v);form.set('file',new File(['carton,operation\n1,palletize'],'batch-work.csv',{type:'text/csv'}));
+ const f=await s.raw(form);assert.equal(f.ok,true,f.error);assert.equal((await s.raw(form)).id,f.id);assert.equal(s.objects.size,1);
+ const group=await s.call('sop_batch_work_materials',{id:a.id});assert.equal(group.ok,true,group.error);assert.equal(group.items[0].id,f.id);assert.equal(group.items[0].uploaded_by,'Fixture manager');assert.equal(group.plan.id,p.id);
+ for(const n of [a,b]){const docs=await s.call('sop_work_materials',{id:n.id});assert.equal(docs.items[0].id,f.id);assert.equal(docs.items[0].batch,true);assert.equal(docs.items[0].historical,false);assert.equal((await s.get(n.id)).requirement_version,(n.requirement_version||1)+1);}
+ assert.equal((await s.call('sop_work_materials',{id:other.id})).items.length,0);
+ assert.equal((await s.call('sop_batch_work_materials',{id:other.id})).ok,false);
+ const order=await s.call('v2_outbound_order_detail',{id:ob.id});assert.equal(order.attachments[0].id,f.id);assert.equal(order.order.warehouse_ack_required,1);assert.equal((await s.call('v2_outbound_order_list',{has_material:'1'})).items[0].material_count,1);
+ assert.equal((await s.change('sop_work_material_remove',a.id,{attachment_id:f.id})).ok,false,'shared file cannot be removed in just one child');
+ form.set('file',new File(['different'],'batch-work.csv',{type:'text/csv'}));assert.equal((await s.raw(form)).ok,false,'retry must be the same file');
+ form.set('need_id',other.id);form.set('client_req_id',crypto.randomUUID());assert.equal((await s.raw(form)).ok,false,'cannot upload via unrelated need');
+ const {uploadBatchMaterial,readBatchMaterials}=await import('../worker-v2/batch-work-materials.js');
+ await assert.rejects(()=>uploadBatchMaterial(form,{...s.env,SOP_REQUEST_USER:{id:'F',name:'Fixture field',scope:'field',role:'dispatcher',departments:['bulk']}}),/仅入库|办公室/);
+ await assert.rejects(()=>readBatchMaterials({action:'sop_batch_work_materials',id:a.id},s.env,{role:'viewer',departments:['import']}),/权限/);
+});
+
 test('historical attachments stay accessible from needs and downstream without copying; concurrent bookings cannot exceed capacity',async()=>{
  const s=setup();await s.login();const plan=await s.call('v2_inbound_plan_create',{customer:'Fixture customer',biz_classes:['bulk']});const n=await s.need({source_type:'inbound',source_id:plan.id});
  s.DB.raw.prepare("INSERT INTO v2_attachments(id,related_doc_type,related_doc_id,attachment_category,file_name,file_key,created_at) VALUES('OLD','inbound_plan',?,'inbound_material','old.csv','old-object',?)").run(plan.id,new Date().toISOString());

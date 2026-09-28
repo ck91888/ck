@@ -70,11 +70,11 @@ export async function workMaterials(env, rows) {
  const files=(await q(env,`SELECT DISTINCT a.* FROM v2_attachments a JOIN sop_records n ON n.kind='need' AND n.id IN (SELECT value FROM json_each(?))
  WHERE NOT EXISTS(SELECT 1 FROM json_each(n.state,'$.removed_material_ids') r WHERE r.value=a.id) AND (
  (a.related_doc_type='sop_need' AND a.related_doc_id=n.id) OR
- (a.related_doc_type='inbound_plan' AND a.attachment_category='inbound_material' AND json_extract(n.state,'$.source_type')='inbound' AND a.related_doc_id=json_extract(n.state,'$.source_id')) OR
+ (a.related_doc_type='inbound_plan' AND a.attachment_category IN ('inbound_material','batch_work_material') AND json_extract(n.state,'$.source_type')='inbound' AND a.related_doc_id=json_extract(n.state,'$.source_id')) OR
  (a.related_doc_type='outbound_order' AND a.attachment_category='outbound_material' AND (
  (json_extract(n.state,'$.source_type')='outbound' AND a.related_doc_id=json_extract(n.state,'$.source_id')) OR
  EXISTS(SELECT 1 FROM json_each(n.state,'$.links') l WHERE json_extract(l.value,'$.outbound_id')=a.related_doc_id)))) ORDER BY a.created_at DESC`,JSON.stringify(rows.map(r=>r.id))).all()).results;
- return files.map(f=>({...f,historical:f.related_doc_type!=='sop_need',material_kind:f.attachment_category}));
+ return files.map(f=>({...f,historical:f.related_doc_type!=='sop_need'&&f.attachment_category!=='batch_work_material',batch:f.attachment_category==='batch_work_material',material_kind:f.attachment_category}));
 }
 export async function workMaterialRead(body,env,user) {
  if (!workChainEnabled(env)) return null;
@@ -125,5 +125,5 @@ export const workMaterialCountSql = `(SELECT COUNT(DISTINCT a.id) FROM v2_attach
  (json_extract(n.state,'$.source_id')=v2_outbound_orders.id OR EXISTS(SELECT 1 FROM json_each(n.state,'$.links') l WHERE json_extract(l.value,'$.outbound_id')=v2_outbound_orders.id))
  AND NOT EXISTS(SELECT 1 FROM json_each(n.state,'$.removed_material_ids') r WHERE r.value=a.id)
  AND ((a.related_doc_type='sop_need' AND a.related_doc_id=n.id) OR
- (a.related_doc_type='inbound_plan' AND a.attachment_category='inbound_material' AND json_extract(n.state,'$.source_type')='inbound' AND a.related_doc_id=json_extract(n.state,'$.source_id')) OR
+ (a.related_doc_type='inbound_plan' AND a.attachment_category IN ('inbound_material','batch_work_material') AND json_extract(n.state,'$.source_type')='inbound' AND a.related_doc_id=json_extract(n.state,'$.source_id')) OR
  (a.related_doc_type='outbound_order' AND a.attachment_category='outbound_material' AND (a.related_doc_id=json_extract(n.state,'$.source_id') OR EXISTS(SELECT 1 FROM json_each(n.state,'$.links') l WHERE json_extract(l.value,'$.outbound_id')=a.related_doc_id))))))`;

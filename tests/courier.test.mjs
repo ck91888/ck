@@ -38,6 +38,12 @@ test('mixed truck and parcel plans wait for both arrival paths, whichever comes 
  if(courierFirst){await scan();assert.equal((await detail(p)).plan.status,'pending');await unload();}else{await unload();assert.notEqual((await detail(p)).plan.status,'completed');await scan();}
  const d=await detail(p);assert.equal(d.plan.status,'completed');assert.equal(d.lines.find(x=>x.unit_type==='courier').actual_qty,1);}
 });
+
+test('bulk putaway remains pending after courier receipt until its own external bills finish',async()=>{
+ const {plan,scan,detail,call}=setup(),p=await plan(['bulk_putaway'],[C1,C2],{external_inbound_nos:['BULK-A','BULK-B']});
+ await scan();await scan(C2);assert.equal((await detail(p)).plan.status,'arrived_pending_putaway');
+ for(const [i,no] of ['BULK-A','BULK-B'].entries()){const j=await call('v2_inbound_job_start',{plan_id:p.id,external_inbound_no:no,biz_class:'bulk',job_type:'inbound_bulk',worker_id:'BULK-TEST'});await call('v2_inbound_job_finish',{job_id:j.job_id,worker_id:'BULK-TEST',complete_job:true});assert.equal((await detail(p)).plan.status,i?'completed':'partially_completed');}
+});
 test('tracking validation, cross-plan uniqueness and received-plan edit protection are enforced server-side',async()=>{
  const {plan,call,scan,DB}=setup();const bad=await call('v2_inbound_plan_create',{biz_classes:['bulk'],lines:[{unit_type:'courier',planned_qty:1}]},false);assert.equal(bad.ok,false);assert.equal(DB.raw.prepare('SELECT COUNT(*) n FROM v2_inbound_plans').get().n,0);
  const p=await plan();const conflict=await call('v2_inbound_plan_create',{biz_classes:['bulk'],lines:[{unit_type:'courier',tracking_nos:[C1]}]},false);assert.equal(conflict.ok,false);

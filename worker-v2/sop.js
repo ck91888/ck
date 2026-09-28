@@ -1,3 +1,4 @@
+import {readBatchMaterials} from './batch-work-materials.js';
 import { workChainEnabled, chainOutboundStatements, chainAllocation, guardWorkChain, workMaterialRead, workMaterials, notifyMaterialChange } from './work-chain.js';
 import { workPlanStatements } from './sop-planning.js';
 import { dispatchAccess } from './dispatch-access.js';
@@ -93,6 +94,7 @@ export async function handleSop(b,env) {
  const auth=env.SOP_REQUEST_USER ? {ok:true,user:env.SOP_REQUEST_USER} : authorization(b,env); if(!auth.ok) return auth;
  const u=auth.user;
  try {
+  const batchMaterials=await readBatchMaterials(b,env,u);if(batchMaterials)return batchMaterials;
   const materialRead=await workMaterialRead(b,env,u);if(materialRead)return materialRead;
   if(env.SOP_ACCEPT_NEW==='false' && (/_create$|_adopt$|_from_outbound$/.test(b.action)||b.action==='sop_task_dispatch'))fail('新版已暂停接收新任务，现有任务仍可收尾');
   if(b.action==='sop_session') return {ok:true,user:{id:u.id,name:u.name,role:u.role,departments:u.departments||[]},mode:env.SOP_ENVIRONMENT||'pilot'};
