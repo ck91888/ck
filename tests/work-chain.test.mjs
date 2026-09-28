@@ -61,6 +61,28 @@ test('direct forwarding requires receipt then quantity confirmation, without inv
  assert.equal(await guardWorkChain({action:'v2_outbound_load_start',order_id:ob.id},s.env),null);
  assert.equal(s.DB.raw.prepare('SELECT count(*) n FROM v2_ops_job_workers').get().n,0);assert.equal(s.DB.raw.prepare('SELECT count(*) n FROM v2_ops_jobs').get().n,0);
 });
+
+test('inline inbound and inventory bookings preserve the same PO and shipping fields as standalone bookings',async()=>{
+ const s=setup();await s.login();
+ const modes=['warehouse_dispatch','customer_pickup','milk_express','milk_pallet','container_pickup'];
+ const bookings=modes.map((outbound_mode,i)=>({quantity:1,expected_ship_at:'2026-10-03',outbound_mode,po_no:'00-PO-'+i,destination:'Fixture destination '+i,outbound_requirement:'Fixture handover '+i}));
+ const inbound=await s.call('v2_inbound_plan_create',{customer:'Fixture customer',biz_classes:['bulk'],lines:[{unit_type:'carton',planned_qty:10}],work_requests:[{title:'Fixture bundled work',instructions:'Fixture instructions',department:'bulk',planned_quantity:10,planned_unit:'箱',outbounds:bookings}]});
+ assert.equal(inbound.ok,true,inbound.error);assert.equal(inbound.outbounds.length,5);
+ const inventory=await s.need({outbounds:[bookings[0]]});
+ const savedInventory=(await s.call('v2_outbound_order_detail',{id:inventory.links[0].outbound_id})).order;
+ assert.equal(savedInventory.po_no,bookings[0].po_no);
+ for(const [i,b] of bookings.entries()){
+  const bundled=(await s.call('v2_outbound_order_detail',{id:inbound.outbounds[i].id})).order;
+  const n=await s.need(),created=await s.schedule(n,1,b);assert.equal(created.ok,true,created.error);
+  const standalone=(await s.call('v2_outbound_order_detail',{id:created.id})).order;
+  for(const key of ['po_no','destination','outbound_mode','expected_ship_at','outbound_requirement']){assert.equal(bundled[key],b[key],key);assert.equal(bundled[key],standalone[key],key+' matches standalone');}
+ }
+ const plain=await s.need({outbounds:[{quantity:1,expected_ship_at:'2026-10-03',outbound_mode:'customer_pickup'}]});
+ assert.equal((await s.call('v2_outbound_order_detail',{id:plain.links[0].outbound_id})).order.po_no,'','PO stays optional');
+ const before=s.DB.raw.prepare('SELECT count(*) n FROM v2_inbound_plans').get().n;
+ const bad=await s.call('v2_inbound_plan_create',{customer:'Fixture customer',biz_classes:['bulk'],work_requests:[{title:'Invalid mode',instructions:'Fixture',planned_quantity:2,planned_unit:'箱',outbounds:[{...bookings[0],outbound_mode:'invalid'}]}]});
+ assert.equal(bad.ok,false);assert.equal(s.DB.raw.prepare('SELECT count(*) n FROM v2_inbound_plans').get().n,before);
+});
 test('work files upload before work, retry once, flow to outbound list/detail, notify warehouse and can be withdrawn without losing history',async()=>{
  const s=setup();await s.login();let n=await s.need();const ob=await s.schedule(n,4);n=await s.get(n.id);
  const f=await s.upload(n,{client_req_id:'upload-once',material_kind:'pallet_label'});assert.equal(f.ok,true,f.error);assert.equal((await s.upload(n,{client_req_id:'upload-once',material_kind:'pallet_label'})).id,f.id);

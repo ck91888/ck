@@ -13,14 +13,14 @@ function readOptional(context,data){
 }
 test('unopened and untouched optional outbound rows yield no shipping plan',()=>{
  const context=setup();assert.equal(readOptional(context,[]).length,0);
- assert.equal(readOptional(context,[{expected_ship_at:'',quantity:'',outbound_mode:'customer_pickup',destination:'',outbound_requirement:''}]).length,0);
+ assert.equal(readOptional(context,[{expected_ship_at:'',quantity:'',outbound_mode:'',destination:'',po_no:'',outbound_requirement:''}]).length,0);
  assert.equal(context.CKHasStandaloneOutbound(blankLegacy),false);
  for(const change of [{destination:'仁川'},{outbound_mode:'customer_pickup'},{planned_box_count:15},{remark:'保留资料'},{biz_class:'direct_ship'}])assert.equal(context.CKHasStandaloneOutbound({...blankLegacy,...change}),true);
 });
 test('partially entered outbound data is never silently discarded',()=>{
  const context=setup();
- for(const row of [{destination:'仁川'},{quantity:'15'},{expected_ship_at:'2026-09-25'},{outbound_mode:'warehouse_dispatch'},{expected_ship_at:'2026-09-25',quantity:'NaN'}])assert.throws(()=>readOptional(context,[row]),/补齐出库日期和分配数量/);
- const result=readOptional(context,[{expected_ship_at:'2026-09-25',quantity:'15',outbound_mode:'customer_pickup'}]);assert.equal(result.length,1);assert.equal(result[0].quantity,'15');
+ for(const row of [{destination:'仁川'},{po_no:'000-PO'},{quantity:'15'},{expected_ship_at:'2026-09-25'},{outbound_mode:'warehouse_dispatch'},{outbound_mode:'customer_pickup'},{expected_ship_at:'2026-09-25',quantity:'NaN'},{expected_ship_at:'2026-09-25',quantity:'15',outbound_mode:''}])assert.throws(()=>readOptional(context,[row]),/补齐预计出库日期、本次出库数量和出库模式/);
+ const result=readOptional(context,[{expected_ship_at:'2026-09-25',quantity:'15',outbound_mode:'customer_pickup',po_no:' 000-PO '}]);assert.equal(result.length,1);assert.equal(result[0].quantity,'15');assert.equal(result[0].po_no,'000-PO');
 });
 async function submit({works=[need],checked=true,rows=[blankLegacy],helper=true}={}){
  const context=setup(),requests=[],alerts=[],fields={'ibc-customer':{value:'宝袋'},'ibc-link-ob':{checked}};
