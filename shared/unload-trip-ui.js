@@ -3,7 +3,7 @@
 window.CKInstallUnloadTrip=function(){
  const $=id=>document.getElementById(id),esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
  const request=async body=>{const r=await window.api(body);if(!r?.ok)throw Error(r?.message||r?.error||'请求失败 / 요청 실패');return r;};
- let selected=new Map(),candidates=[],queryVersion=0,queue=Promise.resolve(),pendingScans=0,starting=false,scanner=null,lastScan='',lastScanAt=0,currentJob=null,finishRequest=null;
+ let selected=new Map(),candidates=[],queryVersion=0,queue=Promise.resolve(),pendingScans=0,starting=false,scanner=null,lastScan='',lastScanAt=0,currentJob=null,finishRequest=null,legacyPhotos=null;
  try{selected=new Map(JSON.parse(sessionStorage.getItem('ck_unload_selection')||'[]'));}catch{}
  const entry=document.createElement('section');entry.id='ck-trip-entry';entry.className='ck-trip';
  entry.innerHTML=`<h3>本车入库计划 / 차량 입고계획</h3><p class="ck-trip-help">连续扫描入库计划单，全部加入后统一开始卸货。<br>입고계획을 연속 스캔한 후 한 번에 하차를 시작하세요.</p>
@@ -71,9 +71,12 @@ window.CKInstallUnloadTrip=function(){
   const id=_activeJobId;if(!id)return originalActions();
   const r=await request({action:'v2_ops_job_detail',job_id:id});if(_activeJobId!==id)return;
   if(!r.can_manage_dispatch)return originalActions();
+  let photosHost=$('ck-legacy-arrival-photos');if(!photosHost){photosHost=document.createElement('div');photosHost.id='ck-legacy-arrival-photos';$('unloadActions').before(photosHost);}
+  if(photosHost.dataset.job!==id){photosHost.replaceChildren();photosHost.dataset.job=id;}
+  legacyPhotos=CKUnloadPhotos.picker(photosHost,{jobId:id,type:r.job.related_doc_type,target:r.job.related_doc_id});
   if(r.job.related_doc_type==='field_feedback')localStorage.setItem('v2_unplanned_fb_id',r.job.related_doc_id);else localStorage.removeItem('v2_unplanned_fb_id');
   $('unloadActions').innerHTML='<p class="ck-trip-help">由派审员核对实收后统一结束，所有参与人员同步结束计时。 / 담당자 확인 후 참여 인원의 작업시간을 함께 종료합니다.</p><button class="btn btn-success" id="ck-unload-team-finish">确认产出并结束卸货 / 확인 후 하차 종료</button><button class="btn btn-outline" id="ck-unload-keep-working">返回首页，任务继续 / 작업 유지·홈으로</button>';
-  $('ck-unload-team-finish').onclick=e=>unloadComplete(e.currentTarget);$('ck-unload-keep-working').onclick=()=>goPage('home');
+  $('ck-unload-team-finish').onclick=async e=>{try{await legacyPhotos.flush();await unloadComplete(e.currentTarget);}catch(error){alert(error.message);}};$('ck-unload-keep-working').onclick=()=>goPage('home');
  };
  $('ck-trip-start').onclick=async()=>{
   if(starting||!selected.size||pendingScans)return;starting=true;renderSelected();await stopCamera();
@@ -91,15 +94,17 @@ window.CKInstallUnloadTrip=function(){
   <form id="ck-trip-result">${r.unload_plans.map(({plan:p,lines,needs})=>`<section class="ck-trip-plan"><h4>${esc(name(p))}</h4><p>${esc(p.cargo_summary||'')}</p>${needs.length?'<div class="ck-trip-needs"><b>卸货时的作业要求 / 하차 시 작업 요청</b>'+needs.map(n=>'<p><strong>'+esc(n.title)+'</strong> '+esc(n.scope_text||'')+'<br>'+esc(n.instructions||'')+'</p>').join('')+'</div>':''}<div class="ck-trip-quantities">${lines.map(l=>l.unit_type==='courier'?'<p class="ck-trip-help">快递 '+esc(l.planned_qty)+' 件：请逐件扫码收货，收齐后自动更新。 / 택배는 개별 송장 스캔</p>':`<label>${esc(window.unitLabel?.(l.unit_type)||l.unit_type)} <small>计划 / 계획 ${esc(l.planned_qty)}</small><input type="number" min="0" max="100000000" step="any" required inputmode="decimal" data-plan="${esc(p.id)}" data-line="${esc(l.id)}" aria-label="${esc(p.display_no)} ${esc(window.unitLabel?.(l.unit_type)||l.unit_type)} 实收" placeholder="实收 / 실제"></label>`).join('')}</div><label class="ck-trip-note">差异说明（选填） / 차이 설명(선택)<input data-diff="${esc(p.id)}" maxlength="1000"></label></section>`).join('')}
   <label>备注（选填） / 비고(선택)<input name="remark" maxlength="2000"></label><p id="ck-trip-finish-message" role="status"></p><button id="ck-trip-finish" class="btn btn-success" type="submit" ${r.can_manage_dispatch?'':'disabled'}>确认实收并结束本车卸货 / 확인 후 차량 하차 종료</button></form><button id="ck-trip-back" class="btn btn-outline" type="button">返回首页，任务继续 / 작업 유지·홈으로</button>`;
   $('ck-trip-back').onclick=()=>goPage('home');
+  const photoPickers=[...working.querySelectorAll('.ck-trip-plan')].map((host,i)=>CKUnloadPhotos.picker(host,{jobId:r.job.id,type:'inbound_plan',target:r.unload_plans[i].plan.id}));
   $('ck-trip-result').onsubmit=async e=>{
    e.preventDefault();const button=$('ck-trip-finish');if(button.disabled)return;button.disabled=true;
    try{
+    await Promise.all(photoPickers.map(p=>p.flush()));
     if(!finishRequest)finishRequest={action:'v2_unload_job_finish',job_id:r.job.id,worker_id:getWorkerId(),complete_job:true,client_req_id:crypto.randomUUID(),remark:new FormData(e.target).get('remark'),plan_results:r.unload_plans.map(({plan})=>({plan_id:plan.id,lines:[...working.querySelectorAll('[data-plan]')].filter(x=>x.dataset.plan===plan.id).map(x=>({line_id:x.dataset.line,actual_qty:Number(x.value)})),diff_note:[...working.querySelectorAll('[data-diff]')].find(x=>x.dataset.diff===plan.id).value}))};
     await request(finishRequest);finishRequest=null;window.CKClearNativeJob?.();working.innerHTML='<h3>本车卸货已完成 / 차량 하차 완료</h3><p>各计划实收已保存，所有参与人员已结束计时。 / 실제 수량 저장 및 작업시간 종료 완료</p><button id="ck-trip-done" class="btn btn-success">返回首页 / 홈으로</button>';$('ck-trip-done').onclick=()=>goPage('home');
    }catch(error){if(!(error instanceof TypeError))finishRequest=null;$('ck-trip-finish-message').textContent=error.message;button.disabled=false;}
   };
  }
- const showPage=window.showPage;window.showPage=function(name,...args){if(name!=='unload')stopCamera();return showPage(name,...args);};
+ const showPage=window.showPage;window.showPage=function(name,...args){if(name!=='unload'&&window.CKUnloadPhotos?.busy()){alert('还有照片未保存，请等待上传完成，或重试／移除待上传照片。 / 저장되지 않은 사진을 확인하세요.');return;}if(name!=='unload')stopCamera();return showPage(name,...args);};
  window.unloadGoBack=()=>goPage('home');
  renderSelected();
 };

@@ -1,4 +1,5 @@
 import {accessEnabled,accessGuard,accessAdminAction,accessFileAllowed} from './access-control.js';
+import {uploadUnloadPhoto,unloadPhotos,inboundAttachmentRead} from './unload-photos.js';
 import {handleFeedbackLink,feedbackLinkDetail} from './feedback-link.js';
 import {validateNativeMutation, nativePeople, finishNativePick, finishNativeOutbound} from './native-lifecycle.js';
 import {findUnloadPlan, startUnloadTrip, finishUnloadTrip, tripPlans} from './unload-trip.js';
@@ -4281,7 +4282,7 @@ route("v2_inbound_plan_detail", async (body, env) => {
       env.DB.prepare('SELECT * FROM v2_inbound_plan_biz_tasks WHERE plan_id=? ORDER BY biz_class').bind(id),
       env.DB.prepare('SELECT * FROM v2_inbound_plan_lines WHERE plan_id=? ORDER BY line_no').bind(id),
       env.DB.prepare("SELECT * FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? ORDER BY created_at DESC").bind(id),
-      env.DB.prepare("SELECT * FROM v2_attachments WHERE related_doc_type='inbound_plan' AND related_doc_id=? ORDER BY created_at DESC").bind(id),
+      inboundFlowEnabled(env)?inboundAttachmentRead(env,id):env.DB.prepare("SELECT * FROM v2_attachments WHERE related_doc_type='inbound_plan' AND related_doc_id=? ORDER BY created_at DESC").bind(id),
       env.DB.prepare('SELECT job_id,worker_name,minutes_worked,left_at FROM v2_ops_job_workers WHERE job_id IN ('+inPlan+') ORDER BY joined_at').bind(id),
       env.DB.prepare('SELECT * FROM (SELECT job_id,result_lines_json,diff_note,remark,result_json,created_at,ROW_NUMBER() OVER (PARTITION BY job_id ORDER BY created_at DESC,rowid DESC) AS latest FROM v2_ops_job_results WHERE job_id IN ('+inPlan+')) WHERE latest=1').bind(id),
       env.DB.prepare('SELECT job_id,result_json FROM ck_unload_plan_links WHERE plan_id=?').bind(id),
@@ -4375,6 +4376,7 @@ route("v2_inbound_plan_detail", async (body, env) => {
   };
 
   const inboundFiles=workChainEnabled(env)?await workMaterials(env,sop_needs):[];
+  const arrival_photos=(atts.results||[]).filter(a=>a.attachment_category==='unload_photo');
   const allInboundAttachments=[...new Map([...(atts.results||[]),...inboundFiles.map(f=>({...f,attachment_category:'inbound_material',canonical_material:true}))].map(f=>[f.id,f])).values()];
   return json({
     ok: true,
@@ -4385,6 +4387,7 @@ route("v2_inbound_plan_detail", async (body, env) => {
     pending_biz_classes,
     missing_biz_classes: pending_biz_classes,
     unload_summary,
+    arrival_photos,
     existing_feedback_link,
     lines: planLines.results || [],
     jobs: enrichedJobs,
@@ -7264,7 +7267,7 @@ route("v2_feedback_detail", async (body, env) => {
   // Parse result_lines from feedback itself (unplanned_unload flow)
   let feedbackResultLines = [];
   try { feedbackResultLines = JSON.parse(row.result_lines_json || "[]"); } catch(e) {}
-  return json({ ok: true, feedback: row, job_results: jobResults, feedback_result_lines: feedbackResultLines, existing_plan_link: inboundFlowEnabled(env)?await feedbackLinkDetail(env,id):null });
+  return json({ ok: true, feedback: row, job_results: jobResults, feedback_result_lines: feedbackResultLines, arrival_photos:await unloadPhotos(env,'field_feedback',id), existing_plan_link: inboundFlowEnabled(env)?await feedbackLinkDetail(env,id):null });
 });
 
 // ===== [DEPRECATED] Generic feedback-to-inbound conversion =====
@@ -12762,6 +12765,7 @@ async function handleMultipartUpload(formData, env) {
       && v003IsPublicField(fieldBody);
     if (!isOpsAuth(fieldBody, env) && !publicArrival) return err("unauthorized", 401);
     if (!related_doc_type || !related_doc_id) return err("missing attachment target");
+    if(attachment_category==='unload_photo')return json(await uploadUnloadPhoto(formData,env));
     if(workChainEnabled(env)){
       if(['inbound_plan','outbound_order'].includes(related_doc_type)&&!['vehicle_photo','load_vehicle_photo','arrival_photo'].includes(attachment_category))return err('资料统一在作业需求中上传 / 작업 요청에서 자료를 업로드하세요');
       if(related_doc_type==='sop_need'&&attachment_category!=='inbound_material'&&attachment_category!=='pallet_details')return json(await uploadWorkMaterial(formData,env));

@@ -3047,6 +3047,7 @@ async function loadInboundDetail() {
     html += '</div>';
   }
 
+  if(window.CKUnloadPhotos)html += CKUnloadPhotos.gallery(res.arrival_photos || []);
   // --- 入库明细资料（attachment_category = 'inbound_material'） ---
   var inboundMaterials = (res.inbound_materials && res.inbound_materials.length)
     ? res.inbound_materials
@@ -3085,7 +3086,7 @@ async function loadInboundDetail() {
   html += '</div>';
 
   // --- 其它附件（车辆/卸货照片等非 inbound_material） ---
-  var otherAtts = atts.filter(function(a) { return a.attachment_category !== 'inbound_material'; });
+  var otherAtts = atts.filter(function(a) { return a.attachment_category !== 'inbound_material' && a.attachment_category !== 'unload_photo'; });
   if (otherAtts.length > 0) {
     html += '<div class="card"><div class="card-title">' + L("attachments") + ' (' + otherAtts.length + ')</div>';
     html += '<div class="att-grid">';
@@ -4267,6 +4268,7 @@ async function loadFeedbackDetail() {
   }
   html += '</div>';
 
+  if(window.CKUnloadPhotos && ['unplanned_unload','unload_no_doc'].includes(fb.feedback_type))html += CKUnloadPhotos.gallery(res.arrival_photos || []);
   // Unload result lines (from feedback itself — unplanned_unload flow)
   if (feedbackResultLines.length > 0) {
     html += '<div class="card"><div class="card-title">卸货结果明细</div>';
