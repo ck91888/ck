@@ -1,5 +1,6 @@
 import {pickTeamStatements} from './native-lifecycle.js';
 import {dispatchAccess} from './dispatch-access.js';
+import {documentCodeError} from '../shared/document-code.js';
 // Responsible-person assignment around existing operation handlers. Documents,
 // result forms and status transitions remain owned by those handlers.
 import { laborDepartment,startDepartment,departments } from '../shared/labor-department.js';
@@ -8,6 +9,12 @@ export async function startNative(body,env,invoke,guard){
  const u=env.SOP_REQUEST_USER;
  if(env.SOP_ENVIRONMENT!=='staging'||!['manager','dispatcher'].includes(u?.role))return {ok:false,error:'请以已授权的派审员登录 / 배정 담당자로 로그인하세요'};
  const p={...body.payload};if(!starts.has(p.action))return {ok:false,error:'无效作业类型'};
+ if(p.action==='v2_pick_job_start_by_docs'||p.action==='v2_pick_job_start'){
+  const codes=Array.isArray(p.pick_doc_nos)?p.pick_doc_nos:typeof p.pick_doc_nos==='string'?p.pick_doc_nos.split(','):[];
+  p.pick_doc_nos=[...new Set(codes.map(x=>String(x).trim()).filter(Boolean))];
+  if(!p.pick_doc_nos.length||p.pick_doc_nos.length>100)return {ok:false,error:'请扫描1至100张拣货单 / 피킹번호 1~100개를 스캔하세요'};
+  const error=p.pick_doc_nos.map(documentCodeError).find(Boolean);if(error)return {ok:false,error};
+ }
  if(p.action==='v2_ops_job_start'&&!String(p.biz_class??'').trim()){
   const department=laborDepartment(p);if(department!=='other')p.biz_class=department;
  }
@@ -20,6 +27,13 @@ export async function startNative(body,env,invoke,guard){
  const prior=await env.DB.prepare('SELECT response_json FROM v2_idempotency_keys WHERE idem_key=?').bind(p.client_req_id).first();
  const allowed=prior?JSON.parse(prior.response_json).job_id:null;
  if(allowed){const existing=await env.DB.prepare("SELECT state FROM sop_records WHERE id=? AND kind='dispatch'").bind(allowed).first();if(existing){const saved=JSON.parse(existing.state);if(saved.owner_id!==u.id)return {ok:false,error:'此任务已有其他负责人'};return {...JSON.parse(prior.response_json),lead:saved.workers.find(w=>w.id===saved.lead_id),assigned_workers:saved.workers};}}
+ // External picking sheets do not need an office-created trip. Existing sheets
+ // retain their original trip/history; never move them into a fresh dispatch.
+ if(p.action==='v2_pick_job_start_by_docs'&&!allowed){
+  const known=(await env.DB.prepare('SELECT DISTINCT pick_doc_no FROM v2_ops_job_pick_docs WHERE pick_doc_no IN ('+p.pick_doc_nos.map(()=>'?').join(',')+')').bind(...p.pick_doc_nos).all()).results||[];
+  if(!known.length)p.action='v2_pick_job_start';
+  else if(known.length!==p.pick_doc_nos.length)return {ok:false,error:'已登记和新拣货单不能混在同一趟，请先打开原任务；新单另行派工 / 기존 작업과 새 피킹번호를 구분하세요'};
+ }
  const managed=await existingDispatch(env,p);
  if(managed)return {ok:false,error:'该单已有在途任务，请从现场首页打开原任务后调整人员 / 진행 중인 작업을 열어 인원을 변경하세요',active_job_id:managed.id};
  let department=body.labor_department||startDepartment(p);

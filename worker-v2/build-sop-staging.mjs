@@ -6,7 +6,7 @@ if(!out.startsWith(root+'\\')&&!out.startsWith(root+'/'))throw Error('Unsafe bui
 await rm(out,{recursive:true,force:true});await mkdir(out,{recursive:true});
 // Explicit original application allowlist. Never publish server code or credentials.
 const apps=['001','002','003','shuju','attendance'];
-const shared=['html5-qrcode.min.js','xlsx.full.min.js','qrcode.min.js','work-plan-language.js','work-chain-ui.js','work-chain.css','sop-entry.js','sop-native.js','sop-native.css','sop-session.js','sop-dispatch-ui.js','sop-planning-ui.js','sop-people.js','ck-design.css','ck-office.css','labor-department.js','inbound-flow-ui.js','courier-ui.js','courier-rules.js','courier.css','attendance-ui.js','field-work.js','work-result-ui.js','test-data-reset.js','test-data-reset.css','employee-attendance.js','employee-attendance.css','employee-import.js','unload-trip-ui.js','unload-trip.css','unload-photos.js','unload-photos.css','native-lifecycle-ui.js','native-lifecycle.css','feedback-link-ui.js','feedback-link.css','access-ui.css'];
+const shared=['document-code.js','html5-qrcode.min.js','xlsx.full.min.js','qrcode.min.js','work-plan-language.js','work-chain-ui.js','work-chain.css','sop-entry.js','sop-native.js','sop-native.css','sop-session.js','sop-dispatch-ui.js','sop-planning-ui.js','sop-people.js','ck-design.css','ck-office.css','labor-department.js','inbound-flow-ui.js','courier-ui.js','courier-rules.js','courier.css','attendance-ui.js','field-work.js','work-result-ui.js','test-data-reset.js','test-data-reset.css','employee-attendance.js','employee-attendance.css','employee-import.js','unload-trip-ui.js','unload-trip.css','unload-photos.js','unload-photos.css','native-lifecycle-ui.js','native-lifecycle.css','feedback-link-ui.js','feedback-link.css','access-ui.css'];
 await mkdir(resolve(out,'shared'),{recursive:true});
 for(const f of shared)await copyFile(resolve(root,'shared',f),resolve(out,'shared',f));
 await mkdir(resolve(out,'templates'),{recursive:true});
@@ -38,5 +38,5 @@ await writeFile(resolve(out,'office-login/index.html'),'<!doctype html><html lan
 await copyFile(resolve(root,'docs/sop-acceptance.html'),resolve(out,'验收说明.html'));
 await writeFile(resolve(out,'_redirects'),'/sop/ / 302\n/sop / 302\n');
 await writeFile(resolve(out,'_headers'),'/*\n  Cache-Control: no-store\n  X-Content-Type-Options: nosniff\n  Referrer-Policy: same-origin\n');
-await writeFile(resolve(out,'release.json'),JSON.stringify({release:'20260928-putaway-batch',builtAt:new Date().toISOString(),modules:apps}));
+await writeFile(resolve(out,'release.json'),JSON.stringify({release:'20260929-scan-dispatch',builtAt:new Date().toISOString(),modules:apps}));
 console.log('Prepared five CK applications with attendance and unified design.');

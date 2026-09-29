@@ -1,5 +1,13 @@
 (function(){
  'use strict';
+ window.CKNativeTaskButton=function(job){
+  const b=document.createElement('button');b.type='button';b.className='btn btn-outline ck-native-task';
+  const title=document.createElement('strong'),info=document.createElement('span'),crew=document.createElement('small');
+  title.textContent=job.business_no||job.display_no||'未关联单据 / 연결 문서 없음';
+  info.textContent=[window.JOB_TYPE_LABEL?.[job.job_type]||job.job_type,job.customer].filter(Boolean).join(' · ');
+  crew.textContent='作业人员 / 작업자: '+(job.workers.map(w=>w.name).join('、')||'待收尾 / 마감 대기');
+  b.append(title,info,crew);b.onclick=async()=>{b.disabled=true;try{await CKOpenNativeJob(job);}finally{b.disabled=false;}};return b;
+ };
  const startActions=new Set(['v2_unload_job_start','v2_unplanned_unload_start','v2_inbound_job_start','v2_import_delivery_job_start','v2_outbound_load_start','v2_outbound_stock_op_start','v2_issue_handle_start','v2_pick_job_start','v2_pick_job_start_by_docs','v2_bulk_op_job_start','v2_ops_job_start','v2_verify_job_start']);
  window.CKInstallDispatch=function(){
   let lead=null;try{lead=JSON.parse(sessionStorage.getItem('ck_test_active_lead')||'null');}catch{}
@@ -26,6 +34,12 @@
   const original=window.api;const retries=new Map();
   window.api=async function(body){
    if(!startActions.has(body.action))return original(body);
+   // Freeze document numbers before the staff camera can start.
+   body=structuredClone(body);
+   const codes=[...(Array.isArray(body.pick_doc_nos)?body.pick_doc_nos:body.pick_doc_nos?String(body.pick_doc_nos).split(','):[]),body.external_inbound_no,body.work_order_no].filter(Boolean);
+   const scanError=codes.map(x=>window.CKDocumentCode?.documentCodeError(x)).find(Boolean);
+   if(scanError)return {ok:false,error:scanError};
+   await window.stopAllManagedQrScanners?.();
    const fingerprint=JSON.stringify(Object.fromEntries(Object.entries(body).filter(([k])=>!['client_req_id','worker_id','worker_name','handler_id','handler_name'].includes(k)).sort(([a],[b])=>a.localeCompare(b))));
    let pending=retries.get(fingerprint);
    if(!pending){const {startDepartment,departments}=await import('/shared/labor-department.js');const staff=await chooseStaff(startDepartment(body),departments);if(!staff)return {ok:false,error:'已取消派工'};pending={payload:{...body,client_req_id:body.client_req_id||crypto.randomUUID()},staff};retries.set(fingerprint,pending);}

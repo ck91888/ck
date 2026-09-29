@@ -145,11 +145,25 @@ export async function handleSop(b,env) {
    if(!['manager','dispatcher'].includes(u.role))fail('仅派审员可查看现场派工');
    const access=dispatchAccess(u);
    const rows=await all(env,`SELECT s.state,j.*,
-    (SELECT json_group_array(json_object('id',w.worker_id,'name',w.worker_name)) FROM v2_ops_job_workers w WHERE w.job_id=j.id AND w.left_at='') AS active_crew
+    ib.display_no AS inbound_no,ib.customer AS inbound_customer,
+    ob.display_no AS outbound_no,ob.wms_work_order_no AS outbound_external_no,ob.customer AS outbound_customer,
+    fb.display_no AS feedback_no,
+    (SELECT json_group_array(json_object('id',w.worker_id,'name',w.worker_name)) FROM v2_ops_job_workers w WHERE w.job_id=j.id AND w.left_at='') AS active_crew,
+    (SELECT json_group_array(pd.pick_doc_no) FROM v2_ops_job_pick_docs pd WHERE pd.job_id=j.id) AS pick_numbers,
+    (SELECT json_group_array(json_object('number',p.display_no,'customer',p.customer)) FROM ck_unload_plan_links l JOIN v2_inbound_plans p ON p.id=l.plan_id WHERE l.job_id=j.id ORDER BY l.position) AS unload_plans
     FROM sop_records s JOIN v2_ops_jobs j ON j.id=s.id
+    LEFT JOIN v2_inbound_plans ib ON j.related_doc_type='inbound_plan' AND ib.id=j.related_doc_id
+    LEFT JOIN v2_outbound_orders ob ON ob.id=CASE WHEN j.linked_outbound_order_id!='' THEN j.linked_outbound_order_id WHEN j.related_doc_type='outbound_order' THEN j.related_doc_id END
+    LEFT JOIN v2_field_feedbacks fb ON j.related_doc_type='field_feedback' AND fb.id=j.related_doc_id
     WHERE s.kind='dispatch' AND j.status NOT IN ('completed','cancelled') AND ${access.sql}
     ORDER BY j.updated_at DESC LIMIT 200`,...access.args);
-   return {ok:true,items:rows.map(r=>{const d=JSON.parse(r.state);return {id:r.id,job_type:r.job_type,status:r.status,source_type:r.related_doc_type,source_id:r.related_doc_id,lead_id:d.lead_id,last_lead:d.last_lead,display_no:r.display_no,workers:JSON.parse(r.active_crew||'[]'),owner:d.owner,estimated_minutes:d.estimated_minutes};})};
+   return {ok:true,items:rows.map(r=>{
+    const d=JSON.parse(r.state),plans=JSON.parse(r.unload_plans||'[]'),picks=JSON.parse(r.pick_numbers||'[]');
+    const numbers=r.job_type==='pick_direct'?picks:plans.length?plans.map(p=>p.number):[r.inbound_external_no||r.inbound_no||(r.related_doc_type==='work_order'?r.related_doc_id:'')||r.outbound_external_no||r.outbound_no||r.feedback_no||r.display_no];
+    const business_no=[...new Set(numbers.filter(Boolean))].join('、');
+    const customer=[...new Set(plans.length?plans.map(p=>p.customer).filter(Boolean):[r.customer||r.inbound_customer||r.outbound_customer].filter(Boolean))].join('、');
+    return {id:r.id,job_type:r.job_type,status:r.status,source_type:r.related_doc_type,source_id:r.related_doc_id,lead_id:d.lead_id,last_lead:d.last_lead,display_no:r.display_no,business_no,customer,workers:JSON.parse(r.active_crew||'[]'),owner:d.owner,estimated_minutes:d.estimated_minutes};
+   })};
   }
   if(b.action==='sop_dashboard') return await dashboard(env,u,b);
   if(b.action==='sop_updates'){

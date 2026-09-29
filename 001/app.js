@@ -116,19 +116,51 @@ async function cycleCameraAndRestart(restartFn) {
   }
 }
 // 通用启动包装：解析摄像头 → start → 注入切换按钮（restart=stop+本函数再调）
+var _managedQrScanners = new Map();
 function startManagedQrScanner(scanner, readerId, scanConfig, onSuccess, onError) {
-  return resolveCameraTarget().then(function(target) {
-    return scanner.start(target, scanConfig, onSuccess, onError || function() {}).then(function() {
-      ensureCameraSwitchButton(readerId, function() {
-        return scanner.stop().then(function() {
-          return startManagedQrScanner(scanner, readerId, scanConfig, onSuccess, onError);
-        }).catch(function() {
-          // stop 可能失败（已停），仍尝试 start
-          return startManagedQrScanner(scanner, readerId, scanConfig, onSuccess, onError);
-        });
-      });
-    });
+  var record={scanner:scanner,readerId:readerId,page:_currentPage,cancelled:false};
+  _managedQrScanners.set(scanner,record);
+  record.ready=resolveCameraTarget().then(async function(target) {
+    if(record.cancelled)return;
+    await scanner.start(target,scanConfig,function(decoded){
+      if(record.cancelled||record.page!==_currentPage||document.querySelector('dialog[open]'))return;
+      if(['inboundScanReader','pickCreateScanReader','pickStartScanReader','bulkScanReader'].includes(readerId)&&!acceptDocumentCode(decoded,readerId))return;
+      onSuccess(decoded);
+    },onError||function(){});
+    if(record.cancelled){await scanner.stop().catch(function(){});return;}
+    ensureCameraSwitchButton(readerId,async function(){record.cancelled=true;await scanner.stop().catch(function(){});return startManagedQrScanner(scanner,readerId,scanConfig,onSuccess,onError);});
   });
+  return record.ready;
+}
+async function stopAllManagedQrScanners(){
+  var records=Array.from(_managedQrScanners.values());
+  records.forEach(function(r){r.cancelled=true;});
+  // Reset only the instances captured here; a newly opened page may start a new camera.
+  ['_pickCreateScanner','_pickStartScanner','_inboundScanner','_bulkScanner','_unloadScanner','_obLoadScanner','_badgeScanner','_badgeModalScanner'].forEach(function(key){if(records.some(function(r){return r.scanner===window[key];}))window[key]=null;});
+  [['pickCreateScanBtn','扫码 / 스캔'],['pickStartScanBtn','扫码 / 스캔'],['ibScanBtn','相机扫码 / 카메라'],['bulkScanBtn','相机扫码 / 카메라']].forEach(function(v){var b=document.getElementById(v[0]);if(b)b.textContent=v[1];});
+  await Promise.all(records.map(function(r){return stopManagedQrScanner(r.scanner);}));
+}
+function stopManagedQrScanner(scanner){
+  var r=_managedQrScanners.get(scanner);
+  if(!r){try{return Promise.resolve(scanner.stop()).catch(function(){});}catch(e){return Promise.resolve();}}
+  r.cancelled=true;
+  if(!r.stopping)r.stopping=(async function(){
+    try{await r.ready;}catch(e){}
+    try{await scanner.stop();}catch(e){}
+    if(_managedQrScanners.get(scanner)===r)_managedQrScanners.delete(scanner);
+    // A newer scanner can already own the same reader after navigation.
+    if(!Array.from(_managedQrScanners.values()).some(function(x){return x.readerId===r.readerId;})){
+      removeCameraSwitchButton(r.readerId);var el=document.getElementById(r.readerId);if(el)el.innerHTML='';
+    }
+  })();
+  return r.stopping;
+}
+function acceptDocumentCode(value,targetId){
+  var error=window.CKDocumentCode?.documentCodeError(value)||'';
+  var target=document.getElementById(targetId),id=targetId+'-scan-error',hint=document.getElementById(id);
+  if(error&&target&&!hint){hint=document.createElement('p');hint.id=id;hint.className='ck-scan-error';hint.setAttribute('role','status');target.after(hint);}
+  if(hint)hint.textContent=error;
+  return !error;
 }
 
 // ===== Action Lock — 防连点 =====
@@ -339,6 +371,7 @@ function goBack() {
 }
 
 function showPage(name) {
+  if(name!==_currentPage)stopAllManagedQrScanners();
   // Stop polling
   if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
 
@@ -1284,6 +1317,7 @@ async function resolveInboundCode(btnEl) {
   var inp = document.getElementById("inboundCodeInput");
   var code = (inp ? inp.value : '').trim();
   if (!code) { alert("请输入或扫描单号 / 번호를 입력하세요"); return; }
+  if(!acceptDocumentCode(code,"inboundCodeInput"))return;
   var resultEl = document.getElementById("ibResolveResult");
   var extFields = document.getElementById("ibExternalFields");
   var bc = _resolveBizClass();
@@ -1365,7 +1399,7 @@ function startInboundScan() {
 }
 function stopInboundScan() {
   if (_inboundScanner) {
-    try { _inboundScanner.stop(); } catch(e) {}
+    stopManagedQrScanner(_inboundScanner);
     removeCameraSwitchButton("inboundScanReader");
     _inboundScanner = null;
     var el = document.getElementById("inboundScanReader");
@@ -3312,6 +3346,7 @@ function addPickCreateDoc() {
   var inp = document.getElementById("pickCreateDocInput");
   var val = (inp ? inp.value : "").trim();
   if (!val) return;
+  if(!acceptDocumentCode(val,'pickCreateDocInput')){if(inp){inp.value='';inp.focus();}return;}
   if (_pickCreateDocNos.indexOf(val) === -1) {
     _pickCreateDocNos.push(val);
     renderPickDocList("pickCreateDocList", _pickCreateDocNos, "_pickCreateDocNos", "pickCreateDocList");
@@ -3353,7 +3388,7 @@ function togglePickCreateScan() {
 
 function stopPickCreateScan() {
   if (_pickCreateScanner) {
-    try { _pickCreateScanner.stop(); } catch(e) {}
+    stopManagedQrScanner(_pickCreateScanner);
     removeCameraSwitchButton("pickCreateScanReader");
     _pickCreateScanner = null;
     var el = document.getElementById("pickCreateScanReader");
@@ -3396,6 +3431,7 @@ function addPickStartDoc() {
   var inp = document.getElementById("pickStartDocInput");
   var val = (inp ? inp.value : "").trim();
   if (!val) return;
+  if(!acceptDocumentCode(val,'pickStartDocInput')){if(inp){inp.value='';inp.focus();}return;}
   if (_pickStartDocNos.indexOf(val) === -1) {
     _pickStartDocNos.push(val);
     renderPickDocList("pickStartDocList", _pickStartDocNos, "_pickStartDocNos", "pickStartDocList");
@@ -3492,7 +3528,7 @@ function togglePickStartScan() {
 
 function stopPickStartScan() {
   if (_pickStartScanner) {
-    try { _pickStartScanner.stop(); } catch(e) {}
+    stopManagedQrScanner(_pickStartScanner);
     removeCameraSwitchButton("pickStartScanReader");
     _pickStartScanner = null;
     var el = document.getElementById("pickStartScanReader");
@@ -3976,7 +4012,7 @@ function startBulkScan() {
 
 function stopBulkScan() {
   if (_bulkScanner) {
-    try { _bulkScanner.stop(); } catch(e) {}
+    stopManagedQrScanner(_bulkScanner);
     removeCameraSwitchButton("bulkScanReader");
     _bulkScanner = null;
     var el = document.getElementById("bulkScanReader");
@@ -3992,6 +4028,7 @@ async function startBulkJob(btnEl) {
     alert("请输入或扫描工单号\n작업지시 번호를 입력하거나 스캔하세요");
     return;
   }
+  if(!acceptDocumentCode(workOrderNo,'bulkOrderInput'))return;
   withActionLock('startBulkJob', btnEl || null, '提交中.../저장중...', async function() {
     var res = await api({
       action: "v2_bulk_op_job_start",

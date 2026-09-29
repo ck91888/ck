@@ -2,3 +2,5 @@
 .ck-dispatch-controls[hidden]{display:none!important}.ck-dispatch-controls p{margin:4px 0;font-size:13px}.ck-dispatch-controls button{min-height:40px;padding:8px 12px}.ck-dispatch-controls .ck-buttons{display:flex;flex-wrap:wrap;gap:8px}
 .ck-native-people{width:min(620px,94vw);max-height:90vh;overflow:auto;padding:20px;border:1px solid #ccd6e0;border-radius:8px}.ck-native-people::backdrop{background:#123a3455}
 .ck-unplanned-resume{padding:12px 0;border-bottom:1px solid #cdded9}.ck-unplanned-resume p{margin:5px 0 9px;font-size:13px;line-height:1.6}.ck-unplanned-resume small{color:#506a63}
+
+.ck-native-task{display:flex!important;flex-direction:column;align-items:flex-start;gap:5px;text-align:left;white-space:normal;overflow-wrap:anywhere;min-width:0;width:100%}.ck-native-task strong{font-size:16px}.ck-native-task span,.ck-native-task small{font-size:13px;font-weight:400}.ck-scan-error{color:#a23a26;font-size:14px;margin:8px 0}

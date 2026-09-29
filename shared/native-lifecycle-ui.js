@@ -20,6 +20,7 @@
   async function editPeople(destination=''){
    if(editing)return;editing=true;let dialog,picker;
    try{
+    await window.stopAllManagedQrScanners?.();
     const r=await detail(),jobId=r.job.id,record=JSON.parse(r.dispatch.state),workers=r.workers.filter(w=>!w.left_at).map(w=>({id:w.worker_id,name:w.worker_name}));
     dialog=document.createElement('dialog');dialog.className='ck-workflow ck-native-people';dialog.innerHTML='<form><h2>调整本任务人员 / 작업 인원 변경</h2><p>移除的人结束本段计时，新增的人从保存时开始；留在任务中的人员连续计时。全部移除后任务保留待收尾。</p><p class="ck-muted">삭제한 인원은 종료, 추가한 인원은 저장 시 시작합니다.</p>'+CKPeopleFields()+'<p role="alert"></p><div class="ck-buttons"><button type="submit">保存人员 / 인원 저장</button><button type="button" data-cancel>取消 / 취소</button></div></form>';
     document.body.append(dialog);dialog.showModal();const form=dialog.querySelector('form'),error=dialog.querySelector('[role=alert]');picker=CKPeoplePicker(form,{workers,leadId:record.lead_id,error,allowEmpty:true});let requestId=null,fingerprint='';
@@ -41,8 +42,16 @@
   window.interruptToUnload=()=>editPeople('unload');window.interruptToLoad=()=>editPeople('outbound_load');
   document.querySelectorAll('[onclick="interruptToUnload()"]').forEach(b=>b.textContent='调人去卸货 / 하차 인원 조정');
   document.querySelectorAll('[onclick="interruptToLoad()"]').forEach(b=>b.textContent='调人去装货 / 상차 인원 조정');
-  const switchMode=window.switchPickMode;window.switchPickMode=function(mode){switchMode(mode);$('pickModeHint').textContent='扫描拣货单，分配操作人员后开始计时。 / 피킹번호 스캔 후 작업자를 배정합니다.';};
-  $('pickModeCreateBtn').textContent='新建拣货趟次 / 피킹 차수 생성';
+  const switchMode=window.switchPickMode;window.switchPickMode=function(){switchMode('start');$('pickModeBar').hidden=true;};
+  document.querySelector('#pickStartSection .card-title').textContent='扫描拣货单并派工 / 피킹번호 스캔·배정';
+  document.querySelector('#pickStartSection .card-title').nextElementSibling.textContent='可连续扫描多个外部拣货单号，点“分配人员并开始”后再扫工牌。确认后开始本趟计时。 / 외부 피킹번호를 스캔한 뒤 인원을 배정하세요.';
+  document.querySelector('[onclick="submitStartPickByDocs(this)"]').textContent='分配人员并开始 / 인원 배정·시작';
+  const lookupHint=window.renderPickStartLookupHint;window.renderPickStartLookupHint=function(){
+   const el=$('pickStartLookupHint');if(!el)return;el.replaceChildren();
+   for(const no of _pickStartDocNos){const info=_pickStartLookupCache[no],line=document.createElement('div');
+    line.textContent=no+' · '+(!info||info._state==='loading'?'识别中 / 확인 중':info._state==='error'?'暂未取得状态，开始前会再次校验 / 시작 시 재확인':!info.found?'新拣货单，待派工 / 새 피킹번호':info.pick_status==='completed'?'已完成，请核对单号 / 완료된 번호':'已登记，请继续原趟次 / 기존 작업 계속');el.append(line);
+   }
+  };
   document.querySelector('[onclick="finishPickJob(this)"]').textContent='确认并结束本趟拣货 / 확인 후 차수 종료';
   window.submitCreatePickTrip=async function(button){
    if(!_pickCreateDocNos.length){alert('请先添加拣货单号 / 피킹번호를 추가하세요');return;}
@@ -63,7 +72,7 @@
   };
   window.loadPickActiveList=async function(){
    const host=$('pickActiveList');if(!host)return;host.textContent='加载中 / 로딩 중';
-   try{const r=await CKSession.request('sop_dispatch_list'),jobs=r.items.filter(j=>j.job_type==='pick_direct');host.replaceChildren();for(const job of jobs){const b=document.createElement('button');b.type='button';b.className='btn btn-outline';b.textContent=(job.display_no||job.title||job.id)+' · '+job.workers.map(w=>w.name).join('、')+' · 继续管理 / 작업 관리';b.onclick=()=>CKOpenNativeJob(job);host.append(b);}if(!jobs.length)host.textContent='暂无进行中拣货 / 진행 중인 피킹 없음';}catch(e){host.textContent=e.message;}
+   try{const r=await CKSession.request('sop_dispatch_list'),jobs=r.items.filter(j=>j.job_type==='pick_direct');host.replaceChildren();for(const job of jobs)host.append(CKNativeTaskButton(job));if(!jobs.length)host.textContent='暂无进行中拣货 / 진행 중인 피킹 없음';}catch(e){host.textContent=e.message;}
   };
   // Opening an existing dispatch must never call the old worker-join route.
   // The signed-in dispatcher may already be a member of this exact crew.

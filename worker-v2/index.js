@@ -1,3 +1,4 @@
+import {documentCodeError} from '../shared/document-code.js';
 import {uploadBatchMaterial} from './batch-work-materials.js';
 import {accessEnabled,accessGuard,accessAdminAction,accessFileAllowed} from './access-control.js';
 import {uploadUnloadPhoto,unloadPhotos,inboundAttachmentRead} from './unload-photos.js';
@@ -7487,6 +7488,8 @@ route("v2_pick_job_start", async (body, env) => {
     pick_doc_nos.map(s => String(s || '').trim()).filter(Boolean)
   ));
   if (pick_doc_nos.length === 0) return err("missing pick_doc_nos");
+  const scanError=pick_doc_nos.map(documentCodeError).find(Boolean);
+  if(scanError)return err(scanError);
 
   return withIdem(env, body, "v2_pick_job_start", async () => {
     const t = now();
@@ -7559,6 +7562,8 @@ route("v2_pick_job_start_by_docs", async (body, env) => {
     pick_doc_nos.map(s => String(s || '').trim()).filter(Boolean)
   ));
   if (pick_doc_nos.length === 0) return err("missing pick_doc_nos");
+  const scanError=pick_doc_nos.map(documentCodeError).find(Boolean);
+  if(scanError)return err(scanError);
 
   return withIdem(env, body, "v2_pick_job_start_by_docs", async () => {
     const t = now();
@@ -7678,6 +7683,7 @@ route("v2_pick_doc_lookup", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
   const docNo = String(body.pick_doc_no || "").trim();
   if (!docNo) return err("missing pick_doc_no");
+  if(documentCodeError(docNo))return err(documentCodeError(docNo));
 
   const row = await env.DB.prepare(
     `SELECT pd.*, j.id as j_id, j.display_no as j_display_no, j.status as j_status,
@@ -7861,6 +7867,8 @@ route("v2_pick_job_add_docs", async (body, env) => {
     pick_doc_nos = pick_doc_nos.split(',').map(s => s.trim()).filter(Boolean);
   }
   if (pick_doc_nos.length === 0) return err("missing pick_doc_nos");
+  const scanError=pick_doc_nos.map(documentCodeError).find(Boolean);
+  if(scanError)return err(scanError);
 
   return withIdem(env, body, "v2_pick_job_add_docs", async () => {
     const t = now();
@@ -8207,6 +8215,7 @@ route("v2_bulk_op_job_start", async (body, env) => {
   const work_order_no = String(body.work_order_no || "").trim();
   if (!worker_id) return err("missing worker_id");
   if (!work_order_no) return err("missing work_order_no");
+  if(documentCodeError(work_order_no))return err(documentCodeError(work_order_no));
 
   return withIdem(env, body, "v2_bulk_op_job_start", async () => {
     const t = now();
