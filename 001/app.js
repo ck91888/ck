@@ -753,8 +753,10 @@ async function checkMyActiveJob() {
 
 function goMyTask() {
   if (!_activeJobId) return;
+  var jobId = _activeJobId;
   // Get job info from checkMyActiveJob's last result to determine page
-  api({ action: "v2_ops_job_detail", job_id: _activeJobId }).then(function(res) {
+  api({ action: "v2_ops_job_detail", job_id: jobId }).then(function(res) {
+    if (_activeJobId !== jobId) return;
     if (!res || !res.ok || !res.job) { goPage("home"); return; }
     var jt = res.job.job_type || "";
     if (jt === "unload") goPage("unload");
@@ -3887,6 +3889,54 @@ var _bulkScanner = null;
 
 var _bulkElapsedTimer = null;
 var _bulkStartedAt = null;
+var _bulkFormJobId = null;
+var _bulkSubmittingJobId = null;
+var _bulkLoadSequence = 0;
+
+function _bulkResetForm(jobId) {
+  _bulkFormJobId = jobId || null;
+  _bulkStopElapsedTimer();
+  _bulkStartedAt = null;
+  for (var i = 0; i < _bulkOutputFieldIds.length; i++) {
+    var field = document.getElementById(_bulkOutputFieldIds[i]);
+    if (field) field.value = "0";
+  }
+  for (var id of ['bulkCustomer', 'bulkRemark', 'bulkResultNote', 'bulkOrderInput']) {
+    var input = document.getElementById(id);
+    if (input) { input.value = ''; input.readOnly = false; input.style.background = ''; }
+  }
+  var forklift = document.getElementById('bulkUsedForklift');
+  if (forklift) forklift.checked = false;
+  for (var id of ['bulkCustomerRequired','bulkCustomerHint']) {
+    var hint = document.getElementById(id); if (hint) hint.style.display = '';
+  }
+  for (var id of ['bulkActiveOrderNo','bulkStartTime','bulkElapsed','bulkWorkerCount']) {
+    var text = document.getElementById(id); if (text) text.textContent = '--';
+  }
+  var card = document.getElementById('bulkLinkedObCard');if (card) card.style.display = 'none';
+  var body = document.getElementById('bulkLinkedObBody');if (body) body.innerHTML = '';
+  renderWorkers('bulkWorkers', []);
+  _bulkSetSubmitting(!!jobId && _bulkSubmittingJobId === jobId);
+}
+
+function _bulkBindForm(jobId) {
+  if (_bulkFormJobId !== jobId) _bulkResetForm(jobId);
+  else _bulkSetSubmitting(_bulkSubmittingJobId === jobId);
+}
+
+function _bulkRestoreCustomer(job) {
+  var input = document.getElementById('bulkCustomer');
+  var linked = !!job.linked_outbound_order_id;
+  if (input) {
+    // Never overwrite an unsaved customer on a polling refresh of this same job.
+    if (linked || !input.value) input.value = job.customer || '';
+    input.readOnly = linked;
+    input.style.background = linked ? '#f5f5f5' : '';
+  }
+  for (var id of ['bulkCustomerRequired','bulkCustomerHint']) {
+    var hint = document.getElementById(id);if (hint) hint.style.display = linked ? 'none' : '';
+  }
+}
 
 function _bulkSwitchState(state) {
   // state: 'idle' | 'working'
@@ -3940,6 +3990,8 @@ function _bulkStopElapsedTimer() {
 }
 
 function _bulkEnterWorkingState(workOrderNo, jobDetail) {
+  _bulkBindForm(_activeJobId);
+  if (jobDetail) _bulkRestoreCustomer(jobDetail);
   _bulkSwitchState("working");
   var noEl = document.getElementById("bulkActiveOrderNo");
   if (noEl) noEl.textContent = workOrderNo || "--";
@@ -3957,24 +4009,32 @@ function _bulkEnterWorkingState(workOrderNo, jobDetail) {
     } catch(e) { stEl.textContent = "--"; }
   }
   _bulkStartElapsedTimer();
-  refreshBulkWorkers();
 }
 
 function initBulkOp() {
+  var sequence = ++_bulkLoadSequence, jobId = _activeJobId;
   _bulkStopElapsedTimer();
-  if (_activeJobId) {
+  if (jobId) {
+    _bulkBindForm(jobId);
     // Resume into working state
     _bulkSwitchState("working");
-    refreshBulkWorkers();
-    api({ action: "v2_ops_job_detail", job_id: _activeJobId }).then(function(res) {
-      if (res && res.ok && res.job) {
+    return api({ action: "v2_ops_job_detail", job_id: jobId }).then(function(res) {
+      if (sequence !== _bulkLoadSequence || _activeJobId !== jobId || _currentPage !== 'bulk_op') return;
+      if (res && res.ok && res.job && res.job.id === jobId && res.job.job_type === 'bulk_op') {
         _bulkEnterWorkingState(res.job.related_doc_id || "", res.job);
+        renderWorkers('bulkWorkers', res.workers);
         // Worker count
         var wcEl = document.getElementById("bulkWorkerCount");
         if (wcEl) wcEl.textContent = (res.job.active_worker_count || 0) + " 人/명";
+        startJobPoll('bulk');
+      } else {
+        _bulkShowError(res && res.error || '无法读取当前工单，请返回后重试 / 작업 정보를 다시 확인하세요');
       }
+    }).catch(function(error) {
+      if (sequence === _bulkLoadSequence && _activeJobId === jobId && _currentPage === 'bulk_op') _bulkShowError(error.message);
     });
   } else {
+    _bulkResetForm(null);
     _bulkSwitchState("idle");
   }
   startJobPoll("bulk");
@@ -4029,17 +4089,21 @@ async function startBulkJob(btnEl) {
     return;
   }
   if(!acceptDocumentCode(workOrderNo,'bulkOrderInput'))return;
-  withActionLock('startBulkJob', btnEl || null, '提交中.../저장중...', async function() {
+  var sequence = ++_bulkLoadSequence;
+  return withActionLock('startBulkJob', btnEl || null, '提交中.../저장중...', async function() {
     var res = await api({
       action: "v2_bulk_op_job_start",
       work_order_no: workOrderNo,
       worker_id: getWorkerId(),
       worker_name: getWorkerName()
     });
+    if (sequence !== _bulkLoadSequence || _currentPage !== 'bulk_op') return;
     if (res && res.ok) {
       saveActiveJob(res.job_id, res.worker_seg_id);
       // Switch to working state
       _bulkEnterWorkingState(workOrderNo, null);
+      refreshBulkWorkers();
+      startJobPoll("bulk");
 
       // 客户字段：系统单 → 自动带出 + 只读；非系统工单 → 可编辑且必填
       var custEl = document.getElementById("bulkCustomer");
@@ -4142,6 +4206,8 @@ async function bulkLeave(btnEl) {
 
 async function finishBulkJob(btnEl) {
   if (!_activeJobId) { alert("没有进行中的任务 / 진행 중인 작업 없음"); return; }
+  var jobId = _activeJobId;
+  if (_bulkFormJobId !== jobId) { initBulkOp(); return; }
   // 客户字段（系统单 readonly 已带出；非系统单必填）
   var bulkCustomerVal = ((document.getElementById("bulkCustomer") || {}).value || "").trim();
   var custReq = document.getElementById("bulkCustomerRequired");
@@ -4152,12 +4218,14 @@ async function finishBulkJob(btnEl) {
     return;
   }
   if (!confirm("确认完成本次大货操作？\n이번 대량화물 작업을 완료하시겠습니까?")) return;
-  withActionLock('finishBulkJob', btnEl || null, '提交中.../저장중...', async function() {
+  return withActionLock('finishBulkJob', btnEl || null, '提交中.../저장중...', async function() {
     // Enter submitting state
+    _bulkSubmittingJobId = jobId;
     _bulkSetSubmitting(true);
+    try {
     var res = await api({
       action: "v2_bulk_op_job_finish",
-      job_id: _activeJobId,
+      job_id: jobId,
       worker_id: getWorkerId(),
       customer: bulkCustomerVal,
       packed_sku_count: parseInt(document.getElementById("bulkPackedSku").value) || 0,
@@ -4175,7 +4243,9 @@ async function finishBulkJob(btnEl) {
       result_note: (document.getElementById("bulkResultNote") || {}).value || ""
     });
 
+    if (_activeJobId !== jobId || _bulkFormJobId !== jobId || _currentPage !== 'bulk_op') return;
     if (res && res.ok && !res.already_completed) {
+      _bulkResetForm(null);
       // Success — exit
       _bulkStopElapsedTimer();
       alert("大货操作已完成 / 대량화물 작업 완료");
@@ -4183,6 +4253,7 @@ async function finishBulkJob(btnEl) {
       clearActiveJob();
       goPage("order_op_menu");
     } else if (isAlreadyCompletedResponse(res)) {
+      _bulkResetForm(null);
       _bulkStopElapsedTimer();
       try { stopBulkScan(); } catch(e) {}
       handleFinishSuccessAndExit("任务已完成，已返回上一级\n작업이 이미 완료되어 이전으로 이동", function() { goPage('order_op_menu'); });
@@ -4207,14 +4278,23 @@ async function finishBulkJob(btnEl) {
       _bulkSetSubmitting(false);
       _bulkShowError("失败/실패: " + (res ? (res.message || res.error) : "unknown"));
     }
+    } catch(error) {
+      if (_activeJobId === jobId && _bulkFormJobId === jobId && _currentPage === 'bulk_op') _bulkShowError(error.message || '提交失败，请重试 / 저장 실패');
+    } finally {
+      if (_bulkSubmittingJobId === jobId) _bulkSubmittingJobId = null;
+      if (_bulkFormJobId === jobId) _bulkSetSubmitting(false);
+    }
   });
 }
 
 async function refreshBulkWorkers() {
-  if (!_activeJobId) return;
-  var res = await api({ action: "v2_ops_job_detail", job_id: _activeJobId });
-  if (res && res.ok) {
+  var jobId = _activeJobId, sequence = _bulkLoadSequence;
+  if (!jobId || _currentPage !== 'bulk_op') return;
+  var res = await api({ action: "v2_ops_job_detail", job_id: jobId });
+  if (sequence !== _bulkLoadSequence || _activeJobId !== jobId || _bulkFormJobId !== jobId || _currentPage !== 'bulk_op') return;
+  if (res && res.ok && res.job && res.job.id === jobId) {
     renderWorkers("bulkWorkers", res.workers);
+    _bulkRestoreCustomer(res.job);
     // Update worker count in card
     var wcEl = document.getElementById("bulkWorkerCount");
     if (wcEl && res.job) wcEl.textContent = (res.job.active_worker_count || 0) + " 人/명";
