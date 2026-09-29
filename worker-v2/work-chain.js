@@ -18,8 +18,42 @@ export async function chainAllocation(env, data, knownOrders) {
  const links = data.links || [], ids = [...new Set(links.map(l => l.outbound_id))];
  const orders = knownOrders || (ids.length ? (await q(env, `SELECT id,status,display_no,expected_ship_at FROM v2_outbound_orders WHERE id IN (SELECT value FROM json_each(?))`, JSON.stringify(ids)).all()).results : []);
  const current = links.filter(l => orders.some(o => o.id === l.outbound_id && o.status !== 'cancelled'));
- const quantity = Number(data.result?.quantity ?? data.planned_quantity) || 0, unit = data.result?.unit || data.planned_unit || '';
+ // Input cargo and packed output need not have the same unit (cartons -> pallets).
+ const basis = data.result || data.shipping_basis;
+ const quantity = Number(basis?.quantity ?? data.planned_quantity) || 0, unit = basis?.unit || data.planned_unit || '';
  return {quantity, unit, used: current.reduce((sum,l) => sum + Number(l.quantity), 0), links: current, orders};
+}
+export function assertShippingResult(result, links) {
+ const planned = links.filter(l => l.phase === 'planned');
+ if (!planned.length) return;
+ const quantities = new Map();
+ for (const l of planned) quantities.set(l.unit, (quantities.get(l.unit) || 0) + Number(l.quantity));
+ const booked = [...quantities].map(([u,n]) => n + ' ' + u).join('、');
+ if (planned.some(l => l.unit !== result.unit)) throw Error(`成果单位不一致：本次填写 ${result.quantity} ${result.unit}，已预约出库 ${booked}。箱数与托数不能直接比较，请联系办公室在作业计划中调整出库数量与单位。 / 출고 예약과 완료 단위가 다릅니다.`);
+ const total = quantities.get(result.unit);
+ if (total > Number(result.quantity)) throw Error(`实际成果不足：本次填写 ${result.quantity} ${result.unit}，已预约出库 ${total} ${result.unit}，相差 ${total-Number(result.quantity)} ${result.unit}。请核实实际成果或调整出库预约。 / 완료 수량이 출고 예약보다 적습니다.`);
+}
+export async function shippingBasisStatements(env, row, data, body, user, t) {
+ if (!workChainEnabled(env) || data.result || ['closed','cancelled'].includes(data.status)) throw Error('只能调整尚未完成的出库预约');
+ if (!['manager','service'].includes(user.role)) throw Error('请由办公室调整出库数量与单位');
+ if (data.operation_kind === 'direct_forward') throw Error('直接转发未加工，请按原货物单位安排出库');
+ const quantity = positive(body.quantity), unit = str(body.unit), reason = str(body.reason);
+ if (!['箱','件','托','单','批'].includes(unit)) throw Error('出库单位无效');
+ if (!reason) throw Error('请填写调整说明');
+ const a = await chainAllocation(env,data), allocations = body.allocations;
+ if (!Array.isArray(allocations) || allocations.length !== a.links.length || new Set(allocations.map(l=>l.outbound_id)).size !== allocations.length || allocations.some(l=>!a.links.some(old=>old.outbound_id===l.outbound_id))) throw Error('出库预约已变化，请刷新后逐单核对');
+ if (a.links.some(l=>l.phase!=='planned') || a.orders.some(o=>frozen.includes(o.status)&&o.status!=='cancelled')) throw Error('已确认或已出库的计划不能调整');
+ const values = new Map(allocations.map(l=>[l.outbound_id,positive(l.quantity)]));
+ if ([...values.values()].reduce((n,v)=>n+v,0)>quantity) throw Error('预约合计超过预计可出库总数量');
+ const statements=[];
+ for (const l of a.links) {
+  const loading=await q(env,"SELECT id FROM v2_ops_jobs WHERE related_doc_type='outbound_order' AND related_doc_id=? AND job_type='load_outbound' AND status IN ('pending','working','completed') LIMIT 1",l.outbound_id).first();
+  if (loading) throw Error('已开始装货的计划不能调整');
+  statements.push(q(env,'UPDATE v2_outbound_orders SET planned_box_count=?,planned_pallet_count=?,updated_at=? WHERE id=?',unit==='箱'?values.get(l.outbound_id):0,unit==='托'?values.get(l.outbound_id):0,t,l.outbound_id));
+ }
+ data.shipping_basis={quantity,unit,reason:reason.slice(0,4000),by:user.name,at:t};
+ data.links=(data.links||[]).map(l=>values.has(l.outbound_id)?{...l,quantity:values.get(l.outbound_id),unit,adjustment_reason:reason.slice(0,4000)}:l);
+ return [...statements,...notifyMaterialChange(env,row,user,t,'出库数量或单位已调整，请重新确认')];
 }
 export function chainEvent(env, row, data, user, request, action, t, result = {}) {
  const revision = row.revision + 1;
@@ -85,7 +119,7 @@ export async function workMaterialRead(body,env,user) {
  const rows=(await q(env,`SELECT * FROM sop_records WHERE kind='need' AND json_extract(state,'$.status') NOT IN ('closed','cancelled') AND (?='' OR id LIKE ? OR json_extract(state,'$.customer') LIKE ? OR json_extract(state,'$.title') LIKE ?)${dep} ORDER BY updated_at DESC LIMIT 31 OFFSET ?`,search,...Array(3).fill('%'+search+'%'),...(user.role==='manager'?[]:user.departments||[]),offset).all()).results;
  const ids=[...new Set(rows.flatMap(row=>(JSON.parse(row.state).links||[]).map(l=>l.outbound_id)))];
  const orders=ids.length?(await q(env,'SELECT id,status,display_no,expected_ship_at FROM v2_outbound_orders WHERE id IN (SELECT value FROM json_each(?))',JSON.stringify(ids)).all()).results:[];
- const items=await Promise.all(rows.slice(0,30).map(async row=>{const data=JSON.parse(row.state),a=await chainAllocation(env,data,orders);return {id:row.id,revision:row.revision,department:row.department,...data,remaining:Math.max(0,a.quantity-a.used),schedule_unit:a.unit,shipping_plans:a.orders.filter(o=>(data.links||[]).some(l=>l.outbound_id===o.id))};}));
+ const items=await Promise.all(rows.slice(0,30).map(async row=>{const data=JSON.parse(row.state),a=await chainAllocation(env,data,orders);return {id:row.id,revision:row.revision,department:row.department,...data,remaining:Math.max(0,a.quantity-a.used),schedule_unit:a.unit,schedule_quantity:a.quantity,shipping_plans:a.orders.filter(o=>(data.links||[]).some(l=>l.outbound_id===o.id))};}));
  return {ok:true,items,more:rows.length>30,offset};
 }
 export function notifyMaterialChange(env,row,user,t,summary) {

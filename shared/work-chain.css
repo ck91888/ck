@@ -31,4 +31,9 @@
 .chain-forward button{margin-top:10px}
 .chain-forward p{font-size:13px}
 .chain-schedule p{overflow-wrap:anywhere}
+.chain-basis{margin-top:16px;padding:14px;border:1px solid #cfddd8;border-radius:8px}
+.chain-basis summary{cursor:pointer;font-weight:600;color:#17584b}
+.chain-basis-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.chain-basis label{display:block;margin:12px 0}.chain-basis input,.chain-basis select{width:100%;box-sizing:border-box;min-width:0}
+.chain-basis .chain-booking{overflow-wrap:anywhere}
 @media(max-width:650px){.chain-upload{grid-template-columns:1fr}.chain-upload p{grid-column:1}.chain-selected a{float:none;display:block;margin-top:8px}.chain-files th:nth-child(2),.chain-files td:nth-child(2){display:none}.chain-files td{padding:8px 5px}.chain-files td:last-child{min-width:90px}.chain-search button{font-size:13px}}

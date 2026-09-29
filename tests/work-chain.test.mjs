@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import worker from '../worker-v2/index.js';
 import {database} from './d1-adapter.mjs';
-import {guardWorkChain,chainNeed} from '../worker-v2/work-chain.js';
+import {guardWorkChain,chainNeed,shippingBasisStatements} from '../worker-v2/work-chain.js';
 function setup(){
  const DB=database(),objects=new Map(),env={DB,SOP_ENVIRONMENT:'staging',SOP_UPGRADE_ENABLED:'true',SOP_WORK_CHAIN_ENABLED:'true',SOP_ACCESS_CONTROL:'true',SOP_ACCEPT_NEW:'true',SOP_USERS_JSON:JSON.stringify([{id:'M',name:'Fixture manager',role:'manager',key:'work-chain-fixture-only'}]),R2_BUCKET:{async put(key,body,meta){objects.set(key,{body:await new Response(body).arrayBuffer(),httpMetadata:meta.httpMetadata});},async get(key){return objects.get(key);},async delete(key){objects.delete(key);}}};let cookie='';
  async function raw(body){const multipart=body instanceof FormData;const r=await worker.fetch(new Request('https://test.local/api',{method:'POST',headers:{Cookie:cookie,...(!multipart?{'Content-Type':'application/json'}:{})},body:multipart?body:JSON.stringify(body)}),env);if(r.headers.has('set-cookie'))cookie=r.headers.get('set-cookie').split(';')[0];return r.json();}
@@ -43,6 +43,55 @@ test('pending work can be booked and issued; actual loading waits for review; re
  assert.equal(await guardWorkChain({action:'v2_outbound_load_start',order_id:b.id},s.env),null);
  assert.match(await guardWorkChain({action:'v2_outbound_load_start',order_id:a.id},s.env),/已取消/);
  assert.equal(s.DB.raw.prepare('SELECT count(*) n FROM v2_ops_jobs').get().n,1,'only the actual work created a labor job');
+});
+test('carton input can be packed into pallet output without rewriting input cargo or inventing labor',async()=>{
+ const s=setup();await s.login();const n=await s.need({planned_quantity:28});const ob=await s.schedule(n,2);
+ const task=await s.call('sop_task_create',{department:'bulk',title:'Fixture palletizing',job_type:'bulk_op',need_id:n.id,workers:[{id:'FIXTURE-A',name:'Fixture A'}],lead_id:'FIXTURE-A',estimated_minutes:10});
+ await s.change('sop_task_start',task.id);
+ const finish=result=>s.change('sop_task_complete_review',task.id,{result,decision:'pass',reason:'Fixture verified'});
+ let r=await finish({quantity:2,unit:'托',operated_box_count:28,pallet_count:2});assert.equal(r.ok,false);assert.match(r.error,/单位不一致.*2 托.*2 箱/);
+ assert.equal((await s.get(task.id)).status,'working');
+ const payload={quantity:2,unit:'托',reason:'Fixture packaging output',allocations:[{outbound_id:ob.id,quantity:2}],client_req_id:'fixture-basis-once'};
+ r=await s.change('sop_need_shipping_basis',n.id,payload);assert.equal(r.ok,true,r.error);
+ const revision=r.revision;assert.equal((await s.change('sop_need_shipping_basis',n.id,payload)).revision,revision,'retry must not repeat adjustment');
+ const need=await s.get(n.id);assert.equal(need.planned_quantity,28);assert.equal(need.planned_unit,'箱');assert.equal(need.shipping_basis.unit,'托');assert.equal(need.links[0].unit,'托');
+ let order=s.DB.raw.prepare('SELECT * FROM v2_outbound_orders WHERE id=?').get(ob.id);assert.equal(order.planned_box_count,0);assert.equal(order.planned_pallet_count,2);assert.equal(order.warehouse_ack_required,1);
+ const resolved=await s.call('sop_field_resolve',{code:task.id});assert.equal(resolved.shipping.unit,'托');assert.equal(resolved.shipping.quantity,2);assert.equal(resolved.shipping.used,2);
+ r=await finish({quantity:1,unit:'托'});assert.equal(r.ok,false);assert.match(r.error,/实际成果不足.*1 托.*2 托.*1 托/);
+ assert.equal((await s.get(task.id)).status,'working');assert.equal(s.DB.raw.prepare('SELECT count(*) n FROM v2_ops_job_results').get().n,0);
+ r=await finish({quantity:2,unit:'托',operated_box_count:28,pallet_count:2});assert.equal(r.ok,true,r.error);
+ assert.equal((await s.get(n.id)).status,'linked');assert.equal((await s.get(n.id)).links[0].phase,'confirmed');
+ order=s.DB.raw.prepare('SELECT * FROM v2_outbound_orders WHERE id=?').get(ob.id);assert.equal(order.stock_operation_status,'completed');
+ const output=s.DB.raw.prepare('SELECT * FROM v2_ops_job_results WHERE job_id=?').get(task.id);assert.equal(output.box_count,28);assert.equal(output.pallet_count,2);
+ assert.equal(s.DB.raw.prepare("SELECT count(*) n FROM v2_ops_job_workers WHERE job_id=? AND left_at='' ").get(task.id).n,0);
+ assert.equal((await s.change('sop_need_shipping_basis',n.id,{...payload,client_req_id:crypto.randomUUID()})).ok,false,'reviewed output is immutable');
+});
+test('shipping unit adjustment covers every active booking, respects capacity, cancellation and stale revisions',async()=>{
+ const s=setup();await s.login();const n=await s.need({planned_quantity:28});const first=await s.schedule(n,10),second=await s.schedule(await s.get(n.id),10),cancelled=await s.schedule(await s.get(n.id),8);
+ await s.call('v2_outbound_order_update_status',{id:cancelled.id,status:'cancelled'});
+ const basis={quantity:3,unit:'托',reason:'Fixture split pallets',allocations:[{outbound_id:first.id,quantity:1},{outbound_id:second.id,quantity:2}]};
+ for(const bad of [{...basis,allocations:basis.allocations.slice(0,1)},{...basis,allocations:[basis.allocations[0],basis.allocations[0]]},{...basis,quantity:2},{...basis,unit:'???'},{...basis,reason:''}])assert.equal((await s.change('sop_need_shipping_basis',n.id,bad)).ok,false);
+ assert.equal((await s.get(n.id)).shipping_basis,undefined);
+ assert.equal(s.DB.raw.prepare('SELECT planned_box_count FROM v2_outbound_orders WHERE id=?').get(first.id).planned_box_count,10);
+ const old=await s.get(n.id);assert.equal((await s.change('sop_need_shipping_basis',n.id,basis)).ok,true);
+ assert.equal((await s.call('sop_need_shipping_basis',{id:n.id,revision:old.revision,...basis})).ok,false);
+ const current=await s.get(n.id);assert.equal(current.links.find(l=>l.outbound_id===cancelled.id).unit,'箱','cancelled history is preserved');
+ assert.equal((await s.change('sop_need_plan_quantity',n.id,{outbound_id:second.id,quantity:3,reason:'Fixture overflow'})).ok,false,'old adjustment route uses pallet capacity');
+ assert.equal((await s.schedule(await s.get(n.id),1)).ok,false,'future scheduling uses expected output capacity');
+ const search=await s.call('sop_work_need_search',{search:n.id});assert.equal(search.items[0].remaining,0);assert.equal(search.items[0].schedule_quantity,3);assert.equal(search.items[0].schedule_unit,'托');
+});
+test('review rechecks bookings changed after recording output; office-only unit changes cannot bypass loading or direct forwarding guards',async()=>{
+ const s=setup();await s.login();const n=await s.need();const ob=await s.schedule(n,2);
+ const task=await s.call('sop_task_create',{department:'bulk',title:'Fixture work',job_type:'bulk_op',need_id:n.id,workers:[{id:'FIXTURE-A',name:'Fixture A'}],lead_id:'FIXTURE-A',estimated_minutes:10});
+ await s.change('sop_task_start',task.id);assert.equal((await s.change('sop_task_finish',task.id,{result:{quantity:2,unit:'箱'}})).ok,true);
+ const basis={quantity:2,unit:'托',reason:'Fixture changed booking',allocations:[{outbound_id:ob.id,quantity:2}]};
+ assert.equal((await s.change('sop_need_shipping_basis',n.id,basis)).ok,true);
+ const review=await s.change('sop_task_review',task.id,{decision:'pass',reason:'Fixture review'});assert.equal(review.ok,false);assert.match(review.error,/单位不一致/);assert.equal((await s.get(task.id)).status,'awaiting_review');
+ assert.equal((await s.change('sop_task_review',task.id,{decision:'return',reason:'Fixture correction'})).ok,true);
+ const direct=await s.need({operation_kind:'direct_forward'});assert.equal((await s.change('sop_need_shipping_basis',direct.id,{quantity:1,unit:'托',reason:'Fixture',allocations:[]})).ok,false);
+ await assert.rejects(shippingBasisStatements(s.env,{id:n.id},await s.get(n.id),basis,{role:'dispatcher'},new Date().toISOString()),/办公室/);
+ s.DB.raw.prepare("UPDATE v2_outbound_orders SET status='shipped' WHERE id=?").run(ob.id);
+ assert.equal((await s.change('sop_need_shipping_basis',n.id,basis)).ok,false);
 });
 test('one inbound can start multiple requirements and bookings in one transaction',async()=>{
  const s=setup();await s.login();const plan=await s.call('v2_inbound_plan_create',{customer:'Fixture customer',biz_classes:['bulk'],lines:[{unit_type:'carton',planned_qty:20}],work_requests:[{title:'Palletize',instructions:'Palletize ten',department:'bulk',planned_quantity:10,planned_unit:'箱',outbounds:[{quantity:5,expected_ship_at:'2026-10-03',outbound_mode:'customer_pickup'}]},{title:'Direct forward',instructions:'Forward unopened cartons',department:'bulk',operation_kind:'direct_forward',planned_quantity:10,planned_unit:'箱'}]});

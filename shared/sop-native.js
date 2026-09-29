@@ -86,7 +86,7 @@ async function detail(id,individual=!!window.CK_SOP_ROLLOUT?.workChain){const r=
    else {const link=document.createElement('a');link.className='link';link.href='../001/?need='+encodeURIComponent(x.id);link.textContent='交现场负责人派工 / 현장 배정';a.append(link);}}
    action('修改作业要求','sop_need_update',area('instructions','操作要求',x.instructions)+(window.CK_SOP_ROLLOUT?.workChain?input('planned_quantity','本作业计划数量','number',x.planned_quantity||'',false)+select('planned_unit','计划单位',{箱:'箱',件:'件',托:'托'},x.planned_unit):'')+input('owner','负责人','text',x.owner)+input('location','货物位置','text',x.location,false)+input('deadline','期限','datetime-local',x.deadline,false));
   }
-  for(const link of (x.links||[]).filter(l=>l.phase==='planned'))action('调整预关联出库数量：'+link.quantity+link.unit,'sop_need_plan_quantity',input('quantity','调整后数量','number',link.quantity)+input('reason','调整原因'),v=>({...v,outbound_id:link.outbound_id}));
+  if(!window.CKWorkChain?.enabled()||x.operation_kind==='direct_forward')for(const link of (x.links||[]).filter(l=>l.phase==='planned'))action('调整预关联出库数量：'+link.quantity+link.unit,'sop_need_plan_quantity',input('quantity','调整后数量（'+link.unit+'）','number',link.quantity)+input('reason','调整原因'),v=>({...v,outbound_id:link.outbound_id}));
   if(x.task_id){const link=document.createElement('a');link.href='../001/?task='+encodeURIComponent(x.task_id);link.textContent='查看关联现场任务';a.append(link);}
   if(x.result){
    a.append(btn('下载打托明细模板 / 양식 다운로드',()=>CKDownloadWorkTemplate()));
