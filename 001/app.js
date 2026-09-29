@@ -1740,17 +1740,12 @@ async function refreshUnloadWorkers() {
 
 function startJobPoll(type) {
   if (_pollTimer) clearInterval(_pollTimer);
-  _pollTimer = setInterval(function() {
-    if (type === "unload") refreshUnloadWorkers();
-    if (type === "load") refreshLoadWorkers();
-    if (type === "inbound") refreshInboundWorkers();
-    if (type === "inbound_return") refreshInboundReturnWorkers();
-    if (type === "generic") refreshGenericWorkers();
-    if (type === "pick") refreshPickWorkers();
-    if (type === "bulk") refreshBulkWorkers();
-    if (type === "import_delivery") refreshImportDeliveryWorkers();
-    if (type === "verify_scan") refreshVerifyScanWorkers();
-  }, 5000);
+  var pending=false;
+  var refresh={unload:refreshUnloadWorkers,load:refreshLoadWorkers,inbound:refreshInboundWorkers,inbound_return:refreshInboundReturnWorkers,generic:refreshGenericWorkers,pick:refreshPickWorkers,bulk:refreshBulkWorkers,import_delivery:refreshImportDeliveryWorkers,verify_scan:refreshVerifyScanWorkers}[type];
+  _pollTimer=setInterval(async function(){
+    if(pending||document.hidden||!_activeJobId||!refresh)return;
+    pending=true;try{await refresh();}finally{pending=false;}
+  },10000);
 }
 
 function renderWorkers(containerId, workers) {
@@ -2309,7 +2304,8 @@ function showOutboundLoadWorking() {
 
 // 出库装货：状态/业务文案映射（韩文兼容现有 UI 不强求）
 var _OB_STATUS_LABEL_001 = {
-  ready_to_ship: '待下发',
+  ready_to_ship: '待出库',
+  issued: '已下发',
   preparing_outbound: '备货中'
 };
 var _OB_BIZ_LABEL_001 = {
@@ -2332,8 +2328,8 @@ async function loadOutboundOrders() {
   var opts = '<option value="">-- 选择出库单/출고단 선택 --</option>';
   if (res && res.ok && res.items) {
     var rows = res.items.filter(function(o) {
-      // 装货页只显示可装货状态：ready_to_ship / preparing_outbound
-      return o.status === "ready_to_ship" || o.status === "preparing_outbound";
+      // 新版预约下发后保持 issued；作业审核和变更确认仍由装货接口校验。
+      return o.status === "ready_to_ship" || o.status === "preparing_outbound" || (window.CK_SOP_ROLLOUT?.workChain && o.status === "issued");
     });
     // 排序：1) ready_to_ship 优先 2) 预计出库日期升序 3) display_no 升序
     rows.sort(function(a, b) {
@@ -2368,6 +2364,7 @@ async function loadOutboundOrders() {
 // ===== 出库装货：扫码/识别/清空 =====
 var _obResolvedOrderId = "";
 var _obLoadScanner = null;
+var _obAckRevision = null;
 var _obAckPending = false;  // 当前选中单是否仍待仓库确认变更（阻止开始装货）
 
 // 出库单字段标签（中韩双语）— change_log diff 渲染用
@@ -2415,6 +2412,7 @@ function obFieldDisplayValue001(field, val) {
   return String(val);
 }
 function renderOutboundDiffTable001(diff) {
+  if(window.CKOutboundChanges)return CKOutboundChanges.diff(diff,obFieldLabel001,obFieldDisplayValue001);
   if (!diff || typeof diff !== 'object') return '';
   var keys = Object.keys(diff);
   if (keys.length === 0) return '';
@@ -2447,8 +2445,7 @@ async function resolveOutboundCode(btnEl) {
       var o = res.order;
       _obResolvedOrderId = o.id;
       document.getElementById("loadOrderSelect").value = o.id;
-      _refreshOutboundLoadMaterial();
-      _refreshOutboundLoadOrderState();
+            _refreshOutboundLoadOrderState();
       var modeMap = {warehouse_dispatch:'仓库代发',customer_pickup:'客户自提',milk_express:'牛奶速递',milk_pallet:'牛奶托盘',container_pickup:'整柜提货'};
       if (resultEl) resultEl.innerHTML = '<div style="background:#e8f5e9;border-radius:6px;padding:8px;">' +
         '<b>✓ </b>' + esc(o.display_no || o.id) + '<br>' +
@@ -2536,8 +2533,7 @@ function onOutboundCandidateSelect() {
   var resultEl = document.getElementById("obResolveResult");
   var opt = sel.options[sel.selectedIndex];
   if (resultEl && opt) resultEl.innerHTML = '<div style="background:#e8f5e9;border-radius:6px;padding:8px;"><b>✓ </b>' + esc(opt.textContent) + '</div>';
-  _refreshOutboundLoadMaterial();
-  _refreshOutboundLoadOrderState();
+    _refreshOutboundLoadOrderState();
 }
 
 async function startOutboundLoad(btnEl) {
@@ -2632,24 +2628,26 @@ async function refreshLoadWorkers() {
 }
 
 // ===== 出库资料展示 helper（执行系统通用） =====
-async function renderOutboundMaterials(orderId, containerId) {
+async function renderOutboundMaterials(orderId, containerId, knownAttachments) {
   var box = document.getElementById(containerId);
   if (!box) return;
+  box.dataset.orderId=orderId||'';
   if (!orderId) { box.innerHTML = ''; return; }
   box.innerHTML = '<div class="muted" style="font-size:12px;">资料加载中... / 자료 로딩...</div>';
   try {
-    var res = await api({
+    var res = knownAttachments?{ok:true,items:knownAttachments}:await api({
       action: "v2_attachment_list",
       related_doc_type: "outbound_order",
       related_doc_id: orderId
     });
+    if(box.dataset.orderId!==orderId)return;
     if (!res || !res.ok) { box.innerHTML = ''; return; }
     var atts = (res.items || []).filter(function(a) { return a.attachment_category === 'outbound_material'; });
     if (atts.length === 0) {
-      box.innerHTML = '<div class="muted" style="font-size:12px;">暂无出库资料 / 출고 자료 없음</div>';
+      box.innerHTML = '<div class="muted" style="font-size:12px;">暂无关联作业资料 / 연결 작업 자료 없음</div>';
       return;
     }
-    var html = '<div style="font-weight:700;margin-bottom:4px;">出库资料 / 출고 자료 (' + atts.length + ')</div>';
+    var html = '<div style="font-weight:700;margin-bottom:4px;">关联作业资料 / 연결 작업 자료 (' + atts.length + ')</div>';
     atts.forEach(function(att) {
       var url = V2_API + "/file?key=" + encodeURIComponent(att.file_key);
       html += '<div style="padding:4px 0;border-bottom:1px solid #f0f0f0;">';
@@ -2660,16 +2658,9 @@ async function renderOutboundMaterials(orderId, containerId) {
     });
     box.innerHTML = html;
   } catch (e) {
+    if(box.dataset.orderId!==orderId)return;
     box.innerHTML = '<div class="muted" style="color:#c62828;font-size:12px;">资料加载失败</div>';
   }
-}
-
-// ===== 出库装货：选定单号后展示资料 =====
-async function _refreshOutboundLoadMaterial() {
-  // 装货页可能没有专用容器；如果有则填，没有就跳过
-  var holder = document.getElementById("obLoadMaterialBox");
-  if (!holder) return;
-  await renderOutboundMaterials(_obResolvedOrderId, "obLoadMaterialBox");
 }
 
 // ===== P1-8/P1-9 出库装货：变更确认 + 提货信息 =====
@@ -2681,12 +2672,16 @@ async function _refreshOutboundLoadOrderState() {
     return;
   }
   if (!_obResolvedOrderId) {
+    renderOutboundMaterials('', 'obLoadMaterialBox');
     _obAckPending = false;
     if (ackBox) ackBox.innerHTML = '';
     if (pickupBox) pickupBox.innerHTML = '';
     return;
   }
-  var res = await api({ action: 'v2_outbound_order_detail', id: _obResolvedOrderId });
+  var requestedId=_obResolvedOrderId,loadToken=window._OutboundLoadStateSequence=(window._OutboundLoadStateSequence||0)+1;
+  _obAckRevision=null;
+  var res = await api({ action: 'v2_outbound_order_detail', id: requestedId });
+  if(requestedId!==_obResolvedOrderId||loadToken!==window._OutboundLoadStateSequence)return;
   if (!res || !res.ok || !res.order) {
     _obAckPending = false;
     if (ackBox) ackBox.innerHTML = '';
@@ -2694,6 +2689,8 @@ async function _refreshOutboundLoadOrderState() {
     return;
   }
   var o = res.order;
+  renderOutboundMaterials(requestedId,'obLoadMaterialBox',res.attachments||[]);
+  _obAckRevision = Number(o.revision_no||0);
   _obAckPending = Number(o.warehouse_ack_required) === 1;
   var pendingLogs = res.pending_change_logs || [];
   var allLogs = res.change_logs || [];
@@ -2715,8 +2712,8 @@ async function _refreshOutboundLoadOrderState() {
       if (pendingLogs.length > 0) {
         pendingLogs.forEach(function(log) {
           html += '<div style="margin-top:8px;padding-top:8px;border-top:1px dashed #f5b7b1;">';
-          html += '<div style="font-size:12px;color:#444;"><b>#' + Number(log.revision_no || 0) + '</b> · ' + esc(log.changed_by || '--') + ' · ' + esc(log.changed_at ? log.changed_at.replace('T', ' ').slice(0, 16) : '--') + '</div>';
-          html += renderOutboundDiffTable001(log.diff);
+          html += '<div style="font-size:12px;color:#444;"><b>#' + Number(log.revision_no || 0) + '</b> · ' + esc(log.changed_by || '--') + ' · ' + esc(log.changed_at ? new Date(log.changed_at).toLocaleString('zh-CN',{timeZone:'Asia/Seoul',hour12:false}) : '--') + '</div>';
+          html += (window.CKOutboundChanges?CKOutboundChanges.summary(log):'')+renderOutboundDiffTable001(log.diff);
           html += '</div>';
         });
       } else if (hasRevisionWithoutLog) {
@@ -2726,7 +2723,7 @@ async function _refreshOutboundLoadOrderState() {
       html += '</div>';
     } else if (allLogs.length > 0 && o.warehouse_ack_by) {
       html += '<div style="border:1px solid #2e7d32;background:#e8f5e9;border-radius:6px;padding:8px;margin-top:6px;font-size:12px;color:#1b5e20;">';
-      html += '✓ 已确认 / 확인됨: ' + esc(o.warehouse_ack_by) + (o.warehouse_ack_at ? ' · ' + esc(o.warehouse_ack_at.replace('T',' ').slice(0,16)) : '');
+      html += '✓ 已确认 / 확인됨: ' + esc(o.warehouse_ack_by) + (o.warehouse_ack_at ? ' · ' + esc(new Date(o.warehouse_ack_at).toLocaleString('zh-CN',{timeZone:'Asia/Seoul',hour12:false})) : '');
       html += '</div>';
     }
     ackBox.innerHTML = html;
@@ -2768,6 +2765,7 @@ async function ackOutboundChange(btnEl) {
     var res = await api({
       action: 'v2_outbound_order_ack_change',
       id: _obResolvedOrderId,
+      revision_no: _obAckRevision,
       worker_name: getWorkerName(),
       worker_id: getWorkerId()
     });
@@ -2786,6 +2784,7 @@ async function confirmOutboundPickup(btnEl) {
     var res = await api({
       action: 'v2_outbound_pickup_confirm',
       id: _obResolvedOrderId,
+      revision_no: _obAckRevision,
       worker_name: getWorkerName(),
       worker_id: getWorkerId()
     });

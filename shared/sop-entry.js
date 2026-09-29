@@ -23,6 +23,7 @@
   const body=document.getElementById(target);if(!body||!id)return;
   const fresh=detailNeeds[type];
   const r=fresh?.id===id?{items:fresh.items}:await request('sop_linked',{source_id:id});
+  if((type==='inbound'?window._currentInboundId:window._currentOutboundId)!==id)return;
   window.CKWorkChain?.hideFileControls(body,type);
   const head=block(body,'关联作业：操作要求、结果和数量在这里统一追踪');const buttons=head.querySelector('.ck-buttons');buttons.replaceChildren();
   if(type==='inbound'&&r.items.length){
@@ -163,7 +164,7 @@
   if(app==='001')window.CKInstallNativeLifecycle?.();
   if(app==='002'){
    const notices=document.createElement('div');notices.className='ck-updates';notices.hidden=true;nav.after(notices);
-   const update=async()=>{if(document.hidden)return;try{const r=await request('sop_updates');notices.hidden=!r.items.length;notices.innerHTML=r.items.length?'<b>有 '+r.items.length+' 条最新要求待仓库确认</b> '+r.items.slice(0,5).map(x=>'<a href="/002/?issue='+encodeURIComponent(x.legacy_id)+'">'+esc(x.title.slice(0,36))+'</a>').join(' · '):'';}catch(e){notices.hidden=false;notices.textContent='消息同步失败，请刷新检查网络：'+e.message;}};await update();setInterval(update,15000);window.addEventListener('focus',update);
+   let updating=false;const update=async()=>{if(document.hidden||updating)return;updating=true;try{const r=await request('sop_updates');notices.hidden=!r.items.length;notices.innerHTML=r.items.length?'<b>有 '+r.items.length+' 条最新要求待仓库确认</b> '+r.items.slice(0,5).map(x=>'<a href="/002/?issue='+encodeURIComponent(x.legacy_id)+'">'+esc(x.title.slice(0,36))+'</a>').join(' · '):'';}catch(e){notices.hidden=false;notices.textContent='消息同步失败，请刷新检查网络：'+e.message;}finally{updating=false;}};await update();setInterval(update,15000);window.addEventListener('focus',update);
   }
  }
  setup().catch(e=>{document.documentElement.classList.remove('ck-auth-pending');const el=document.createElement('p');el.className='ck-updates';el.textContent='页面初始化失败：'+e.message;document.body.prepend(el);});

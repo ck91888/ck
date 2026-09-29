@@ -2,6 +2,18 @@ import test from 'node:test';import assert from 'node:assert/strict';import {dat
 test('database rejects a join after checkout, even if a preflight validation raced',async()=>{const {call,DB}=setup(),r=(await call('checkin',{name:'并发甲',agency:'가온'})).record;await call('checkout',{id:r.id});DB.raw.exec("INSERT INTO v2_ops_jobs(id,job_type,biz_class,status) VALUES('RACE','bulk_op','bulk','working')");assert.throws(()=>DB.raw.prepare('INSERT INTO v2_ops_job_workers(id,job_id,worker_id,joined_at) VALUES(?,?,?,?)').run('RACEW','RACE',r.badgeId,new Date().toISOString()),/Attendance required/);});
 test('verified attendance correction closes only the affected personal segment and logs its evidence',async()=>{const {call,DB}=setup(),r=(await call('checkin',{name:'补卡甲',agency:'가온'})).record;DB.raw.exec("INSERT INTO v2_ops_jobs(id,job_type,biz_class,status) VALUES('CORRECT','bulk_op','bulk','working')");DB.raw.prepare('INSERT INTO v2_ops_job_workers(id,job_id,worker_id,joined_at) VALUES(?,?,?,?)').run('CORRECTW','CORRECT',r.badgeId,r.inAt);const end=new Date().toISOString();const fixed=await call('correct',{id:r.id,version:r.version,inAt:r.inAt,outAt:end,reason:'负责人核实离场时间'});assert.equal(fixed.record.outAt,end);assert.equal(DB.raw.prepare("SELECT left_at FROM v2_ops_job_workers WHERE id='CORRECTW'").get().left_at,end);assert.equal(DB.raw.prepare("SELECT status FROM v2_ops_jobs WHERE id='CORRECT'").get().status,'working');const report=await call('summary');assert.equal(report.items[0].events.at(-1).after.corrected_segments.length,1);});
 function setup(){const DB=database(),env={DB,SOP_ENVIRONMENT:'staging',SOP_ATTENDANCE_ENABLED:'true',SOP_UPGRADE_ENABLED:'true',SOP_REQUEST_USER:{id:'M',name:'测试负责人',role:'manager'}};const call=(a,v={})=>handleAttendance({action:'sop_attendance_'+a,client_req_id:crypto.randomUUID(),...v},env);return {DB,env,call};}
+
+test('native crew editing accepts members already on this job; a whole crew uses one attendance batch',async()=>{
+ const {DB,env,call}=setup(),crew=[];
+ for(let i=0;i<8;i++){const p=(await call('employee_register',{name:'Fixture '+i,employeeNo:'AUDIT'+i,department:'bulk'})).person;const d=(await call('checkin',{badge:p.badgeId})).record;crew.push({id:d.badgeId,name:d.name});}
+ DB.raw.exec("INSERT INTO v2_ops_jobs(id,job_type,status) VALUES('J','bulk_op','working')");
+ for(const w of crew)DB.raw.prepare('INSERT INTO v2_ops_job_workers(id,job_id,worker_id,joined_at) VALUES(?,?,?,?)').run(w.id,'J',w.id,new Date().toISOString());
+ const batch=DB.batch.bind(DB);let calls=0;DB.batch=async x=>{calls++;return batch(x);};
+ assert.equal(await guardAttendance({action:'sop_native_people',job_id:'J',workers:crew},env),null);assert.equal(calls,1);
+ assert.match(await guardAttendance({action:'sop_native_people',job_id:'OTHER',workers:crew},env),/另一任务/);
+ await call('break_start',{badge:crew[0].id});assert.match(await guardAttendance({action:'sop_native_people',job_id:'J',workers:crew},env),/休息/);
+ await call('checkout',{badge:crew[0].id});assert.match(await guardAttendance({action:'sop_native_people',job_id:'J',workers:crew},env),/签退/);
+});
 test('lost badge name search lists same names and preserves original attendance on reprint',async()=>{
  const {call,DB,env}=setup();const a=(await call('checkin',{name:'同名甲',agency:'가온'})).record,b=(await call('checkin',{name:'同名甲',agency:'포레인',confirm_distinct_person:true,reason:'确认不同人员'})).record;
  const out=(await call('checkout',{id:b.id})).record;env.SOP_REQUEST_USER.role='kiosk';

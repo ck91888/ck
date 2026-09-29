@@ -15,6 +15,30 @@ function setup(){
  async function upload(n,fields={}){const form=new FormData();for(const [k,v] of Object.entries({action:'v2_attachment_upload',related_doc_type:'sop_need',related_doc_id:n.id,attachment_category:'work_material',revision:n.revision,client_req_id:crypto.randomUUID(),...fields}))form.set(k,v);form.set('file',new File(['%PDF-1.7\nfixture document'], 'fixture-label.pdf',{type:'application/pdf'}));return raw(form);}
  return {DB,env,objects,call,raw,login,get,change,need,schedule,upload};
 }
+
+test('shipping and requirement notifications show actual changes; acknowledgement cannot approve unseen revisions',async()=>{
+ const s=setup();await s.login();const n=await s.need({planned_quantity:28}),ob=await s.schedule(n,2);
+ await s.call('v2_outbound_order_update_status',{id:ob.id,status:'issued'});
+ const r=await s.change('sop_need_shipping_basis',n.id,{quantity:2,unit:'托',reason:'Fixture packaging',allocations:[{outbound_id:ob.id,quantity:2}]});assert.equal(r.ok,true,r.error);
+ const d=await s.call('v2_outbound_order_detail',{id:ob.id}),log=d.change_logs.at(0);assert.equal(log.change_type,'shipping_adjustment');assert.deepEqual(log.diff,{shipping_quantity:{from:'2 箱',to:'2 托'}});
+ const revision=d.order.revision_no;
+ assert.equal((await s.call('v2_outbound_order_ack_change',{id:ob.id})).ok,false);
+ const edit=await s.change('sop_need_update',n.id,{instructions:'Fixture new requirements',owner:n.owner});assert.equal(edit.ok,true,edit.error);
+ const latest=await s.call('v2_outbound_order_detail',{id:ob.id});assert.equal(latest.change_logs[0].change_type,'requirement_update');
+ assert.equal((await s.call('v2_outbound_order_ack_change',{id:ob.id,revision_no:revision})).ok,false);
+ assert.equal(s.DB.raw.prepare('SELECT warehouse_ack_required FROM v2_outbound_orders WHERE id=?').get(ob.id).warehouse_ack_required,1);
+ // Simulate an office change after the confirmation read but before its atomic batch.
+ const batch=s.DB.batch.bind(s.DB);let injected=false;
+ s.DB.batch=async statements=>{if(!injected&&statements.some(x=>x.sql.includes('SET warehouse_ack_required=0'))){injected=true;s.DB.raw.prepare('UPDATE v2_outbound_orders SET revision_no=revision_no+1 WHERE id=?').run(ob.id);}return batch(statements);};
+ assert.equal((await s.call('v2_outbound_order_ack_change',{id:ob.id,revision_no:latest.order.revision_no})).ok,false);assert.equal(injected,true);
+ const current=await s.call('v2_outbound_order_detail',{id:ob.id});assert.equal(current.order.warehouse_ack_required,1);
+ assert.equal((await s.call('v2_outbound_order_ack_change',{id:ob.id,revision_no:current.order.revision_no})).ok,true);
+ assert.equal(s.DB.raw.prepare('SELECT warehouse_ack_required FROM v2_outbound_orders WHERE id=?').get(ob.id).warehouse_ack_required,0);
+ s.DB.raw.prepare('UPDATE v2_outbound_orders SET pickup_confirm_required=1 WHERE id=?').run(ob.id);
+ assert.equal((await s.call('v2_outbound_pickup_confirm',{id:ob.id,revision_no:revision})).ok,false);
+ assert.equal(s.DB.raw.prepare('SELECT pickup_confirm_required FROM v2_outbound_orders WHERE id=?').get(ob.id).pickup_confirm_required,1);
+ assert.equal((await s.call('v2_outbound_pickup_confirm',{id:ob.id,revision_no:current.order.revision_no})).ok,true);
+});
 test('new outbound must reference a requirement; reverse and orphan paths cannot bypass the chain',async()=>{
  const s=setup();await s.login();
  assert.equal((await s.call('v2_outbound_order_create',{customer:'Fixture customer',biz_class:'bulk',outbound_mode:'customer_pickup'})).ok,false);

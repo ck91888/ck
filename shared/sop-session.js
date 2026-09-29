@@ -6,11 +6,20 @@
  const endpoint=window.SOP_API||'/api';let user=null,resolveReady,gate,scanner,locked=false,completed=false;
  const ready=new Promise(r=>resolveReady=r);
  const rawFetch=window.fetch.bind(window);
+ // Share only identical in-flight reads. No response cache, mutation retry, or cross-login data.
+ const reads=new Set('sop_identity sop_get sop_list sop_need_groups sop_linked sop_updates sop_work_materials sop_batch_work_materials sop_work_need_search sop_dispatch_list v2_inbound_plan_detail v2_outbound_order_detail v2_ops_job_detail v2_attachment_list sop_attendance_summary'.split(' '));
+ const inFlight=new Map();let generation=0;
  window.fetch=async function(input,init){
-  const r=await rawFetch(input,init);const url=new URL(typeof input==='string'?input:input.url,location.href);
-  if(completed&&r.status===401&&url.origin===location.origin&&url.pathname===new URL(endpoint,location.href).pathname)lock();
+  const url=new URL(typeof input==='string'?input:input.url,location.href),local=url.origin===location.origin&&url.pathname===new URL(endpoint,location.href).pathname;
+  let key='',body;
+  if(local){try{body=JSON.parse(init?.body);}catch{}if(reads.has(body?.action)&&!init?.signal)key=generation+':'+JSON.stringify(body);else{generation++;inFlight.clear();}}
+  let pending=key&&inFlight.get(key);
+  if(!pending){pending=rawFetch(input,init);if(key){inFlight.set(key,pending);pending.finally(()=>{if(inFlight.get(key)===pending)inFlight.delete(key);}).catch(()=>{});}}
+  const original=await pending,r=key?original.clone():original;
+  if(completed&&r.status===401&&local)lock();
   return r;
  };
+
  async function request(action,data={}){
   const r=await fetch(endpoint,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({...data,action})});
   const out=await r.json();if(!r.ok||!out.ok){const error=Error(out.error||out.message||'请求失败');error.businessError=true;error.unauthorized=r.status===401;throw error;}return out;

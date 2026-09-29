@@ -18,6 +18,16 @@ async function setup(){
  const login=p=>ok('field','sop_login',{badge:p.badgeId+'|伪造名称'});
  return {DB,env,cookies,raw,call,ok,employee,grant,checkin,login};
 }
+
+test('only fingerprinted public code is cached; office pages and all APIs remain gated',async()=>{
+ const {raw}=await setup();
+ for(const path of ['/002/app.js?v=0123456789ab','/shuju/app.js?v=0123456789ab','/shared/sop-session.js?v=0123456789ab']){
+  const r=await raw('office',null,{entry:true,method:'GET',path,cookie:''});assert.equal(r.status,200);assert.match(r.headers.get('Cache-Control'),/immutable/);
+ }
+ const script=await raw('office',null,{entry:true,method:'GET',path:'/002/app.js',cookie:''});assert.equal(script.headers.get('Cache-Control'),'no-store');
+ for(const path of ['/002/','/003/','/shuju/'])assert.equal((await raw('office',null,{entry:true,method:'GET',path,cookie:''})).status,302);
+ const api=await raw('office',{action:'v2_outbound_order_list'},{entry:true,cookie:''});assert.equal(api.status,401);
+});
 test('registered employees have default field access but still require today check-in; server supplies the name',async()=>{
  const {call,ok,employee,checkin,login}=await setup();
  assert.equal((await call('field','sop_identity')).ok,false);

@@ -491,6 +491,7 @@ function obFieldDisplayValue(field, val) {
 
 // 渲染单条 change_log 的 diff 明细表
 function renderOutboundDiffTable(diff) {
+  if(window.CKOutboundChanges)return CKOutboundChanges.diff(diff,obFieldLabel,obFieldDisplayValue);
   if (!diff || typeof diff !== 'object') return '';
   var keys = Object.keys(diff);
   if (keys.length === 0) return '';
@@ -534,13 +535,13 @@ function renderOutboundChangeLogsCard(o, change_logs, pending_change_logs) {
         html += '<div style="font-size:13px;line-height:1.7;">';
         html += '<div><b>修改版本 / 버전:</b> #' + Number(log.revision_no || 0);
         if (log.change_type && log.change_type !== 'order_update') {
-          html += ' <span class="muted" style="font-size:11px;">[' + esc(log.change_type) + ']</span>';
+          html += ' <span class="muted" style="font-size:11px;">[' + esc(window.CKOutboundChanges?CKOutboundChanges.title(log):log.change_type) + ']</span>';
         }
         html += '</div>';
         html += '<div><b>修改人 / 수정자:</b> ' + esc(log.changed_by || '--') + '</div>';
         html += '<div><b>修改时间 / 수정 시간:</b> ' + esc(log.changed_at ? fmtTime(log.changed_at) : '--') + '</div>';
         html += '</div>';
-        html += renderOutboundDiffTable(log.diff);
+        html += (window.CKOutboundChanges?CKOutboundChanges.summary(log):'')+renderOutboundDiffTable(log.diff);
         html += '</div>';
       });
     } else if (hasRevisionWithoutLog) {
@@ -581,7 +582,7 @@ function renderOutboundChangeLogsCard(o, change_logs, pending_change_logs) {
         html += '</span>';
       }
       html += '</div>';
-      html += renderOutboundDiffTable(log.diff);
+      html += (window.CKOutboundChanges?CKOutboundChanges.summary(log):'')+renderOutboundDiffTable(log.diff);
       html += '</div>';
     });
     html += '</details>';
@@ -605,6 +606,7 @@ async function ackOutboundChangeProxy(btnEl) {
       action: 'v2_outbound_order_ack_change',
       id: _currentOutboundId,
       worker_name: getUser() + '（办公室代确认）',
+      revision_no: Number(window._currentOutboundOrderCache?.revision_no||0),
       source: '002_office_proxy'
     });
     if (res && res.ok) {
@@ -1755,7 +1757,9 @@ async function loadOutboundDetail() {
   if (!body || !_currentOutboundId) return;
   body.innerHTML = '<div class="card muted">' + L("loading") + '</div>';
 
-  var res = await api({ action: "v2_outbound_order_detail", id: _currentOutboundId });
+  var requestedId=_currentOutboundId,loadToken=window._OutboundDetailLoad=(window._OutboundDetailLoad||0)+1;
+  var res = await api({ action: "v2_outbound_order_detail", id: requestedId });
+  if(requestedId!==_currentOutboundId||loadToken!==window._OutboundDetailLoad)return;
   if (!res || !res.ok || !res.order) {
     body.innerHTML = '<div class="card muted">加载失败</div>';
     return;
@@ -1911,11 +1915,13 @@ async function loadOutboundDetail() {
     html += '</div>';
   }
 
-  // 出库资料（attachment_category = 'outbound_material'）
+  // The same work-plan files are read here; no second upload area.
+  var chainMaterials=!!window.CKWorkChain?.enabled();
+  // 出库资料（attachment_category = 'outbound_material')
   var outboundMaterials = atts.filter(function(a) { return a.attachment_category === 'outbound_material'; });
-  html += '<div class="card"><div class="card-title">' + esc(L("outbound_materials")) + ' (' + outboundMaterials.length + ')</div>';
+  html += '<div class="card"><div class="card-title">' + esc(chainMaterials?(getLang()==='ko'?'연결 작업 자료':'关联作业资料'):L("outbound_materials")) + ' (' + outboundMaterials.length + ')</div>';
   if (outboundMaterials.length === 0) {
-    html += '<div class="muted">' + esc(L("outbound_materials_empty")) + '</div>';
+    html += '<div class="muted">' + esc(chainMaterials?(getLang()==='ko'?'연결 작업계획에서 자료를 업로드하세요.':'暂无关联作业资料，请到上方关联作业计划统一上传。'):L("outbound_materials_empty")) + '</div>';
   } else {
     html += '<table class="line-table"><thead><tr><th>文件名</th><th>上传人</th><th>时间</th><th>操作</th></tr></thead><tbody>';
     outboundMaterials.forEach(function(att) {
@@ -1938,10 +1944,12 @@ async function loadOutboundDetail() {
     html += '</tbody></table>';
   }
   // 客服在详情页补传按钮
+  if(!chainMaterials){
   html += '<div style="margin-top:8px;">';
   html += '<input id="ob-detail-upload-input" type="file" multiple accept=".xlsx,.xls,.csv,.pdf,.jpg,.jpeg,.png" style="display:none;" onchange="uploadOutboundMaterialsFromDetail(this)">';
   html += '<button class="btn btn-outline btn-sm" onclick="document.getElementById(\'ob-detail-upload-input\').click()">+ ' + esc(L("outbound_materials")) + '</button>';
   html += '</div>';
+  }
   html += '</div>';
 
   // Attachments — grouped by category（车辆照片 / 其它非出库资料）
@@ -2778,7 +2786,9 @@ async function loadInboundDetail() {
   if (!body || !_currentInboundId) return;
   body.innerHTML = '<div class="card muted">' + L("loading") + '</div>';
 
-  var res = await api({ action: "v2_inbound_plan_detail", id: _currentInboundId });
+  var requestedId=_currentInboundId,loadToken=window._InboundDetailLoad=(window._InboundDetailLoad||0)+1;
+  var res = await api({ action: "v2_inbound_plan_detail", id: requestedId });
+  if(requestedId!==_currentInboundId||loadToken!==window._InboundDetailLoad)return;
   if (!res || !res.ok || !res.plan) {
     body.innerHTML = '<div class="card muted">' + L("error") + '</div>';
     return;

@@ -8,14 +8,15 @@ const parse=value=>{try{return JSON.parse(value||'null');}catch{return null;}};
 export async function tripPlans(env,jobId){
  if(!inboundFlowEnabled(env))return [];
  const links=await rows(env,'SELECT * FROM ck_unload_plan_links WHERE job_id=? ORDER BY position',jobId);
- const out=[];
- for(const link of links){
-  const plan=await q(env,'SELECT * FROM v2_inbound_plans WHERE id=?',link.plan_id).first();
-  const lines=await rows(env,'SELECT * FROM v2_inbound_plan_lines WHERE plan_id=? ORDER BY line_no',link.plan_id);
-  const needs=await rows(env,"SELECT id,state FROM sop_records WHERE kind='need' AND json_extract(state,'$.source_id')=? ORDER BY updated_at",link.plan_id);
-  out.push({plan,lines,needs:needs.map(n=>({id:n.id,...parse(n.state)})),result:parse(link.result_json)});
- }
- return out;
+ if(!links.length)return [];
+ const ids=JSON.stringify(links.map(l=>l.plan_id));
+ const [plans,lines,needs]=await env.DB.batch([
+  q(env,'SELECT * FROM v2_inbound_plans WHERE id IN (SELECT value FROM json_each(?))',ids),
+  q(env,'SELECT * FROM v2_inbound_plan_lines WHERE plan_id IN (SELECT value FROM json_each(?)) ORDER BY line_no',ids),
+  q(env,"SELECT id,state FROM sop_records WHERE kind='need' AND json_extract(state,'$.source_id') IN (SELECT value FROM json_each(?)) ORDER BY updated_at",ids)
+ ]);
+ const work=needs.results.map(n=>({id:n.id,...parse(n.state)}));
+ return links.map(link=>({plan:plans.results.find(p=>p.id===link.plan_id)||null,lines:lines.results.filter(l=>l.plan_id===link.plan_id),needs:work.filter(n=>n.source_id===link.plan_id),result:parse(link.result_json)}));
 }
 export async function findUnloadPlan(env,value){
  let code=inboundCode(value);

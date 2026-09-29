@@ -8,9 +8,11 @@ export default {async fetch(request,env,ctx){
  if(accessEnabled(env)){
   const api=['/api','/file','/api/file','/001/api','/001/api/file','/001/file','/attendance/api'].includes(url.pathname)||maintenance;
   if(!api){
-   const publicAsset=url.pathname.startsWith('/shared/')||url.pathname.startsWith('/001/')||url.pathname.startsWith('/attendance/')||url.pathname.startsWith('/office-login/')||url.pathname==='/release.json';
+   // Only shipped code/styles are public and cacheable; pages and API data stay authenticated.
+   const staticAsset=/^\/(?:shared|001|002|003|shuju|attendance)\/[^/]+\.(?:js|css)$/.test(url.pathname);
+   const publicAsset=staticAsset||url.pathname.startsWith('/shared/')||url.pathname.startsWith('/001/')||url.pathname.startsWith('/attendance/')||url.pathname.startsWith('/office-login/')||url.pathname==='/release.json';
    if(!publicAsset&&!await sessionUser(request,env))return Response.redirect(url.origin+'/office-login/?next='+encodeURIComponent(url.pathname+url.search),302);
-   const asset=await env.ASSETS.fetch(request);const headers=new Headers(asset.headers);headers.set('Cache-Control','no-store');headers.set('X-Content-Type-Options','nosniff');headers.set('Referrer-Policy','same-origin');headers.set('Content-Security-Policy',"frame-ancestors 'none'");return new Response(asset.body,{status:asset.status,headers});
+   const asset=await env.ASSETS.fetch(request);const headers=new Headers(asset.headers);headers.set('Cache-Control',staticAsset&&/^[a-f0-9]{12}$/.test(url.searchParams.get('v')||'')?'public, max-age=31536000, immutable':'no-store');headers.set('X-Content-Type-Options','nosniff');headers.set('Referrer-Policy','same-origin');headers.set('Content-Security-Policy',"frame-ancestors 'none'");return new Response(asset.body,{status:asset.status,headers});
   }
  }
 

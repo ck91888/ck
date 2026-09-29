@@ -2878,17 +2878,14 @@ route("v2_outbound_order_list", async (body, env) => {
   } else if (hasMaterialRaw === "0") {
     where += " AND NOT EXISTS (SELECT 1 FROM v2_attachments a WHERE a.related_doc_type='outbound_order' AND a.related_doc_id=v2_outbound_orders.id AND a.attachment_category='outbound_material')";
   }
-  const countRow = binds.length > 0
-    ? await env.DB.prepare("SELECT COUNT(*) AS c FROM v2_outbound_orders" + where).bind(...binds).first()
-    : await env.DB.prepare("SELECT COUNT(*) AS c FROM v2_outbound_orders" + where).first();
-  const total = Number((countRow && countRow.c) || 0);
   const listSql = "SELECT *"+(workChainEnabled(env)?", "+workMaterialCountSql+" AS material_count":"")+" FROM v2_outbound_orders" + where + " ORDER BY " + _dateExpr + " DESC, created_at DESC LIMIT ? OFFSET ?";
-  const rs = await env.DB.prepare(listSql).bind(...binds, limit, offset).all();
+  const [countRs,rs]=await env.DB.batch([env.DB.prepare('SELECT COUNT(*) AS c FROM v2_outbound_orders'+where).bind(...binds),env.DB.prepare(listSql).bind(...binds,limit,offset)]);
+  const total=Number(countRs.results?.[0]?.c||0);
   const items = rs.results || [];
   // 注入 material_count（CHUNK=80 防 D1 too many SQL variables）
   if (items.length > 0) {
     const ids = items.map(o => o.id);
-    const matRows = await batchSelectInGlobal(env,
+    const matRows = workChainEnabled(env)?[]:await batchSelectInGlobal(env,
       `SELECT related_doc_id AS id, COUNT(*) AS c FROM v2_attachments
         WHERE related_doc_type='outbound_order' AND attachment_category='outbound_material'
           AND related_doc_id IN (PLACEHOLDER) GROUP BY related_doc_id`,
@@ -2923,40 +2920,18 @@ route("v2_outbound_order_detail", async (body, env) => {
   if (!id) return err("missing id");
   const row = await env.DB.prepare("SELECT * FROM v2_outbound_orders WHERE id=?").bind(id).first();
   if (!row) return err("not found", 404);
-  const lines = await env.DB.prepare(
-    "SELECT * FROM v2_outbound_order_lines WHERE order_id=? ORDER BY line_no"
-  ).bind(id).all();
-  // Get related jobs（含 outbound_load 和 bulk_op 两种关联方式）
-  const jobs = await env.DB.prepare(
-    "SELECT * FROM v2_ops_jobs WHERE (related_doc_type='outbound_order' AND related_doc_id=?) OR linked_outbound_order_id=? ORDER BY created_at DESC"
-  ).bind(id, id).all();
-  const jobIds = (jobs.results || []).map(j => j.id);
-  let allAtts = [];
-  const orderAtts = await env.DB.prepare(
-    "SELECT * FROM v2_attachments WHERE related_doc_type='outbound_order' AND related_doc_id=? ORDER BY created_at DESC"
-  ).bind(id).all();
-  allAtts = allAtts.concat(orderAtts.results || []);
-  for (const jid of jobIds) {
-    const jAtts = await env.DB.prepare(
-      "SELECT * FROM v2_attachments WHERE related_doc_id=? ORDER BY created_at DESC"
-    ).bind(jid).all();
-    allAtts = allAtts.concat(jAtts.results || []);
-  }
-  // Canonical work documents are shared with the field loading screen.
-  if(workChainEnabled(env)){const files=await workMaterials(env,await chainLinked(env,id));const byId=new Map(allAtts.map(f=>[f.id,f]));for(const f of files)byId.set(f.id,{...f,attachment_category:'outbound_material',canonical_material:true});allAtts=[...byId.values()];}
-  // 注入 material_count
-  const materialCount = allAtts.filter(a => a.attachment_category === 'outbound_material').length;
-  row.material_count = materialCount;
-
-  // 修改日志（按 revision_no DESC）
-  const changeLogRs = await env.DB.prepare(
-    `SELECT id, revision_no, change_type, changed_by, changed_at,
-            diff_json, summary_text, warehouse_ack_required, warehouse_ack_by, warehouse_ack_at, ack_source
-       FROM v2_outbound_order_change_logs
-      WHERE order_id=?
-      ORDER BY revision_no DESC, changed_at DESC
-      LIMIT 50`
-  ).bind(id).all();
+  const [reads,needs] = await Promise.all([
+    env.DB.batch([
+      env.DB.prepare('SELECT * FROM v2_outbound_order_lines WHERE order_id=? ORDER BY line_no').bind(id),
+      env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE (related_doc_type='outbound_order' AND related_doc_id=?) OR linked_outbound_order_id=? ORDER BY created_at DESC").bind(id,id),
+      env.DB.prepare("SELECT * FROM v2_attachments WHERE (related_doc_type='outbound_order' AND related_doc_id=?) OR related_doc_id IN (SELECT id FROM v2_ops_jobs WHERE (related_doc_type='outbound_order' AND related_doc_id=?) OR linked_outbound_order_id=?) ORDER BY created_at DESC").bind(id,id,id),
+      env.DB.prepare('SELECT * FROM v2_outbound_order_change_logs WHERE order_id=? ORDER BY revision_no DESC,changed_at DESC LIMIT 50').bind(id)
+    ]),env.SOP_UPGRADE_ENABLED==='true'?chainLinked(env,id):[]
+  ]);
+  const [lines,jobs,orderAtts,changeLogRs]=reads;
+  let allAtts=orderAtts.results||[];
+  if(workChainEnabled(env)){const files=await workMaterials(env,needs);const byId=new Map(allAtts.map(f=>[f.id,f]));for(const f of files)byId.set(f.id,{...f,attachment_category:'outbound_material',canonical_material:true});allAtts=[...byId.values()];}
+  row.material_count=allAtts.filter(a=>a.attachment_category==='outbound_material').length;
   const change_logs = (changeLogRs.results || []).map(r => {
     let diff = {};
     try { diff = JSON.parse(r.diff_json || '{}'); } catch (e) {}
@@ -2980,7 +2955,7 @@ route("v2_outbound_order_detail", async (body, env) => {
   return json({
     ok: true,
     order: row,
-    sop_needs: await linkedNeeds(env,id),
+    sop_needs: await linkedNeeds(env,id,needs),
     lines: lines.results || [],
     jobs: jobs.results || [],
     attachments: allAtts,
@@ -3267,21 +3242,16 @@ route("v2_outbound_order_ack_change", async (body, env) => {
   return withIdem(env, body, "v2_outbound_order_ack_change", async () => {
     const order = await env.DB.prepare("SELECT id, warehouse_ack_required, revision_no FROM v2_outbound_orders WHERE id=?").bind(id).first();
     if (!order) return { ok: false, error: "not_found" };
+    const revision=Number(order.revision_no||0);
+    if(workChainEnabled(env)&&(!Number.isSafeInteger(body.revision_no)||body.revision_no!==revision))return {ok:false,error:'出库计划又有新修改，请刷新查看后再确认 / 변경 내용을 새로고침 후 확인하세요'};
     const alreadyAcked = Number(order.warehouse_ack_required) !== 1;
-    const t = now();
-    const worker = String(body.worker_name || body.by || "");
-    const ack_source = String(body.source || '').trim() || 'warehouse';
-
-    if (!alreadyAcked) {
-      await env.DB.prepare(
-        "UPDATE v2_outbound_orders SET warehouse_ack_required=0, warehouse_ack_by=?, warehouse_ack_at=?, updated_at=? WHERE id=?"
-      ).bind(worker, t, t, id).run();
-    }
-    // 清掉该 order_id 所有 pending change_logs（即便主表已 ack 也确保日志同步）
-    const updRs = await env.DB.prepare(
-      "UPDATE v2_outbound_order_change_logs SET warehouse_ack_required=0, warehouse_ack_by=?, warehouse_ack_at=?, ack_source=? WHERE order_id=? AND warehouse_ack_required=1"
-    ).bind(worker, t, ack_source, id).run();
-    const acked_count = (updRs && updRs.meta && Number(updRs.meta.changes || 0)) || 0;
+    const t=now(),worker=env.SOP_REQUEST_USER?.name||String(body.worker_name||body.by||''),ack_source=env.SOP_REQUEST_USER?.scope==='field'?'warehouse':String(body.source||'warehouse');
+    const results=await env.DB.batch([
+      env.DB.prepare("UPDATE v2_outbound_orders SET warehouse_ack_required=0,warehouse_ack_by=?,warehouse_ack_at=?,updated_at=? WHERE id=? AND COALESCE(revision_no,0)=?").bind(worker,t,t,id,revision),
+      env.DB.prepare("UPDATE v2_outbound_order_change_logs SET warehouse_ack_required=0,warehouse_ack_by=?,warehouse_ack_at=?,ack_source=? WHERE order_id=? AND warehouse_ack_required=1 AND revision_no<=? AND EXISTS(SELECT 1 FROM v2_outbound_orders WHERE id=? AND COALESCE(revision_no,0)=?)").bind(worker,t,ack_source,id,revision,id,revision)
+    ]);
+    if(!results[0].meta?.changes)return {ok:false,error:'出库计划又有新修改，请刷新查看后再确认'};
+    const acked_count=Number(results[1].meta?.changes||0);
 
     return {
       ok: true,
@@ -3299,13 +3269,16 @@ route("v2_outbound_pickup_confirm", async (body, env) => {
   const id = String(body.id || "").trim();
   if (!id) return err("missing id");
   return withIdem(env, body, "v2_outbound_pickup_confirm", async () => {
-    const order = await env.DB.prepare("SELECT id, pickup_confirm_required FROM v2_outbound_orders WHERE id=?").bind(id).first();
+    const order = await env.DB.prepare("SELECT id, pickup_confirm_required, revision_no FROM v2_outbound_orders WHERE id=?").bind(id).first();
     if (!order) return { ok: false, error: "not_found" };
+    const revision=Number(order.revision_no||0);
+    if(workChainEnabled(env)&&(!Number.isSafeInteger(body.revision_no)||body.revision_no!==revision))return {ok:false,error:'提货安排又有新修改，请刷新查看后再确认 / 픽업 정보가 변경되었습니다'};
     const t = now();
-    const worker = String(body.worker_name || body.by || "");
-    await env.DB.prepare(
-      "UPDATE v2_outbound_orders SET pickup_confirm_required=0, pickup_confirmed_by=?, pickup_confirmed_at=?, updated_at=? WHERE id=?"
-    ).bind(worker, t, t, id).run();
+    const worker = env.SOP_REQUEST_USER?.name||String(body.worker_name || body.by || "");
+    const saved=await env.DB.prepare(
+      "UPDATE v2_outbound_orders SET pickup_confirm_required=0, pickup_confirmed_by=?, pickup_confirmed_at=?, updated_at=? WHERE id=? AND COALESCE(revision_no,0)=?"
+    ).bind(worker, t, t, id,revision).run();
+    if(!saved.meta?.changes)return {ok:false,error:'提货安排又有新修改，请刷新查看后再确认'};
     return { ok: true, id };
   });
 });
@@ -6881,21 +6854,20 @@ route("v2_ops_job_detail", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
   const job_id = String(body.job_id || "").trim();
   if (!job_id) return err("missing job_id");
-  // 实时校正 active_worker_count
-  await recalcActiveCount(env, job_id, now());
-  const job = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
+  // A detail read must not change task timestamps or write on every UI poll.
+  const queries=[
+    env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(job_id),
+    env.DB.prepare("SELECT * FROM v2_ops_job_workers WHERE job_id=? ORDER BY joined_at DESC").bind(job_id),
+    env.DB.prepare("SELECT * FROM v2_ops_job_results WHERE job_id=? ORDER BY created_at DESC").bind(job_id),
+    env.DB.prepare("SELECT * FROM v2_attachments WHERE related_doc_type='ops_job' AND related_doc_id=? ORDER BY created_at DESC").bind(job_id)
+  ];
+  if(inboundFlowEnabled(env))queries.push(env.DB.prepare("SELECT revision,state FROM sop_records WHERE id=? AND kind='dispatch'").bind(job_id));
+  const [detail,canManage]=await Promise.all([env.DB.batch(queries),nativeOwner(body,env)]);
+  const [jobRows,workers,results,atts,dispatchRows]=detail,job=jobRows.results[0];
   if (!job) return err("not found", 404);
-  const workers = await env.DB.prepare(
-    "SELECT * FROM v2_ops_job_workers WHERE job_id=? ORDER BY joined_at DESC"
-  ).bind(job_id).all();
-  const results = await env.DB.prepare(
-    "SELECT * FROM v2_ops_job_results WHERE job_id=? ORDER BY created_at DESC"
-  ).bind(job_id).all();
-  const atts = await env.DB.prepare(
-    "SELECT * FROM v2_attachments WHERE related_doc_type='ops_job' AND related_doc_id=? ORDER BY created_at DESC"
-  ).bind(job_id).all();
+  job.active_worker_count=new Set(workers.results.filter(w=>!w.left_at).map(w=>w.worker_id)).size;
   return json({
-    ok: true, dispatch: inboundFlowEnabled(env) ? await env.DB.prepare("SELECT revision,state FROM sop_records WHERE id=? AND kind='dispatch'").bind(job_id).first() : null, job, can_manage_dispatch: await nativeOwner(body,env), unload_plans: await tripPlans(env,job_id),
+    ok: true, dispatch: dispatchRows?.results[0]||null, job, can_manage_dispatch: canManage, unload_plans: job.job_type==='unload'?await tripPlans(env,job_id):[],
     workers: workers.results || [],
     results: results.results || [],
     attachments: atts.results || []
@@ -11821,10 +11793,7 @@ route('v2_003_material_txn', async (body, env) => {
       const supplier = v003Text(body.supplier || item.supplier, 160);
       const txId = v003Id('MTX');
       const results = await env.DB.batch([
-        env.DB.prepare(`UPDATE v2_003_materials SET current_qty=?, location_code=?,
-          unit_cost=?, supplier=?, stock_version=stock_version+1, updated_by=?, updated_at=?
-          WHERE id=? AND stock_version=?`)
-          .bind(after, location, cost, supplier, op.name, t, id, version),
+        // Insert only against the version actually read; the paired update is in this same transaction.
         env.DB.prepare(`INSERT INTO v2_003_material_txns
           (id, material_id, txn_type, qty_delta, qty_before, qty_after, warehouse_name, location_code,
            recipient_id, recipient_name, purpose, related_doc_no, unit_cost, supplier, note,
@@ -11834,7 +11803,11 @@ route('v2_003_material_txn', async (body, env) => {
           .bind(txId, id, txnType, delta, before, after, '', location,
             v003Text(body.recipient_id, 80), recipientName,
             v003Text(body.purpose, 240), v003Text(body.related_doc_no, 120), cost, supplier,
-            v003Text(body.note, 1000), op.id, op.name, department, t, id, version + 1)
+            v003Text(body.note, 1000), op.id, op.name, department, t, id, version),
+        env.DB.prepare(`UPDATE v2_003_materials SET current_qty=?, location_code=?,
+          unit_cost=?, supplier=?, stock_version=stock_version+1, updated_by=?, updated_at=?
+          WHERE id=? AND stock_version=?`)
+          .bind(after, location, cost, supplier, op.name, t, id, version)
       ]);
       if (v003Changes(results[0]) === 1 && v003Changes(results[1]) === 1) {
         return { ok: true, id: txId, qty_before: before, qty_delta: delta, qty_after: after };
@@ -12058,10 +12031,7 @@ route('v2_003_asset_action', async (body, env) => {
       const t = now();
       const txId = v003Id('ATX');
       const results = await env.DB.batch([
-        env.DB.prepare(`UPDATE v2_003_assets SET status=?, location_code=?,
-          keeper_id=?, keeper_name=?, keeper_department=?, asset_version=asset_version+1, updated_by=?, updated_at=?
-          WHERE id=? AND asset_version=?`)
-          .bind(status, location, keeperId, keeperName, keeperDepartment, op.name, t, id, version),
+        // Insert only against the version actually read; the paired update is in this same transaction.
         env.DB.prepare(`INSERT INTO v2_003_asset_txns
           (id, asset_id, action_type, status_before, status_after, from_warehouse, from_location,
            to_warehouse, to_location, from_keeper_id, from_keeper_name, to_keeper_id, to_keeper_name,
@@ -12071,7 +12041,11 @@ route('v2_003_asset_action', async (body, env) => {
           .bind(txId, id, action, item.status, status, item.warehouse_name, item.location_code,
             '', location, item.keeper_id, item.keeper_name, keeperId, keeperName,
             v003Text(body.related_doc_no, 120), v003Text(body.note, 1000), op.id, op.name,
-            v003Department(item.keeper_department), keeperDepartment, t, id, version + 1)
+            v003Department(item.keeper_department), keeperDepartment, t, id, version),
+        env.DB.prepare(`UPDATE v2_003_assets SET status=?, location_code=?,
+          keeper_id=?, keeper_name=?, keeper_department=?, asset_version=asset_version+1, updated_by=?, updated_at=?
+          WHERE id=? AND asset_version=?`)
+          .bind(status, location, keeperId, keeperName, keeperDepartment, op.name, t, id, version)
       ]);
       if (v003Changes(results[0]) === 1 && v003Changes(results[1]) === 1) {
         return { ok: true, id: txId, status, keeper_id: keeperId, keeper_name: keeperName,

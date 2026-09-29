@@ -187,14 +187,20 @@ export async function guardAttendance(body,env){
  if(!(native||['sop_task_start','sop_task_people','sop_task_dispatch','sop_native_people'].includes(action)||/^v2_.*_(start|resume|join)$/.test(action)||action==='v2_pick_job_start_by_docs'))return null;
  // A committed retry must reach the original action's idempotent response.
  if(body.client_req_id){const done=await q(env,'SELECT action,actor_id FROM sop_events WHERE request_id=?',body.client_req_id).first();if(done&&done.action===action&&done.actor_id===env.SOP_REQUEST_USER?.id)return null;}
- let workers=body.workers||[],jobId=body.id||source.job_id;
+ let workers=body.workers||[],jobId=body.job_id||body.id||source.job_id;
  if(native&&source.client_req_id){const old=await q(env,'SELECT response_json FROM v2_idempotency_keys WHERE idem_key=?',source.client_req_id).first();if(old){jobId=JSON.parse(old.response_json).job_id;const saved=await q(env,"SELECT state FROM sop_records WHERE id=? AND kind='dispatch'",jobId).first();if(saved&&JSON.parse(saved.state).owner_id===env.SOP_REQUEST_USER?.id)return null;}}
  if(action==='sop_task_people'){const row=await q(env,"SELECT state FROM sop_records WHERE id=? AND kind='task'",body.id).first();if(row&&JSON.parse(row.state).status!=='working')return null;}
 
  if(action==='sop_task_start'){const row=await q(env,"SELECT state FROM sop_records WHERE id=? AND kind='task'",body.id).first();workers=row?JSON.parse(row.state).workers||[]:[];}
  if(!workers.length&&(source.worker_id||source.handler_id))workers=[{id:source.worker_id||source.handler_id}];
  const daily=workers.filter(w=>/^(?:DA(?:F)?|EMP)-/.test(w.id||''));if(!daily.length)return null;
- await ensureAttendance(env);const t=new Date().toISOString();
- for(const w of daily){const record=await todayRecord(env,w.id,t);if(!record)return (w.name||w.id)+' 请先办理当天签到 / 먼저 출근 등록하세요';if(record.signed_out)return record.name+' 已签退，不能开始作业 / 이미 퇴근했습니다';const rest=await q(env,"SELECT id FROM ck_attendance_breaks WHERE attendance_id=? AND ended_at=''",record.id).first();if(rest)return record.name+' 正在休息，请先结束休息 / 휴식을 먼저 종료하세요';const busy=await q(env,"SELECT job_id FROM v2_ops_job_workers WHERE worker_id=? AND left_at='' AND job_id!=? LIMIT 1",w.id,jobId||'').first();if(busy)return record.name+' 已在另一任务，请先办理交接';}
+ await ensureAttendance(env);const day=kstDay(new Date().toISOString()),ids=JSON.stringify([...new Set(daily.map(w=>w.id))]);
+ const [days,rests,busy]=await env.DB.batch([
+  q(env,'SELECT * FROM ck_attendance_days WHERE day=? AND worker_id IN (SELECT value FROM json_each(?))',day,ids),
+  q(env,"SELECT d.worker_id FROM ck_attendance_breaks b JOIN ck_attendance_days d ON d.id=b.attendance_id WHERE d.day=? AND d.worker_id IN (SELECT value FROM json_each(?)) AND b.ended_at=''",day,ids),
+  q(env,"SELECT DISTINCT worker_id FROM v2_ops_job_workers WHERE worker_id IN (SELECT value FROM json_each(?)) AND left_at='' AND job_id!=?",ids,jobId||'')
+ ]);
+ const records=new Map(days.results.map(r=>[r.worker_id,r])),resting=new Set(rests.results.map(r=>r.worker_id)),occupied=new Set(busy.results.map(r=>r.worker_id));
+ for(const w of daily){const record=records.get(w.id);if(!record)return (w.name||w.id)+' 请先办理当天签到 / 먼저 출근 등록하세요';if(record.signed_out)return record.name+' 已签退，不能开始作业 / 이미 퇴근했습니다';if(resting.has(w.id))return record.name+' 正在休息，请先结束休息 / 휴식을 먼저 종료하세요';if(occupied.has(w.id))return record.name+' 已在另一任务，请先办理交接';}
  return null;
 }

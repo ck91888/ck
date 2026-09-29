@@ -37,10 +37,11 @@ async function materials(host,need,{field=false,onChange=()=>{},items=null}={}){
 }
 async function mountNeed(host,need,options={}){
  if(!enabled())return;host.classList.add('chain-need');
- const docs=document.createElement('section');host.append(docs);await materials(docs,need,options);
- if(options.field)return;
+ const docs=document.createElement('section');host.append(docs);const materialLoad=materials(docs,need,options);
+ if(options.field)return materialLoad;
+ const allocationLoad=allocation(need);
  const plan=document.createElement('section');plan.className='chain-schedule';plan.innerHTML='<h3><span data-i18n="ck_plan_74">出库安排 / 출고 예약</span></h3><p class="muted"><span data-i18n="ck_plan_75">可以提前预约；完成审核后才能装货。 / 사전 예약 가능, 작업 확인 후 상차</span></p>';host.append(plan);
- const shipping=await allocation(need);
+ const [shipping]=await Promise.all([allocationLoad,materialLoad]);if(!host.isConnected)return;
  if(!['closed','cancelled'].includes(need.status)){
   const a=shipping;if(a){const info=document.createElement('p');info.textContent='可安排 '+a.remaining+' '+a.schedule_unit+' / 예약 가능';plan.append(info);const link=document.createElement('a');link.className='btn btn-primary';link.href='/002/?create_outbound=1&need='+encodeURIComponent(need.id);if(window.CKPlanCopy)CKPlanCopy.bind(link,'安排出库 / 출고 예약');else link.textContent='安排出库 / 출고 예약';plan.append(link);}
  }

@@ -53,7 +53,7 @@ export async function shippingBasisStatements(env, row, data, body, user, t) {
  }
  data.shipping_basis={quantity,unit,reason:reason.slice(0,4000),by:user.name,at:t};
  data.links=(data.links||[]).map(l=>values.has(l.outbound_id)?{...l,quantity:values.get(l.outbound_id),unit,adjustment_reason:reason.slice(0,4000)}:l);
- return [...statements,...notifyMaterialChange(env,row,user,t,'出库数量或单位已调整，请重新确认')];
+ return [...statements,...notifyMaterialChange(env,row,user,t,'出库数量与单位已调整：'+reason,{type:'shipping_adjustment',diff:id=>{const before=(row.data.links||[]).find(l=>l.outbound_id===id),after=data.links.find(l=>l.outbound_id===id);return {shipping_quantity:{from:before?before.quantity+' '+before.unit:'',to:after?after.quantity+' '+after.unit:''}};}})];
 }
 export function chainEvent(env, row, data, user, request, action, t, result = {}) {
  const revision = row.revision + 1;
@@ -122,11 +122,11 @@ export async function workMaterialRead(body,env,user) {
  const items=await Promise.all(rows.slice(0,30).map(async row=>{const data=JSON.parse(row.state),a=await chainAllocation(env,data,orders);return {id:row.id,revision:row.revision,department:row.department,...data,remaining:Math.max(0,a.quantity-a.used),schedule_unit:a.unit,schedule_quantity:a.quantity,shipping_plans:a.orders.filter(o=>(data.links||[]).some(l=>l.outbound_id===o.id))};}));
  return {ok:true,items,more:rows.length>30,offset};
 }
-export function notifyMaterialChange(env,row,user,t,summary) {
+export function notifyMaterialChange(env,row,user,t,summary,change={}) {
  const ids=[...new Set([...(row.data.links||[]).map(l=>l.outbound_id),...(row.data.source_type==='outbound'?[row.data.source_id]:[])])],out=[];
  for(const id of ids){
   out.push(q(env,`UPDATE v2_outbound_orders SET revision_no=COALESCE(revision_no,0)+1,warehouse_ack_required=1,warehouse_ack_by='',warehouse_ack_at='',last_modified_by=?,last_modified_at=?,updated_at=? WHERE id=? AND status NOT IN ('shipped','completed','cancelled')`,user.name,t,t,id));
-  out.push(q(env,`INSERT INTO v2_outbound_order_change_logs(id,order_id,revision_no,change_type,changed_by,changed_at,diff_json,summary_text,warehouse_ack_required) SELECT ?,id,revision_no,'material_update',?,?,?, ?,1 FROM v2_outbound_orders WHERE id=? AND status NOT IN ('shipped','completed','cancelled')`,'CHG-'+crypto.randomUUID(),user.name,t,JSON.stringify({need_id:row.id}),summary,id));
+  out.push(q(env,`INSERT INTO v2_outbound_order_change_logs(id,order_id,revision_no,change_type,changed_by,changed_at,diff_json,summary_text,warehouse_ack_required) SELECT ?,id,revision_no,?,?,?,?, ?,1 FROM v2_outbound_orders WHERE id=? AND status NOT IN ('shipped','completed','cancelled')`,'CHG-'+crypto.randomUUID(),change.type||'material_update',user.name,t,JSON.stringify(typeof change.diff==='function'?change.diff(id):change.diff||{}),summary,id));
  }
  return out;
 }

@@ -5,6 +5,7 @@ import entry from '../worker-v2/staging-entry.js';
 import {digest} from '../worker-v2/access-control.js';
 import {ensureSchema} from '../worker-v2/schema-ready.js';
 import {STAGING_HOST,STAGING_DATABASE} from '../worker-v2/test-data-reset.js';
+import worker from '../worker-v2/index.js';
 
 test('schema readiness is scoped to DB and version, retries failures, and retains no business data',async()=>{
  const a={},b={};let count=0;
@@ -13,6 +14,18 @@ test('schema readiness is scoped to DB and version, retries failures, and retain
  await ensureSchema(b,'v1',init);await ensureSchema(a,'v2',init);assert.equal(count,3);
  await assert.rejects(ensureSchema(a,'retry',async()=>{throw Error('unavailable');}));
  await ensureSchema(a,'retry',init);assert.equal(count,4);
+});
+
+test('polling job details derives current crew without writes and uses a fixed batch',async()=>{
+ const DB=database(),env={DB,SOP_ENVIRONMENT:'staging',SOP_UPGRADE_ENABLED:'true',SOP_PUBLIC_TEST_ACCESS:'true'},stamp='2026-01-01T00:00:00Z';
+ const api=async b=>(await worker.fetch(new Request('https://fixture.test/api',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}),env)).json();
+ await api({action:'sop_identity'});
+ DB.raw.prepare("INSERT INTO v2_ops_jobs(id,job_type,status,active_worker_count,updated_at) VALUES('POLL','bulk_op','working',99,?)").run(stamp);
+ for(let i=0;i<20;i++)DB.raw.prepare("INSERT INTO v2_ops_job_workers(id,job_id,worker_id,joined_at,left_at) VALUES(?,'POLL',?,?,?)").run('W'+i,'EMP-'+i,stamp,i<8?'':stamp);
+ const prepare=DB.prepare.bind(DB),batch=DB.batch.bind(DB);const calls=[];
+ DB.prepare=sql=>{const s=prepare(sql);for(const method of ['first','all','run']){const f=s[method].bind(s);s[method]=async()=>{calls.push(sql);return f();};}return s;};
+ DB.batch=async items=>{calls.push(items.map(x=>x.sql).join('\n'));return batch(items);};
+ for(let i=0;i<2;i++){calls.length=0;const r=await api({action:'v2_ops_job_detail',job_id:'POLL'});assert.equal(r.ok,true,r.error);assert.equal(r.job.active_worker_count,8);assert.ok(calls.length<=4,calls.length);assert.ok(calls.every(sql=>!/^\s*(UPDATE|INSERT|DELETE)/m.test(sql)),calls.join('\n'));assert.equal(DB.raw.prepare("SELECT updated_at FROM v2_ops_jobs WHERE id='POLL'").get().updated_at,stamp);}
 });
 
 test('warm requests avoid DDL; detail query count is fixed as history grows and preserves latest output',async()=>{

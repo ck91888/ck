@@ -139,7 +139,7 @@ export async function handleSop(b,env) {
   }
   if(b.action==='sop_get') {
    const row=await read(env,b.id); if(!row) fail('记录不存在'); permit(u,row.department,roles);
-   const events=await all(env,'SELECT action,actor_name,before_json,after_json,created_at FROM sop_events WHERE record_id=? ORDER BY created_at DESC LIMIT 100',row.id);
+   const events=b.version_only?[]:await all(env,'SELECT action,actor_name,before_json,after_json,created_at FROM sop_events WHERE record_id=? ORDER BY created_at DESC LIMIT 100',row.id);
    return {ok:true,record:publicState(row),events};
   }
   if(b.action==='sop_dispatch_list'){
@@ -343,7 +343,7 @@ export async function handleSop(b,env) {
     if(workChainEnabled(env)&&b.planned_quantity!==undefined&&str(b.planned_quantity)!==''){const quantity=positive(b.planned_quantity),unit=required(b.planned_unit,'计划单位'),a=await chainAllocation(env,d);if(!d.shipping_basis&&(a.used>quantity||a.links.some(l=>l.unit!==unit)))fail('计划数量和单位不能小于或改变已分配的出库数量');d.planned_quantity=quantity;d.planned_unit=unit;}
     d.requirement_version=(d.requirement_version||1)+1;d.instructions=required(b.instructions,'要求');d.needs_clarification=false;d.location=text(b.location);d.owner=required(b.owner,'责任人');d.deadline=text(b.deadline);
     for(const link of d.links||[])extra.push(stmt(env,'UPDATE v2_outbound_orders SET instruction=?,updated_at=? WHERE id=?',d.instructions,t,link.outbound_id));
-    if(workChainEnabled(env))extra.push(...notifyMaterialChange(env,row,u,t,'作业要求已更新，请重新确认'));
+    if(workChainEnabled(env))extra.push(...notifyMaterialChange(env,row,u,t,'作业要求已更新，请重新确认',{type:'requirement_update',diff:{instruction:{from:row.data.instructions,to:d.instructions}}}));
     if(d.source_type==='outbound')extra.push(stmt(env,'UPDATE v2_outbound_orders SET instruction=?,updated_at=? WHERE id=?',d.instructions,t,d.source_id));
    } else if(b.action==='sop_need_shipping_basis') {
     extra.push(...await shippingBasisStatements(env,row,d,b,u,t));
@@ -352,7 +352,7 @@ export async function handleSop(b,env) {
     const ob=await verifySource(env,'outbound',link.outbound_id,d.customer);if(['shipped','completed','cancelled'].includes(ob.status))fail('出库状态不能调整');
     const quantity=positive(b.quantity);required(b.reason,'调整原因');const allocation=workChainEnabled(env)?await chainAllocation(env,d):{links:d.links,quantity:d.planned_quantity};if(allocation.links.reduce((n,l)=>n+(l.outbound_id===link.outbound_id?quantity:l.quantity),0)>allocation.quantity)fail('超过预计可出库数量');if(b.unit&&b.unit!==link.unit)fail('更改出库单位请使用调整出库数量与单位');link.quantity=quantity;link.adjustment_reason=text(b.reason);
     extra.push(stmt(env,'UPDATE v2_outbound_orders SET planned_box_count=?,planned_pallet_count=?,updated_at=? WHERE id=?',link.unit==='箱'?quantity:0,link.unit==='托'?quantity:0,t,link.outbound_id));
-    if(workChainEnabled(env))extra.push(...notifyMaterialChange(env,row,u,t,'出库数量已调整，请重新确认'));
+    if(workChainEnabled(env))extra.push(...notifyMaterialChange(env,row,u,t,'出库数量已调整：'+text(b.reason),{type:'shipping_adjustment',diff:id=>id===b.outbound_id?{shipping_quantity:{from:row.data.links.find(l=>l.outbound_id===id).quantity+' '+link.unit,to:quantity+' '+link.unit}}:{}}));
    } else if(b.action==='sop_need_details') {
     if(!d.result)fail('审核通过后再上传作业明细');
     const rows=b.rows;if(!Array.isArray(rows)||!rows.length||rows.length>10000)fail('明细须为1至10000行');
@@ -478,7 +478,12 @@ function validateWorkers(workers,lead){
 async function needGroups(env,u,b){
  const departments=u.role==='manager'?[]:u.departments||[];
  const filter=u.role==='manager'?'':` AND department IN (${departments.map(()=>'?').join(',')||"''"})`;
- const rows=await all(env,`SELECT * FROM sop_records WHERE kind='need'${filter} ORDER BY updated_at DESC,id`,...departments);
+ let scope='',scopeArgs=[];
+ const groupExpr="json_array(COALESCE(NULLIF(json_extract(state,'$.source_type'),''),'standalone'),COALESCE(NULLIF(json_extract(state,'$.source_id'),''),NULLIF(json_extract(state,'$.supply_chain_no'),''),id),json_extract(state,'$.customer'))";
+ if(b.group_key){scope=' AND '+groupExpr+'=?';scopeArgs=[b.group_key];}
+ else if(b.source_id){scope=" AND json_extract(state,'$.source_id')=?";scopeArgs=[b.source_id];if(b.source_type){scope+=" AND json_extract(state,'$.source_type')=?";scopeArgs.push(b.source_type);}}
+ else if(b.need_id){scope=' AND '+groupExpr+'=(SELECT '+groupExpr+" FROM sop_records WHERE id=? AND kind='need')";scopeArgs=[b.need_id];}
+ const rows=await all(env,`SELECT * FROM sop_records WHERE kind='need'${filter}${scope} ORDER BY updated_at DESC,id`,...departments,...scopeArgs);
  const groups=new Map();
  for(const row of rows){const x=publicState({...row,data:JSON.parse(row.state)});
   const key=JSON.stringify([x.source_type||'standalone',x.source_id||x.supply_chain_no||x.id,x.customer]);
@@ -493,9 +498,11 @@ async function needGroups(env,u,b){
  const ibIds=[...new Set(items.filter(g=>g.source_type==='inbound'&&g.source_id).map(g=>g.source_id))];
  const obIds=[...new Set(items.filter(g=>g.source_type==='outbound'&&g.source_id).map(g=>g.source_id))];
  const inClause=ids=>ids.map(()=>'?').join(',');
- const plans=ibIds.length?await all(env,`SELECT id,display_no,customer,plan_date,expected_arrival,cargo_summary,purpose,remark,status,is_deleted FROM v2_inbound_plans WHERE id IN (${inClause(ibIds)})`,...ibIds):[];
- const lines=ibIds.length?await all(env,`SELECT plan_id,unit_type,planned_qty,remark FROM v2_inbound_plan_lines WHERE plan_id IN (${inClause(ibIds)}) ORDER BY line_no`,...ibIds):[];
- const outbounds=obIds.length?await all(env,`SELECT id,display_no FROM v2_outbound_orders WHERE id IN (${inClause(obIds)})`,...obIds):[];
+ const reads=await env.DB.batch([
+  stmt(env,'SELECT id,display_no,customer,plan_date,expected_arrival,cargo_summary,purpose,remark,status,is_deleted FROM v2_inbound_plans WHERE id IN (SELECT value FROM json_each(?))',JSON.stringify(ibIds)),
+  stmt(env,'SELECT plan_id,unit_type,planned_qty,remark FROM v2_inbound_plan_lines WHERE plan_id IN (SELECT value FROM json_each(?)) ORDER BY line_no',JSON.stringify(ibIds)),
+  stmt(env,'SELECT id,display_no FROM v2_outbound_orders WHERE id IN (SELECT value FROM json_each(?))',JSON.stringify(obIds))]);
+ const [plans,lines,outbounds]=reads.map(r=>r.results||[]);
  for(const g of items){
   if(g.source_type==='inbound'){const p=plans.find(p=>p.id===g.source_id);if(p){Object.assign(g,{plan:p,display_no:p.display_no||p.id,cargo_summary:p.cargo_summary,plan_date:p.plan_date,expected_arrival:p.expected_arrival});g.lines=lines.filter(l=>l.plan_id===g.source_id);}}
   if(g.source_type==='outbound')g.display_no=outbounds.find(p=>p.id===g.source_id)?.display_no||g.source_id;
@@ -550,9 +557,9 @@ export async function linkedCheck(env,id){
  if(env.SOP_UPGRADE_ENABLED!=='true')return null;
  const row=await stmt(env,"SELECT * FROM sop_records WHERE kind='check' AND json_extract(state,'$.legacy_id')=?",id).first();return row?publicState({...row,data:JSON.parse(row.state)}):null;
 }
-export async function linkedNeeds(env,id){
+export async function linkedNeeds(env,id,knownRows){
  if(env.SOP_UPGRADE_ENABLED!=='true')return [];
- const rows=await all(env,"SELECT * FROM sop_records WHERE kind='need' AND (json_extract(state,'$.source_id')=? OR EXISTS(SELECT 1 FROM json_each(json_extract(state,'$.links')) l WHERE json_extract(l.value,'$.outbound_id')=?))",id,id);
+ const rows=knownRows||await all(env,"SELECT * FROM sop_records WHERE kind='need' AND (json_extract(state,'$.source_id')=? OR EXISTS(SELECT 1 FROM json_each(json_extract(state,'$.links')) l WHERE json_extract(l.value,'$.outbound_id')=?))",id,id);
  return rows.map(r=>publicState({...r,data:JSON.parse(r.state)}));
 }
 export async function guardLegacy(b,env){

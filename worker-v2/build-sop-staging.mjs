@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { mkdir, copyFile, readFile, writeFile, rm } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
@@ -6,14 +7,14 @@ if(!out.startsWith(root+'\\')&&!out.startsWith(root+'/'))throw Error('Unsafe bui
 await rm(out,{recursive:true,force:true});await mkdir(out,{recursive:true});
 // Explicit original application allowlist. Never publish server code or credentials.
 const apps=['001','002','003','shuju','attendance'];
-const shared=['document-code.js','html5-qrcode.min.js','xlsx.full.min.js','qrcode.min.js','work-plan-language.js','work-chain-ui.js','work-chain.css','sop-entry.js','sop-native.js','sop-native.css','sop-session.js','sop-dispatch-ui.js','sop-planning-ui.js','sop-people.js','ck-design.css','ck-office.css','labor-department.js','inbound-flow-ui.js','courier-ui.js','courier-rules.js','courier.css','attendance-ui.js','field-work.js','work-result-ui.js','test-data-reset.js','test-data-reset.css','employee-attendance.js','employee-attendance.css','employee-import.js','unload-trip-ui.js','unload-trip.css','unload-photos.js','unload-photos.css','native-lifecycle-ui.js','native-lifecycle.css','feedback-link-ui.js','feedback-link.css','access-ui.css'];
+const shared=['outbound-changes.js','document-code.js','html5-qrcode.min.js','xlsx.full.min.js','qrcode.min.js','work-plan-language.js','work-chain-ui.js','work-chain.css','sop-entry.js','sop-native.js','sop-native.css','sop-session.js','sop-dispatch-ui.js','sop-planning-ui.js','sop-people.js','ck-design.css','ck-office.css','labor-department.js','inbound-flow-ui.js','courier-ui.js','courier-rules.js','courier.css','attendance-ui.js','field-work.js','work-result-ui.js','test-data-reset.js','test-data-reset.css','employee-attendance.js','employee-attendance.css','employee-import.js','unload-trip-ui.js','unload-trip.css','unload-photos.js','unload-photos.css','native-lifecycle-ui.js','native-lifecycle.css','feedback-link-ui.js','feedback-link.css','access-ui.css'];
 await mkdir(resolve(out,'shared'),{recursive:true});
 for(const f of shared)await copyFile(resolve(root,'shared',f),resolve(out,'shared',f));
 await mkdir(resolve(out,'templates'),{recursive:true});
 await writeFile(resolve(out,'templates/employees.xlsx'),Buffer.from(await readFile(resolve(root,'shared/templates/employees.xlsx.b64'),'utf8'),'base64'));
 await writeFile(resolve(out,'templates/pallet-details.xlsx'),Buffer.from(await readFile(resolve(root,'shared/templates/pallet-details.xlsx.b64'),'utf8'),'base64'));
 await writeFile(resolve(out,'shared/sop-rollout.js'),"window.CK_SOP_ROLLOUT={enabled:true,staging:true,publicAccess:false,accessControl:true,workChain:true};\nwindow.SOP_API=location.origin+(location.pathname.startsWith('/001/')?'/001/api':location.pathname.startsWith('/attendance/')?'/attendance/api':'/api');\n");
-const head='<link rel="stylesheet" href="/shared/access-ui.css"><link rel="stylesheet" href="/shared/sop-native.css"><link rel="stylesheet" href="/shared/work-chain.css"><link rel="stylesheet" href="/shared/ck-design.css"><link rel="stylesheet" href="/shared/ck-office.css"><link rel="stylesheet" href="/shared/employee-attendance.css"><link rel="stylesheet" href="/shared/courier.css"><link rel="stylesheet" href="/shared/unload-trip.css"><link rel="stylesheet" href="/shared/unload-photos.css"><link rel="stylesheet" href="/shared/native-lifecycle.css"><link rel="stylesheet" href="/shared/feedback-link.css"><script src="/shared/sop-rollout.js"></script><script src="/shared/sop-session.js"></script>';
+const head='<script src="/shared/outbound-changes.js"></script><link rel="stylesheet" href="/shared/access-ui.css"><link rel="stylesheet" href="/shared/sop-native.css"><link rel="stylesheet" href="/shared/work-chain.css"><link rel="stylesheet" href="/shared/ck-design.css"><link rel="stylesheet" href="/shared/ck-office.css"><link rel="stylesheet" href="/shared/employee-attendance.css"><link rel="stylesheet" href="/shared/courier.css"><link rel="stylesheet" href="/shared/unload-trip.css"><link rel="stylesheet" href="/shared/unload-photos.css"><link rel="stylesheet" href="/shared/native-lifecycle.css"><link rel="stylesheet" href="/shared/feedback-link.css"><script src="/shared/sop-rollout.js"></script><script src="/shared/sop-session.js"></script>';
 for(const app of apps){
  await mkdir(resolve(out,app),{recursive:true});
  for(const f of app==='attendance'?['index.html','style.css']:['index.html','app.js','config.js','style.css']){
@@ -38,5 +39,15 @@ await writeFile(resolve(out,'office-login/index.html'),'<!doctype html><html lan
 await copyFile(resolve(root,'docs/sop-acceptance.html'),resolve(out,'验收说明.html'));
 await writeFile(resolve(out,'_redirects'),'/sop/ / 302\n/sop / 302\n');
 await writeFile(resolve(out,'_headers'),'/*\n  Cache-Control: no-store\n  X-Content-Type-Options: nosniff\n  Referrer-Policy: same-origin\n');
-await writeFile(resolve(out,'release.json'),JSON.stringify({release:'20260929-bulk-form-reset',builtAt:new Date().toISOString(),modules:apps}));
+await writeFile(resolve(out,'release.json'),JSON.stringify({release:'20260929-system-audit',builtAt:new Date().toISOString(),modules:apps}));
+// Content-addressed script/style URLs permit browser reuse without stale deployments.
+for(const html of ['index.html','office-login/index.html',...apps.map(a=>a+'/index.html')]){
+ const filename=resolve(out,html),content=await readFile(filename,'utf8');
+ const matches=[...content.matchAll(/(?:src|href)="([^"?#]+\.(?:js|css))(?:[?#][^"]*)?"/g)];let next=content;
+ for(const m of matches){const u=new URL(m[1],'https://assets.local/'+html);if(u.origin!=='https://assets.local')continue;
+  const target=resolve(out,'.'+u.pathname);if(!target.startsWith(out+'\\')&&!target.startsWith(out+'/'))throw Error('Unsafe asset path');
+  const hash=createHash('sha256').update(await readFile(target)).digest('hex').slice(0,12);next=next.replace(m[0],m[0].split('=')[0]+'="'+m[1]+'?v='+hash+'"');
+ }
+ await writeFile(filename,next);
+}
 console.log('Prepared five CK applications with attendance and unified design.');
