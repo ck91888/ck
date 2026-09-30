@@ -142,7 +142,7 @@ export async function uploadWorkMaterial(form,env) {
  if(!types[ext]||!file.size||file.size>20*1024*1024)throw Error('支持20MB以内的PDF、Excel、CSV、JPG、PNG、WebP');
  const category=str(form.get('material_kind'))||'work_material';if(!['work_material','pallet_label','shipping_document','product_label'].includes(category))throw Error('作业资料类型无效');
  const feedback=category==='work_material';
- if(feedback&&user.scope!=='field')throw Error('作业说明／明细请由现场仓库人员上传');
+ if(feedback&&user.scope!=='field'&&!['manager','service'].includes(user.role))throw Error('作业说明／明细请由现场人员上传，或由办公室代录仓库反馈');
  if(!feedback&&(user.scope==='field'||!['manager','service'].includes(user.role)))throw Error('托唛、出库单和标签请由办公室客服上传');
  const id='ATT-'+crypto.randomUUID(),key='v2/sop_need/'+row.id+'/'+id+'.'+ext,t=new Date().toISOString(),d=structuredClone(row.data);
  d.material_version=(d.material_version||0)+1;if(!feedback)d.requirement_version=(d.requirement_version||1)+1;

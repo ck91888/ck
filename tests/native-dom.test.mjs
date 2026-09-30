@@ -84,7 +84,10 @@ test('work-plan documents separate customer instructions from warehouse feedback
   assert.match(office.textContent,/托唛.pdf/);assert.doesNotMatch(office.textContent,/仓库实际明细.pdf/);
   assert.match(field.textContent,/仓库实际明细.pdf/);assert.doesNotMatch(field.textContent,/托唛.pdf/);
   assert.deepEqual([...office.querySelectorAll('[data-kind] option')].map(x=>x.value),['pallet_label','shipping_document','product_label']);
-  assert.equal(field.querySelector('form'),null,'office reads feedback but does not upload it');
+  assert.ok(field.querySelector('form'),'office can record warehouse feedback on behalf of the field');
+  assert.ok(field.querySelector('input[type=file]'),'office feedback has a file picker');
+  assert.match(field.querySelector('button[type=submit]').textContent,/代录仓库反馈/);
+  assert.equal(field.querySelector('[data-kind]'),null,'office feedback cannot be mislabeled as a customer document');
   p.w.toggleLang();assert.match(office.textContent,/고객 담당자가 창고에 제공하는 작업 자료/);assert.match(field.textContent,/창고에서 고객 담당자에게 전달하는 작업 설명/);
   await p.w.CKWorkChain.materials(host,need,{field:true});
   assert.equal(host.querySelector('[data-direction=office] form'),null,'warehouse reads customer documents');

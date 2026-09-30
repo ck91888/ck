@@ -23,22 +23,26 @@ async function materials(host,need,{field=false,onChange=()=>{},items=null}={}){
  const r=items?{items,revision:need.revision}:await api('sop_work_materials',{id:need.id});if(!host.isConnected)return;
  let revision=r.revision;
  const feedback=r.items.filter(f=>f.material_kind==='work_material'),office=r.items.filter(f=>f.material_kind!=='work_material');
- host.innerHTML='<section class="chain-material-group" data-direction="office"><h3>'+copy('客服提供给仓库的作业资料','고객 담당자가 창고에 제공하는 작업 자료')+'</h3><p class="muted">'+copy('托唛、出库单和产品条码标签由客服上传，仓库在这里下载。','팔레트 라벨, 출고 서류, 상품 바코드 라벨은 고객 담당자가 올리고 창고에서 내려받습니다.')+'</p>'+filesTable(office,'暂无客服作业资料')+'</section><section class="chain-material-group" data-direction="field"><h3>'+copy('仓库反馈给客服的作业说明／明细','창고에서 고객 담당자에게 전달하는 작업 설명·명세')+'</h3><p class="muted">'+copy('现场上传实际操作说明或明细，客服在这里查看下载。','현장에서 실제 작업 설명이나 명세를 올리면 고객 담당자가 여기에서 확인합니다.')+'</p>'+filesTable(feedback,'暂无仓库反馈')+'</section>';
+ host.innerHTML='<section class="chain-material-group" data-direction="office"><h3>'+copy('客服提供给仓库的作业资料','고객 담당자가 창고에 제공하는 작업 자료')+'</h3><p class="muted">'+copy('托唛、出库单和产品条码标签由客服上传，仓库在这里下载。','팔레트 라벨, 출고 서류, 상품 바코드 라벨은 고객 담당자가 올리고 창고에서 내려받습니다.')+'</p>'+filesTable(office,'暂无客服作业资料')+'</section><section class="chain-material-group" data-direction="field"><h3>'+copy('仓库反馈给客服的作业说明／明细','창고에서 고객 담당자에게 전달하는 작업 설명·명세')+'</h3><p class="muted">'+copy('现场上传作业说明或明细；办公室收到仓库反馈后也可代录，客服在这里查看下载。','현장에서 작업 설명이나 명세를 올립니다. 사무실에서도 창고 피드백을 대신 등록할 수 있으며 고객 담당자가 여기에서 확인합니다.')+'</p>'+filesTable(feedback,'暂无仓库反馈')+'</section>';
  const role=CKSession.user?.role,writable=!['closed','cancelled'].includes(need.status);
- const canUpload=field?writable&&['manager','dispatcher','reviewer'].includes(role):writable&&['manager','service'].includes(role);
- host.querySelectorAll('[data-remove-file]').forEach(span=>{const f=r.items.find(f=>f.id===span.dataset.removeFile);if(f.historical||f.batch||f.id===need.details?.attachment_id||!canUpload||field&&f.material_kind!=='work_material'||!field&&f.material_kind==='work_material'&&role!=='manager')return;span.append(button('撤下 / 해제',async()=>{if(!confirm('撤下这份资料？历史记录仍会保留。 / 이 자료를 해제할까요?'))return;await api('sop_work_material_remove',{id:need.id,revision,attachment_id:f.id,client_req_id:crypto.randomUUID()});await onChange();if(host.isConnected)await materials(host,need,{field,onChange});}));});
- if(!canUpload)return;
- const form=document.createElement('form');form.className='chain-upload';
- form.innerHTML=(field?'':'<label><span data-i18n="ck_plan_68">资料类型 / 자료 종류</span><select data-kind>'+Object.entries(kinds).filter(([k])=>k!=='work_material').map(([k,v])=>'<option'+(window.CKPlanCopy?CKPlanCopy.attrs(v):'')+' value="'+k+'">'+(window.CKPlanCopy?CKPlanCopy.text(v):v)+'</option>').join('')+'</select></label>')+'<label><span data-i18n="ck_plan_69">选择文件 / 파일 선택</span><input data-files type="file" multiple accept=".pdf,.xlsx,.xls,.csv,.jpg,.jpeg,.png,.webp" required></label><button type="submit">'+(field?copy('上传作业说明／明细','작업 설명·명세 업로드'):copy('上传客服资料','고객 담당자 자료 업로드'))+'</button><p class="muted"><span data-i18n="ck_plan_72">每个文件不超过20MB，可连续追加。 / 파일당 20MB 이하</span></p><p data-status role="status"></p>';
- host.querySelector('[data-direction="'+(field?'field':'office')+'"]').append(form);
- let pending=[];
- form.querySelector('[data-files]').onchange=()=>{pending=[];};
- form.onsubmit=async ev=>{ev.preventDefault();const submit=form.querySelector('[type=submit]'),status=form.querySelector('[data-status]');submit.disabled=true;
-  if(!pending.length)pending=Array.from(form.querySelector('[data-files]').files).map(file=>({file,request:crypto.randomUUID(),kind:field?'work_material':form.querySelector('[data-kind]').value,done:false}));
-  try{for(const item of pending.filter(x=>!x.done)){status.textContent='正在上传 / 업로드 중：'+item.file.name;const data=new FormData();for(const [k,v] of Object.entries({action:'v2_attachment_upload',related_doc_type:'sop_need',related_doc_id:need.id,attachment_category:'work_material',material_kind:item.kind,revision,client_req_id:item.request}))data.set(k,v);data.set('file',item.file);const response=await fetch(window.SOP_API,{method:'POST',credentials:'include',body:data}),result=await response.json();if(!result.ok)throw Error(result.error||'上传失败');revision=result.revision;item.done=true;}
-   status.textContent='资料已上传 / 업로드 완료';pending=[];await onChange();if(host.isConnected)await materials(host,need,{field,onChange});
-  }catch(x){status.textContent=x.message+'。已成功的文件会保留，请刷新确认后重试。';}finally{submit.disabled=false;}
- };
+ const canOffice=writable&&!field&&['manager','service'].includes(role);
+ const canFeedback=writable&&(field?['manager','dispatcher','reviewer'].includes(role):['manager','service'].includes(role));
+ host.querySelectorAll('[data-remove-file]').forEach(span=>{const f=r.items.find(f=>f.id===span.dataset.removeFile);if(!f||f.historical||f.batch||f.id===need.details?.attachment_id||!(f.material_kind==='work_material'?canFeedback:canOffice))return;span.append(button('撤下 / 해제',async()=>{if(!confirm('撤下这份资料？历史记录仍会保留。 / 이 자료를 해제할까요?'))return;await api('sop_work_material_remove',{id:need.id,revision,attachment_id:f.id,client_req_id:crypto.randomUUID()});await onChange();if(host.isConnected)await materials(host,need,{field,onChange});}));});
+ function addUpload(direction){
+  const feedbackForm=direction==='field',form=document.createElement('form');form.className='chain-upload';
+  form.innerHTML=(feedbackForm?'':'<label><span data-i18n="ck_plan_68">资料类型 / 자료 종류</span><select data-kind>'+Object.entries(kinds).filter(([k])=>k!=='work_material').map(([k,v])=>'<option'+(window.CKPlanCopy?CKPlanCopy.attrs(v):'')+' value="'+k+'">'+(window.CKPlanCopy?CKPlanCopy.text(v):v)+'</option>').join('')+'</select></label>')+'<label><span data-i18n="ck_plan_69">选择文件 / 파일 선택</span><input data-files type="file" multiple accept=".pdf,.xlsx,.xls,.csv,.jpg,.jpeg,.png,.webp" required></label><button type="submit">'+(feedbackForm?field?copy('上传作业说明／明细','작업 설명·명세 업로드'):copy('代录仓库反馈','창고 피드백 대리 등록'):copy('上传客服资料','고객 담당자 자료 업로드'))+'</button><p class="muted"><span data-i18n="ck_plan_72">每个文件不超过20MB，可连续追加。 / 파일당 20MB 이하</span></p><p data-status role="status"></p>';
+  host.querySelector('[data-direction="'+direction+'"]').append(form);
+  let pending=[];
+  form.querySelector('[data-files]').onchange=()=>{pending=[];};
+  form.onsubmit=async ev=>{ev.preventDefault();const submit=form.querySelector('[type=submit]'),status=form.querySelector('[data-status]');submit.disabled=true;
+   if(!pending.length)pending=Array.from(form.querySelector('[data-files]').files).map(file=>({file,request:crypto.randomUUID(),kind:feedbackForm?'work_material':form.querySelector('[data-kind]').value,done:false}));
+   try{for(const item of pending.filter(x=>!x.done)){status.textContent='正在上传 / 업로드 중：'+item.file.name;const data=new FormData();for(const [k,v] of Object.entries({action:'v2_attachment_upload',related_doc_type:'sop_need',related_doc_id:need.id,attachment_category:'work_material',material_kind:item.kind,revision,client_req_id:item.request}))data.set(k,v);data.set('file',item.file);const response=await fetch(window.SOP_API,{method:'POST',credentials:'include',body:data}),result=await response.json();if(!result.ok)throw Error(result.error||'上传失败');revision=result.revision;item.done=true;}
+    status.textContent='资料已上传 / 업로드 완료';pending=[];await onChange();if(host.isConnected)await materials(host,need,{field,onChange});
+   }catch(x){status.textContent=x.message+'。已成功的文件会保留，请刷新确认后重试。';}finally{submit.disabled=false;}
+  };
+ }
+ if(canOffice)addUpload('office');
+ if(canFeedback)addUpload('field');
 }
 async function mountNeed(host,need,options={}){
  if(!enabled())return;host.classList.add('chain-need');

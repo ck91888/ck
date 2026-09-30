@@ -331,7 +331,7 @@ export async function handleSop(b,env) {
     const f=(await workMaterials(env,[row])).find(f=>f.id===b.attachment_id&&f.related_doc_type==='sop_need'&&f.related_doc_id===row.id);
     if(!f)fail('资料不存在；历史来源资料保留只读');
     const feedback=f.material_kind==='work_material';
-    if(feedback&&u.scope!=='field'&&u.role!=='manager')fail('仓库反馈请由现场人员撤下');
+    if(feedback&&u.scope!=='field'&&!['manager','service'].includes(u.role))fail('仓库反馈请由现场或办公室经办人撤下');
     if(!feedback&&(u.scope==='field'||!['manager','service'].includes(u.role)))fail('客服资料请由办公室撤下');
     if(f.id===d.details?.attachment_id)fail('当前打托明细请通过上传新版替换');
     d.last_material_change={action:'remove',attachment_id:f.id,file_name:f.file_name,by:u.name,at:t};d.removed_material_ids=[...(d.removed_material_ids||[]),f.id];d.material_version=(d.material_version||0)+1;

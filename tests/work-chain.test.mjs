@@ -173,18 +173,23 @@ test('work files upload before work, retry once, flow to outbound list/detail, n
  for(const related_doc_type of ['inbound_plan','outbound_order'])assert.equal((await s.upload(await s.get(n.id),{related_doc_type,related_doc_id:ob.id,attachment_category:'outbound_material'})).ok,false);
  await assert.rejects(()=>chainNeed(s.env,n.id,{role:'viewer',departments:['bulk']},true),/权限/);
 });
-test('warehouse feedback and office documents have separate upload rights and notification direction',async()=>{
+test('office can record warehouse feedback without notifying warehouse; customer documents still require acknowledgement',async()=>{
  const s=setup();await s.login();let n=await s.need(),ob=await s.schedule(n,2);n=await s.get(n.id);
- assert.equal((await s.upload(n,{material_kind:'work_material'})).ok,false,'office cannot upload warehouse feedback');
+ const proxy=await s.upload(n,{material_kind:'work_material'});assert.equal(proxy.ok,true,proxy.error);
+ let current=await s.get(n.id),order=s.DB.raw.prepare('SELECT warehouse_ack_required FROM v2_outbound_orders WHERE id=?').get(ob.id);
+ assert.equal(current.requirement_version,n.requirement_version,'office-recorded feedback does not change warehouse instructions');
+ assert.equal(current.material_version,(n.material_version||0)+1);assert.equal(order.warehouse_ack_required,0);
+ assert.equal((await s.call('sop_work_materials',{id:n.id})).items[0].material_kind,'work_material');
+ n=current;
  const field={id:'F',name:'Fixture dispatcher',role:'dispatcher',scope:'field',departments:['bulk']};
  const upload=(kind,revision)=>{const form=new FormData();for(const [k,v] of Object.entries({related_doc_id:n.id,material_kind:kind,revision,client_req_id:crypto.randomUUID()}))form.set(k,v);form.set('file',new File(['fixture details'],'work-details.pdf',{type:'application/pdf'}));return form;};
  await assert.rejects(()=>uploadWorkMaterial(upload('pallet_label',n.revision),{...s.env,SOP_REQUEST_USER:field}),/办公室客服/);
  const first=await uploadWorkMaterial(upload('work_material',n.revision),{...s.env,SOP_REQUEST_USER:field});assert.equal(first.ok,true);
- let current=await s.get(n.id),order=s.DB.raw.prepare('SELECT warehouse_ack_required FROM v2_outbound_orders WHERE id=?').get(ob.id);
+ current=await s.get(n.id);order=s.DB.raw.prepare('SELECT warehouse_ack_required FROM v2_outbound_orders WHERE id=?').get(ob.id);
  assert.equal(current.requirement_version,n.requirement_version,'feedback does not change the printed instruction version');
  assert.equal(current.material_version,(n.material_version||0)+1);assert.equal(order.warehouse_ack_required,0,'warehouse need not acknowledge its own feedback');
- const files=(await s.call('sop_work_materials',{id:n.id})).items;assert.equal(files[0].material_kind,'work_material');assert.equal(files[0].uploaded_by,field.name);
- assert.equal((await s.call('v2_outbound_order_detail',{id:ob.id})).attachments[0].id,first.id,'customer can view the same feedback downstream');
+ const files=(await s.call('sop_work_materials',{id:n.id})).items;assert.equal(files.length,2);assert.equal(files[0].material_kind,'work_material');assert.ok(files.some(f=>f.uploaded_by===field.name));
+ assert.ok((await s.call('v2_outbound_order_detail',{id:ob.id})).attachments.some(f=>f.id===first.id),'customer can view the same feedback downstream');
  assert.equal(FIELD_ACTIONS.has('sop_work_material_remove'),true);
  const removed=await handleSop({action:'sop_work_material_remove',id:n.id,revision:current.revision,attachment_id:first.id,client_req_id:crypto.randomUUID()},{...s.env,SOP_REQUEST_USER:field});assert.equal(removed.ok,true,removed.error);
  current=await s.get(n.id);order=s.DB.raw.prepare('SELECT warehouse_ack_required FROM v2_outbound_orders WHERE id=?').get(ob.id);assert.equal(current.requirement_version,n.requirement_version);assert.equal(order.warehouse_ack_required,0);
