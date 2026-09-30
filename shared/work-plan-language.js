@@ -54,7 +54,7 @@ const html=value=>key(value)?'<span'+attrs(value)+'>'+escape(text(value))+'</spa
 const bind=(el,value)=>{const k=key(value);if(k)el.dataset.i18n=k;else delete el.dataset.i18n;el.textContent=text(value);return el;};
 function counts(el,total,page,pages){el.dataset.planCounts=JSON.stringify([total,page,pages]);renderCount(el);}
 function renderCount(el){const [total,page,pages]=JSON.parse(el.dataset.planCounts);el.textContent=getLang()==='ko'?`총 ${total}건 · ${page} / ${pages} 페이지`:`共 ${total} 批 · 第 ${page} / ${pages} 页`;}
-const original=window.applyLang;window.applyLang=function(...args){const result=original.apply(this,args);document.querySelectorAll('[data-plan-counts]').forEach(renderCount);return result;};
+const original=window.applyLang;window.applyLang=function(...args){const result=original.apply(this,args);document.querySelectorAll('[data-plan-counts]').forEach(renderCount);const korean=getLang()==='ko';document.querySelectorAll('[data-ck-batch-print]').forEach(el=>{const count=el.dataset.ckBatchPrint;el.textContent=korean?`이번 입고 작업 계획서 일괄 인쇄 (${count}건)`:`批量打印本批作业单（${count}份）`;});document.querySelectorAll('[data-ck-batch-print-hint]').forEach(el=>{el.textContent=korean?'인쇄 시 “PDF로 저장”을 선택하면 한 파일로 저장됩니다. 작업 계획서마다 새 페이지에서 시작하며 취소된 건은 제외합니다.':'打印时选择“保存为 PDF”，得到一个文件；每张作业单另起一页。已取消的作业单不打印。';});return result;};
 window.CKPlanCopy={text,html,attrs,bind,counts};
 // Newly opened panels inherit the current language without remounting forms.
 // The observer only touches our explicit static labels, never entered values.
