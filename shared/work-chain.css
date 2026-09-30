@@ -3,6 +3,7 @@
 .chain-need{border-top:1px solid #cfddd8;margin-top:16px}
 .chain-need h3,.chain-picker h3{font-size:17px;margin:0 0 10px;color:#17464b}
 .chain-materials,.chain-schedule,.chain-forward{padding:18px 0;border-bottom:1px solid #cfddd8}
+.chain-material-group{background:#fff;border:1px solid #cfddd8;border-radius:8px;padding:16px;margin:0 0 14px}.chain-material-group[data-direction=field]{border-left:4px solid #bb8740}.chain-material-group[data-direction=office]{border-left:4px solid #17584b}.chain-material-group h3{margin:0 0 5px}.chain-material-group>.muted{font-size:13px;margin:0 0 12px}.chain-material-group[data-direction=field] .chain-upload{grid-template-columns:minmax(180px,1fr) auto}
 .chain-files{width:100%;border-collapse:collapse;font-size:13px}
 .chain-files td,.chain-files th{text-align:left;vertical-align:top;padding:9px 10px;border-bottom:1px solid #dce6e2}
 .chain-files th{background:#edf4f1;font-weight:600}
@@ -36,4 +37,4 @@
 .chain-basis-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
 .chain-basis label{display:block;margin:12px 0}.chain-basis input,.chain-basis select{width:100%;box-sizing:border-box;min-width:0}
 .chain-basis .chain-booking{overflow-wrap:anywhere}
-@media(max-width:650px){.chain-upload{grid-template-columns:1fr}.chain-upload p{grid-column:1}.chain-selected a{float:none;display:block;margin-top:8px}.chain-files th:nth-child(2),.chain-files td:nth-child(2){display:none}.chain-files td{padding:8px 5px}.chain-files td:last-child{min-width:90px}.chain-search button{font-size:13px}}
+@media(max-width:650px){.chain-upload,.chain-material-group[data-direction=field] .chain-upload{grid-template-columns:1fr}.chain-upload p{grid-column:1}.chain-selected a{float:none;display:block;margin-top:8px}.chain-files th:nth-child(2),.chain-files td:nth-child(2){display:none}.chain-files td{padding:8px 5px}.chain-files td:last-child{min-width:90px}.chain-search button{font-size:13px}}

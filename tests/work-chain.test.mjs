@@ -3,6 +3,9 @@ import assert from 'node:assert/strict';
 import worker from '../worker-v2/index.js';
 import {database} from './d1-adapter.mjs';
 import {guardWorkChain,chainNeed,shippingBasisStatements} from '../worker-v2/work-chain.js';
+import {uploadWorkMaterial} from '../worker-v2/work-chain.js';
+import {handleSop} from '../worker-v2/sop.js';
+import {FIELD_ACTIONS} from '../worker-v2/access-control.js';
 function setup(){
  const DB=database(),objects=new Map(),env={DB,SOP_ENVIRONMENT:'staging',SOP_UPGRADE_ENABLED:'true',SOP_WORK_CHAIN_ENABLED:'true',SOP_ACCESS_CONTROL:'true',SOP_ACCEPT_NEW:'true',SOP_USERS_JSON:JSON.stringify([{id:'M',name:'Fixture manager',role:'manager',key:'work-chain-fixture-only'}]),R2_BUCKET:{async put(key,body,meta){objects.set(key,{body:await new Response(body).arrayBuffer(),httpMetadata:meta.httpMetadata});},async get(key){return objects.get(key);},async delete(key){objects.delete(key);}}};let cookie='';
  async function raw(body){const multipart=body instanceof FormData;const r=await worker.fetch(new Request('https://test.local/api',{method:'POST',headers:{Cookie:cookie,...(!multipart?{'Content-Type':'application/json'}:{})},body:multipart?body:JSON.stringify(body)}),env);if(r.headers.has('set-cookie'))cookie=r.headers.get('set-cookie').split(';')[0];return r.json();}
@@ -169,6 +172,24 @@ test('work files upload before work, retry once, flow to outbound list/detail, n
  assert.equal((await s.call('v2_attachment_delete',{id:f.id})).ok,false);
  for(const related_doc_type of ['inbound_plan','outbound_order'])assert.equal((await s.upload(await s.get(n.id),{related_doc_type,related_doc_id:ob.id,attachment_category:'outbound_material'})).ok,false);
  await assert.rejects(()=>chainNeed(s.env,n.id,{role:'viewer',departments:['bulk']},true),/权限/);
+});
+test('warehouse feedback and office documents have separate upload rights and notification direction',async()=>{
+ const s=setup();await s.login();let n=await s.need(),ob=await s.schedule(n,2);n=await s.get(n.id);
+ assert.equal((await s.upload(n,{material_kind:'work_material'})).ok,false,'office cannot upload warehouse feedback');
+ const field={id:'F',name:'Fixture dispatcher',role:'dispatcher',scope:'field',departments:['bulk']};
+ const upload=(kind,revision)=>{const form=new FormData();for(const [k,v] of Object.entries({related_doc_id:n.id,material_kind:kind,revision,client_req_id:crypto.randomUUID()}))form.set(k,v);form.set('file',new File(['fixture details'],'work-details.pdf',{type:'application/pdf'}));return form;};
+ await assert.rejects(()=>uploadWorkMaterial(upload('pallet_label',n.revision),{...s.env,SOP_REQUEST_USER:field}),/办公室客服/);
+ const first=await uploadWorkMaterial(upload('work_material',n.revision),{...s.env,SOP_REQUEST_USER:field});assert.equal(first.ok,true);
+ let current=await s.get(n.id),order=s.DB.raw.prepare('SELECT warehouse_ack_required FROM v2_outbound_orders WHERE id=?').get(ob.id);
+ assert.equal(current.requirement_version,n.requirement_version,'feedback does not change the printed instruction version');
+ assert.equal(current.material_version,(n.material_version||0)+1);assert.equal(order.warehouse_ack_required,0,'warehouse need not acknowledge its own feedback');
+ const files=(await s.call('sop_work_materials',{id:n.id})).items;assert.equal(files[0].material_kind,'work_material');assert.equal(files[0].uploaded_by,field.name);
+ assert.equal((await s.call('v2_outbound_order_detail',{id:ob.id})).attachments[0].id,first.id,'customer can view the same feedback downstream');
+ assert.equal(FIELD_ACTIONS.has('sop_work_material_remove'),true);
+ const removed=await handleSop({action:'sop_work_material_remove',id:n.id,revision:current.revision,attachment_id:first.id,client_req_id:crypto.randomUUID()},{...s.env,SOP_REQUEST_USER:field});assert.equal(removed.ok,true,removed.error);
+ current=await s.get(n.id);order=s.DB.raw.prepare('SELECT warehouse_ack_required FROM v2_outbound_orders WHERE id=?').get(ob.id);assert.equal(current.requirement_version,n.requirement_version);assert.equal(order.warehouse_ack_required,0);
+ const office=await s.upload(current,{material_kind:'shipping_document'});assert.equal(office.ok,true,office.error);
+ assert.equal(s.DB.raw.prepare('SELECT warehouse_ack_required FROM v2_outbound_orders WHERE id=?').get(ob.id).warehouse_ack_required,1,'new customer document requires warehouse acknowledgement');
 });
 test('batch files upload once, download from group and every related need, and notify downstream work',async()=>{
  const s=setup();await s.login();const p=await s.call('v2_inbound_plan_create',{customer:'Fixture customer',biz_classes:['bulk']});

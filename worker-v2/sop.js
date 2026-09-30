@@ -325,14 +325,17 @@ export async function handleSop(b,env) {
     if(d.need_id){const need=await read(env,d.need_id);if(need)appendRelated(env,extra,key+'-need',u,need,{...need.data,status:'pending',task_id:''},b.action,t);}
    } else if(!['sop_task_start','sop_task_people','sop_task_delegate','sop_task_pause','sop_task_finish'].includes(b.action))fail('未知任务操作');
   } else if(b.action.startsWith('sop_need_')||b.action==='sop_work_material_remove') {
-   if(row.kind!=='need')fail('记录类型错误');permit(u,row.department,['manager','service','dispatcher']);
+   if(row.kind!=='need')fail('记录类型错误');permit(u,row.department,b.action==='sop_work_material_remove'?['manager','service','dispatcher','reviewer']:['manager','service','dispatcher']);
    if(b.action==='sop_work_material_remove') {
     if(!workChainEnabled(env))fail('功能未启用');if(['closed','cancelled'].includes(d.status))fail('作业已关闭');
     const f=(await workMaterials(env,[row])).find(f=>f.id===b.attachment_id&&f.related_doc_type==='sop_need'&&f.related_doc_id===row.id);
     if(!f)fail('资料不存在；历史来源资料保留只读');
+    const feedback=f.material_kind==='work_material';
+    if(feedback&&u.scope!=='field'&&u.role!=='manager')fail('仓库反馈请由现场人员撤下');
+    if(!feedback&&(u.scope==='field'||!['manager','service'].includes(u.role)))fail('客服资料请由办公室撤下');
     if(f.id===d.details?.attachment_id)fail('当前打托明细请通过上传新版替换');
-    d.last_material_change={action:'remove',attachment_id:f.id,file_name:f.file_name,by:u.name,at:t};d.removed_material_ids=[...(d.removed_material_ids||[]),f.id];d.material_version=(d.material_version||0)+1;d.requirement_version=(d.requirement_version||1)+1;
-    extra.push(...notifyMaterialChange(env,row,u,t,'作业资料已撤下：'+f.file_name));
+    d.last_material_change={action:'remove',attachment_id:f.id,file_name:f.file_name,by:u.name,at:t};d.removed_material_ids=[...(d.removed_material_ids||[]),f.id];d.material_version=(d.material_version||0)+1;
+    if(!feedback){d.requirement_version=(d.requirement_version||1)+1;extra.push(...notifyMaterialChange(env,row,u,t,'客服作业资料已撤下：'+f.file_name));}
    } else if(b.action==='sop_need_forward_ready') {
     if(!workChainEnabled(env)||d.operation_kind!=='direct_forward'||d.status!=='pending'||d.task_id)fail('仅待确认的直接转发需求可以确认');
     permit(u,row.department,['manager','dispatcher','reviewer']);

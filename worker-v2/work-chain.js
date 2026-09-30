@@ -141,12 +141,16 @@ export async function uploadWorkMaterial(form,env) {
  const ext=str(file?.name).split('.').pop().toLowerCase(),types={pdf:'application/pdf',xlsx:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',xls:'application/vnd.ms-excel',csv:'text/csv',jpg:'image/jpeg',jpeg:'image/jpeg',png:'image/png',webp:'image/webp'};
  if(!types[ext]||!file.size||file.size>20*1024*1024)throw Error('支持20MB以内的PDF、Excel、CSV、JPG、PNG、WebP');
  const category=str(form.get('material_kind'))||'work_material';if(!['work_material','pallet_label','shipping_document','product_label'].includes(category))throw Error('作业资料类型无效');
+ const feedback=category==='work_material';
+ if(feedback&&user.scope!=='field')throw Error('作业说明／明细请由现场仓库人员上传');
+ if(!feedback&&(user.scope==='field'||!['manager','service'].includes(user.role)))throw Error('托唛、出库单和标签请由办公室客服上传');
  const id='ATT-'+crypto.randomUUID(),key='v2/sop_need/'+row.id+'/'+id+'.'+ext,t=new Date().toISOString(),d=structuredClone(row.data);
- d.material_version=(d.material_version||0)+1;d.requirement_version=(d.requirement_version||1)+1;
+ d.material_version=(d.material_version||0)+1;if(!feedback)d.requirement_version=(d.requirement_version||1)+1;
  d.last_material_change={action:'upload',attachment_id:id,file_name:str(file.name).slice(0,240),kind:category,by:user.name,at:t};
  const result={ok:true,id,file_key:key,revision:row.revision+1};
  const batch=chainEvent(env,row,d,user,req,'sop_work_material_upload',t,{...result,need_id:row.id});
- batch.push(q(env,'INSERT INTO v2_attachments(id,related_doc_type,related_doc_id,attachment_category,file_name,file_key,file_size,content_type,uploaded_by,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)',id,'sop_need',row.id,category,str(file.name).slice(0,240),key,file.size,types[ext],user.name,t),...notifyMaterialChange(env,row,user,t,'作业资料已更新，请查看关联作业需求'));
+ batch.push(q(env,'INSERT INTO v2_attachments(id,related_doc_type,related_doc_id,attachment_category,file_name,file_key,file_size,content_type,uploaded_by,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)',id,'sop_need',row.id,category,str(file.name).slice(0,240),key,file.size,types[ext],user.name,t));
+ if(!feedback)batch.push(...notifyMaterialChange(env,row,user,t,'客服作业资料已更新，请查看关联作业计划'));
  await env.R2_BUCKET.put(key,file.stream(),{httpMetadata:{contentType:types[ext]}});
  // On an ambiguous D1 failure keep the object; never delete a possibly committed
  // attachment. Retrying this request ID returns the stored result.

@@ -28,7 +28,7 @@ async function fixture(){
   await new Promise(resolve=>setTimeout(resolve,40));assert.ok(!dom.window.document.body.textContent.includes('页面初始化失败'),dom.window.document.querySelector('.ck-updates')?.textContent);
   return {dom,w:dom.window,d:dom.window.document,errors};
  }
- return {page,seed,request};
+ return {page,seed,request,env};
 }
 async function until(condition,errors=[]){for(let i=0;i<100;i++){if(condition())return;await new Promise(r=>setTimeout(r,10));}throw Error('DOM condition timeout: '+errors.join('; '));}
 const opts={skip:!runtime};
@@ -70,6 +70,27 @@ test('ongoing bulk work cards and opened work show the scanned work-plan number'
   for(const order of orders){const card=p.d.querySelector('#page-bulk_op [data-task="'+order.id+'"]');assert.equal(card.querySelector('.ck-task-number').textContent,order.number);assert.match(card.textContent,/打托/);}
   p.d.querySelector('#page-bulk_op [data-task="'+orders[0].id+'"]').click();await until(()=>p.d.querySelector('#page-bulk_op .ck-work-number'),p.errors);
   assert.match(p.d.querySelector('#page-bulk_op .ck-work-number').textContent,new RegExp(orders[0].number));assert.deepEqual(p.errors,[]);
+ }finally{p.w.close();}
+});
+test('work-plan documents separate customer instructions from warehouse feedback in office and field views',opts,async()=>{
+ const f=await fixture();f.env.SOP_WORK_CHAIN_ENABLED='true';
+ const created=await (await f.request({action:'sop_need_create',department:'bulk',source_type:'inventory',supply_chain_no:'STOCK-MATERIALS',title:'打托',customer:'Fixture',instructions:'打托后反馈',planned_quantity:2,planned_unit:'托',client_req_id:crypto.randomUUID()})).json();assert.equal(created.ok,true,created.error);
+ const need=(await (await f.request({action:'sop_get',id:created.id})).json()).record;
+ f.env.DB.raw.prepare('INSERT INTO v2_attachments(id,related_doc_type,related_doc_id,attachment_category,file_name,file_key,uploaded_by,created_at) VALUES(?,?,?,?,?,?,?,?),(?,?,?,?,?,?,?,?)').run('FIELD-FILE','sop_need',need.id,'work_material','仓库实际明细.pdf','field.pdf','现场人员','2026-09-30T10:00:00Z','OFFICE-FILE','sop_need',need.id,'pallet_label','托唛.pdf','office.pdf','客服','2026-09-30T10:01:00Z');
+ const p=await f.page('/002/');try{
+  const host=p.d.createElement('section');p.d.body.append(host);
+  await p.w.CKWorkChain.materials(host,need);
+  const office=host.querySelector('[data-direction=office]'),field=host.querySelector('[data-direction=field]');
+  assert.match(office.textContent,/托唛.pdf/);assert.doesNotMatch(office.textContent,/仓库实际明细.pdf/);
+  assert.match(field.textContent,/仓库实际明细.pdf/);assert.doesNotMatch(field.textContent,/托唛.pdf/);
+  assert.deepEqual([...office.querySelectorAll('[data-kind] option')].map(x=>x.value),['pallet_label','shipping_document','product_label']);
+  assert.equal(field.querySelector('form'),null,'office reads feedback but does not upload it');
+  p.w.toggleLang();assert.match(office.textContent,/고객 담당자가 창고에 제공하는 작업 자료/);assert.match(field.textContent,/창고에서 고객 담당자에게 전달하는 작업 설명/);
+  await p.w.CKWorkChain.materials(host,need,{field:true});
+  assert.equal(host.querySelector('[data-direction=office] form'),null,'warehouse reads customer documents');
+  assert.ok(host.querySelector('[data-direction=field] form'),'warehouse can upload feedback');
+  assert.equal(host.querySelector('[data-direction=field] [data-kind]'),null,'feedback type is fixed');
+  assert.deepEqual(p.errors,[]);
  }finally{p.w.close();}
 });
 test('inbound work rows and inventory need optional outbound fields use original forms',opts,async()=>{
