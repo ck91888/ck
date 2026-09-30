@@ -28,9 +28,10 @@ test('job polling starts after an idle screen gains a task, does not overlap, an
  vm.runInNewContext(s,c);c.startJobPoll('bulk');await tick();assert.equal(count,0);c._activeJobId='A';const first=tick();await tick();assert.equal(count,1);release();await first;c.document.hidden=true;await tick();assert.equal(count,1);c.document.hidden=false;c._activeJobId='B';const next=tick();assert.equal(count,2);release();await next;
 });
 
-test('outbound materials reuse detail attachments and discard another orders late file response',async()=>{
- const full=source('001/app.js'),s=full.slice(full.indexOf('async function renderOutboundMaterials('),full.indexOf('// ===== P1-8/P1-9',full.indexOf('async function renderOutboundMaterials(')));const box={dataset:{},innerHTML:''};let release,calls=0;
- const c={document:{getElementById:()=>box},api:()=>{calls++;return new Promise(resolve=>release=resolve);},esc:x=>String(x),V2_API:'/001/api'};vm.runInNewContext(s,c);
- const old=c.renderOutboundMaterials('A','files');await c.renderOutboundMaterials('B','files',[{file_name:'Only B',file_key:'B.pdf',attachment_category:'outbound_material'}]);assert.equal(calls,1);assert.match(box.innerHTML,/Only B/);
- release({ok:true,items:[{file_name:'Stale A',file_key:'A.pdf',attachment_category:'outbound_material'}]});await old;assert.match(box.innerHTML,/Only B/);assert.ok(!box.innerHTML.includes('Stale A'));
+test('legacy field entry points omit work files without requesting attachments',async()=>{
+ const full=source('001/app.js'),s=full.slice(full.indexOf('async function renderOutboundMaterials('),full.indexOf('// ===== P1-8/P1-9',full.indexOf('async function renderOutboundMaterials('))),inbound=full.slice(full.indexOf('function renderInboundMaterialsReadonly('),full.indexOf('// ===== 卸货页辅助',full.indexOf('function renderInboundMaterialsReadonly(')));
+ const box={innerHTML:'Old file links',hidden:false};let calls=0;
+ const c={document:{getElementById:()=>box},api:()=>{calls++;throw Error('Unexpected attachment query');}};vm.runInNewContext(s+inbound,c);
+ await c.renderOutboundMaterials('A','files',[{file_name:'PC only.pdf',attachment_category:'outbound_material'}]);assert.equal(box.innerHTML,'');assert.equal(box.hidden,true);assert.equal(calls,0);
+ assert.equal(c.renderInboundMaterialsReadonly({inbound_materials:[{file_name:'PC inbound.xlsx'}]}),'');
 });

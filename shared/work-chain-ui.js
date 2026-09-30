@@ -1,6 +1,7 @@
 (function(){
 'use strict';
 const enabled=()=>!!window.CK_SOP_ROLLOUT?.workChain;
+const fieldContext=flag=>flag||window.CKSession?.user?.scope==='field'||window.location.pathname.startsWith('/001/');
 const e=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const api=(action,data={})=>CKSession.request(action,data);
 const kinds={work_material:'作业说明／明细 · 작업 자료',pallet_label:'托唛 · 팔레트 라벨',shipping_document:'出库单 · 출고 서류',product_label:'产品条码标签 · 상품 바코드'};
@@ -19,6 +20,7 @@ async function allocation(need){const r=await api('sop_work_need_search',{search
 const copy=(zh,ko)=>window.CKPlanCopy?CKPlanCopy.html(zh):e(window.getLang?.()==='ko'?ko:zh);
 function filesTable(files,empty='暂无作业资料。托唛、出库单、产品条码等在这里统一上传。'){return files.length?'<div class="chain-scroll"><table class="chain-files"><thead><tr><th><span data-i18n="ck_plan_59">资料 / 자료</span></th><th><span data-i18n="ck_plan_60">类型</span></th><th><span data-i18n="ck_plan_61">上传人 · 时间</span></th><th></th></tr></thead><tbody>'+files.map(f=>'<tr><td><a href="'+e(fileUrl(f))+'" target="_blank" rel="noopener">'+e(f.file_name)+'</a>'+(f.historical?'<small><span data-i18n="ck_plan_63">历史来源资料 · 원본 자료</span></small>':'')+'</td><td>'+(window.CKPlanCopy?CKPlanCopy.html((f.batch?'本批总作业明细':kinds[f.material_kind])||'打托／货物明细'):e((f.batch?(window.getLang?.()==='ko'?'입고 건 전체 작업 명세':'本批总作业明细'):kinds[f.material_kind])||'打托／货物明细'))+'</td><td>'+e(f.uploaded_by)+'<small>'+e(new Date(f.created_at).toLocaleString('zh-CN',{timeZone:'Asia/Seoul',hour12:false}))+'</small></td><td><a href="'+e(fileUrl(f))+'" download="'+e(f.file_name)+'"><span data-i18n="ck_plan_62">下载 / 다운로드</span></a><span data-remove-file="'+e(f.id)+'"></span></td></tr>').join('')+'</tbody></table></div>':'<p class="muted">'+copy(empty,empty==='暂无仓库反馈'?'창고 작업 피드백이 없습니다':empty==='暂无客服作业资料'?'고객 담당자 자료가 없습니다':'작업 자료가 없습니다')+'</p>';}
 async function materials(host,need,{field=false,onChange=()=>{},items=null}={}){
+ if(fieldContext(field)){host.replaceChildren();return;}
  host.className='chain-materials';host.innerHTML='<h3><span data-i18n="ck_plan_58">作业资料 / 작업 자료</span></h3><p>正在读取…</p>';
  const r=items?{items,revision:need.revision}:await api('sop_work_materials',{id:need.id});if(!host.isConnected)return;
  let revision=r.revision;
@@ -45,7 +47,7 @@ async function materials(host,need,{field=false,onChange=()=>{},items=null}={}){
  if(canFeedback)addUpload('field');
 }
 async function mountNeed(host,need,options={}){
- if(!enabled())return;host.classList.add('chain-need');
+ if(!enabled()||fieldContext(options.field))return;host.classList.add('chain-need');
  const docs=document.createElement('section');host.append(docs);const materialLoad=materials(docs,need,options);
  if(options.field)return materialLoad;
  const allocationLoad=allocation(need);
@@ -99,6 +101,7 @@ function installOffice(){
  wrap('openInboundEditForm',()=>hideFileControls(document.body,'inbound'));wrap('openOutboundEditForm',()=>hideFileControls(document.body,'outbound'));
 }
 async function batchMaterials(host,group,{field=false}={}){
+ if(fieldContext(field)){host.replaceChildren();return;}
  if(!enabled()||group.source_type!=='inbound'||!group.items?.length)return;
  const text=(zh,ko)=>window.CKPlanCopy?CKPlanCopy.html(zh):e(window.getLang?.()==='ko'?ko:zh);
  const need=group.items[0];

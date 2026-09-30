@@ -73,7 +73,7 @@ test('ongoing bulk work cards show each customer and scanned work-plan number',o
   assert.match(p.d.querySelector('#page-bulk_op .ck-work-number').textContent,new RegExp(orders[0].number));assert.deepEqual(p.errors,[]);
  }finally{p.w.close();}
 });
-test('work-plan documents separate customer instructions from warehouse feedback in office and field views',opts,async()=>{
+test('work files remain available on office PC and do not render or load on field pages',opts,async()=>{
  const f=await fixture();f.env.SOP_WORK_CHAIN_ENABLED='true';
  const created=await (await f.request({action:'sop_need_create',department:'bulk',source_type:'inventory',supply_chain_no:'STOCK-MATERIALS',title:'打托',customer:'Fixture',instructions:'打托后反馈',planned_quantity:2,planned_unit:'托',client_req_id:crypto.randomUUID()})).json();assert.equal(created.ok,true,created.error);
  const need=(await (await f.request({action:'sop_get',id:created.id})).json()).record;
@@ -90,12 +90,20 @@ test('work-plan documents separate customer instructions from warehouse feedback
   assert.match(field.querySelector('button[type=submit]').textContent,/代录仓库反馈/);
   assert.equal(field.querySelector('[data-kind]'),null,'office feedback cannot be mislabeled as a customer document');
   p.w.toggleLang();assert.match(office.textContent,/고객 담당자가 창고에 제공하는 작업 자료/);assert.match(field.textContent,/창고에서 고객 담당자에게 전달하는 작업 설명/);
+  let fileReads=0;const request=p.w.CKSession.request;p.w.CKSession.request=(action,...args)=>{if(['sop_work_materials','sop_batch_work_materials'].includes(action))fileReads++;return request(action,...args);};
   await p.w.CKWorkChain.materials(host,need,{field:true});
-  assert.equal(host.querySelector('[data-direction=office] form'),null,'warehouse reads customer documents');
-  assert.ok(host.querySelector('[data-direction=field] form'),'warehouse can upload feedback');
-  assert.equal(host.querySelector('[data-direction=field] [data-kind]'),null,'feedback type is fixed');
+  await p.w.CKWorkChain.mountNeed(host,need,{field:true});
+  await p.w.CKWorkChain.batchMaterials(host,{source_type:'inbound',items:[need]},{field:true});
+  assert.equal(host.innerHTML,'','field context has no customer files or feedback form');assert.equal(fileReads,0,'field context never requests work files');
   assert.deepEqual(p.errors,[]);
  }finally{p.w.close();}
+ const q=await f.page('/001/?need='+encodeURIComponent(need.id));try{
+  await until(()=>q.d.querySelector('#page-bulk_op .ck-work-number'),q.errors);
+  const sheet=q.d.querySelector('#page-bulk_op .ck-work-sheet');assert.equal(sheet.querySelector('.ck-instructions').textContent,need.instructions);
+  assert.equal(q.d.querySelector('#page-bulk_op .chain-material-group'),null);assert.equal(q.d.querySelector('#page-bulk_op .chain-upload'),null);
+  const host=q.d.createElement('section');q.d.body.append(host);await q.w.CKWorkChain.materials(host,need);assert.equal(host.innerHTML,'','field URL omits files even without an explicit field option');
+  assert.deepEqual(q.errors,[]);
+ }finally{q.w.close();}
 });
 test('inbound work rows and inventory need optional outbound fields use original forms',opts,async()=>{
  const f=await fixture(),p=await f.page('/002/');try{

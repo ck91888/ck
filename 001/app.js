@@ -898,41 +898,8 @@ function renderOutboundOrderRemarks(o) {
   return html;
 }
 
-// 入库明细资料只读渲染（仓库端只需要查看/下载/打开；不可删除）
-function renderInboundMaterialsReadonly(planData) {
-  var atts = (planData && planData.inbound_materials)
-    ? planData.inbound_materials
-    : ((planData && planData.attachments) || []).filter(function(a) {
-        return a && a.attachment_category === 'inbound_material';
-      });
-  if (!atts || atts.length === 0) {
-    return '<div class="card"><div class="card-title">入库明细 / 입고 명세</div>'
-      + '<div class="muted" style="font-size:12px;">暂无入库明细 / 입고 명세 없음</div></div>';
-  }
-  var html = '<div class="card"><div class="card-title">入库明细 / 입고 명세 (' + atts.length + ')</div>';
-  html += '<table class="mini-table" style="width:100%;font-size:12px;">';
-  html += '<thead><tr><th style="text-align:left;">文件名 / 파일명</th><th>操作 / 작업</th></tr></thead><tbody>';
-  atts.forEach(function(att) {
-    var url = att.file_key ? fileUrl(att.file_key) : '';
-    var fn = (att.file_name || '').toLowerCase();
-    var ct = (att.content_type || '').toLowerCase();
-    var isPdf = ct.indexOf('pdf') !== -1 || fn.endsWith('.pdf');
-    var isImg = ct.indexOf('image/') === 0;
-    var openLabel = (isPdf || isImg) ? '打开/打印 / 열기' : '下载 / 다운로드';
-    html += '<tr>';
-    html += '<td style="word-break:break-all;">' + esc(att.file_name || '--') + '</td>';
-    html += '<td style="white-space:nowrap;text-align:right;">';
-    if (url) {
-      html += '<a class="btn btn-outline btn-sm" href="' + esc(url) + '" download="' + esc(att.file_name || '') + '">下载 / 다운로드</a> ';
-      html += '<a class="btn btn-outline btn-sm" href="' + esc(url) + '" target="_blank" rel="noopener">' + esc(openLabel) + '</a>';
-    } else {
-      html += '<span class="muted">--</span>';
-    }
-    html += '</td></tr>';
-  });
-  html += '</tbody></table></div>';
-  return html;
-}
+// Work files are handled on the office PC; retain the legacy call contract.
+function renderInboundMaterialsReadonly() { return ''; }
 
 // ===== 卸货页辅助（自 001/patch.js 合并） =====
 function planNo(plan) { return (plan && (plan.display_no || plan.id)) || ''; }
@@ -968,7 +935,6 @@ function renderUnloadPlanCard(planData, displayNo) {
     } else {
       inner = '<span class="muted">无明细 / 명세 없음</span>';
     }
-    // 仓库端：入库明细资料（只读，下载/打开）
     inner += renderInboundMaterialsReadonly(planData);
     area.innerHTML = inner;
   }
@@ -1892,7 +1858,6 @@ async function loadInboundPlanInfo(planId) {
     var html = '<div><b>' + esc(p.display_no || p.id) + '</b> · ' + esc(p.customer || '--') + '</div>';
     html += '<div>' + esc(p.cargo_summary || '--') + '</div>';
     html += renderInboundPlanRemark(p);
-    // 仓库端：入库明细资料（只读，下载/打开） — 直接嵌入 plan info 卡片下方
     html += renderInboundMaterialsReadonly(res);
     infoEl.innerHTML = html;
   }
@@ -2627,40 +2592,12 @@ async function refreshLoadWorkers() {
   if (res && res.ok) renderWorkers("loadWorkers", res.workers);
 }
 
-// ===== 出库资料展示 helper（执行系统通用） =====
-async function renderOutboundMaterials(orderId, containerId, knownAttachments) {
+// Keep old callers compatible without loading office work files on field pages.
+async function renderOutboundMaterials(orderId, containerId) {
   var box = document.getElementById(containerId);
   if (!box) return;
-  box.dataset.orderId=orderId||'';
-  if (!orderId) { box.innerHTML = ''; return; }
-  box.innerHTML = '<div class="muted" style="font-size:12px;">资料加载中... / 자료 로딩...</div>';
-  try {
-    var res = knownAttachments?{ok:true,items:knownAttachments}:await api({
-      action: "v2_attachment_list",
-      related_doc_type: "outbound_order",
-      related_doc_id: orderId
-    });
-    if(box.dataset.orderId!==orderId)return;
-    if (!res || !res.ok) { box.innerHTML = ''; return; }
-    var atts = (res.items || []).filter(function(a) { return a.attachment_category === 'outbound_material'; });
-    if (atts.length === 0) {
-      box.innerHTML = '<div class="muted" style="font-size:12px;">暂无关联作业资料 / 연결 작업 자료 없음</div>';
-      return;
-    }
-    var html = '<div style="font-weight:700;margin-bottom:4px;">关联作业资料 / 연결 작업 자료 (' + atts.length + ')</div>';
-    atts.forEach(function(att) {
-      var url = V2_API + "/file?key=" + encodeURIComponent(att.file_key);
-      html += '<div style="padding:4px 0;border-bottom:1px solid #f0f0f0;">';
-      html += esc(att.file_name) + ' ';
-      html += '<a class="btn btn-outline btn-sm" href="' + esc(url) + '" download="' + esc(att.file_name) + '">下载/다운로드</a> ';
-      html += '<a class="btn btn-outline btn-sm" href="' + esc(url) + '" target="_blank" rel="noopener">打开/打印·열기/인쇄</a>';
-      html += '</div>';
-    });
-    box.innerHTML = html;
-  } catch (e) {
-    if(box.dataset.orderId!==orderId)return;
-    box.innerHTML = '<div class="muted" style="color:#c62828;font-size:12px;">资料加载失败</div>';
-  }
+  box.innerHTML = '';
+  box.hidden = true;
 }
 
 // ===== P1-8/P1-9 出库装货：变更确认 + 提货信息 =====
