@@ -6,7 +6,7 @@ export const STAGING_DATABASE = 'ba1eba33-bcdd-4de2-8927-d37dc3788396';
 export const TABLES = [
  'ck_field_access','ck_access_events','ck_feedback_plan_links','ck_unload_plan_links','ck_unload_trips','ck_courier_events','ck_courier_plan_items','ck_courier_receipts',
  'ck_employee_profiles','ck_attendance_prints','ck_attendance_events','ck_attendance_breaks','ck_attendance_days','ck_attendance_people',
- 'sop_events','sop_records','v2_verify_scan_logs','v2_verify_batch_items','v2_verify_batches','v2_scan_batch_items','v2_scan_batches',
+ 'sop_document_numbers','sop_events','sop_records','v2_verify_scan_logs','v2_verify_batch_items','v2_verify_batches','v2_scan_batch_items','v2_scan_batches',
  'v2_issue_rework_requests','v2_issue_handle_runs','v2_issue_tickets','v2_pick_worker_docs','v2_ops_job_pick_docs','v2_ops_job_results','v2_ops_job_workers','v2_ops_jobs',
  'v2_outbound_order_change_logs','v2_outbound_order_lines','v2_outbound_orders','v2_inbound_plan_biz_tasks','v2_inbound_plan_lines','v2_inbound_plans','v2_field_feedbacks','v2_attachments',
  'v2_wms_import_rows','v2_wms_import_batches','v2_correction_requests','v2_ops_login_events','v2_admin_cleanup_logs',

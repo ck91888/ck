@@ -1,3 +1,4 @@
+import {ensureDocumentNumbers,jobNumbers,JOB_NUMBER_SQL} from './document-numbers.js';
 import {documentCodeError} from '../shared/document-code.js';
 import {uploadBatchMaterial} from './batch-work-materials.js';
 import {accessEnabled,accessGuard,accessAdminAction,accessFileAllowed} from './access-control.js';
@@ -6862,12 +6863,14 @@ route("v2_ops_job_detail", async (body, env) => {
     env.DB.prepare("SELECT * FROM v2_attachments WHERE related_doc_type='ops_job' AND related_doc_id=? ORDER BY created_at DESC").bind(job_id)
   ];
   if(inboundFlowEnabled(env))queries.push(env.DB.prepare("SELECT revision,state FROM sop_records WHERE id=? AND kind='dispatch'").bind(job_id));
+  if(env.SOP_UPGRADE_ENABLED==='true')queries.push(env.DB.prepare(JOB_NUMBER_SQL+' WHERE j.id=?').bind(job_id));
   const [detail,canManage]=await Promise.all([env.DB.batch(queries),nativeOwner(body,env)]);
   const [jobRows,workers,results,atts,dispatchRows]=detail,job=jobRows.results[0];
   if (!job) return err("not found", 404);
+  if(env.SOP_UPGRADE_ENABLED==='true'){const n=detail.at(-1).results[0];if(n)Object.assign(job,{...n,display_no:n.business_no||job.display_no||''});}
   job.active_worker_count=new Set(workers.results.filter(w=>!w.left_at).map(w=>w.worker_id)).size;
   return json({
-    ok: true, dispatch: dispatchRows?.results[0]||null, job, can_manage_dispatch: canManage, unload_plans: job.job_type==='unload'?await tripPlans(env,job_id):[],
+    ok: true, dispatch: inboundFlowEnabled(env)?dispatchRows?.results[0]||null:null, job, can_manage_dispatch: canManage, unload_plans: job.job_type==='unload'?await tripPlans(env,job_id):[],
     workers: workers.results || [],
     results: results.results || [],
     attachments: atts.results || []
@@ -8577,7 +8580,7 @@ route("v2_order_ops_job_list", async (body, env) => {
     };
   });
 
-  return json({ ok: true, items, ...pageMeta(total, limit, offset) });
+  return json({ ok: true, items:await jobNumbers(env,items), ...pageMeta(total, limit, offset) });
 });
 
 // =====================================================
@@ -8697,7 +8700,7 @@ route("v2_dashboard_realtime_overview", async (body, env) => {
     today_login_workers: (todayLogins && todayLogins.c) || 0,
     current_active_jobs: (activeJobs && activeJobs.c) || 0,
     current_active_docs: (activeDocs && activeDocs.c) || 0,
-    worker_live_status: liveWorkerRows,
+    worker_live_status: await jobNumbers(env,liveWorkerRows,'job_id'),
     biz_breakdown: bizBreak.results || []
   });
 });
@@ -8755,7 +8758,7 @@ route("v2_dashboard_live_docs", async (body, env) => {
     });
   }
 
-  return json({ ok: true, docs });
+  return json({ ok: true, docs:await jobNumbers(env,docs,'job_id') });
 });
 
 // P2-10：执行系统简版实时看板
@@ -8817,6 +8820,7 @@ route("v2_ops_realtime_board", async (body, env) => {
     offWorkers.push({
       worker_id: tw.worker_id,
       worker_name: tw.worker_name,
+      job_id:last?.job_id||'',
       last_job_type: (last && last.job_type) || '',
       last_flow_stage: (last && last.flow_stage) || '',
       last_display_no: (last && (last.plan_display_no || last.job_display_no || last.related_doc_id)) || '',
@@ -8829,8 +8833,8 @@ route("v2_ops_realtime_board", async (body, env) => {
     today_worker_count: todayWorkers.length,
     active_worker_count: active_workers.length,
     off_worker_count: offWorkers.length,
-    active_workers: active_workers,
-    off_workers: offWorkers
+    active_workers: await jobNumbers(env,active_workers,'job_id'),
+    off_workers: (await jobNumbers(env,offWorkers,'job_id')).map(w=>({...w,last_display_no:w.business_no??w.last_display_no}))
   });
 });
 
@@ -10431,9 +10435,9 @@ route("v2_dashboard_order_list", async (body, env) => {
   if (job_type)   { where += " AND j.job_type=?"; binds.push(job_type); }
   if (status)     { where += " AND j.status=?"; binds.push(status); }
   if (doc_no) {
-    where += " AND (j.display_no LIKE ? OR j.related_doc_id LIKE ? OR j.linked_outbound_order_id LIKE ?)";
+    where += " AND (j.display_no LIKE ? OR j.related_doc_id LIKE ? OR j.linked_outbound_order_id LIKE ?"+(env.SOP_UPGRADE_ENABLED==='true'?" OR  EXISTS (SELECT 1 FROM sop_document_numbers dn LEFT JOIN sop_records sr ON sr.id=j.id AND sr.kind='task' WHERE (dn.record_id=json_extract(sr.state,'$.need_id') OR dn.record_id=j.related_doc_id) AND dn.display_no LIKE ?) OR EXISTS(SELECT 1 FROM v2_inbound_plans ip WHERE ip.id=j.related_doc_id AND ip.display_no LIKE ?) OR EXISTS(SELECT 1 FROM v2_outbound_orders op WHERE (op.id=j.related_doc_id OR op.id=j.linked_outbound_order_id) AND op.display_no LIKE ?)":"")+")";
     const pat = "%" + doc_no + "%";
-    binds.push(pat, pat, pat);
+    binds.push(pat, pat, pat);if(env.SOP_UPGRADE_ENABLED==='true')binds.push(pat,pat,pat);
   }
   if (worker_name) {
     where += " AND EXISTS (SELECT 1 FROM v2_ops_job_workers w WHERE w.job_id=j.id AND w.worker_name LIKE ?)";
@@ -10480,7 +10484,7 @@ route("v2_dashboard_order_list", async (body, env) => {
       result_remarks_short: (parsed.result_notes || '').slice(0, 100)
     });
   });
-  return json({ ok: true, items, total, limit, offset });
+  return json({ ok: true, items:await jobNumbers(env,items), total, limit, offset });
 });
 
 // 2) 单子数据 — 详情
@@ -10540,7 +10544,7 @@ route("v2_dashboard_order_detail", async (body, env) => {
 
   return json({
     ok: true,
-    job,
+    job:(await jobNumbers(env,[job]))[0],
     workers: workersRs.results || [],
     results,
     pick_worker_docs: pickDocsRs.results || [],
@@ -10582,9 +10586,9 @@ route("v2_dashboard_order_export", async (body, env) => {
   if (job_type)   { where += " AND j.job_type=?"; binds.push(job_type); }
   if (status)     { where += " AND j.status=?"; binds.push(status); }
   if (doc_no) {
-    where += " AND (j.display_no LIKE ? OR j.related_doc_id LIKE ? OR j.linked_outbound_order_id LIKE ?)";
+    where += " AND (j.display_no LIKE ? OR j.related_doc_id LIKE ? OR j.linked_outbound_order_id LIKE ?"+(env.SOP_UPGRADE_ENABLED==='true'?" OR  EXISTS (SELECT 1 FROM sop_document_numbers dn LEFT JOIN sop_records sr ON sr.id=j.id AND sr.kind='task' WHERE (dn.record_id=json_extract(sr.state,'$.need_id') OR dn.record_id=j.related_doc_id) AND dn.display_no LIKE ?) OR EXISTS(SELECT 1 FROM v2_inbound_plans ip WHERE ip.id=j.related_doc_id AND ip.display_no LIKE ?) OR EXISTS(SELECT 1 FROM v2_outbound_orders op WHERE (op.id=j.related_doc_id OR op.id=j.linked_outbound_order_id) AND op.display_no LIKE ?)":"")+")";
     const pat = "%" + doc_no + "%";
-    binds.push(pat, pat, pat);
+    binds.push(pat, pat, pat);if(env.SOP_UPGRADE_ENABLED==='true')binds.push(pat,pat,pat);
   }
   if (worker_name) {
     where += " AND EXISTS (SELECT 1 FROM v2_ops_job_workers w WHERE w.job_id=j.id AND w.worker_name LIKE ?)";
@@ -10597,7 +10601,7 @@ route("v2_dashboard_order_export", async (body, env) => {
      FROM v2_ops_jobs j ${where}
      ORDER BY j.created_at DESC LIMIT ?`
   ).bind(...binds, limit).all();
-  const jobs = jobsRs.results || [];
+  const jobs = await jobNumbers(env,jobsRs.results || []);
   if (jobs.length === 0) return json({ ok: true, rows: [], total: 0 });
 
   const jobIds = jobs.map(j => j.id);
@@ -10765,7 +10769,8 @@ route("v2_dashboard_order_export", async (body, env) => {
     return {
       job_id: j.id,
       日期: (j.created_at || '').slice(0, 10),
-      单号: j.display_no || j.related_doc_id || j.linked_outbound_order_id || j.id,
+      单号: j.business_no || j.display_no || '单号待补充',
+      work_plan_no:j.work_plan_no||'',
       display_no: j.display_no || '',
       related_doc_id: j.related_doc_id || '',
       linked_outbound_order_id: j.linked_outbound_order_id || '',
@@ -10874,7 +10879,7 @@ route("v2_dashboard_workhour_summary", async (body, env) => {
     ${where}
     ORDER BY w.joined_at DESC LIMIT 1000`;
   const rs = await env.DB.prepare(segSql).bind(...binds).all();
-  const rows = rs.results || [];
+  const rows = await jobNumbers(env,rs.results || [],'job_id');
 
   const nowMs = Date.now();
   const todayKst = kstToday();
@@ -12684,6 +12689,7 @@ export default {
       if(doc==='ops_job'&&!await nativeOwner({job_id:id},env))return err('仅本任务派审员可上传附件',403);
     }
     const accessBlock=accessGuard(body,env,request);if(accessBlock)return accessBlock;
+    await ensureDocumentNumbers(env);
     const authResponse = await sessionAction(body, env,request);
     if (authResponse) return authResponse;
     if(accessEnabled(env)){const adminAction=await accessAdminAction(body,env);if(adminAction)return adminAction;}

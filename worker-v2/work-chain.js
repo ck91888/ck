@@ -1,3 +1,4 @@
+import {recordNumbers} from './document-numbers.js';
 // One upstream requirement owns the work instructions and materials. Shipping
 // plans allocate its quantities; they never create a second work requirement.
 export const workChainEnabled = env => env.SOP_UPGRADE_ENABLED === 'true' && env.SOP_WORK_CHAIN_ENABLED === 'true';
@@ -116,11 +117,11 @@ export async function workMaterialRead(body,env,user) {
  if (body.action!=='sop_work_need_search') return null;
  if(!user||!['manager','service','dispatcher','reviewer'].includes(user.role))throw Error('无此操作权限');
  const search=str(body.search).slice(0,100),offset=Math.max(0,Math.floor(Number(body.offset)||0)),dep=user.role==='manager'?'':` AND department IN (${(user.departments||[]).map(()=>'?').join(',')||"''"})`;
- const rows=(await q(env,`SELECT * FROM sop_records WHERE kind='need' AND json_extract(state,'$.status') NOT IN ('closed','cancelled') AND (?='' OR id LIKE ? OR json_extract(state,'$.customer') LIKE ? OR json_extract(state,'$.title') LIKE ?)${dep} ORDER BY updated_at DESC LIMIT 31 OFFSET ?`,search,...Array(3).fill('%'+search+'%'),...(user.role==='manager'?[]:user.departments||[]),offset).all()).results;
+ const rows=(await q(env,`SELECT * FROM sop_records WHERE kind='need' AND json_extract(state,'$.status') NOT IN ('closed','cancelled') AND (?='' OR id LIKE ? OR json_extract(state,'$.customer') LIKE ? OR json_extract(state,'$.title') LIKE ? OR EXISTS(SELECT 1 FROM sop_document_numbers dn WHERE dn.record_id=sop_records.id AND dn.display_no LIKE ?) OR EXISTS(SELECT 1 FROM v2_inbound_plans ip WHERE ip.id=json_extract(state,'$.source_id') AND ip.display_no LIKE ?))${dep} ORDER BY updated_at DESC LIMIT 31 OFFSET ?`,search,...Array(5).fill('%'+search+'%'),...(user.role==='manager'?[]:user.departments||[]),offset).all()).results;
  const ids=[...new Set(rows.flatMap(row=>(JSON.parse(row.state).links||[]).map(l=>l.outbound_id)))];
  const orders=ids.length?(await q(env,'SELECT id,status,display_no,expected_ship_at FROM v2_outbound_orders WHERE id IN (SELECT value FROM json_each(?))',JSON.stringify(ids)).all()).results:[];
  const items=await Promise.all(rows.slice(0,30).map(async row=>{const data=JSON.parse(row.state),a=await chainAllocation(env,data,orders);return {id:row.id,revision:row.revision,department:row.department,...data,remaining:Math.max(0,a.quantity-a.used),schedule_unit:a.unit,schedule_quantity:a.quantity,shipping_plans:a.orders.filter(o=>(data.links||[]).some(l=>l.outbound_id===o.id))};}));
- return {ok:true,items,more:rows.length>30,offset};
+ return {ok:true,items:await recordNumbers(env,items),more:rows.length>30,offset};
 }
 export function notifyMaterialChange(env,row,user,t,summary,change={}) {
  const ids=[...new Set([...(row.data.links||[]).map(l=>l.outbound_id),...(row.data.source_type==='outbound'?[row.data.source_id]:[])])],out=[];

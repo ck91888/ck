@@ -1,3 +1,4 @@
+import {NUMBER_SCHEMA} from '../worker-v2/document-numbers.js';
 import {DatabaseSync} from 'node:sqlite';
 import fs from 'node:fs';
 import vm from 'node:vm';
@@ -7,6 +8,7 @@ export function database(file=':memory:'){
  const migrations=vm.runInNewContext(source.slice(source.indexOf('const MIGRATIONS ='),source.indexOf('// 每次发布迁移变化时'))+'\nMIGRATIONS');
  for(const sql of migrations){try{db.exec(sql);}catch(e){if(!sql.trim().startsWith('ALTER'))throw e;}}
  db.exec(fs.readFileSync(new URL('../worker-v2/migrations/20260917_sop.sql',import.meta.url),'utf8'));
+ for(const sql of NUMBER_SCHEMA)db.exec(sql);
  const prepare=(sql)=>{
   let args=[];const statement={sql,get args(){return args;},bind(...values){args=values;return statement;},
    async first(){return db.prepare(sql).get(...args)||null;},async all(){return {results:db.prepare(sql).all(...args)};},async run(){const r=db.prepare(sql).run(...args);return{success:true,meta:{changes:r.changes}};}};return statement;

@@ -1,3 +1,4 @@
+import {ensureDocumentNumbers,recordNumbers,resolveRecordId,jobNumbers} from './document-numbers.js';
 import {readBatchMaterials} from './batch-work-materials.js';
 import { workChainEnabled, chainOutboundStatements, chainAllocation, guardWorkChain, workMaterialRead, workMaterials, notifyMaterialChange, assertShippingResult, shippingBasisStatements } from './work-chain.js';
 import { workPlanStatements } from './sop-planning.js';
@@ -36,6 +37,7 @@ function permit(u, department, allowed) {
  if(u.role!=='manager' && !(u.departments||[]).includes(department)) fail('无此部门权限');
 }
 async function read(env,id) {
+ id=await resolveRecordId(env,id);
  const row=await stmt(env,'SELECT * FROM sop_records WHERE id=?',id).first();
  return row ? {...row,data:JSON.parse(row.state)} : null;
 }
@@ -94,6 +96,7 @@ export async function handleSop(b,env) {
  const auth=env.SOP_REQUEST_USER ? {ok:true,user:env.SOP_REQUEST_USER} : authorization(b,env); if(!auth.ok) return auth;
  const u=auth.user;
  try {
+  await ensureDocumentNumbers(env);
   const batchMaterials=await readBatchMaterials(b,env,u);if(batchMaterials)return batchMaterials;
   const materialRead=await workMaterialRead(b,env,u);if(materialRead)return materialRead;
   if(env.SOP_ACCEPT_NEW==='false' && (/_create$|_adopt$|_from_outbound$/.test(b.action)||b.action==='sop_task_dispatch'))fail('新版已暂停接收新任务，现有任务仍可收尾');
@@ -108,7 +111,8 @@ export async function handleSop(b,env) {
    const segments=task?await all(env,'SELECT worker_id,worker_name,joined_at,left_at,leave_reason FROM v2_ops_job_workers WHERE job_id=? ORDER BY joined_at',task.id):[];
    let source=null;if(need?.data.source_id&&['inbound','outbound'].includes(need.data.source_type))source=await verifySource(env,need.data.source_type,need.data.source_id);
    const shipping=need&&workChainEnabled(env)?await chainAllocation(env,need.data):null;
-   return {ok:true,need:need?publicState(need):null,task:task?publicState(task):null,shipping,source:source?{id:source.id,number:source.display_no||source.id,customer:source.customer}:null,segments,changed:code[0]==='CKWORK'&&Number(code[2])!==(need?.data.requirement_version||1)};
+   const numbered=await recordNumbers(env,[need,task].filter(Boolean).map(publicState));
+   return {ok:true,need:need?numbered.find(x=>x.id===need.id):null,task:task?numbered.find(x=>x.id===task.id):null,shipping,source:source?{id:source.id,number:source.display_no||'来源单号待补充',customer:source.customer}:null,segments,changed:code[0]==='CKWORK'&&Number(code[2])!==(need?.data.requirement_version||1)};
   }
   if(b.action==='sop_need_groups')return await needGroups(env,u,b);
   if(b.action==='sop_list') {
@@ -117,30 +121,30 @@ export async function handleSop(b,env) {
    const dep=u.role==='manager'?'':` AND department IN (${(u.departments||[]).map(()=>'?').join(',')||"''"})`;
    const args=u.role==='manager'?[]:u.departments||[];
    const rows=await all(env,`SELECT * FROM sop_records WHERE kind=?${dep} ORDER BY updated_at DESC LIMIT ? OFFSET ?`,b.kind,...args,limit+1,offset);
-   return {ok:true,items:rows.slice(0,limit).map(r=>publicState({...r,data:JSON.parse(r.state)})),more:rows.length>limit,offset};
+   return {ok:true,items:await recordNumbers(env,rows.slice(0,limit).map(r=>publicState({...r,data:JSON.parse(r.state)}))),more:rows.length>limit,offset};
   }
   if(b.action==='sop_source_detail') {
    permit(u,b.department||'bulk',['manager','dispatcher','service','reviewer']);
    const doc=await verifySource(env,b.type,required(b.source_id,'单据编号'));
    if(!doc)fail('单据不存在');
-   return {ok:true,source:{id:doc.id,title:doc.display_no||doc.id,customer:doc.customer,instructions:doc.instruction||doc.remark||'',department:doc.biz_class==='direct_ship'?'direct_ship':'bulk'}};
+   return {ok:true,source:{id:doc.id,title:doc.display_no||'来源单号待补充',customer:doc.customer,instructions:doc.instruction||doc.remark||'',department:doc.biz_class==='direct_ship'?'direct_ship':'bulk'}};
   }
   if(b.action==='sop_linked') {
    permit(u,b.department||'bulk',roles);
    const rows=await all(env,"SELECT * FROM sop_records WHERE kind='need' AND (json_extract(state,'$.source_id')=? OR EXISTS(SELECT 1 FROM json_each(json_extract(state,'$.links')) l WHERE json_extract(l.value,'$.outbound_id')=?))",text(b.source_id),text(b.source_id));
-   return {ok:true,items:rows.filter(r=>u.role==='manager'||(u.departments||[]).includes(r.department)).map(r=>publicState({...r,data:JSON.parse(r.state)}))};
+   return {ok:true,items:await recordNumbers(env,rows.filter(r=>u.role==='manager'||(u.departments||[]).includes(r.department)).map(r=>publicState({...r,data:JSON.parse(r.state)})))};
   }
   if(b.action==='sop_sources') {
    const mapping={inbound:'v2_inbound_plans',outbound:'v2_outbound_orders',issue:'v2_issue_tickets',check:'v2_verify_batches'};
    const table=mapping[b.type];if(!table)fail('无效来源');
    permit(u,b.department||'bulk',['manager','service','dispatcher','reviewer']);
    const rows=await all(env,`SELECT * FROM ${table} ORDER BY created_at DESC LIMIT 200`);
-   return {ok:true,items:rows.map(x=>({id:x.id,label:(x.display_no||x.batch_no||x.id)+' / '+(x.customer||x.customer_name||'')+' / '+(x.status||''),status:x.status})),limited:true};
+   return {ok:true,items:rows.map(x=>({id:x.id,number:x.display_no||x.batch_no||'',label:(x.display_no||x.batch_no||'单号待补充')+' / '+(x.customer||x.customer_name||'')+' / '+(x.status||''),status:x.status})),limited:true};
   }
   if(b.action==='sop_get') {
    const row=await read(env,b.id); if(!row) fail('记录不存在'); permit(u,row.department,roles);
    const events=b.version_only?[]:await all(env,'SELECT action,actor_name,before_json,after_json,created_at FROM sop_events WHERE record_id=? ORDER BY created_at DESC LIMIT 100',row.id);
-   return {ok:true,record:publicState(row),events};
+   return {ok:true,record:b.version_only?publicState(row):(await recordNumbers(env,[publicState(row)]))[0],events};
   }
   if(b.action==='sop_dispatch_list'){
    if(!['manager','dispatcher'].includes(u.role))fail('仅派审员可查看现场派工');
@@ -198,7 +202,7 @@ export async function handleSop(b,env) {
    }
    row={id:source_type==='outbound'?'NEED-'+source_id:uid('NEED'),kind:'need',department,revision:0,data:{}};
    if(await read(env,row.id))fail('此出库计划已有关联作业，请引用原作业');
-   const bundle=workPlanStatements(env,[{...b,id:row.id,title:b.title||(doc?'关联作业 '+(doc.display_no||doc.id):''),instructions:b.instructions||doc?.instruction}],{type:source_type,id:source_id,customer,supply_chain_no:b.supply_chain_no},u,t);
+   const bundle=workPlanStatements(env,[{...b,id:row.id,title:b.title||(doc?'关联作业 '+(doc.display_no||'来源单号待补充'):''),instructions:b.instructions||doc?.instruction}],{type:source_type,id:source_id,customer,supply_chain_no:b.supply_chain_no},u,t);
    const data={...bundle.needs[0],reason:text(b.reason)};delete data.id;
    // save owns the requirement's event and record; optional outbound statements precede them.
    return await save(env,b,u,row,data,bundle.statements.slice(0,-2));
@@ -485,9 +489,10 @@ async function needGroups(env,u,b){
  else if(b.need_id){scope=' AND '+groupExpr+'=(SELECT '+groupExpr+" FROM sop_records WHERE id=? AND kind='need')";scopeArgs=[b.need_id];}
  const rows=await all(env,`SELECT * FROM sop_records WHERE kind='need'${filter}${scope} ORDER BY updated_at DESC,id`,...departments,...scopeArgs);
  const groups=new Map();
- for(const row of rows){const x=publicState({...row,data:JSON.parse(row.state)});
+ const numbered=await recordNumbers(env,rows.map(row=>publicState({...row,data:JSON.parse(row.state)})));
+ for(const x of numbered){
   const key=JSON.stringify([x.source_type||'standalone',x.source_id||x.supply_chain_no||x.id,x.customer]);
-  if(!groups.has(key))groups.set(key,{key,source_type:x.source_type||'standalone',source_id:x.source_id||'',customer:x.customer,display_no:x.supply_chain_no||x.source_id||x.id,updated_at:x.updated_at,items:[]});
+  if(!groups.has(key))groups.set(key,{key,source_type:x.source_type||'standalone',source_id:x.source_id||'',customer:x.customer,display_no:x.source_display_no||x.supply_chain_no||x.display_no||'未关联单据',updated_at:x.updated_at,items:[]});
   groups.get(key).items.push(x);
  }
  let items=[...groups.values()];
@@ -504,8 +509,8 @@ async function needGroups(env,u,b){
   stmt(env,'SELECT id,display_no FROM v2_outbound_orders WHERE id IN (SELECT value FROM json_each(?))',JSON.stringify(obIds))]);
  const [plans,lines,outbounds]=reads.map(r=>r.results||[]);
  for(const g of items){
-  if(g.source_type==='inbound'){const p=plans.find(p=>p.id===g.source_id);if(p){Object.assign(g,{plan:p,display_no:p.display_no||p.id,cargo_summary:p.cargo_summary,plan_date:p.plan_date,expected_arrival:p.expected_arrival});g.lines=lines.filter(l=>l.plan_id===g.source_id);}}
-  if(g.source_type==='outbound')g.display_no=outbounds.find(p=>p.id===g.source_id)?.display_no||g.source_id;
+  if(g.source_type==='inbound'){const p=plans.find(p=>p.id===g.source_id);if(p){Object.assign(g,{plan:p,display_no:p.display_no||'入库计划单号待补充',cargo_summary:p.cargo_summary,plan_date:p.plan_date,expected_arrival:p.expected_arrival});g.lines=lines.filter(l=>l.plan_id===g.source_id);}}
+  if(g.source_type==='outbound')g.display_no=outbounds.find(p=>p.id===g.source_id)?.display_no||'出库计划单号待补充';
   g.items.sort((a,b)=>(a.created_at||'').localeCompare(b.created_at||'')||(a.instruction_order||0)-(b.instruction_order||0)||a.title.localeCompare(b.title,'zh',{numeric:true}));
   const active=g.items.filter(x=>x.status!=='cancelled');g.completed=active.filter(x=>!!x.result||x.status==='closed').length;g.count=active.length;
   g.status=!active.length?'cancelled':g.completed===active.length?'completed':active.some(x=>x.status!=='pending')?'working':'pending';
@@ -545,11 +550,12 @@ async function dashboard(env,u,b){
  }
  const ranked=[...ranking.values()].sort((a,b)=>b.quantity-a.quantity);
  const roster=[...new Map(allSegments.map(s=>[s.worker_id,{worker_id:s.worker_id,worker_name:s.worker_name}])).values()].map(w=>{const active=allSegments.find(s=>s.worker_id===w.worker_id&&!s.left_at);const task=records.find(r=>r.id===active?.job_id);return {...w,current_job_id:active?.job_id||'',current_task:task?.title||'',status:active?'作业中':'无进行中记录（不等于空闲）'};});
- return {ok:true,date:days,scope:'整单完成后更新产量；多人按该任务实际参与人数均分（分配产量，不是个人扫描实测）。按业务、作业、指标及单位分别排名。已登记人员无任务不等于空闲；外部系统Excel尚未导入的成果不包含在内。',roster,rankings:ranked,reported_outputs:[...reported.values()],
+ const numberedRoster=await jobNumbers(env,roster,'current_job_id');
+ return {ok:true,date:days,scope:'整单完成后更新产量；多人按该任务实际参与人数均分（分配产量，不是个人扫描实测）。按业务、作业、指标及单位分别排名。已登记人员无任务不等于空闲；外部系统Excel尚未导入的成果不包含在内。',roster:numberedRoster,rankings:ranked,reported_outputs:[...reported.values()],
   working:tasks.filter(r=>r.status==='working').length+nativeJobs.filter(x=>x.status==='working').length,
   active_people:new Set(segments.filter(s=>!s.left_at).map(s=>s.worker_id)).size,
   live:segments.filter(s=>!s.left_at).map(s=>({worker_id:s.worker_id,worker_name:s.worker_name,job_id:s.job_id,joined_at:s.joined_at})),completed:completed.length,person_hours:Math.round(minutes/6)/10,outputs,
-  alerts:alerts.map(r=>({id:r.id,kind:r.kind,title:r.title,status:r.status,department:r.department,owner:r.owner||'',updated_at:r.updated_at,revision:r.revision})),
+  alerts:await recordNumbers(env,alerts.map(r=>({id:r.id,kind:r.kind,title:r.title,status:r.status,department:r.department,owner:r.owner||'',updated_at:r.updated_at,revision:r.revision}))),
   data_quality:tasks.filter(r=>r.status==='awaiting_review'||(r.status==='working'&&Date.parse(now())-Date.parse(r.started_at)>12*3600000)).map(r=>({id:r.id,title:r.title,reason:r.status==='awaiting_review'?'待审核':'计时超过12小时，请核实'}))};
 }
 // Defense in depth: legacy clients may finish old tasks but cannot alter SOP-owned tasks.
@@ -560,7 +566,7 @@ export async function linkedCheck(env,id){
 export async function linkedNeeds(env,id,knownRows){
  if(env.SOP_UPGRADE_ENABLED!=='true')return [];
  const rows=knownRows||await all(env,"SELECT * FROM sop_records WHERE kind='need' AND (json_extract(state,'$.source_id')=? OR EXISTS(SELECT 1 FROM json_each(json_extract(state,'$.links')) l WHERE json_extract(l.value,'$.outbound_id')=?))",id,id);
- return rows.map(r=>publicState({...r,data:JSON.parse(r.state)}));
+ return recordNumbers(env,rows.map(r=>publicState({...r,data:JSON.parse(r.state)})));
 }
 export async function guardLegacy(b,env){
  if(env.SOP_UPGRADE_ENABLED!=='true')return null;

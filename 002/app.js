@@ -4565,9 +4565,9 @@ async function loadOrderOpsList() {
     // Trip/work order column
     var tripHtml = '--';
     if (j.display_no) {
-      tripHtml = '<span class="trip-tag">' + esc(j.display_no) + '</span>';
+      tripHtml = '<span class="trip-tag">' + esc(j.trip_no || j.display_no) + '</span>';
     } else if (j.related_doc_id) {
-      tripHtml = '<span class="doc-tag">' + esc(j.related_doc_id) + '</span>';
+      tripHtml = '<span class="doc-tag">' + esc(j.business_no || '单号待补充') + '</span>';
     }
 
     // Doc nos column (pick docs or --)
@@ -4577,7 +4577,7 @@ async function loadOrderOpsList() {
         return '<span class="doc-tag">' + esc(d) + '</span>';
       }).join('') + '</div>';
     } else if (j.related_doc_id && j.display_no) {
-      docHtml = '<span class="doc-tag">' + esc(j.related_doc_id) + '</span>';
+      docHtml = '<span class="doc-tag">' + esc(j.business_no || '单号待补充') + '</span>';
     }
 
     var stText = orderOpsStatusText(j.status);
@@ -4634,12 +4634,12 @@ async function loadOrderOpsDetail(id) {
   html += '<div class="detail-field"><b>' + L("order_ops_field_status") + ':</b> <span class="st st-' + esc(j.status) + '">' + esc(stText) + '</span></div>';
   html += '<div class="detail-field"><b>' + L("order_ops_field_biz_class") + ':</b> ' + esc(bizLabel(j.biz_class)) + '</div>';
   if (j.display_no) {
-    var tripLabel = (j.job_type === 'bulk_op') ? L("order_ops_field_work_order") : L("order_ops_field_trip_no");
-    html += '<div class="detail-field"><b>' + tripLabel + ':</b> <span class="trip-tag">' + esc(j.display_no) + '</span></div>';
+    var tripLabel = j.trip_no ? L("order_ops_field_trip_no") : L("order_ops_field_work_order");
+    html += '<div class="detail-field"><b>' + tripLabel + ':</b> <span class="trip-tag">' + esc(j.trip_no || j.display_no) + '</span></div>';
   }
   html += '<div class="detail-field"><b>' + L("order_ops_field_job_type") + ':</b> ' + esc(flowLabel) + '</div>';
   if (j.related_doc_id) {
-    html += '<div class="detail-field"><b>' + L("related_doc_no") + ':</b> <span class="doc-tag">' + esc(j.related_doc_id) + '</span></div>';
+    html += '<div class="detail-field"><b>' + L("related_doc_no") + ':</b> <span class="doc-tag">' + esc(j.business_no || '单号待补充') + '</span></div>';
   }
   html += '<div class="detail-field"><b>' + L("order_ops_field_creator") + ':</b> ' + esc(j.created_by || "--") + '</div>';
   html += '<div class="detail-field"><b>' + L("order_ops_field_started_at") + ':</b> ' + esc(fmtTime(j.created_at)) + '</div>';
