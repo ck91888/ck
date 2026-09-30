@@ -61,7 +61,7 @@ async function groupDetail(query){
  root.classList.remove('ck-needs-list');
  const r=await api('sop_need_groups',query),g=r.items[0];if(!g)throw Error('未找到本批作业指令');current=null;currentGroup=g.key;listSnapshot=JSON.stringify(r.items.map(g=>[g.key,g.items.map(x=>[x.id,x.revision])]));$('updates').textContent='';
  const c=$('content');c.innerHTML='<div class="toolbar" id="groupActions"></div><article class="card">'+groupHeader(g)+'<p class="muted">同一批货物的全部作业要求如下；分货依据以客服文字及箱唛范围为准。</p></article><article class="card"><div class="card-title">本批作业明细 <span class="count">'+g.count+'项 · 已完成 '+g.completed+'项</span></div><div class="scroll" id="groupTable">'+CKWorkNeedsTable(g.items)+'</div></article>';
- const actions=$('groupActions');actions.append(btn('← 返回作业指令列表',()=>load(),'light'));actions.append(btn('打印整批指令',()=>CKPrintWorkGroup(g),'light'));
+ const actions=$('groupActions');actions.append(btn('← 返回作业指令列表',()=>load(),'light'));if(g.count){const korean=window.getLang?.()==='ko';actions.append(btn(korean?'이번 입고 작업 계획서 일괄 인쇄 ('+g.count+'건)':'批量打印本批作业单（'+g.count+'份）',()=>CKNeedBatchPrint(g),'light'));const hint=document.createElement('span');hint.className='muted';hint.textContent=korean?'인쇄 시 “PDF로 저장”을 선택하면 한 파일로 저장됩니다. 작업 계획서마다 새 페이지에서 시작하며 취소된 건은 제외합니다.':'打印时选择“保存为 PDF”，得到一个文件；每张作业单另起一页。已取消的作业单不打印。';actions.append(hint);}
  if(g.source_type==='inbound'&&g.source_id){if(options.context==='collab'&&window.openInboundDetail)actions.append(btn('查看入库计划',()=>openInboundDetail(g.source_id),'light'));else if(options.context!=='field'){const a=document.createElement('a');a.href='/002/?inbound='+encodeURIComponent(g.source_id);a.textContent='查看入库计划';actions.append(a);}}
  if(g.source_type==='inbound'&&window.CKWorkChain?.enabled()){const files=document.createElement('section');c.querySelector('article').append(files);await CKWorkChain.batchMaterials(files,g,{field:options.context==='field'});}
  const table=$('groupTable').querySelector('table');const th=document.createElement('th');th.textContent='操作';table.querySelector('thead tr').append(th);
@@ -84,8 +84,7 @@ async function detail(id,individual=!!window.CK_SOP_ROLLOUT?.workChain){const r=
   a.append(btn('打印作业单',()=>CKNeedPrint(x)));
   const info=document.createElement('p');info.textContent='货物范围：'+(x.scope_text||'见文字要求')+'　供应链单号：'+(x.supply_chain_no||'—');c.querySelector('article').append(info);
   if(x.status==='pending'){
-   if(x.operation_kind!=='direct_forward'){if(options.context==='field')a.append(btn('分配现场任务',()=>taskForm(x)));
-   else {const link=document.createElement('a');link.className='link';link.href='../001/?need='+encodeURIComponent(x.id);link.textContent='交现场负责人派工 / 현장 배정';a.append(link);}}
+   if(x.operation_kind!=='direct_forward'&&options.context==='field')a.append(btn('分配现场任务',()=>taskForm(x)));
    action('修改作业要求','sop_need_update',area('instructions','操作要求',x.instructions)+(window.CK_SOP_ROLLOUT?.workChain?input('planned_quantity','本作业计划数量','number',x.planned_quantity||'',false)+select('planned_unit','计划单位',{箱:'箱',件:'件',托:'托'},x.planned_unit):'')+input('owner','负责人','text',x.owner)+input('location','货物位置','text',x.location,false)+input('deadline','期限','datetime-local',x.deadline,false));
   }
   if(!window.CKWorkChain?.enabled()||x.operation_kind==='direct_forward')for(const link of (x.links||[]).filter(l=>l.phase==='planned'))action('调整预关联出库数量：'+link.quantity+link.unit,'sop_need_plan_quantity',input('quantity','调整后数量（'+link.unit+'）','number',link.quantity)+input('reason','调整原因'),v=>({...v,outbound_id:link.outbound_id}));

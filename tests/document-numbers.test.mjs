@@ -24,6 +24,8 @@ test('one plan number is returned by detail, groups, linked plans, search and sc
  assert.equal((await api('sop_get',{id:n.display_no.toLowerCase()})).record.id,n.id);
  assert.equal((await api('sop_linked',{source_id:'IB-internal'})).items[0].display_no,n.display_no);
  const group=(await api('sop_need_groups',{need_id:n.id})).items[0];assert.equal(group.display_no,n.source_display_no);assert.equal(group.items[0].display_no,n.display_no);
+ insert(DB,'NEED-LEGACY','need','2026-09-30T00:01:00Z',{source_type:'inbound',source_id:'IB-internal',customer:'Historical alternate name',instructions:'Another work order'});
+ const samePlan=(await api('sop_need_groups',{need_id:n.id})).items;assert.equal(samePlan.length,1);assert.equal(samePlan[0].items.length,2);
  for(const search of [n.display_no,'RU-20260930-005'])assert.equal((await api('sop_work_need_search',{search})).items[0].display_no,n.display_no);
  for(const code of [n.display_no,n.id,'CKWORK|'+n.id+'|1']){const r=await api('sop_field_resolve',{code});assert.equal(r.need.display_no,n.display_no);assert.equal(r.source.number,'RU-20260930-005');}
  const stock=await api('sop_need_create',{department:'bulk',source_type:'inventory',supply_chain_no:'0000456',title:'Stock work',customer:'Example',instructions:'Label',planned_quantity:1,planned_unit:'箱'});
@@ -50,10 +52,10 @@ test('task cards, job reports, searches and exports show business numbers while 
  DB.raw.exec("INSERT INTO v2_inbound_plans(id,display_no,status,updated_at) VALUES('IB-truck-1','RU-20260930-011','pending','v1'),('IB-truck-2','RU-20260930-012','pending','v1'); INSERT INTO v2_ops_jobs(id,job_type,related_doc_type,related_doc_id) VALUES('JOB-truck','unload','inbound_plan','IB-truck-1'); INSERT INTO ck_unload_plan_links(job_id,plan_id,position,plan_version,lines_snapshot) VALUES('JOB-truck','IB-truck-2',2,'v1','[]'),('JOB-truck','IB-truck-1',1,'v1','[]')");
  const trip=(await jobNumbers(env,[{id:'JOB-truck'}]))[0];assert.equal(trip.business_no,'RU-20260930-011、RU-20260930-012');assert.equal(trip.inbound_plan_no,trip.business_no);
 });
-test('single and batch print use business numbers, keep the legacy QR payload and respect selected language',()=>{
- let html='',payload='',lang='zh';const printWindow={document:{write:s=>html=s,close(){}},focus(){},print(){},close(){}};
- const qrcode=()=>({addData:s=>payload=s,make(){},createSvgTag:()=>'<svg aria-label="scan"></svg>'});qrcode.stringToBytesFuncs={'UTF-8':v=>v};
- const context={window:{open:()=>printWindow,getLang:()=>lang},qrcode,console,Date};context.window.window=context.window;vm.createContext(context);
+test('single and batch print use business numbers, keep each QR payload and place active work orders on separate sheets',()=>{
+ let html='',payload='',lang='zh',opens=0,prints=0;const printWindow={document:{write:s=>html=s,close(){}},focus(){},print(){prints++},close(){}};
+ const qrs=[];const qrcode=()=>({addData:s=>{payload=s;qrs.push(s)},make(){},createSvgTag:()=>'<svg aria-label="scan"></svg>'});qrcode.stringToBytesFuncs={'UTF-8':v=>v};
+ const context={window:{open:()=>{opens++;return printWindow},getLang:()=>lang},qrcode,console,Date};context.window.window=context.window;vm.createContext(context);
  vm.runInContext(fs.readFileSync(new URL('../shared/document-labels.js',import.meta.url),'utf8'),context);
  const x={id:'NEED-private',display_no:'ZY-20260930-001',source_id:'IB-private',source_display_no:'RU-20260930-005',source_type:'inbound',customer:'Example',instructions:'<img onerror=alert(1)>',title:'Pallet work',requirement_version:2};
  context.window.CKNeedPrint(x);assert.match(html,/作业计划号：ZY-20260930-001/);assert.match(html,/来源入库计划：RU-20260930-005/);assert.doesNotMatch(html,/NEED-private|IB-private|공급망|供应链单号/);assert.match(html,/&lt;img/);assert.equal(payload,'CKWORK|NEED-private|2');
@@ -61,8 +63,11 @@ test('single and batch print use business numbers, keep the legacy QR payload an
  lang='zh';context.window.CKNeedPrint({...x,source_type:'inventory',source_display_no:'',supply_chain_no:'00004'});assert.match(html,/货物来源：库内库存/);assert.match(html,/供应链单号：00004/);
  for(const f of ['sop-planning-ui.js','field-work.js'])vm.runInContext(fs.readFileSync(new URL('../shared/'+f,import.meta.url),'utf8'),context);
  context.window.CKNeedPrint(x);assert.match(html,/ZY-20260930-001/);assert.doesNotMatch(html,/NEED-private|IB-private/);
- context.CKWorkNeedsTable=context.window.CKWorkNeedsTable;
- context.window.CKPrintWorkGroup({source_id:'IB-private',source_type:'inbound',display_no:'RU-20260930-005',customer:'Example',items:[x,{...x,id:'NEED-private-2',display_no:'ZY-20260930-002'}]});
- assert.match(html,/RU-20260930-005/);assert.match(html,/ZY-20260930-001/);assert.match(html,/ZY-20260930-002/);assert.doesNotMatch(html,/NEED-private|IB-private/);
+ const before={opens,prints};qrs.length=0;
+ context.window.CKNeedBatchPrint({source_id:'IB-private',source_type:'inbound',display_no:'RU-20260930-005',customer:'Example',items:[x,{...x,id:'NEED-private-2',display_no:'ZY-20260930-002',title:'Second job',requirement_version:3},{...x,id:'NEED-cancelled',display_no:'ZY-20260930-003',status:'cancelled'}]});
+ assert.equal(opens,before.opens+1);assert.equal(prints,before.prints+1);assert.equal((html.match(/<section class="sheet">/g)||[]).length,2);assert.match(html,/<section class="sheet">[\s\S]*ZY-20260930-001[\s\S]*<\/section><section class="sheet">[\s\S]*ZY-20260930-002/);
+ assert.match(html,/page-break-after:always/);assert.match(html,/RU-20260930-005/);assert.doesNotMatch(html,/ZY-20260930-003|NEED-private|IB-private|NEED-cancelled/);
+ assert.deepEqual(qrs,['CKWORK|NEED-private|2','CKWORK|NEED-private-2|3']);
+ assert.throws(()=>context.window.CKNeedBatchPrint({items:[{...x,status:'cancelled'}]}),/没有可打印/);assert.equal(opens,before.opens+1);
 });
 

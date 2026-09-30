@@ -483,7 +483,7 @@ async function needGroups(env,u,b){
  const departments=u.role==='manager'?[]:u.departments||[];
  const filter=u.role==='manager'?'':` AND department IN (${departments.map(()=>'?').join(',')||"''"})`;
  let scope='',scopeArgs=[];
- const groupExpr="json_array(COALESCE(NULLIF(json_extract(state,'$.source_type'),''),'standalone'),COALESCE(NULLIF(json_extract(state,'$.source_id'),''),NULLIF(json_extract(state,'$.supply_chain_no'),''),id),json_extract(state,'$.customer'))";
+ const groupExpr="json_array(COALESCE(NULLIF(json_extract(state,'$.source_type'),''),'standalone'),COALESCE(NULLIF(json_extract(state,'$.source_id'),''),NULLIF(json_extract(state,'$.supply_chain_no'),''),id),CASE WHEN json_extract(state,'$.source_type')='inbound' THEN '' ELSE json_extract(state,'$.customer') END)";
  if(b.group_key){scope=' AND '+groupExpr+'=?';scopeArgs=[b.group_key];}
  else if(b.source_id){scope=" AND json_extract(state,'$.source_id')=?";scopeArgs=[b.source_id];if(b.source_type){scope+=" AND json_extract(state,'$.source_type')=?";scopeArgs.push(b.source_type);}}
  else if(b.need_id){scope=' AND '+groupExpr+'=(SELECT '+groupExpr+" FROM sop_records WHERE id=? AND kind='need')";scopeArgs=[b.need_id];}
@@ -491,7 +491,7 @@ async function needGroups(env,u,b){
  const groups=new Map();
  const numbered=await recordNumbers(env,rows.map(row=>publicState({...row,data:JSON.parse(row.state)})));
  for(const x of numbered){
-  const key=JSON.stringify([x.source_type||'standalone',x.source_id||x.supply_chain_no||x.id,x.customer]);
+  const key=JSON.stringify([x.source_type||'standalone',x.source_id||x.supply_chain_no||x.id,x.source_type==='inbound'?'':x.customer]);
   if(!groups.has(key))groups.set(key,{key,source_type:x.source_type||'standalone',source_id:x.source_id||'',customer:x.customer,display_no:x.source_display_no||x.supply_chain_no||x.display_no||'未关联单据',updated_at:x.updated_at,items:[]});
   groups.get(key).items.push(x);
  }
@@ -509,7 +509,7 @@ async function needGroups(env,u,b){
   stmt(env,'SELECT id,display_no FROM v2_outbound_orders WHERE id IN (SELECT value FROM json_each(?))',JSON.stringify(obIds))]);
  const [plans,lines,outbounds]=reads.map(r=>r.results||[]);
  for(const g of items){
-  if(g.source_type==='inbound'){const p=plans.find(p=>p.id===g.source_id);if(p){Object.assign(g,{plan:p,display_no:p.display_no||'入库计划单号待补充',cargo_summary:p.cargo_summary,plan_date:p.plan_date,expected_arrival:p.expected_arrival});g.lines=lines.filter(l=>l.plan_id===g.source_id);}}
+  if(g.source_type==='inbound'){const p=plans.find(p=>p.id===g.source_id);if(p){Object.assign(g,{plan:p,customer:p.customer||g.customer,display_no:p.display_no||'入库计划单号待补充',cargo_summary:p.cargo_summary,plan_date:p.plan_date,expected_arrival:p.expected_arrival});g.lines=lines.filter(l=>l.plan_id===g.source_id);}}
   if(g.source_type==='outbound')g.display_no=outbounds.find(p=>p.id===g.source_id)?.display_no||'出库计划单号待补充';
   g.items.sort((a,b)=>(a.created_at||'').localeCompare(b.created_at||'')||(a.instruction_order||0)-(b.instruction_order||0)||a.title.localeCompare(b.title,'zh',{numeric:true}));
   const active=g.items.filter(x=>x.status!=='cancelled');g.completed=active.filter(x=>!!x.result||x.status==='closed').length;g.count=active.length;
