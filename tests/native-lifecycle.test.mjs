@@ -93,3 +93,20 @@ test('return receiving and barcode verification both close the assigned three-pe
  const {ok,start,count,status}=setup();const j=await start('v2_inbound_job_start',{job_type:'inbound_return',biz_class:'return'});await ok('v2_inbound_job_finish',{job_id:j.job_id,worker_id:'A',complete_job:true});assert.equal(count(j.job_id),0);assert.equal(status(j.job_id),'completed');
  const seed=await ok('sop_demo_prepare');const v=await start('v2_verify_job_start',{batch_id:seed.batch_id});await ok('v2_verify_job_finish',{job_id:v.job_id,worker_id:'A',complete_job:true,complete_batch:false});assert.equal(count(v.job_id),0);assert.equal(status(v.job_id),'completed');
 });
+
+test('home discovery merges native and work-plan tasks once with work numbers and excludes finished tasks',async()=>{
+ const {DB,ok,start}=setup(),external=await start('v2_bulk_op_job_start',{work_order_no:'EXT-HOME',customer:'外部客户'});
+ const need=await ok('sop_need_create',{department:'bulk',source_type:'inventory',supply_chain_no:'HOME-STOCK',title:'打托',customer:'计划客户',instructions:'28箱打2托',planned_quantity:2,planned_unit:'托'}),number=(await ok('sop_get',{id:need.id})).record.display_no;
+ const task=await ok('sop_task_dispatch',{department:'bulk',need_id:need.id,title:'打托',job_type:'bulk_op',estimated_minutes:15,workers:[{id:'D',name:'丁'}],lead_id:'D'});
+ const list=(await ok('sop_dispatch_list')).items;assert.equal(list.length,2);const item=list.find(x=>x.id===task.id);
+ assert.equal(item.task_kind,'task');assert.equal(item.business_no,number);assert.equal(item.title,'打托');assert.equal(item.customer,'计划客户');assert.equal(item.workers[0].id,'D');
+ const filtered=(await ok('sop_dispatch_list',{external_code:'EXT-HOME'})).items;assert.equal(filtered.length,1);assert.equal(filtered[0].id,external.job_id);
+ await ok('sop_task_pause',{id:task.id,revision:1,reason:'等客户'});assert.equal((await ok('sop_dispatch_list')).items.find(x=>x.id===task.id).status,'paused');
+ DB.raw.prepare("UPDATE v2_ops_jobs SET status='completed' WHERE id=?").run(task.id);assert.equal((await ok('sop_dispatch_list')).items.some(x=>x.id===task.id),false);
+});
+
+test('an external bulk start cannot interpret printed work-plan numbers as unrelated external orders',async()=>{
+ const {call,ok,count}=setup();const n=await ok('sop_need_create',{department:'bulk',source_type:'inventory',supply_chain_no:'NUMBER-GUARD',title:'打托',customer:'客户',instructions:'按单打托'}),number=(await ok('sop_get',{id:n.id})).record.display_no;
+ const denied=await call('sop_native_start',{payload:{action:'v2_bulk_op_job_start',work_order_no:number,client_req_id:crypto.randomUUID()},workers:[{id:'A',name:'甲'}],lead_id:'A',estimated_minutes:15,labor_department:'bulk'});
+ assert.equal(denied.ok,false);assert.match(denied.error,/需求作业单/);assert.equal(count(n.id),0);
+});

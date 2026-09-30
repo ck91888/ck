@@ -4,8 +4,8 @@
   const b=document.createElement('button');b.type='button';b.className='btn btn-outline ck-native-task';
   const title=document.createElement('strong'),info=document.createElement('span'),crew=document.createElement('small');
   title.textContent=job.business_no||job.display_no||'未关联单据 / 연결 문서 없음';
-  info.textContent=[window.JOB_TYPE_LABEL?.[job.job_type]||job.job_type,job.customer].filter(Boolean).join(' · ');
-  crew.textContent='作业人员 / 작업자: '+(job.workers.map(w=>w.name).join('、')||'待收尾 / 마감 대기');
+  info.textContent=[job.title||window.JOB_TYPE_LABEL?.[job.job_type]||job.job_type,job.customer].filter(Boolean).join(' · ');
+  crew.textContent='作业人员 / 작업자: '+(job.workers.map(w=>w.name).join('、')||(job.status==='assigned'?'待开始 / 시작 대기':'暂无人员 / 인원 없음'));
   b.append(title,info,crew);b.onclick=async()=>{b.disabled=true;try{await CKOpenNativeJob(job);}finally{b.disabled=false;}};return b;
  };
  const startActions=new Set(['v2_unload_job_start','v2_unplanned_unload_start','v2_inbound_job_start','v2_import_delivery_job_start','v2_outbound_load_start','v2_outbound_stock_op_start','v2_issue_handle_start','v2_pick_job_start','v2_pick_job_start_by_docs','v2_bulk_op_job_start','v2_ops_job_start','v2_verify_job_start']);
@@ -15,6 +15,7 @@
   window.CKSetNativeLead=function(person){if(person){lead=person;sessionStorage.setItem('ck_test_active_lead',JSON.stringify(lead));}};
   window.CKOpenNativeJob=async function(job){
    try{
+    if(job.task_kind==='task'){window.CKClearNativeJob();goPage('bulk_op',{task:job.id,external:false});return;}
     const r=await api({action:'v2_ops_job_detail',job_id:job.id});
     if(!r?.ok||!r.can_manage_dispatch)throw Error(r?.error||'你已不在此任务中，请联系派工人 / 배정 담당자에게 문의하세요');
     if(!['pending','working','awaiting_close'].includes(r.job.status))throw Error('任务已结束，请刷新列表 / 작업 종료, 목록을 새로고침하세요');
@@ -24,7 +25,7 @@
     sessionStorage.setItem('ck_test_active_lead',JSON.stringify(lead));
     if(r.job.job_type==='unload'&&r.job.related_doc_type==='field_feedback')localStorage.setItem('v2_unplanned_fb_id',r.job.related_doc_id);
     else localStorage.removeItem('v2_unplanned_fb_id');
-    saveActiveJob(job.id,null);if(r.job.job_type==='issue_handle')window._currentIssueId=r.job.related_doc_id;goMyTask();
+    saveActiveJob(job.id,null);if(r.job.job_type==='bulk_op'){goPage('bulk_op',{task:job.id,external:true,detail:r});return;}if(r.job.job_type==='issue_handle')window._currentIssueId=r.job.related_doc_id;goMyTask();
    }catch(e){alert(e.message);}
   };
   window.CKClearNativeJob=function(){lead=null;sessionStorage.removeItem('ck_test_active_lead');clearActiveJob();};

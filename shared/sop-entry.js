@@ -108,7 +108,7 @@
    const renderPlan=window.renderUnloadPlanCard;window.renderUnloadPlanCard=function(data,no){renderPlan(data,no);const info=document.getElementById('unloadPlanInfo');const box=document.createElement('section');box.className='ck-inbound-work';box.innerHTML='<p>正在读取本批分货要求…</p>';info.append(box);request('sop_linked',{source_id:data.plan.id}).then(r=>{if(!box.isConnected)return;box.innerHTML=r.items.length?'<h3>卸货时的分货与操作要求</h3>'+CKWorkNeedsTable(r.items)+'<p class="ck-muted">打托货边卸边打托；散出货集中放置；入库代发货单独分出并交代发组。已完成内容在交接时说明，后续只做剩余操作。</p>':'<p class="ck-muted">本计划暂无单独作业要求。</p>';}).catch(e=>{box.textContent='作业要求读取失败：'+e.message;});};
    const tasks=document.createElement('section');tasks.className='ck-inline-heading';tasks.innerHTML='<b>现场在途任务（点击继续原单据操作）</b><div class="ck-buttons"></div>';document.getElementById('page-home').append(tasks);
    window.initHome=async()=>{CKClearNativeJob();document.getElementById('myTaskBar')?.classList.add('hidden');window._unloadPlanData=null;
-    try{const r=await request('sop_dispatch_list');const list=tasks.querySelector('.ck-buttons');list.replaceChildren();for(const job of r.items)list.append(CKNativeTaskButton(job));if(!r.items.length)list.textContent='暂无原业务在途派工；关联作业请进入按单操作 → 大货操作。';}catch(e){tasks.querySelector('.ck-buttons').textContent=e.message;}
+    try{const r=await request('sop_dispatch_list');const list=tasks.querySelector('.ck-buttons');list.replaceChildren();for(const job of r.items)list.append(CKNativeTaskButton(job));if(!r.items.length)list.textContent='暂无现场在途任务 / 진행 중인 현장 작업 없음';}catch(e){tasks.querySelector('.ck-buttons').textContent=e.message;}
    };
 
    document.getElementById('headerWorker').textContent=u.name+' · 派审员 / 배정·검수';document.getElementById('headerWorker').onclick=()=>{};
@@ -118,17 +118,13 @@
    const modes=document.createElement('div');modes.className='ck-bulk-modes';modes.innerHTML='<button type="button" data-mode="need">需求作业单 / 작업 계획서</button><button type="button" data-mode="external">外部作业单 / 외부 작업서</button>';bulkPage.querySelector('.topbar').after(modes);
    modes.querySelectorAll('button').forEach(b=>b.onclick=()=>goPage('bulk_op',{external:b.dataset.mode==='external'}));
    const menu=document.querySelector('#page-order_op_menu .btn:last-child');menu.after(button('外部作业单 / 외부 작업서',()=>goPage('bulk_op',{external:true})));
-   const originalBulkInit=window.initBulkOp;window.initBulkOp=function(){
+   window.initBulkOp=function(){
     const external=!!window._pageParams?.external||!!(window._activeJobId&&!String(window._activeJobId).startsWith('SOPJOB-'));
     modes.querySelectorAll('button').forEach(b=>{b.setAttribute('aria-pressed',String((b.dataset.mode==='external')===external));b.disabled=!!window._activeJobId;});
     if(fieldWork){fieldWork.destroy();fieldWork=null;}window.stopBulkScan?.();window._bulkStopElapsedTimer?.();
-    if(external){bulkHost.hidden=true;return originalBulkInit();}
     for(const node of ['bulkStateIdle','bulkStateWorking'])document.getElementById(node).style.display='none';
-    bulkHost.hidden=false;if(fieldWork)fieldWork.destroy();fieldWork=CKFieldWork(bulkHost,params.get('task')||params.get('need')||'');
+    bulkHost.hidden=false;fieldWork=CKFieldWork(bulkHost,window._pageParams?.task||window._activeJobId||'',{external,detail:window._pageParams?.detail,onChange:task=>{if(external&&task&&!['completed','cancelled'].includes(task.status))saveActiveJob(task.id,null);else CKClearNativeJob();modes.querySelectorAll('button').forEach(b=>b.disabled=!!task&&!['completed','cancelled'].includes(task.status));}});
    };
-   document.querySelector('#bulkStateIdle .card-title').textContent='外部作业单号 / 외부 작업번호';
-   document.getElementById('bulkOrderInput').placeholder='扫描或输入外部系统作业单号 / 외부 작업번호';
-   const hint=document.createElement('p');hint.className='ck-external-hint';hint.textContent='无需先建协同中心需求；扫描外部单号后分配人员，记录本次工时和产出。 / 외부 작업서로 인원·작업시간·산출 기록';document.getElementById('bulkStateIdle').prepend(hint);
    const labor=document.createElement('div');labor.id='page-labor';labor.className='page';labor.innerHTML='<div class="topbar"><button class="back-btn">← 现场首页</button><div class="page-title">人员与休息 / 인원·휴식</div></div><div id="ck-field-labor" style="padding:0 16px"></div>';document.body.append(labor);labor.querySelector('button').onclick=()=>showPage('home');
    window.CKOpenFieldLabor=async()=>{showPage('labor');await CKLabor(document.getElementById('ck-field-labor'),{field:true});};
    const laborButton=button('现场人员与休息 / 인원·휴식',window.CKOpenFieldLabor);laborButton.className='btn btn-outline';document.getElementById('page-home').prepend(laborButton);
@@ -141,7 +137,7 @@
     }catch(e){alert(e.message);}
    };
    showPage('home');
-   if(params.get('task')||params.get('need')){showPage('bulk_op');}
+   if(params.get('task')||params.get('need')){goPage('bulk_op',{task:params.get('task')||params.get('need')});}
   }else if(app==='shuju'){
    localStorage.removeItem(SHUJU_KEY_STORAGE);showApp();
    const b=button('派工质量与待办',()=>{document.querySelectorAll('.tab-content').forEach(x=>x.style.display='none');window._currentTab='sop';host.style.display='';mount(host,{tab:'dashboard',context:'dashboard'});});

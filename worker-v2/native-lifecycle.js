@@ -23,6 +23,11 @@ export async function validateNativeMutation(body,env){
  if(body.action==='v2_bulk_op_job_finish'){
   if(!quantityKeys.filter(k=>k!=='box_count').some(k=>Number(body[k])>0)&&!body.used_forklift)fail('请先记录操作产出后再完成 / 산출을 기록한 후 완료하세요');
   if(!job.linked_outbound_order_id&&!String(body.customer||job.customer||'').trim())fail('请填写客户名称 / 고객명을 입력하세요');
+  const ids=body.location_photos||[];
+  if(!Array.isArray(ids)||ids.length>8||new Set(ids).size!==ids.length||ids.some(id=>typeof id!=='string'))fail('货位照片无效');
+  const photos=ids.length?await rows(env,"SELECT id,file_key,file_name,content_type FROM v2_attachments WHERE related_doc_type='ops_job' AND related_doc_id=? AND attachment_category='location_photo' AND id IN (SELECT value FROM json_each(?))",job.id,JSON.stringify(ids)):[];
+  if(photos.length!==ids.length||photos.some(p=>!['image/jpeg','image/png','image/webp'].includes(p.content_type)))fail('货位照片不存在或不属于本任务');
+  body.location_photos=photos;
  }
 }
 export function pickTeamStatements(env,jobId,t){
@@ -44,7 +49,7 @@ export async function nativePeople(body,env){
  const workers=body.workers;
  if(!Array.isArray(workers)||workers.length>50||workers.some(w=>!w.id||!w.name||String(w.id).length>100||String(w.name).length>100)||new Set(workers.map(w=>w.id)).size!==workers.length)fail('工牌无效或重复 / 명찰을 확인하세요');
  if(workers.length&&!workers.some(w=>w.id===body.lead_id))fail('请选择本次主操作员 / 주 작업자를 선택하세요');
- const t=new Date().toISOString(),prior=JSON.parse(row.state),next={...prior,workers,lead_id:workers.length?body.lead_id:prior.lead_id,last_lead:workers.find(w=>w.id===body.lead_id)||prior.workers.find(w=>w.id===prior.lead_id)||prior.last_lead};
+ const t=new Date().toISOString(),prior=JSON.parse(row.state),next={...prior,workers,lead_id:workers.length?body.lead_id:prior.lead_id,last_lead:workers.find(w=>w.id===body.lead_id)||prior.workers.find(w=>w.id===prior.lead_id)||prior.last_lead,last_adjustment:String(body.reason||'')};
  const active=await rows(env,"SELECT * FROM v2_ops_job_workers WHERE job_id=? AND left_at=''",job.id);
  const result={ok:true,job_id:job.id,revision:row.revision+1,lead:next.last_lead};
  const sql=[q(env,'INSERT INTO sop_events VALUES(?,?,?,?,?,?,?,?,?,?)',request,job.id,row.revision,'sop_native_people',env.SOP_REQUEST_USER.id,env.SOP_REQUEST_USER.name,row.state,JSON.stringify(next),JSON.stringify(result),t),q(env,'UPDATE sop_records SET state=?,revision=revision+1,updated_at=? WHERE id=?',JSON.stringify(next),t,job.id)];

@@ -8178,7 +8178,7 @@ route("v2_bulk_op_job_start", async (body, env) => {
     const linkedOb = await findOutboundByWorkOrder(env, work_order_no);
     const obId = linkedOb ? linkedOb.id : "";
     if(env.SOP_UPGRADE_ENABLED==='true'){
-      if(/^(CKWORK\||NEED-|SOPJOB-)/i.test(work_order_no))return {ok:false,error:'这是需求作业单，请从需求作业单入口打开'};
+      if(/^(CKWORK\||NEED-|SOPJOB-|(?:ZY|RW)-\d{8}-\d+)/i.test(work_order_no))return {ok:false,error:'这是需求作业单，请从需求作业单入口打开'};
       if(obId&&(await linkedNeeds(env,obId)).length)return {ok:false,error:'此出库计划已关联作业需求，请打开原需求，避免重复记录产出'};
     }
     const obStatus = linkedOb ? (linkedOb.status || "") : "";
@@ -8433,6 +8433,8 @@ route("v2_bulk_op_job_finish", async (body, env) => {
       used_forklift: body.used_forklift ? 1 : 0,
       forklift_location_count: Number(body.forklift_location_count || 0),
       result_note: String(body.result_note || ""),
+      description: String(body.description || body.remark || ""),
+      location_photos: Array.isArray(body.location_photos) ? body.location_photos : [],
       customer: finalCustomer
     };
 
@@ -12736,7 +12738,7 @@ async function handleMultipartUpload(formData, env) {
     const related_doc_type = v003Text(formData.get("related_doc_type"), 80);
     const related_doc_id = v003Text(formData.get("related_doc_id"), 120);
     const attachment_category = v003Text(formData.get("attachment_category"), 80);
-    const uploaded_by = related_doc_type==='sop_task' ? env.SOP_REQUEST_USER?.name||'' : v003Text(formData.get("uploaded_by"), 120);
+    const uploaded_by = related_doc_type==='sop_task'||attachment_category==='location_photo' ? env.SOP_REQUEST_USER?.name||'' : v003Text(formData.get("uploaded_by"), 120);
     const fieldBody = {
       k,
       operator_id: v003Text(formData.get("operator_id"), 80),
@@ -12752,17 +12754,18 @@ async function handleMultipartUpload(formData, env) {
       if(['inbound_plan','outbound_order'].includes(related_doc_type)&&!['vehicle_photo','load_vehicle_photo','arrival_photo'].includes(attachment_category))return err('资料统一在作业需求中上传 / 작업 요청에서 자료를 업로드하세요');
       if(related_doc_type==='sop_need'&&attachment_category!=='inbound_material'&&attachment_category!=='pallet_details')return json(await uploadWorkMaterial(formData,env));
     }
-    if(related_doc_type==='sop_task'){
+    if(related_doc_type==='sop_task'||related_doc_type==='ops_job'&&attachment_category==='location_photo'){
       if(env.SOP_UPGRADE_ENABLED!=='true'||attachment_category!=='location_photo')return err('无效货位照片');
-      const task=await env.DB.prepare("SELECT state,department FROM sop_records WHERE id=? AND kind='task'").bind(related_doc_id).first(),u=env.SOP_REQUEST_USER;
+      const task=await env.DB.prepare("SELECT state,department FROM sop_records WHERE id=? AND kind=?").bind(related_doc_id,related_doc_type==='sop_task'?'task':'dispatch').first(),u=env.SOP_REQUEST_USER;
       if(!task||!u)return err('任务不存在或未授权',403);
-      const data=JSON.parse(task.state),allowed=u.role==='manager'||u.role==='dispatcher'&&(u.departments||[]).includes(task.department)&&(data.owner_id===u.id||(data.delegates||[]).includes(u.id));
-      if(!allowed||data.status!=='working')return err('只有本任务派审员可在作业中上传货位照片',403);
+      const data=JSON.parse(task.state),native=related_doc_type==='ops_job',job=native?await env.DB.prepare('SELECT job_type,status FROM v2_ops_jobs WHERE id=?').bind(related_doc_id).first():null;
+      const allowed=native?await nativeOwner({job_id:related_doc_id},env):u.role==='manager'||u.role==='dispatcher'&&(u.departments||[]).includes(task.department)&&(data.owner_id===u.id||(data.delegates||[]).includes(u.id));
+      if(!allowed||(native?job?.job_type!=='bulk_op'||!['working','awaiting_close'].includes(job?.status):data.status!=='working'))return err('只有本任务派审员可在作业中上传货位照片',403);
       if(!['image/jpeg','image/png','image/webp'].includes(file.type)||!file.size||file.size>10*1024*1024)return err('仅支持10MB以内的JPG、PNG、WebP照片');
       const bytes=new Uint8Array(await file.slice(0,12).arrayBuffer());
       const valid=file.type==='image/jpeg'?bytes[0]===255&&bytes[1]===216&&bytes[2]===255:file.type==='image/png'?[137,80,78,71,13,10,26,10].every((v,i)=>bytes[i]===v):String.fromCharCode(...bytes.slice(0,4))==='RIFF'&&String.fromCharCode(...bytes.slice(8,12))==='WEBP';
       if(!valid)return err('照片格式无效');
-      const count=await env.DB.prepare("SELECT COUNT(*) n FROM v2_attachments WHERE related_doc_type='sop_task' AND related_doc_id=? AND attachment_category='location_photo'").bind(related_doc_id).first();if(count.n>=8)return err('每个任务最多8张货位照片');
+      const count=await env.DB.prepare("SELECT COUNT(*) n FROM v2_attachments WHERE related_doc_type=? AND related_doc_id=? AND attachment_category='location_photo'").bind(related_doc_type,related_doc_id).first();if(count.n>=8)return err('每个任务最多8张货位照片');
     }
     if(related_doc_type==='sop_need'){
       if(env.SOP_UPGRADE_ENABLED!=='true')return err('作业需求功能未启用');

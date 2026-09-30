@@ -53,7 +53,7 @@ test('original field and dashboard integrate added controls',opts,async()=>{
  assert.ok(!p.d.querySelector('.home-grid').textContent.includes('负责人派工与审核'));
  p.w.goPage('order_op_menu');p.d.querySelector('#page-order_op_menu button[onclick="goPage(\'bulk_op\')"]').click();await until(()=>p.d.querySelector('#page-bulk_op [data-scanform]'),p.errors);
  assert.ok(p.d.querySelector('#page-bulk_op').classList.contains('active'));
- p.d.querySelector('#page-bulk_op [data-mode=external]').click();await until(()=>p.d.querySelector('#bulkStateIdle').style.display!=='none',p.errors);assert.match(p.d.querySelector('#bulkOrderInput').placeholder,/外部/);assert.deepEqual(p.errors,[]);
+ p.d.querySelector('#page-bulk_op [data-mode=external]').click();await until(()=>/外部/.test(p.d.querySelector('#page-bulk_op [data-code]')?.placeholder),p.errors);assert.equal(p.d.querySelector('#bulkStateIdle').style.display,'none');assert.equal(p.d.querySelector('#bulkStateWorking').style.display,'none');assert.deepEqual(p.errors,[]);
  }finally{p.w.close();}
  const q=await f.page('/shuju/');try{Array.from(q.d.querySelectorAll('.tab-bar button')).find(x=>x.textContent==='派工质量与待办').click();await until(()=>q.d.querySelector('#ck-dashboard article'),q.errors);assert.deepEqual(q.errors,[]);}finally{q.w.close();}
 });
@@ -104,6 +104,56 @@ test('work files remain available on office PC and do not render or load on fiel
   const host=q.d.createElement('section');q.d.body.append(host);await q.w.CKWorkChain.materials(host,need);assert.equal(host.innerHTML,'','field URL omits files even without an explicit field option');
   assert.deepEqual(q.errors,[]);
  }finally{q.w.close();}
+});
+
+test('home opens both work-plan and external jobs in the shared workspace; finishing cannot leak outputs into the next job',opts,async()=>{
+ const f=await fixture(),call=async(action,data={})=>{const r=await (await f.request({action,client_req_id:crypto.randomUUID(),...data})).json();assert.equal(r.ok,true,r.error);return r;};
+ const external=[];
+ for(let i=0;i<2;i++)external.push(await call('sop_native_start',{payload:{action:'v2_bulk_op_job_start',work_order_no:'EXT-'+i,customer:'外部客户 '+i,client_req_id:crypto.randomUUID()},workers:[{id:'EXT-W-'+i,name:'外部员工 '+i}],lead_id:'EXT-W-'+i,estimated_minutes:30,labor_department:'bulk'}));
+ const need=await call('sop_need_create',{department:'bulk',source_type:'inventory',supply_chain_no:'MIXED-HOME',title:'打托',customer:'计划客户',instructions:'28箱打成2托',planned_quantity:2,planned_unit:'托'});
+ const task=await call('sop_task_dispatch',{department:'bulk',need_id:need.id,title:'打托',job_type:'bulk_op',estimated_minutes:30,workers:[{id:'PLAN-W',name:'计划员工'}],lead_id:'PLAN-W'}),number=(await call('sop_get',{id:need.id})).record.display_no;
+ const p=await f.page('/001/');
+ const cards=()=>[...p.d.querySelectorAll('#page-home .ck-native-task')],card=no=>cards().find(b=>b.querySelector('strong').textContent===no),action=prefix=>[...p.d.querySelectorAll('#page-bulk_op [data-actions] button')].find(b=>b.textContent.startsWith(prefix)),status=id=>f.env.DB.raw.prepare('SELECT status FROM v2_ops_jobs WHERE id=?').get(id).status;
+ const openFinish=async()=>{action('填写产出').click();await until(()=>p.d.querySelector('#page-bulk_op [data-finish]'),p.errors);return p.d.querySelector('#page-bulk_op [data-finish]');};
+ try{
+  await until(()=>card(number)&&card('EXT-0')&&card('EXT-1'),p.errors);assert.match(card(number).textContent,/计划客户/);assert.match(card('EXT-0').textContent,/外部客户 0/);
+  card(number).click();await until(()=>p.d.querySelector('#page-bulk_op .ck-work-number b')?.textContent===number,p.errors);
+  assert.equal(p.d.querySelector('#page-bulk_op [data-mode=need]').getAttribute('aria-pressed'),'true');
+  let form=await openFinish();form.elements.quantity.value='2';form.elements.unit.value='托';form.elements.pallet_count.value='2';form.elements.operated_box_count.value='28';form.elements.reason.value='核对完成';form.requestSubmit();
+  await until(()=>status(task.id)==='completed',p.errors);await until(()=>/已完成/.test(p.d.querySelector('#page-bulk_op .ck-state')?.textContent),p.errors);
+  p.w.goPage('home');await until(()=>card('EXT-0')&&!card(number),p.errors);
+  card('EXT-0').click();await until(()=>p.d.querySelector('#page-bulk_op .ck-work-number b')?.textContent==='EXT-0',p.errors);
+  assert.equal(p.d.querySelector('#bulkStateWorking').style.display,'none');assert.equal(p.d.querySelector('#page-bulk_op [data-mode=external]').getAttribute('aria-pressed'),'true');
+  assert.match(p.d.querySelector('#page-bulk_op [data-content]').textContent,/外部员工 0/);
+  form=await openFinish();assert.equal(form.elements.customer.value,'外部客户 0');assert.equal(form.elements.pallet_count.value,'0');assert.equal(form.elements.pallet_count.disabled,false);
+  form.elements.pallet_count.value='3';form.elements.packed_count.value='4';form.elements.operated_box_count.value='28';form.elements.reason.value='外部单核对完成';form.requestSubmit();
+  await until(()=>status(external[0].job_id)==='completed',p.errors);await until(()=>/已完成/.test(p.d.querySelector('#page-bulk_op .ck-state')?.textContent),p.errors);
+  const result=JSON.parse(f.env.DB.raw.prepare('SELECT result_json FROM v2_ops_job_results WHERE job_id=?').get(external[0].job_id).result_json);
+  assert.equal(result.packed_box_count,4);assert.equal(result.pallet_count,3);assert.equal(result.total_operated_box_count,28);assert.equal(result.result_note,'外部单核对完成');
+  assert.equal(f.env.DB.raw.prepare("SELECT COUNT(*) n FROM v2_ops_job_workers WHERE job_id=? AND left_at=''").get(external[0].job_id).n,0);
+  p.w.goPage('home');await until(()=>card('EXT-1')&&!card('EXT-0'),p.errors);card('EXT-1').click();await until(()=>p.d.querySelector('#page-bulk_op .ck-work-number b')?.textContent==='EXT-1',p.errors);
+  form=await openFinish();assert.equal(form.elements.customer.value,'外部客户 1');assert.equal(form.elements.pallet_count.value,'0');assert.equal(form.elements.packed_count.value,'0');assert.equal(form.elements.reason.value,'');assert.equal(form.elements.pallet_count.disabled,false);
+  assert.equal(p.d.querySelector('#page-bulk_op .chain-material-group'),null);assert.deepEqual(p.errors,[]);
+ }finally{p.w.close();}
+});
+
+test('external scanner creates a crew once, resumes by external number and pauses without losing task history',opts,async()=>{
+ const f=await fixture(),p=await f.page('/001/');try{
+  p.w.goPage('bulk_op',{external:true});await until(()=>p.d.querySelector('#page-bulk_op [data-code]'),p.errors);
+  const scan=async code=>{const input=p.d.querySelector('#page-bulk_op [data-code]');input.value=code;input.form.requestSubmit();};
+  await scan('EMP-INVALID|人员');await until(()=>p.d.querySelector('#page-bulk_op [data-error]')?.textContent,p.errors);assert.equal(f.env.DB.raw.prepare("SELECT COUNT(*) n FROM v2_ops_jobs WHERE job_type='bulk_op'").get().n,0);
+  await scan('NEW-EXTERNAL');await until(()=>p.d.querySelector('#page-bulk_op [data-people]'),p.errors);
+  const form=p.d.querySelector('#page-bulk_op [data-people]');form.elements.customer.value='新增外部客户';form.querySelector('[data-staff-badge]').value='NEW-W|新员工';form.querySelector('[data-staff-add]').click();form.requestSubmit();
+  await until(()=>p.d.querySelector('#page-bulk_op [data-actions]'),p.errors);
+  const job=f.env.DB.raw.prepare("SELECT id FROM v2_ops_jobs WHERE related_doc_id='NEW-EXTERNAL'").get(),segments=()=>f.env.DB.raw.prepare('SELECT * FROM v2_ops_job_workers WHERE job_id=?').all(job.id);
+  assert.equal(segments().length,1);const joined=segments()[0].joined_at;
+  p.d.querySelector('#page-bulk_op [data-back]').click();await until(()=>p.d.querySelector('#page-bulk_op [data-code]'),p.errors);await scan('NEW-EXTERNAL');await until(()=>p.d.querySelector('#page-bulk_op [data-actions]'),p.errors);
+  assert.equal(segments().length,1);assert.equal(segments()[0].joined_at,joined);assert.equal(segments()[0].left_at,'');
+  [...p.d.querySelectorAll('#page-bulk_op [data-actions] button')].find(b=>b.textContent.startsWith('暂停')).click();const pause=p.d.querySelector('#page-bulk_op [data-pause]');pause.elements.reason.value='人员换班';pause.requestSubmit();
+  await until(()=>p.d.querySelector('#page-bulk_op .ck-state')?.textContent.includes('待收尾'),p.errors);assert.ok(segments()[0].left_at);
+  [...p.d.querySelectorAll('#page-bulk_op [data-actions] button')].find(b=>b.textContent.startsWith('核对人员')).click();const people=p.d.querySelector('#page-bulk_op [data-people]');people.querySelector('[data-staff-badge]').value='NEW-W|新员工';people.querySelector('[data-staff-add]').click();people.querySelector('[data-reason]').value='继续作业';people.requestSubmit();
+  await until(()=>p.d.querySelector('#page-bulk_op .ck-state')?.textContent.startsWith('作业中'),p.errors);assert.equal(segments().length,2);assert.equal(segments()[0].joined_at,joined);assert.equal(segments()[1].left_at,'');assert.deepEqual(p.errors,[]);
+ }finally{p.w.close();}
 });
 test('inbound work rows and inventory need optional outbound fields use original forms',opts,async()=>{
  const f=await fixture(),p=await f.page('/002/');try{
