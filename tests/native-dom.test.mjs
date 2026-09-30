@@ -57,17 +57,18 @@ test('original field and dashboard integrate added controls',opts,async()=>{
  }finally{p.w.close();}
  const q=await f.page('/shuju/');try{Array.from(q.d.querySelectorAll('.tab-bar button')).find(x=>x.textContent==='派工质量与待办').click();await until(()=>q.d.querySelector('#ck-dashboard article'),q.errors);assert.deepEqual(q.errors,[]);}finally{q.w.close();}
 });
-test('ongoing bulk work cards and opened work show the scanned work-plan number',opts,async()=>{
+test('ongoing bulk work cards show each customer and scanned work-plan number',opts,async()=>{
  const f=await fixture(),call=async(action,data)=>(await f.request({action,client_req_id:crypto.randomUUID(),...data})).json();
  const orders=[];
  for(let i=0;i<2;i++){
-  const need=await call('sop_need_create',{department:'bulk',source_type:'inventory',supply_chain_no:'STOCK-'+i,title:'打托',customer:'Fixture',instructions:'打托后上架',planned_quantity:2,planned_unit:'托'});assert.equal(need.ok,true,need.error);
+  const customer=i===0?'Fixture <&>':'另一个客户';
+  const need=await call('sop_need_create',{department:'bulk',source_type:'inventory',supply_chain_no:'STOCK-'+i,title:'打托',customer,instructions:'打托后上架',planned_quantity:2,planned_unit:'托'});assert.equal(need.ok,true,need.error);
   const task=await call('sop_task_create',{department:'bulk',title:'打托',need_id:need.id,job_type:'bulk_op',estimated_minutes:30,workers:[{id:'W-'+i,name:'操作员 '+i}],lead_id:'W-'+i});assert.equal(task.ok,true,task.error);
-  const detail=await call('sop_get',{id:need.id});orders.push({id:task.id,number:detail.record.display_no});
+  const detail=await call('sop_get',{id:need.id});orders.push({id:task.id,number:detail.record.display_no,customer});
  }
  const p=await f.page('/001/');try{
   p.w.goPage('bulk_op');await until(()=>p.d.querySelectorAll('#page-bulk_op [data-task]').length>=2,p.errors);
-  for(const order of orders){const card=p.d.querySelector('#page-bulk_op [data-task="'+order.id+'"]');assert.equal(card.querySelector('.ck-task-number').textContent,order.number);assert.match(card.textContent,/打托/);}
+  for(const order of orders){const card=p.d.querySelector('#page-bulk_op [data-task="'+order.id+'"]');assert.equal(card.querySelector('.ck-task-number').textContent,order.number);assert.equal(card.querySelector('.ck-task-customer').textContent,'客户 / 고객：'+order.customer);assert.match(card.textContent,/打托/);}
   p.d.querySelector('#page-bulk_op [data-task="'+orders[0].id+'"]').click();await until(()=>p.d.querySelector('#page-bulk_op .ck-work-number'),p.errors);
   assert.match(p.d.querySelector('#page-bulk_op .ck-work-number').textContent,new RegExp(orders[0].number));assert.deepEqual(p.errors,[]);
  }finally{p.w.close();}
