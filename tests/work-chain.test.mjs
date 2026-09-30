@@ -119,7 +119,7 @@ test('review rechecks bookings changed after recording output; office-only unit 
 });
 test('one inbound can start multiple requirements and bookings in one transaction',async()=>{
  const s=setup();await s.login();const plan=await s.call('v2_inbound_plan_create',{customer:'Fixture customer',biz_classes:['bulk'],lines:[{unit_type:'carton',planned_qty:20}],work_requests:[{title:'Palletize',instructions:'Palletize ten',department:'bulk',planned_quantity:10,planned_unit:'箱',outbounds:[{quantity:5,expected_ship_at:'2026-10-03',outbound_mode:'customer_pickup'}]},{title:'Direct forward',instructions:'Forward unopened cartons',department:'bulk',operation_kind:'direct_forward',planned_quantity:10,planned_unit:'箱'}]});
- assert.equal(plan.ok,true,plan.error);assert.equal(plan.needs.length,2);assert.equal(plan.outbounds.length,1);
+ assert.equal(plan.ok,true,plan.error);assert.equal(plan.needs.length,2);assert.equal(plan.outbounds.length,1);assert.equal(plan.outbounds[0].display_no,'CHU-FC-20261003');
  for(const n of plan.needs){const r=await s.get(n.id);assert.equal(r.source_type,'inbound');assert.equal(r.source_id,plan.id);}
  const bad=await s.call('v2_inbound_plan_create',{customer:'Fixture customer',biz_classes:['bulk'],work_requests:[{title:'Bad booking',instructions:'Check',planned_quantity:5,planned_unit:'箱',outbounds:[{quantity:6,expected_ship_at:'2026-10-03',outbound_mode:'customer_pickup'}]}]});assert.equal(bad.ok,false);assert.equal(s.DB.raw.prepare('SELECT count(*) n FROM v2_inbound_plans').get().n,1);
 });
@@ -141,6 +141,7 @@ test('inline inbound and inventory bookings preserve the same PO and shipping fi
  const bookings=modes.map((outbound_mode,i)=>({quantity:1,expected_ship_at:'2026-10-03',outbound_mode,po_no:'00-PO-'+i,destination:'Fixture destination '+i,outbound_requirement:'Fixture handover '+i}));
  const inbound=await s.call('v2_inbound_plan_create',{customer:'Fixture customer',biz_classes:['bulk'],lines:[{unit_type:'carton',planned_qty:10}],work_requests:[{title:'Fixture bundled work',instructions:'Fixture instructions',department:'bulk',planned_quantity:10,planned_unit:'箱',outbounds:bookings}]});
  assert.equal(inbound.ok,true,inbound.error);assert.equal(inbound.outbounds.length,5);
+ assert.deepEqual(inbound.outbounds.map(x=>x.display_no),['CHU-FC-20261003','CHU-FC-20261003-02','CHU-FC-20261003-03','CHU-FC-20261003-04','CHU-FC-20261003-05']);
  const inventory=await s.need({outbounds:[bookings[0]]});
  const savedInventory=(await s.call('v2_outbound_order_detail',{id:inventory.links[0].outbound_id})).order;
  assert.equal(savedInventory.po_no,bookings[0].po_no);

@@ -1,9 +1,10 @@
 import { workChainEnabled, chainDate } from './work-chain.js';
+import { nextOutboundDisplayNo } from './outbound-number.js';
 // Work requirements and optional dispatch plans share the inbound transaction.
 const str=v=>String(v??'').trim();
 const required=(v,label)=>{const s=str(v);if(!s)throw Error(label+'不能为空');return s;};
 const qty=v=>{const n=Number(v);if(!Number.isSafeInteger(n)||n<1)throw Error('计划数量必须为正整数');return n;};
-export function workPlanStatements(env,rows,source,actor,t){
+export async function workPlanStatements(env,rows,source,actor,t){
  if(!Array.isArray(rows)||rows.length>30)throw Error('每次最多建立30条作业需求');
  const statements=[],needs=[],outbounds=[];
  if(workChainEnabled(env)&&rows.length&&!['inbound','inventory'].includes(source.type))throw Error('作业需求来源只能是入库计划或库内库存');
@@ -22,7 +23,7 @@ export function workPlanStatements(env,rows,source,actor,t){
    if(unit!==data.planned_unit)throw Error('出库分配单位须与作业计划单位一致');
    if(!['warehouse_dispatch','customer_pickup','milk_express','milk_pallet','container_pickup'].includes(ob.outbound_mode))throw Error('请选择出库方式');
    const ship=required(ob.expected_ship_at,'预计出库日期');if(workChainEnabled(env))chainDate(ship);if(!/^\d{4}-\d{2}-\d{2}$/.test(ship)||Number.isNaN(Date.parse(ship)))throw Error('出库日期无效');
-   const obid='OB-'+crypto.randomUUID(),display='OB-'+ship.replaceAll('-','')+'-'+obid.slice(-8);
+   const obid='OB-'+crypto.randomUUID(),display=await nextOutboundDisplayNo(env,data.customer,ship);
    data.links.push({outbound_id:obid,quantity,unit,phase:'planned',by:actor.name,at:t});outbounds.push({id:obid,display_no:display,need_id:id});
    statements.push(sql(`INSERT INTO v2_outbound_orders(id,order_date,customer,biz_class,outbound_mode,instruction,status,source_inbound_plan_id,created_by,created_at,updated_at,display_no,expected_ship_at,wms_work_order_no,planned_box_count,planned_pallet_count,uses_stock_operation,stock_operation_status,outbound_requirement,destination,po_no) VALUES(?,?,?,?,?,?,'pending_issue',?,?,?,?,?,?,?,?,?,0,'pending',?,?,?)`,obid,new Date(Date.parse(t)+9*3600000).toISOString().slice(0,10),data.customer,department==='import'?'bulk':department,ob.outbound_mode,data.instructions,source.type==='inbound'?source.id:'',actor.name,t,t,display,ship,data.supply_chain_no,unit==='箱'?quantity:0,unit==='托'?quantity:0,str(ob.outbound_requirement),str(ob.destination),str(ob.po_no)));
   }

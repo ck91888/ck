@@ -8,7 +8,7 @@ export const TABLES = [
  'ck_employee_profiles','ck_attendance_prints','ck_attendance_events','ck_attendance_breaks','ck_attendance_days','ck_attendance_people',
  'sop_document_numbers','sop_events','sop_records','v2_verify_scan_logs','v2_verify_batch_items','v2_verify_batches','v2_scan_batch_items','v2_scan_batches',
  'v2_issue_rework_requests','v2_issue_handle_runs','v2_issue_tickets','v2_pick_worker_docs','v2_ops_job_pick_docs','v2_ops_job_results','v2_ops_job_workers','v2_ops_jobs',
- 'v2_outbound_order_change_logs','v2_outbound_order_lines','v2_outbound_orders','v2_inbound_plan_biz_tasks','v2_inbound_plan_lines','v2_inbound_plans','v2_field_feedbacks','v2_attachments',
+ 'v2_outbound_order_change_logs','v2_outbound_order_lines','v2_outbound_orders','ck_outbound_display_sequences','v2_inbound_plan_biz_tasks','v2_inbound_plan_lines','v2_inbound_plans','v2_field_feedbacks','v2_attachments',
  'v2_wms_import_rows','v2_wms_import_batches','v2_correction_requests','v2_ops_login_events','v2_admin_cleanup_logs',
  'v2_003_purchase_receipt_items','v2_003_purchase_receipts','v2_003_purchase_shipment_items','v2_003_purchase_shipments','v2_003_purchase_order_lines','v2_003_purchase_orders',
  'v2_003_asset_txns','v2_003_material_txns','v2_003_assets','v2_003_materials','v2_idempotency_keys'

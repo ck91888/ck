@@ -11,6 +11,7 @@ import { inboundFlowEnabled, inboundCode, inboundCodes, inboundReferenceValue, i
 import { handleAttendance, guardAttendance } from './attendance.js';
 import { workChainEnabled, guardWorkChain, chainLinked, workMaterials, uploadWorkMaterial, workMaterialCountSql } from './work-chain.js';
 import { workPlanStatements } from './sop-planning.js';
+import { nextOutboundDisplayNo } from './outbound-number.js';
 import { handleSop, guardLegacy, linkedNeeds, linkedCheck, outboundNeedStatements } from './sop.js';
 import { sessionUser, sessionAction } from './sop-session.js';
 import { prepareDemo } from './sop-demo.js';
@@ -1050,29 +1051,6 @@ async function nextPickTripNo(env) {
   return 'PK-' + dateStr + '-' + Date.now().toString(36).slice(-4);
 }
 
-// ===== Outbound Display No helper =====
-// CHU-YYYYMMDD-001 format
-async function nextOutboundDisplayNo(env, orderDate) {
-  const dateStr = String(orderDate || kstToday()).replace(/-/g, '');
-  const prefix = 'CHU-' + dateStr + '-';
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const row = await env.DB.prepare(
-      "SELECT display_no FROM v2_outbound_orders WHERE display_no LIKE ? ORDER BY display_no DESC LIMIT 1"
-    ).bind(prefix + '%').first();
-    let seq = 1;
-    if (row && row.display_no) {
-      const tail = row.display_no.split('-').pop();
-      seq = (parseInt(tail, 10) || 0) + 1;
-    }
-    const no = prefix + String(seq).padStart(3, '0');
-    const dup = await env.DB.prepare(
-      "SELECT 1 FROM v2_outbound_orders WHERE display_no=? LIMIT 1"
-    ).bind(no).first();
-    if (!dup) return no;
-  }
-  return 'CHU-' + dateStr + '-' + Date.now().toString(36).slice(-4);
-}
-
 // ===== Auto-migration =====
 const MIGRATIONS = [
   `CREATE TABLE IF NOT EXISTS ck_courier_receipts(id TEXT PRIMARY KEY,tracking_no TEXT NOT NULL UNIQUE,owner TEXT NOT NULL,received_at TEXT NOT NULL,scanner_id TEXT NOT NULL,scanner_name TEXT NOT NULL,actor_id TEXT NOT NULL,actor_name TEXT NOT NULL,location TEXT NOT NULL DEFAULT '',note TEXT NOT NULL DEFAULT '',shipment_id TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'received' CHECK(status IN ('received','handed_over')),handed_to TEXT NOT NULL DEFAULT '',handed_at TEXT NOT NULL DEFAULT '',version INTEGER NOT NULL DEFAULT 1)`,
@@ -1415,9 +1393,10 @@ const MIGRATIONS = [
   `ALTER TABLE v2_outbound_orders ADD COLUMN actual_pallet_count INTEGER DEFAULT 0`,
   `CREATE INDEX IF NOT EXISTS idx_v2_outbound_wms_wo ON v2_outbound_orders(wms_work_order_no) WHERE wms_work_order_no != ''`,
 
-  // ---- display_no for outbound orders (CHU-YYYYMMDD-NNN) ----
+  // ---- display_no for outbound orders (CHU-客户拼音首字母-预计出库日期[-序号]) ----
   `ALTER TABLE v2_outbound_orders ADD COLUMN display_no TEXT DEFAULT ''`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_outbound_display_no ON v2_outbound_orders(display_no) WHERE display_no != ''`,
+  `CREATE TABLE IF NOT EXISTS ck_outbound_display_sequences(base TEXT PRIMARY KEY,sequence INTEGER NOT NULL CHECK(sequence>=0))`,
 
   // ---- 强关联：bulk_op job → 出库单主键 ----
   `ALTER TABLE v2_ops_jobs ADD COLUMN linked_outbound_order_id TEXT DEFAULT ''`,
@@ -2041,7 +2020,7 @@ const MIGRATIONS = [
 ];
 
 // 每次发布迁移变化时手动 +1（patch 段），冷启动只比对一次字符串即可跳过整段 MIGRATIONS
-const CURRENT_SCHEMA_VERSION = 'v2.20260928b';
+const CURRENT_SCHEMA_VERSION = 'v2.20260930c';
 
 const migratedDatabases = new WeakSet();
 async function ensureMigrated(db) {
@@ -2792,7 +2771,7 @@ route("v2_outbound_order_create", async (body, env) => {
     const expected_ship_at = normalizeDateOnly(body.expected_ship_at);
     const _esaDate = expected_ship_at; // 已是 YYYY-MM-DD 或 ''
     const order_date = String(body.order_date || _esaDate || kstToday());
-    const display_no = await nextOutboundDisplayNo(env, order_date);
+    const display_no = await nextOutboundDisplayNo(env, body.customer, expected_ship_at || order_date);
     // 库内操作型：初始状态 operation_reserved；普通：pending_issue
     const initStatus = uses_stock_operation === 1 ? 'operation_reserved' : 'pending_issue';
     const initStockOpStatus = uses_stock_operation === 1 ? 'reserved' : '';
@@ -3793,7 +3772,7 @@ route("v2_inbound_plan_create", async (body, env) => {
     if (body.auto_create_outbound) {
       outbound_id = "OB-" + uid();
       const ob_date = String(body.plan_date || kstToday());
-      outbound_display_no = await nextOutboundDisplayNo(env, ob_date);
+      outbound_display_no = await nextOutboundDisplayNo(env, customer, String(body.ob_expected_ship_at || ob_date));
       // 口径调整：auto-create outbound 同步新字段；biz_class 固定 'bulk'，不再接 op_mode/remark
       inboundStatements.push(env.DB.prepare(`
         INSERT INTO v2_outbound_orders(id, order_date, customer, biz_class, operation_mode,
@@ -3820,7 +3799,7 @@ route("v2_inbound_plan_create", async (body, env) => {
     let workBundle={needs:[],outbounds:[],statements:[]};
     if(body.work_requests?.length){
       if(env.SOP_UPGRADE_ENABLED!=='true'||env.SOP_ACCEPT_NEW==='false')throw Error('作业需求功能未开启');
-      workBundle=workPlanStatements(env,body.work_requests,{type:'inbound',id,customer},env.SOP_REQUEST_USER||{id:'service',name:created_by},t);
+      workBundle=await workPlanStatements(env,body.work_requests,{type:'inbound',id,customer},env.SOP_REQUEST_USER||{id:'service',name:created_by},t);
     }
     await env.DB.batch([...inboundStatements,...workBundle.statements]);
     if(lines.some(x=>x.unit_type==='courier'))await syncCourierArrival(env,id,recalcInboundPlanCompletion);

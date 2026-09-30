@@ -202,7 +202,7 @@ export async function handleSop(b,env) {
    }
    row={id:source_type==='outbound'?'NEED-'+source_id:uid('NEED'),kind:'need',department,revision:0,data:{}};
    if(await read(env,row.id))fail('此出库计划已有关联作业，请引用原作业');
-   const bundle=workPlanStatements(env,[{...b,id:row.id,title:b.title||(doc?'关联作业 '+(doc.display_no||'来源单号待补充'):''),instructions:b.instructions||doc?.instruction}],{type:source_type,id:source_id,customer,supply_chain_no:b.supply_chain_no},u,t);
+   const bundle=await workPlanStatements(env,[{...b,id:row.id,title:b.title||(doc?'关联作业 '+(doc.display_no||'来源单号待补充'):''),instructions:b.instructions||doc?.instruction}],{type:source_type,id:source_id,customer,supply_chain_no:b.supply_chain_no},u,t);
    const data={...bundle.needs[0],reason:text(b.reason)};delete data.id;
    // save owns the requirement's event and record; optional outbound statements precede them.
    return await save(env,b,u,row,data,bundle.statements.slice(0,-2));
