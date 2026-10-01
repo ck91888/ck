@@ -145,7 +145,7 @@ test('past crew snapshots do not grant access after a worker leaves; list filter
  for(let i=0;i<205;i++){
   const id='UNRELATED-'+i;
   DB.raw.prepare("INSERT INTO v2_ops_jobs(id,job_type,status,updated_at) VALUES(?,'unload','working','2099-01-01')").run(id);
-  DB.raw.prepare("INSERT INTO sop_records VALUES(?,'dispatch',1,'bulk',?,'2099-01-01')").run(id,JSON.stringify({...JSON.parse(record.state),owner_id:'unrelated'}));
+  DB.raw.prepare("INSERT INTO sop_records VALUES(?,'dispatch',1,'bulk',?,'2099-01-01')").run(id,JSON.stringify({...JSON.parse(record.state),owner_id:'unrelated',source_id:id}));
  }
  await login(b);assert.equal((await ok('field','sop_dispatch_list')).items[0].id,j.job_id);
  DB.raw.prepare("UPDATE v2_ops_job_workers SET left_at='2099-01-01' WHERE job_id=?").run(j.job_id);

@@ -1,7 +1,10 @@
 import {ensureDocumentNumbers,jobNumbers,JOB_NUMBER_SQL} from './document-numbers.js';
 import {documentCodeError} from '../shared/document-code.js';
 import {effectiveResults} from './effective-results.js';
+import {dashboardRange,segmentMinutes,reportWorkerId} from './dashboard-time.js';
 import {atomicNativeFinish} from './atomic-native-finish.js';
+import {atomicBulkFinish} from './atomic-bulk-finish.js';
+import {ensureInboundReferenceGuard} from './inbound-reference-guard.js';
 import {adoptLegacyLoad} from './legacy-load.js';
 import {uploadBatchMaterial} from './batch-work-materials.js';
 import {accessEnabled,accessGuard,accessAdminAction,accessFileAllowed} from './access-control.js';
@@ -609,7 +612,7 @@ async function withIdem(env, body, action, fn) {
     result = await fn();
   } catch (e) {
     // 异常不缓存，让客户端可以重试
-    return json({ ok: false, error: e.message || "internal error" }, 500);
+    return json({ ok: false, error: String(e.message||'').includes('ck_external_reference_conflict')?'外部入库单号已被另一计划占用，请刷新核对 / 입고번호가 이미 사용 중입니다':e.message || "internal error" }, String(e.message||'').includes('ck_external_reference_conflict')?409:500);
   }
   if (key && result && typeof result === 'object') {
     try {
@@ -3645,6 +3648,10 @@ route("v2_outbound_stock_op_finish", async (body, env) => {
     }
     const order_id = jobCheck.related_doc_id || "";
 
+    if(inboundFlowEnabled(env)&&body.complete_job!==false){
+     const other=await env.DB.prepare("SELECT COUNT(*) AS n FROM v2_ops_job_workers WHERE job_id=? AND worker_id!=? AND left_at=''").bind(job_id,worker_id).first();
+     if(!Number(other?.n))return finishNativeOutbound(body,env,{legacy:true});
+    }
     // 关闭该 worker 全部 open segs
     if (worker_id) await closeAllOpenSegs(env, job_id, worker_id, t, 'finished');
     const realCount = await recalcActiveCount(env, job_id, t);
@@ -8050,6 +8057,7 @@ route("v2_pick_job_finalize", async (body, env) => {
         active_worker_names: (activeRs && activeRs.names) || '' };
     }
 
+    if(inboundFlowEnabled(env))return finishNativePick(body,env,{legacy:true});
     // 1) 关闭残留 open segments（每段计算 minutes）— 此时正常无残留，仅作兜底
     const stale = await env.DB.prepare(
       "SELECT id, worker_id, joined_at FROM v2_ops_job_workers WHERE job_id=? AND left_at=''"
@@ -8428,6 +8436,32 @@ route("v2_bulk_op_job_finish", async (body, env) => {
         return { ok: false, error: "missing_bulk_output",
           message: "请先记录操作产出后再完成" };
       }
+    }
+
+    if(inboundFlowEnabled(env)&&(willBeLastPerson||env.SOP_GROUP_FINISH)){
+     const jobBefore=await env.DB.prepare('SELECT * FROM v2_ops_jobs WHERE id=?').bind(job_id).first();
+     if(!jobBefore)return {ok:false,error:'job_not_found'};
+     const finalCustomer=String(body.customer||jobBefore.customer||'').trim();
+     if(!jobBefore.linked_outbound_order_id&&!finalCustomer)return {ok:false,error:'missing_customer',message:'请填写客户名称 / 고객명을 입력하세요'};
+    const resultData = {
+      packed_sku_count: Number(body.packed_sku_count || 0),
+      packed_box_count: Number(body.packed_box_count || 0),
+      used_carton_large_count: Number(body.used_carton_large_count || 0),
+      used_carton_small_count: Number(body.used_carton_small_count || 0),
+      repaired_box_count: Number(body.repaired_box_count || 0),
+      reboxed_count: Number(body.reboxed_count || 0),
+      label_count: Number(body.label_count || 0),
+      total_operated_box_count: Number(body.total_operated_box_count || 0),
+      pallet_count: Number(body.pallet_count || 0),
+      used_forklift: body.used_forklift ? 1 : 0,
+      forklift_location_count: Number(body.forklift_location_count || 0),
+      result_note: String(body.result_note || ""),
+      description: String(body.description || body.remark || ""),
+      location_photos: Array.isArray(body.location_photos) ? body.location_photos : [],
+      customer: finalCustomer
+    };
+
+     return atomicBulkFinish(env,body,jobBefore,resultData);
     }
 
     // 1. Close this worker's segments only
@@ -10881,17 +10915,18 @@ route("v2_dashboard_workhour_summary", async (body, env) => {
 
   let where = "WHERE 1=1";
   const binds = [];
+  const range = dashboardRange(start_date,end_date);
   const startRange = kstDayRangeUtc(start_date);
   const endRange = kstDayRangeUtc(end_date);
-  if (startRange) { where += " AND w.joined_at >= ?"; binds.push(startRange.startUtc); }
-  if (endRange)   { where += " AND w.joined_at < ?"; binds.push(endRange.endUtc); }
+  if (startRange) { where += " AND (w.left_at='' OR julianday(w.left_at)>julianday(?))"; binds.push(startRange.startUtc); }
+  if (endRange)   { where += " AND julianday(w.joined_at)<julianday(?)"; binds.push(endRange.endUtc); }
   if (flow_stage) { where += " AND j.flow_stage=?"; binds.push(flow_stage); }
   if (job_type)   { where += " AND j.job_type=?"; binds.push(job_type); }
   if (worker_name) { where += " AND w.worker_name LIKE ?"; binds.push("%" + worker_name + "%"); }
 
   // segments: 限 1000 条，避免一次拉太大
   const segSql = `
-    SELECT w.worker_id, w.worker_name, w.joined_at, w.left_at, w.minutes_worked, w.leave_reason,
+    SELECT w.id, w.worker_id, w.worker_name, w.joined_at, w.left_at, w.minutes_worked, w.leave_reason,
            j.id AS job_id, j.display_no, j.flow_stage, j.biz_class, j.job_type, j.status
     FROM v2_ops_job_workers w
     JOIN v2_ops_jobs j ON j.id = w.job_id
@@ -10904,24 +10939,21 @@ route("v2_dashboard_workhour_summary", async (body, env) => {
   const todayKst = kstToday();
   const segments = rows.map(r => {
     const closed = !!r.left_at;
-    let minutes = Number(r.minutes_worked) || 0;
-    if (!closed && r.joined_at) {
-      const t = new Date(r.joined_at).getTime();
-      if (!isNaN(t)) minutes = Math.max(0, (nowMs - t) / 60000);
-    }
-    minutes = round1(minutes);
+    const counted=segmentMinutes(r,range,nowMs);
+    const minutes=counted.minutes,rawMinutes=counted.raw_minutes;
     const joinedKstDate = kstDateOf(r.joined_at);
     const crossDayActive = !closed && joinedKstDate && joinedKstDate < todayKst;
     let anomaly = 0, anomaly_reason = '';
-    if (closed && minutes <= 0) { anomaly = 1; anomaly_reason = '已结束但工时为 0/负'; }
-    else if (closed && minutes >= 720) { anomaly = 1; anomaly_reason = '已结束 ≥12 小时'; }
-    else if (!closed && minutes >= 720) { anomaly = 1; anomaly_reason = '进行中 ≥12 小时'; }
+    if (counted.invalid) { anomaly=1; anomaly_reason='时间无效或倒序'; }
+    else if (closed && rawMinutes <= 0) { anomaly = 1; anomaly_reason = '已结束但工时为 0/负'; }
+    else if (closed && rawMinutes >= 720) { anomaly = 1; anomaly_reason = '已结束 ≥12 小时'; }
+    else if (!closed && rawMinutes >= 720) { anomaly = 1; anomaly_reason = '进行中 ≥12 小时'; }
     else if (crossDayActive) { anomaly = 1; anomaly_reason = '跨天未结束'; }
     const long_segment = (!anomaly && minutes >= 240) ? 1 : 0;
     return {
-      worker_id: r.worker_id, worker_name: r.worker_name,
+      worker_id: reportWorkerId(r), worker_name: r.worker_name,
       joined_at: r.joined_at, left_at: r.left_at,
-      minutes,
+      minutes, raw_minutes:rawMinutes,
       leave_reason: r.leave_reason || '',
       active: closed ? 0 : 1,
       job_id: r.job_id, display_no: r.display_no,
@@ -10931,7 +10963,7 @@ route("v2_dashboard_workhour_summary", async (body, env) => {
     };
   });
 
-  const byWorkerMap = {}, byJobTypeMap = {}, jobIdSet = {};
+  const byWorkerMap = Object.create(null), byJobTypeMap = Object.create(null), jobIdSet = Object.create(null);
   let total_minutes = 0, max_segment_minutes = 0, anomaly_count = 0, long_segment_count = 0;
   segments.forEach(s => {
     total_minutes += s.minutes;
@@ -10939,8 +10971,8 @@ route("v2_dashboard_workhour_summary", async (body, env) => {
     if (s.anomaly) anomaly_count++;
     if (s.long_segment) long_segment_count++;
     jobIdSet[s.job_id] = 1;
-    const wk = s.worker_name || s.worker_id || '--';
-    if (!byWorkerMap[wk]) byWorkerMap[wk] = { worker_name: wk, total_minutes: 0, job_ids: {}, max_segment_minutes: 0 };
+    const wk = s.worker_id;
+    if (!byWorkerMap[wk]) byWorkerMap[wk] = { worker_id:wk,worker_name:s.worker_name||wk, total_minutes: 0, job_ids: {}, max_segment_minutes: 0 };
     byWorkerMap[wk].total_minutes += s.minutes;
     byWorkerMap[wk].job_ids[s.job_id] = 1;
     if (s.minutes > byWorkerMap[wk].max_segment_minutes) byWorkerMap[wk].max_segment_minutes = s.minutes;
@@ -10954,7 +10986,7 @@ route("v2_dashboard_workhour_summary", async (body, env) => {
   const by_worker = Object.values(byWorkerMap).map(v => {
     const job_count = Object.keys(v.job_ids).length;
     return {
-      worker_name: v.worker_name,
+      worker_id:v.worker_id, worker_name: v.worker_name,
       total_minutes: round1(v.total_minutes),
       total_hours: round1(v.total_minutes / 60),
       job_count,
@@ -11106,13 +11138,14 @@ route("v2_dashboard_management_summary", async (body, env) => {
   // ---- 工时段（与 workhour_summary 同口径，但聚合到 by_job_type / by_worker）----
   let where = "WHERE 1=1";
   const binds = [];
+  const range = dashboardRange(start_date,end_date);
   const startRange = kstDayRangeUtc(start_date);
   const endRange = kstDayRangeUtc(end_date);
-  if (startRange) { where += " AND w.joined_at >= ?"; binds.push(startRange.startUtc); }
-  if (endRange)   { where += " AND w.joined_at < ?"; binds.push(endRange.endUtc); }
+  if (startRange) { where += " AND (w.left_at='' OR julianday(w.left_at)>julianday(?))"; binds.push(startRange.startUtc); }
+  if (endRange)   { where += " AND julianday(w.joined_at)<julianday(?)"; binds.push(endRange.endUtc); }
 
   const segRs = await env.DB.prepare(`
-    SELECT w.worker_id, w.worker_name, w.joined_at, w.left_at, w.minutes_worked,
+    SELECT w.id, w.worker_id, w.worker_name, w.joined_at, w.left_at, w.minutes_worked,
            j.flow_stage, j.biz_class, j.job_type
     FROM v2_ops_job_workers w
     JOIN v2_ops_jobs j ON j.id = w.job_id
@@ -11126,24 +11159,22 @@ route("v2_dashboard_management_summary", async (body, env) => {
   if (start_date) { wmsWhere += " AND work_date>=?"; wmsBinds.push(start_date); }
   if (end_date)   { wmsWhere += " AND work_date<=?"; wmsBinds.push(end_date); }
   const wmsRs = await env.DB.prepare(
-    `SELECT import_type, worker_name, qty, box_count FROM v2_wms_import_rows ${wmsWhere} LIMIT 20000`
+    `SELECT import_type, worker_id, worker_name, qty, box_count FROM v2_wms_import_rows ${wmsWhere} LIMIT 20000`
   ).bind(...wmsBinds).all();
   const wmsRows = wmsRs.results || [];
 
   // ---- 工时聚合 ----
   const nowMs = Date.now();
   let total_minutes = 0, anomaly_count = 0;
-  const workerMins = {}, jobTypeMins = {}, workerJobTypeMins = {};
+  const workerMins = Object.create(null), jobTypeMins = Object.create(null), workerJobTypeMins = Object.create(null), workerNames=Object.create(null),nameIds=new Map();
   segs.forEach(r => {
     const closed = !!r.left_at;
-    let m = Number(r.minutes_worked) || 0;
-    if (!closed && r.joined_at) {
-      const t = new Date(r.joined_at).getTime();
-      if (!isNaN(t)) m = Math.max(0, Math.round((nowMs - t) / 60000));
-    }
-    if (m > 240 || (closed && m <= 0)) anomaly_count++;
+    const counted=segmentMinutes(r,range,nowMs),m=counted.minutes;
+    if(counted.invalid||counted.raw_minutes>240||(closed&&counted.raw_minutes<=0))anomaly_count++;
     total_minutes += m;
-    const wk = r.worker_name || r.worker_id || '--';
+    const wk=reportWorkerId(r);
+    if(!workerNames[wk])workerNames[wk]=r.worker_name||wk;
+    if(r.worker_name){const ids=nameIds.get(r.worker_name)||new Set();ids.add(wk);nameIds.set(r.worker_name,ids);}
     workerMins[wk] = (workerMins[wk] || 0) + m;
     const jt = r.job_type || '--';
     jobTypeMins[jt] = (jobTypeMins[jt] || 0) + m;
@@ -11153,8 +11184,8 @@ route("v2_dashboard_management_summary", async (body, env) => {
 
   // ---- WMS 聚合（按 import_type 反查 job_type 候选；按 worker_name）----
   let total_qty = 0, total_boxes = 0;
-  const jobTypeWms = {}; // job_type -> { qty, boxes }
-  const workerWms = {};  // worker_name -> { qty, boxes }
+  const jobTypeWms = Object.create(null); // job_type -> { qty, boxes }
+  const workerWms = Object.create(null), workerWmsDirect=Object.create(null), unmatchedRows=[];
   wmsRows.forEach(r => {
     const q = Number(r.qty) || 0, b = Number(r.box_count) || 0;
     total_qty += q;
@@ -11166,11 +11197,12 @@ route("v2_dashboard_management_summary", async (body, env) => {
       jobTypeWms[jt].qty += q / cands.length;
       jobTypeWms[jt].boxes += b / cands.length;
     });
-    if (r.worker_name) {
+    if(r.worker_id){const id=String(r.worker_id).trim();if(Object.hasOwn(workerMins,id)){const prior=workerWmsDirect[id]||{qty:0,boxes:0};workerWmsDirect[id]={qty:prior.qty+q,boxes:prior.boxes+b};}else unmatchedRows.push({worker_id:id,worker_name:r.worker_name||'（未填写姓名）',qty:q,boxes:b,reason:'工牌没有对应作业记录，待核实'});}
+    else if (r.worker_name) {
       if (!workerWms[r.worker_name]) workerWms[r.worker_name] = { qty: 0, boxes: 0 };
       workerWms[r.worker_name].qty += q;
       workerWms[r.worker_name].boxes += b;
-    }
+    }else unmatchedRows.push({worker_id:'',worker_name:'（未填写姓名）',qty:q,boxes:b,reason:'姓名与工牌缺失，待核实'});
   });
 
   // ---- by_job_type ----
@@ -11193,15 +11225,17 @@ route("v2_dashboard_management_summary", async (body, env) => {
   }).sort((a, b) => b.total_minutes - a.total_minutes);
 
   // ---- by_worker ----
-  const wkSet = new Set([...Object.keys(workerMins), ...Object.keys(workerWms)]);
+  const unmatched=[...unmatchedRows];const workerWmsById=workerWmsDirect;
+  for(const [name,value] of Object.entries(workerWms)){const ids=nameIds.get(name);if(ids?.size===1){const id=[...ids][0],prior=workerWmsById[id]||{qty:0,boxes:0};workerWmsById[id]={qty:prior.qty+value.qty,boxes:prior.boxes+value.boxes};}else unmatched.push({worker_name:name,...value,reason:ids?.size>1?'同名多个工牌，待核实':'无唯一工牌，待核实'});}
+  const wkSet = new Set(Object.keys(workerMins));
   const by_worker = [...wkSet].map(wk => {
     const mins = workerMins[wk] || 0;
     const hours = Math.round(mins / 6) / 10;
-    const w = workerWms[wk] || { qty: 0, boxes: 0 };
+    const w = workerWmsById[wk] || { qty: 0, boxes: 0 };
     const qty = Math.round(w.qty * 10) / 10;
     const boxes = Math.round(w.boxes * 10) / 10;
     return {
-      worker_name: wk,
+      worker_id:wk, worker_name:workerNames[wk],
       total_minutes: mins,
       total_hours: hours,
       wms_qty: qty,
@@ -11225,7 +11259,7 @@ route("v2_dashboard_management_summary", async (body, env) => {
       anomaly_count
     },
     by_job_type,
-    by_worker
+    by_worker, unmatched_wms:unmatched, truncated:segs.length>=5000||wmsRows.length>=20000
   });
 });
 
@@ -12684,6 +12718,7 @@ export default {
 
     try {
       await ensureMigrated(env.DB);
+      await ensureInboundReferenceGuard(env);
     } catch (e) {
       return json({ ok: false, error: "migration failed: " + e.message }, 500);
     }
@@ -12771,7 +12806,7 @@ export default {
     if(action==='sop_native_adopt'){try{return json(await adoptLegacyLoad(body,env));}catch(e){return json({ok:false,error:e.message},409);}}
     if(action==='sop_native_people'){try{const allowed=await canCrewDestination(env,body),result=await nativePeople(body,env);if(allowed){try{result.crew_returns=await reconcileCrewReturns(env,body.job_id);}catch{result.crew_return_error='人员已调整，归还暂未完成，请重试归还';}}return json(result);}catch(e){return json({ok:false,error:e.message},409);}}
     if(action==='sop_native_start'){
-      try{const result=await startNative(body,env,async input=>(await HANDLERS[input.action](input,env)).json(),guardLegacy,{feedbackNumber:()=>nextFeedbackDisplayNo(env,kstToday(),'XCXH')});if(result.ok&&env.SOP_CREW_BORROW)result.has_crew_borrows=true;return json(result);}
+      try{const result=await startNative(body,env,async input=>(await HANDLERS[input.action](input,env)).json(),guardLegacy,{feedbackNumber:()=>nextFeedbackDisplayNo(env,kstToday(),'XCXH'),inboundNumber:()=>nextDisplayNo(env,kstToday()),pickNumber:()=>nextPickTripNo(env),findOutbound:no=>findOutboundByWorkOrder(env,no),linkedNeeds:id=>linkedNeeds(env,id)});if(result.ok&&env.SOP_CREW_BORROW)result.has_crew_borrows=true;return json(result);}
       catch(e){return json({ok:false,error:e.message},400);}
     }
     env.SOP_GROUP_FINISH = /_(finish|finalize)$/.test(action) && !body.leave_only && await nativeOwner(body,env);

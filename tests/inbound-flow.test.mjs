@@ -57,7 +57,10 @@ test('legacy arrived plans can add a reference; stale edits, duplicates and rebi
  const busy=await call('v2_inbound_plan_bind_external',{id:p.id,previous_code:'FIXED-CODE',external_inbound_no:'OTHER'},false);assert.equal(busy.ok,false);assert.match(busy.error,/正在进行/);
 });
 test('ambiguous historical external numbers do not select an arbitrary plan',async()=>{
- const {plan,unload,call,DB}=setup();const a=await plan(['direct_ship'],{external_inbound_no:'DUP-A'}),b=await plan(['direct_ship'],{external_inbound_no:'DUP-B'});await unload(a);await unload(b);DB.raw.prepare("UPDATE v2_inbound_plans SET external_inbound_no='DUP-A' WHERE id=?").run(b.id);
+ const {plan,unload,call,DB}=setup();const a=await plan(['direct_ship'],{external_inbound_no:'DUP-A'}),b=await plan(['direct_ship'],{external_inbound_no:'DUP-B'});await unload(a);await unload(b);
+ // Seed a pre-upgrade duplicate only in this memory fixture, then reinstall the exact guard.
+ const guard=DB.raw.prepare("SELECT sql FROM sqlite_master WHERE name='ck_inbound_reference_update_guard'").get().sql;
+ DB.raw.exec('DROP TRIGGER ck_inbound_reference_update_guard');DB.raw.prepare("UPDATE v2_inbound_plans SET external_inbound_no='DUP-A' WHERE id=?").run(b.id);DB.raw.exec(guard);
  const resolved=await call('v2_inbound_resolve_code',{code:'DUP-A',biz_class:'direct_ship'});assert.equal(resolved.kind,'status_not_allowed');assert.match(resolved.message,/多张/);
 });
 

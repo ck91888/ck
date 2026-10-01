@@ -5,11 +5,11 @@ import { EMPLOYEE_SCHEMA, employeeDepartments, employeeAction, isEmployee } from
 import { laborDepartment } from '../shared/labor-department.js';
 import {sourceActiveWorkers,personHasPendingReturn} from './crew-borrow.js';
 export const ATTENDANCE_SCHEMA=[
- ...EMPLOYEE_SCHEMA,
  `CREATE TABLE IF NOT EXISTS ck_attendance_people(id TEXT PRIMARY KEY,badge_id TEXT NOT NULL UNIQUE,name TEXT NOT NULL,agency TEXT NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('daily','permanent')),enabled INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL)`,
  `CREATE TABLE IF NOT EXISTS ck_attendance_days(id TEXT PRIMARY KEY,person_id TEXT NOT NULL,worker_id TEXT NOT NULL,name TEXT NOT NULL,agency TEXT NOT NULL,day TEXT NOT NULL,identity_key TEXT NOT NULL,signed_in TEXT NOT NULL,signed_out TEXT NOT NULL DEFAULT '',version INTEGER NOT NULL DEFAULT 1,UNIQUE(day,worker_id),UNIQUE(day,identity_key))`,
  `CREATE TABLE IF NOT EXISTS ck_attendance_events(id TEXT PRIMARY KEY,request_id TEXT NOT NULL UNIQUE,record_id TEXT NOT NULL,version INTEGER NOT NULL,action TEXT NOT NULL,actor TEXT NOT NULL,at TEXT NOT NULL,before_json TEXT NOT NULL,after_json TEXT NOT NULL,response_json TEXT NOT NULL,fingerprint TEXT NOT NULL,UNIQUE(record_id,version))`,
- `CREATE TABLE IF NOT EXISTS ck_attendance_breaks(id TEXT PRIMARY KEY,attendance_id TEXT NOT NULL,started_at TEXT NOT NULL,ended_at TEXT NOT NULL DEFAULT '',job_ids_json TEXT NOT NULL,actor TEXT NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS ck_attendance_breaks(id TEXT PRIMARY KEY,attendance_id TEXT NOT NULL,started_at TEXT NOT NULL,ended_at TEXT NOT NULL DEFAULT '',job_ids_json TEXT NOT NULL,actor TEXT NOT NULL)`,
+  ...EMPLOYEE_SCHEMA,
  `CREATE UNIQUE INDEX IF NOT EXISTS ck_attendance_one_break ON ck_attendance_breaks(attendance_id) WHERE ended_at=''`,
  `CREATE INDEX IF NOT EXISTS ck_attendance_day ON ck_attendance_days(day,agency)`,
  `CREATE INDEX IF NOT EXISTS ck_attendance_worker ON ck_attendance_days(worker_id,day)`,
@@ -34,7 +34,7 @@ const badgeOf=value=>text(String(value||'').split('|')[0]);
 function dateOf(value){const d=String(value||'');if(!/^\d{4}-\d{2}-\d{2}$/.test(d)||Number.isNaN(Date.parse(d+'T00:00:00+09:00'))||new Date(d+'T00:00:00Z').toISOString().slice(0,10)!==d)fail('日期无效');return d;}
 const publicPerson=p=>({id:p.id,badgeId:p.badge_id,name:p.name,agency:p.agency,badgeType:p.kind,enabled:!!p.enabled,personType:isEmployee(p.badge_id)?'employee':'daily',employeeNo:isEmployee(p.badge_id)?p.badge_id.slice(4):'',department:isEmployee(p.badge_id)?p.agency:''});
 const publicDay=r=>({id:r.id,personId:r.person_id,badgeId:r.worker_id,name:r.name,agency:r.agency,day:r.day,inAt:r.signed_in,outAt:r.signed_out,version:r.version,badgeType:r.worker_id.startsWith('DAF-')||isEmployee(r.worker_id)?'permanent':'daily',personType:isEmployee(r.worker_id)?'employee':'daily',employeeNo:isEmployee(r.worker_id)?r.worker_id.slice(4):'',department:isEmployee(r.worker_id)?r.agency:''});
-export async function ensureAttendance(env){if(!attendanceEnabled(env))return;await ensureSchema(env.DB,'attendance-v1',()=>env.DB.batch(ATTENDANCE_SCHEMA.map(sql=>env.DB.prepare(sql))));}
+export async function ensureAttendance(env){if(!attendanceEnabled(env))return;await ensureSchema(env.DB,'attendance-v2-enabled',()=>env.DB.batch(ATTENDANCE_SCHEMA.map(sql=>env.DB.prepare(sql))));}
 function access(env,allowed=roles){const u=env.SOP_REQUEST_USER;if(!u||!allowed.includes(u.role))fail('无此操作权限 / 권한이 없습니다');return u;}
 const readDay=(env,id)=>q(env,'SELECT * FROM ck_attendance_days WHERE id=?',id).first();
 const todayRecord=(env,badge,t)=>q(env,'SELECT * FROM ck_attendance_days WHERE worker_id=? AND day=?',badge,kstDay(t)).first();
@@ -198,11 +198,11 @@ export async function guardAttendance(body,env){
  const daily=workers.filter(w=>/^(?:DA(?:F)?|EMP)-/.test(w.id||''));if(!daily.length)return null;
  await ensureAttendance(env);const day=kstDay(new Date().toISOString()),ids=JSON.stringify([...new Set(daily.map(w=>w.id))]);
  const [days,rests,busy]=await env.DB.batch([
-  q(env,'SELECT * FROM ck_attendance_days WHERE day=? AND worker_id IN (SELECT value FROM json_each(?))',day,ids),
+   q(env,'SELECT d.*,p.enabled AS employee_enabled,e.person_id AS employee_profile FROM ck_attendance_days d LEFT JOIN ck_attendance_people p ON p.id=d.person_id LEFT JOIN ck_employee_profiles e ON e.person_id=p.id WHERE d.day=? AND d.worker_id IN (SELECT value FROM json_each(?))',day,ids),
   q(env,"SELECT d.worker_id FROM ck_attendance_breaks b JOIN ck_attendance_days d ON d.id=b.attendance_id WHERE d.day=? AND d.worker_id IN (SELECT value FROM json_each(?)) AND b.ended_at=''",day,ids),
   q(env,"SELECT DISTINCT worker_id FROM v2_ops_job_workers WHERE worker_id IN (SELECT value FROM json_each(?)) AND left_at='' AND job_id!=?",ids,jobId||'')
  ]);
  const records=new Map(days.results.map(r=>[r.worker_id,r])),resting=new Set(rests.results.map(r=>r.worker_id)),occupied=new Set(busy.results.map(r=>r.worker_id));
- for(const w of daily){const record=records.get(w.id);if(!record)return (w.name||w.id)+' 请先办理当天签到 / 먼저 출근 등록하세요';if(record.signed_out)return record.name+' 已签退，不能开始作业 / 이미 퇴근했습니다';if(resting.has(w.id))return record.name+' 正在休息，请先结束休息 / 휴식을 먼저 종료하세요';if(occupied.has(w.id)&&!env.SOP_CREW_BORROW?.plans.some(p=>p.worker.id===w.id))return record.name+' 已在另一任务，请先办理交接';}
+  for(const w of daily){const record=records.get(w.id);if(!record)return (w.name||w.id)+' 请先办理当天签到 / 먼저 출근 등록하세요';if(isEmployee(w.id)&&(!record.employee_enabled||!record.employee_profile))return record.name+' 已停用或未登记，不能加入作业 / 비활성 직원입니다';if(record.signed_out)return record.name+' 已签退，不能开始作业 / 이미 퇴근했습니다';if(resting.has(w.id))return record.name+' 正在休息，请先结束休息 / 휴식을 먼저 종료하세요';if(occupied.has(w.id)&&!env.SOP_CREW_BORROW?.plans.some(p=>p.worker.id===w.id))return record.name+' 已在另一任务，请先办理交接';}
  return null;
 }

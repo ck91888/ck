@@ -3,7 +3,13 @@ export const EMPLOYEE_SCHEMA=[
  `CREATE TABLE IF NOT EXISTS ck_employee_profiles(person_id TEXT PRIMARY KEY,employee_no TEXT NOT NULL UNIQUE,department TEXT NOT NULL,version INTEGER NOT NULL DEFAULT 1)`,
  `CREATE TRIGGER IF NOT EXISTS ck_employee_guard_join BEFORE INSERT ON v2_ops_job_workers
  WHEN NEW.worker_id GLOB 'EMP-*' AND NEW.left_at=''
- BEGIN SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM ck_attendance_days d WHERE d.worker_id=NEW.worker_id AND d.day=date(NEW.joined_at,'+9 hours') AND d.signed_out='' AND d.signed_in<=NEW.joined_at AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at='')) THEN RAISE(ABORT,'Employee attendance required') END; END`
+  BEGIN SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM ck_attendance_days d WHERE d.worker_id=NEW.worker_id AND d.day=date(NEW.joined_at,'+9 hours') AND d.signed_out='' AND d.signed_in<=NEW.joined_at AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at='')) THEN RAISE(ABORT,'Employee attendance required') END; END`,
+ `CREATE TRIGGER IF NOT EXISTS ck_employee_enabled_checkin BEFORE INSERT ON ck_attendance_days
+ WHEN NEW.worker_id GLOB 'EMP-*'
+ BEGIN SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM ck_attendance_people p JOIN ck_employee_profiles e ON e.person_id=p.id WHERE p.id=NEW.person_id AND p.badge_id=NEW.worker_id AND p.enabled=1) THEN RAISE(ABORT,'Employee disabled or unregistered') END; END`,
+ `CREATE TRIGGER IF NOT EXISTS ck_employee_enabled_join BEFORE INSERT ON v2_ops_job_workers
+ WHEN NEW.worker_id GLOB 'EMP-*' AND NEW.left_at=''
+ BEGIN SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM ck_attendance_people p JOIN ck_employee_profiles e ON e.person_id=p.id WHERE p.badge_id=NEW.worker_id AND p.enabled=1) THEN RAISE(ABORT,'Employee disabled or unregistered') END; END`
 ];
 export const isEmployee=badge=>String(badge||'').startsWith('EMP-');
 const q=(env,sql,...a)=>env.DB.prepare(sql).bind(...a),rows=async(env,sql,...a)=>(await q(env,sql,...a).all()).results;
@@ -37,5 +43,5 @@ export async function employeeAction(b,env,h){
  if(typeof b.enabled!=='boolean')fail('在职状态无效');
  if(!b.enabled&&(await q(env,"SELECT id FROM ck_attendance_days WHERE person_id=? AND signed_out='' LIMIT 1",before.id).first()||await q(env,"SELECT id FROM v2_ops_job_workers WHERE worker_id=? AND left_at='' LIMIT 1",before.badge_id).first()))fail('该职员尚未签退或仍在任务中，请先核实结束 / 출퇴근·작업 상태를 먼저 확인하세요');
  const after={...before,name,agency:department,department,enabled:b.enabled?1:0,version:before.version+1};
- return commit(env,b,u,before,after,[q(env,'UPDATE ck_attendance_people SET name=?,agency=?,enabled=? WHERE id=?',name,department,after.enabled,before.id),q(env,'UPDATE ck_employee_profiles SET department=?,version=? WHERE person_id=? AND version=?',department,after.version,before.id,before.version)],{ok:true,person:person(after)});
+  return commit(env,b,u,before,after,[q(env,"UPDATE ck_employee_profiles SET department=?,version=CASE WHEN version=? AND (?=1 OR (NOT EXISTS(SELECT 1 FROM ck_attendance_days WHERE person_id=? AND signed_out='') AND NOT EXISTS(SELECT 1 FROM v2_ops_job_workers WHERE worker_id=? AND left_at=''))) THEN ? ELSE NULL END WHERE person_id=?",department,before.version,after.enabled,before.id,before.badge_id,after.version,before.id),q(env,'UPDATE ck_attendance_people SET name=?,agency=?,enabled=? WHERE id=?',name,department,after.enabled,before.id)],{ok:true,person:person(after)});
 }

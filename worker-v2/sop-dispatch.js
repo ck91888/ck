@@ -4,6 +4,7 @@ import {documentCodeError} from '../shared/document-code.js';
 import {loadTripEnabled,startLoadTrip} from './outbound-load-trip.js';
 import {startBorrowableSimple} from './crew-borrow.js';
 import {startUnloadTrip} from './unload-trip.js';
+import {startAtomicGeneric,startAtomicInbound,startAtomicBulk,startAtomicDocument,dispatchSignature,ensureDispatchStartGuard} from './atomic-native-start.js';
 // Responsible-person assignment around existing operation handlers. Documents,
 // result forms and status transitions remain owned by those handlers.
 import { laborDepartment,startDepartment,departments } from '../shared/labor-department.js';
@@ -34,7 +35,7 @@ export async function startNative(body,env,invoke,guard,helpers={}){
  }
  const prior=await env.DB.prepare('SELECT response_json FROM v2_idempotency_keys WHERE idem_key=?').bind(p.client_req_id).first();
  const allowed=prior?JSON.parse(prior.response_json).job_id:null;
- if(allowed){const existing=await env.DB.prepare("SELECT state FROM sop_records WHERE id=? AND kind='dispatch'").bind(allowed).first();if(existing){const saved=JSON.parse(existing.state);if(saved.owner_id!==u.id)return {ok:false,error:'此任务已有其他负责人'};return {...JSON.parse(prior.response_json),lead:saved.workers.find(w=>w.id===saved.lead_id),assigned_workers:saved.workers};}}
+  if(allowed){const existing=await env.DB.prepare("SELECT state FROM sop_records WHERE id=? AND kind='dispatch'").bind(allowed).first();if(existing){const saved=JSON.parse(existing.state),replay=JSON.parse(prior.response_json);if(saved.owner_id!==u.id)return {ok:false,error:'此任务已有其他负责人'};if(replay._dispatch_signature&&replay._dispatch_signature!==dispatchSignature(env,p,{workers,lead_id:lead.id,estimated_minutes:minutes,department:body.labor_department||startDepartment(p)}))return {ok:false,error:'同一请求的人员或作业要求已变化，请重新提交'};return {...replay,lead:saved.workers.find(w=>w.id===saved.lead_id),assigned_workers:saved.workers};}}
  // External picking sheets do not need an office-created trip. Existing sheets
  // retain their original trip/history; never move them into a fresh dispatch.
  if(p.action==='v2_pick_job_start_by_docs'&&!allowed){
@@ -51,7 +52,14 @@ export async function startNative(body,env,invoke,guard,helpers={}){
  if(!Object.hasOwn(departments,department))return {ok:false,error:'请选择本次用工部门 / 작업 부서를 선택하세요'};
  for(const w of workers){const busy=await env.DB.prepare("SELECT job_id FROM v2_ops_job_workers WHERE worker_id=? AND left_at='' AND job_id!=? LIMIT 1").bind(w.id,allowed||'').first();if(busy&&!env.SOP_CREW_BORROW?.plans.some(x=>x.worker.id===w.id&&x.source.job_id===busy.job_id))return {ok:false,error:w.name+'仍在另一任务中，请先办理人员交接'};}
  p.worker_id=lead.id;p.worker_name=lead.name;p.handler_id=lead.id;p.handler_name=lead.name;
- const blocked=await guard(p,env);if(blocked)return {ok:false,error:blocked};
+  const blocked=await guard(p,env);if(blocked)return {ok:false,error:blocked};
+  await ensureDispatchStartGuard(env);
+  if(p.action==='v2_unload_job_start')return {...await startUnloadTrip(env,{...p,plan_ids:p.plan_ids||[p.plan_id]},{workers,lead_id:lead.id,estimated_minutes:minutes,department}),lead,assigned_workers:workers};
+  if(p.action==='v2_unplanned_unload_start'||p.action==='v2_outbound_load_start')return startBorrowableSimple(env,p,{workers,lead_id:lead.id,estimated_minutes:minutes,department,signature:dispatchSignature(env,p,{workers,lead_id:lead.id,estimated_minutes:minutes,department})},p.action==='v2_unplanned_unload_start'?await helpers.feedbackNumber():undefined);
+  if(p.action==='v2_ops_job_start'&&!env.SOP_CREW_BORROW?.plans.length)return startAtomicGeneric(env,p,{workers,lead_id:lead.id,estimated_minutes:minutes,department});
+  if(p.action==='v2_inbound_job_start'&&!env.SOP_CREW_BORROW?.plans.length)return startAtomicInbound(env,p,{workers,lead_id:lead.id,estimated_minutes:minutes,department},helpers.inboundNumber);
+  if(p.action==='v2_bulk_op_job_start'&&!env.SOP_CREW_BORROW?.plans.length)return startAtomicBulk(env,p,{workers,lead_id:lead.id,estimated_minutes:minutes,department},helpers.findOutbound,helpers.linkedNeeds);
+  if(['v2_pick_job_start','v2_pick_job_start_by_docs','v2_outbound_stock_op_start','v2_issue_handle_start','v2_verify_job_start'].includes(p.action)&&!env.SOP_CREW_BORROW?.plans.length)return startAtomicDocument(env,p,{workers,lead_id:lead.id,estimated_minutes:minutes,department},helpers.pickNumber);
  if(env.SOP_CREW_BORROW?.plans.length){
   const staff={workers,lead_id:lead.id,estimated_minutes:minutes,department};
   if(p.action==='v2_unload_job_start')return {...await startUnloadTrip(env,{...p,plan_ids:p.plan_ids||[p.plan_id],worker_id:lead.id,worker_name:lead.name},staff),lead,assigned_workers:workers};

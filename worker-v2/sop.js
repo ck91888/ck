@@ -558,7 +558,7 @@ async function dashboard(env,u,b){
  const nativeResults=await all(env,`SELECT r.* FROM v2_ops_job_results r JOIN sop_records s ON s.id=r.job_id WHERE s.kind='dispatch'${dep.replaceAll('department','s.department')}`,...args);
  for(const j of nativeJobs.filter(j=>j.status==='completed'&&j.finished_at>=start&&j.finished_at<end)){
   const r={quantity:0,unit:'箱',label_count:0,packed_count:0,operated_box_count:0,pallet_count:0};
-   for(const v of effectiveResults(nativeResults.filter(r=>r.job_id===j.id))){let d={};try{d=JSON.parse(v.result_json||'{}');}catch{}r.quantity+=Number(v.box_count)||0;for(const [k] of metrics)r[k]+=Number(d[k]??(k==='pallet_count'?v.pallet_count:k==='operated_box_count'?v.box_count:0))||0;}
+    for(const v of effectiveResults(nativeResults.filter(r=>r.job_id===j.id))){let d={};try{d=JSON.parse(v.result_json||'{}');}catch{}r.quantity+=Number(v.box_count)||0;for(const [k] of metrics)r[k]+=Number(d[k]??(k==='packed_count'?d.packed_box_count:k==='pallet_count'?v.pallet_count:k==='operated_box_count'?(d.total_operated_box_count??v.box_count):0))||0;}
   const task={...j,department:records.find(r=>r.id===j.id)?.department||j.biz_class};allocate(task,r,reported,'原流程已完成');allocate(task,r,ranking,'原流程已完成');
  }
  const ranked=[...ranking.values()].sort((a,b)=>b.quantity-a.quantity);

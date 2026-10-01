@@ -79,7 +79,8 @@ export async function finishUnloadTrip(env,body,{ensureTasks,recalc,syncCourier}
  const plans=await tripPlans(env,trip.job_id);
  if(job.status!=='completed'){
   if(job.status!=='working'||!body.complete_job||body.leave_only)fail('请从整车卸货页面填写各计划实收数量 / 차량 하차 화면에서 실제 수량을 입력하세요');
-  const results=body.plan_results;
+   // Existing single-plan clients send unit-based receipts rather than a per-plan wrapper.
+   const results=body.plan_results||(plans.length===1&&Array.isArray(body.result_lines)?[{plan_id:plans[0].plan.id,diff_note:body.diff_note||'',lines:plans[0].lines.filter(l=>l.unit_type!=='courier').map(l=>({line_id:l.id,actual_qty:body.result_lines.find(r=>r.unit_type===l.unit_type)?.actual_qty}))}]:undefined);
   if(!Array.isArray(results)||results.length!==plans.length||new Set(results.map(r=>r.plan_id)).size!==plans.length||results.some(r=>!plans.some(p=>p.plan.id===r.plan_id)))fail('请逐张填写本车全部计划的实收数量 / 모든 계획의 실제 수량을 입력하세요');
   const prepared=[],totals=new Map();
   for(const {plan,lines} of plans){

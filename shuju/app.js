@@ -1032,6 +1032,8 @@ function closeOrderDetail() {
 // 工时分析 (workhours)
 // =====================================================
 var _whSummary = null;
+var _whQuery = null;
+function workhourKstDate(value) { var ms=Date.parse(value||'');return Number.isFinite(ms)?new Date(ms+9*3600000).toISOString().slice(0,10):''; }
 
 function whFilterParams() {
   return {
@@ -1044,6 +1046,7 @@ function whFilterParams() {
 }
 
 async function loadWorkhours(btn) {
+  _whSummary=null;_whQuery=null;
   setBtnLoading(btn, true);
   var params = whFilterParams();
   params.action = "v2_dashboard_workhour_summary";
@@ -1054,6 +1057,7 @@ async function loadWorkhours(btn) {
     return;
   }
   _whSummary = res;
+  _whQuery = Object.assign({},params);
   var s = res.summary || {};
 
   // 顶部统计卡
@@ -1080,7 +1084,7 @@ async function loadWorkhours(btn) {
   var tb1 = '';
   if (bw.length === 0) tb1 = '<tr><td colspan="5" class="muted" style="text-align:center;">暂无数据</td></tr>';
   else bw.forEach(function(w) {
-    tb1 += '<tr><td><b>' + esc(w.worker_name) + '</b></td>';
+    tb1 += '<tr><td><b>' + esc(w.worker_name) + '</b><small style="display:block;overflow-wrap:anywhere">' + esc(w.worker_id||'工牌待核实') + '</small></td>';
     tb1 += '<td>' + round1(w.total_minutes) + '</td>';
     tb1 += '<td>' + round1(w.total_hours) + '</td>';
     tb1 += '<td>' + (w.job_count || 0) + '</td>';
@@ -1113,7 +1117,7 @@ async function loadWorkhours(btn) {
     var longTag = s.long_segment ? ' <span class="tag tag-orange" style="font-size:10px;">长工时</span>' : '';
     var activeTag = s.active ? ' <span class="tag tag-green" style="font-size:10px;">在岗</span>' : '';
     tb3 += '<tr><td>' + esc(s.worker_name) + '</td>';
-    tb3 += '<td>' + esc((s.joined_at || '').slice(0, 10)) + '</td>';
+    tb3 += '<td>' + esc(workhourKstDate(s.joined_at)) + '</td>';
     tb3 += '<td>' + esc(jobTypeLabel(s.job_type)) + '</td>';
     tb3 += '<td>' + esc(s.display_no || "单号待补充") + '</td>';
     tb3 += '<td>' + esc(fmtTime(s.joined_at)) + '</td>';
@@ -1133,7 +1137,7 @@ function exportWorkhoursSegments() {
   if (!_whSummary) { alert("请先查询"); return; }
   var rows = (_whSummary.segments || []).map(function(s) {
     return {
-      员工: s.worker_name, 日期: (s.joined_at || '').slice(0, 10),
+      员工: s.worker_name, 工牌: s.worker_id, 日期: workhourKstDate(s.joined_at),
       任务类型: jobTypeLabel(s.job_type), 任务号: s.display_no || "单号待补充",
       开始: fmtTime(s.joined_at), 结束: fmtTime(s.left_at),
       分钟: round1(s.minutes), 状态: statusLabel(s.status),
@@ -1141,7 +1145,7 @@ function exportWorkhoursSegments() {
       长工时: s.long_segment ? 1 : 0
     };
   });
-  exportCsv("workhour_segments_" + defaultDateRangeToday() + ".csv", rows);
+  exportCsv("workhour_segments_" + (_whQuery?.start_date||"all") + "_" + (_whQuery?.end_date||"all") + ".csv", rows);
 }
 
 // =====================================================
@@ -1431,7 +1435,7 @@ async function loadManagement(btn) {
   var tb2 = '';
   if (bw.length === 0) tb2 = '<tr><td colspan="6" class="muted" style="text-align:center;">暂无数据</td></tr>';
   else bw.forEach(function(w) {
-    tb2 += '<tr><td><b>' + esc(w.worker_name) + '</b></td>';
+    tb2 += '<tr><td><b>' + esc(w.worker_name) + '</b><small style="display:block;overflow-wrap:anywhere">' + esc(w.worker_id||'工牌待核实') + '</small></td>';
     tb2 += '<td>' + (w.total_hours || 0) + '</td>';
     tb2 += '<td>' + fmtNumber(w.wms_qty) + '</td>';
     tb2 += '<td>' + fmtNumber(w.wms_boxes) + '</td>';
@@ -1439,6 +1443,9 @@ async function loadManagement(btn) {
     tb2 += '<td>' + (w.boxes_per_hour || 0) + '</td></tr>';
   });
   document.getElementById("mgmtByWorkerBody").innerHTML = tb2;
+  var unmatched = res.unmatched_wms || [], hint = document.getElementById('mgmtUnmatchedWms');
+  if (!hint) { hint=document.createElement('section');hint.id='mgmtUnmatchedWms';document.getElementById('mgmtByWorkerBody').closest('table').after(hint); }
+  hint.innerHTML = (res.truncated ? '<p class="muted">当前数据已截断，请缩小日期范围后核对统计。</p>' : '') + (unmatched.length ? '<h3>WMS产量待核实</h3><p class="muted">以下姓名没有唯一工牌对应，保留在WMS总量中，尚未计入个人产量。</p>' + unmatched.map(function(x){return '<p>'+esc(x.worker_name)+' · '+fmtNumber(x.qty)+'件 / '+fmtNumber(x.boxes)+'箱 · '+esc(x.reason)+'</p>';}).join('') : '');
 }
 
 // ===== Init =====
