@@ -159,6 +159,7 @@
   await window.CKInstallCourier?.(app);
   if(app==='001')window.CKInstallNativeLifecycle?.();
   if(app==='001')window.CKInstallLoadTrip?.();
+  if(app==='001')window.CKInstallCrewBorrowUI?.();
   if(app==='002'){
    const notices=document.createElement('div');notices.className='ck-updates';notices.hidden=true;nav.after(notices);
    let updating=false;const update=async()=>{if(document.hidden||updating)return;updating=true;try{const r=await request('sop_updates');notices.hidden=!r.items.length;notices.innerHTML=r.items.length?'<b>有 '+r.items.length+' 条最新要求待仓库确认</b> '+r.items.slice(0,5).map(x=>'<a href="/002/?issue='+encodeURIComponent(x.legacy_id)+'">'+esc(x.title.slice(0,36))+'</a>').join(' · '):'';}catch(e){notices.hidden=false;notices.textContent='消息同步失败，请刷新检查网络：'+e.message;}finally{updating=false;}};await update();setInterval(update,15000);window.addEventListener('focus',update);

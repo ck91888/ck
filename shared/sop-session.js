@@ -22,7 +22,7 @@
 
  async function request(action,data={}){
   const r=await fetch(endpoint,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({...data,action})});
-  const out=await r.json();if(!r.ok||!out.ok){const error=Error(out.error||out.message||'请求失败');error.businessError=true;error.unauthorized=r.status===401;throw error;}return out;
+  const out=await r.json();if(!r.ok||!out.ok){const error=Error(out.error||out.message||'请求失败');error.businessError=true;error.unauthorized=r.status===401;throw error;}if(out.has_crew_borrows||out.crew_returns||out.crew_return_error)window.dispatchEvent(new CustomEvent('ck-crew-returns',{detail:{job_id:data.job_id,...out}}));return out;
  }
  async function stopCamera(){if(scanner){const old=scanner;scanner=null;try{await old.stop();old.clear();}catch{}}}
  function lock(){if(locked)return;locked=true;user=null;document.documentElement.classList.add('ck-auth-pending');document.querySelectorAll('dialog[open]').forEach(d=>d.close());showGate('登录已结束，请重新扫码 / 로그인이 종료되었습니다');}

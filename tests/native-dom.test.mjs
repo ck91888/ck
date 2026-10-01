@@ -47,7 +47,7 @@ async function loadOrders(f,{extra=false}={}){
 }
 const storageOf=w=>Object.fromEntries(Array.from({length:w.sessionStorage.length},(_,i)=>{const k=w.sessionStorage.key(i);return[k,w.sessionStorage.getItem(k)];}));
 async function scanLoad(p,code){p.d.querySelector('#ck-load-code').value=code;p.d.querySelector('#ck-load-scan').requestSubmit();await new Promise(r=>setTimeout(r,35));}
-async function staffLoad(p){p.d.querySelector('#ck-load-start').click();await until(()=>p.d.querySelector('dialog[open] [data-staff-badge]'),p.errors);const form=p.d.querySelector('dialog[open] form');form.querySelector('[data-staff-badge]').value='LOAD-DOM-A|装货甲';form.querySelector('[data-staff-add]').click();form.querySelector('[data-staff-badge]').value='LOAD-DOM-B|装货乙';form.querySelector('[data-staff-add]').click();form.requestSubmit();}
+async function staffLoad(p){await until(()=>!p.d.querySelector('#ck-load-start').disabled,p.errors);p.d.querySelector('#ck-load-start').click();await until(()=>p.d.querySelector('dialog[open] [data-staff-badge]'),p.errors);const form=p.d.querySelector('dialog[open] form');form.querySelector('[data-staff-badge]').value='LOAD-DOM-A|装货甲';form.querySelector('[data-staff-add]').click();form.querySelector('[data-staff-badge]').value='LOAD-DOM-B|装货乙';form.querySelector('[data-staff-add]').click();await until(()=>form.querySelectorAll('[data-staff-people] .badge').length===2,p.errors);form.requestSubmit();}
 test('loading UI scans and multi-selects three orders, deduplicates, removes wrong picks, blocks bad orders and retains input after staff changes and reload',opts,async()=>{
  const f=await fixture(),{orders,call}=await loadOrders(f,{extra:true});let p=await f.page('/001/');
  try{

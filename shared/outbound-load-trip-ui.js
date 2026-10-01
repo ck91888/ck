@@ -108,7 +108,7 @@ window.CKInstallLoadTrip=function(){
   const form=working.querySelector('form');if(pending)form.querySelectorAll('input,textarea,[data-planned]').forEach(x=>x.disabled=true);
   form.oninput=saveDraft;
   working.querySelector('[data-refresh]').onclick=refreshWorking;
-  working.querySelector('[data-home]').onclick=()=>goPage('home');working.querySelector('[data-move]').onclick=()=>CKEditNativePeople('unload');
+  working.querySelector('[data-home]').onclick=()=>goPage('home');working.querySelector('[data-move]').onclick=()=>interruptToUnload();working.querySelector('[data-move]').textContent='到仓卸货 / 도착 하차';
   working.querySelector('[data-camera]').onclick=()=>uploadPhoto('ops_job','vehicle_photo','camera');working.querySelector('[data-album]').onclick=()=>uploadPhoto('ops_job','vehicle_photo','album');
   working.querySelector('[data-photos]').innerHTML=(r.attachments||[]).filter(a=>a.attachment_category==='vehicle_photo').map(a=>`<img class="photo-thumb" alt="${esc(a.file_name)}" src="${esc(fileUrl(a.file_key))}">`).join('');
   for(const row of form.querySelectorAll('[data-result]')){

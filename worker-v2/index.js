@@ -9,7 +9,8 @@ import {findUnloadPlan, startUnloadTrip, finishUnloadTrip, tripPlans} from './un
 import {ensureLoadSchema,loadTripEnabled,loadCandidates,resolveLoadOrder,loadOrdersForJob,finishLoadTrip,validateLegacyLoadFinish} from './outbound-load-trip.js';
 import {handleCourier,validateCourierLines,courierPlanStatements,courierProgress,courierReady,protectCourierEdit,syncCourierArrival} from './courier.js';
 import { inboundFlowEnabled, inboundCode, inboundCodes, inboundReferenceValue, inboundCodeProgress, selectInboundReference, validateInboundCode, resolveInboundPlan, putawayTaskBiz, completeUnloadedDispositions, bindInboundCode, inboundLabels, inboundReferenceData, departmentCodes, putawayClasses } from './inbound-flow.js';
-import { handleAttendance, guardAttendance } from './attendance.js';
+import { handleAttendance, guardAttendance, ensureAttendance } from './attendance.js';
+import {crewBorrowEnabled,ensureCrewBorrow,prepareCrewBorrow,crewAvailability,crewStatus,crewRetry,canCrewDestination,reconcileCrewReturns,reconcilePersonReturns,borrowedOut} from './crew-borrow.js';
 import { workChainEnabled, guardWorkChain, chainLinked, workMaterials, uploadWorkMaterial, workMaterialCountSql } from './work-chain.js';
 import { workPlanStatements } from './sop-planning.js';
 import { nextOutboundDisplayNo } from './outbound-number.js';
@@ -6969,6 +6970,9 @@ route("v2_ops_job_resume", async (body, env) => {
     const t = now();
     const job = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(parent_job_id).first();
     if (!job) return { ok: false, error: "parent job not found" };
+    if (!['working','awaiting_close'].includes(job.status)) return { ok:false, error:'原任务已结束、取消或暂停，不能恢复计时' };
+    const occupied=await checkWorkerBusy(env,worker_id,parent_job_id);
+    if(occupied)return {ok:false,error:'人员仍在其他任务中，不能重复恢复计时'};
 
     const dup = await findOpenSeg(env, parent_job_id, worker_id);
     if (dup) {
@@ -12699,12 +12703,22 @@ export default {
       try{return json(await handleCourier(body,env,recalcInboundPlanCompletion));}catch(e){return json({ok:false,error:e.message},400);}
     }
     if(action.startsWith('sop_attendance_')){
-      try{return json(await handleAttendance(body,env));}catch(e){return json({ok:false,error:e.message},400);}
+      try{const result=await handleAttendance(body,env);if(result.ok&&crewBorrowEnabled(env)&&['sop_attendance_checkout','sop_attendance_break_start','sop_attendance_break_end'].includes(action)){try{result.crew_returns=await reconcilePersonReturns(env,result.record?.badgeId);}catch{result.crew_return_error='借调归还暂未完成，请在原装卸任务重试归还';}}return json(result);}catch(e){return json({ok:false,error:e.message},400);}
     }
+    if(crewBorrowEnabled(env)&&['sop_crew_availability','sop_crew_status','sop_crew_return','sop_native_start','sop_native_people'].includes(action)){
+      try{
+        await ensureAttendance(env);await ensureCrewBorrow(env);
+        if(action==='sop_crew_availability')return json(await crewAvailability(env,body));
+        if(action==='sop_crew_status')return json(await crewStatus(env,body));
+        if(action==='sop_crew_return')return json(await crewRetry(env,body));
+        env.SOP_CREW_BORROW=await prepareCrewBorrow(env,body);
+      }catch(e){return json({ok:false,error:e.message},409);}
+    }
+    if(action==='v2_ops_job_resume'&&body.parent_job_id)body.job_id=body.parent_job_id;
     try{const attendanceBlock=await guardAttendance(body,env);if(attendanceBlock)return json({ok:false,error:attendanceBlock},409);}catch(e){return json({ok:false,error:e.message},400);}
-    if(action==='sop_native_people'){try{return json(await nativePeople(body,env));}catch(e){return json({ok:false,error:e.message},409);}}
+    if(action==='sop_native_people'){try{const allowed=await canCrewDestination(env,body),result=await nativePeople(body,env);if(allowed){try{result.crew_returns=await reconcileCrewReturns(env,body.job_id);}catch{result.crew_return_error='人员已调整，归还暂未完成，请重试归还';}}return json(result);}catch(e){return json({ok:false,error:e.message},409);}}
     if(action==='sop_native_start'){
-      try{return json(await startNative(body,env,async input=>(await HANDLERS[input.action](input,env)).json(),guardLegacy));}
+      try{const result=await startNative(body,env,async input=>(await HANDLERS[input.action](input,env)).json(),guardLegacy,{feedbackNumber:()=>nextFeedbackDisplayNo(env,kstToday(),'XCXH')});if(result.ok&&env.SOP_CREW_BORROW)result.has_crew_borrows=true;return json(result);}
       catch(e){return json({ok:false,error:e.message},400);}
     }
     env.SOP_GROUP_FINISH = /_(finish|finalize)$/.test(action) && !body.leave_only && await nativeOwner(body,env);
@@ -12721,7 +12735,7 @@ export default {
 
     // SOP rollout is opt-in; old clients and in-flight legacy jobs stay on original routes.
     if (action.startsWith('sop_')) {
-      try { return json(await handleSop(body, env)); }
+      try { const result=await handleSop(body, env);if(result.ok&&action==='sop_get'&&result.record?.kind==='task')result.record.borrowed_out=await borrowedOut(env,result.record.id);if(result.ok&&action==='sop_field_resolve'&&result.task)result.task.borrowed_out=await borrowedOut(env,result.task.id);return json(result); }
       catch (e) { return json({ok:false,error:'新版配置或迁移未就绪，请联系管理员'},503); }
     }
     if (env.SOP_UPGRADE_ENABLED === 'true') {
@@ -12735,7 +12749,18 @@ export default {
     }
 
     try {
-      return await handler(body, env, request);
+      const destination=crewBorrowEnabled(env)&&body.job_id&&await canCrewDestination(env,body);
+      const response=await handler(body, env, request);
+      if(destination&&(/_(finish|finalize|leave)$/.test(action)||action==='v2_ops_job_detail')){
+        const result=await response.clone().json();
+        if(result.ok){try{result.crew_returns=await reconcileCrewReturns(env,body.job_id);}catch{result.crew_return_error='装卸操作已保存，借调归还暂未完成，请重试归还';}
+          if(action==='v2_ops_job_detail'){result.crew_borrows=(await crewStatus(env,body)).items;result.borrowed_out=await borrowedOut(env,body.job_id);}
+          return json(result,response.status);
+        }
+      }else if(crewBorrowEnabled(env)&&action==='v2_ops_job_detail'){
+        const result=await response.clone().json();if(result.ok&&result.can_manage_dispatch){result.borrowed_out=await borrowedOut(env,body.job_id);return json(result,response.status);}
+      }
+      return response;
     } catch (e) {
       return json({ ok: false, error: e.message || "internal error" }, 500);
     }

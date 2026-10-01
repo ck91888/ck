@@ -1,5 +1,6 @@
 // One vehicle is one labor job. Links carry each plan's receipt, never extra jobs.
 import {inboundFlowEnabled, inboundCode} from './inbound-flow.js';
+import {staffedDispatchStatements} from './crew-borrow.js';
 const q=(env,sql,...args)=>env.DB.prepare(sql).bind(...args);
 const rows=async(env,sql,...args)=>(await q(env,sql,...args).all()).results||[];
 const fail=message=>{throw Error(message);};
@@ -34,7 +35,7 @@ async function available(env,plan){
  const existing=await q(env,"SELECT id FROM v2_inbound_plan_jobs WHERE plan_id=? AND job_type='unload' AND status IN ('pending','working','awaiting_close','completed') LIMIT 1",plan.id).first();
  if(existing)fail(no+' 已有卸货任务，请从进行中的任务继续 / 진행 중 작업에서 계속하세요');
 }
-export async function startUnloadTrip(env,body){
+export async function startUnloadTrip(env,body,staff=null){
  if(!inboundFlowEnabled(env))fail('整车卸货未启用');
  const ids=body.plan_ids;
  if(!Array.isArray(ids)||!ids.length||ids.length>20||ids.some(x=>typeof x!=='string'||!x||x.length>120)||new Set(ids).size!==ids.length)fail('请选择1～20张不同入库计划 / 서로 다른 계획 1~20개를 선택하세요');
@@ -60,7 +61,8 @@ export async function startUnloadTrip(env,body){
  statements.push(q(env,'INSERT INTO v2_idempotency_keys(idem_key,action,response_json,created_at) VALUES(?,?,?,?)',request,'v2_unload_job_start',JSON.stringify({ok:true,job_id:jobId,worker_seg_id:segId,is_new_job:true}),t));
  plans.forEach(({p,lines},i)=>statements.push(q(env,'INSERT INTO ck_unload_plan_links(job_id,plan_id,position,plan_version,lines_snapshot) VALUES(?,?,?,?,?)',jobId,p.id,i,p.updated_at,JSON.stringify(lines.map(l=>({id:l.id,unit_type:l.unit_type,planned_qty:l.planned_qty}))))));
  for(const id of ids)statements.push(q(env,"UPDATE v2_inbound_plans SET status='unloading',updated_at=? WHERE id=?",t,id));
- statements.push(q(env,'INSERT INTO v2_ops_job_workers(id,job_id,worker_id,worker_name,joined_at) VALUES(?,?,?,?,?)',segId,jobId,worker,name,t));
+ if(staff){statements.push(...staffedDispatchStatements(env,{...body,job_type:'unload',source_type:'inbound_plan',source_id:ids[0]},staff,jobId,t,{ok:true,job_id:jobId,worker_seg_id:segId,is_new_job:true}));statements.push(q(env,'UPDATE v2_ops_jobs SET active_worker_count=? WHERE id=?',staff.workers.length,jobId));}
+ else statements.push(q(env,'INSERT INTO v2_ops_job_workers(id,job_id,worker_id,worker_name,joined_at) VALUES(?,?,?,?,?)',segId,jobId,worker,name,t));
  try{await env.DB.batch(statements);}catch(e){
   const replay=await q(env,'SELECT * FROM ck_unload_trips WHERE request_id=?',request).first();
   if(replay&&replay.plan_ids_json===fingerprint&&replay.owner_id===env.SOP_REQUEST_USER?.id)return {ok:true,job_id:replay.job_id,is_new_job:false};

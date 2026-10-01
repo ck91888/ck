@@ -3,7 +3,7 @@ var S003 = {
   lang: localStorage.getItem(V2_003_LANG_KEY) || 'zh',
   key: '', role: '', badge: '', operatorId: '', operatorName: '',
   locations: [], materialRows: [], currentMaterial: null, currentAsset: null, ledgerRows: [],
-  purchaseOrders: [], purchaseMaterials: [], purchaseRequestLines: [], purchaseSelectedMaterialId: '', currentPurchase: null, currentShipment: null,
+  purchaseOrders: [], purchaseMaterials: [], purchaseRequestLines: [], purchaseRequestSubmission: null, purchaseSelectedMaterialId: '', currentPurchase: null, currentShipment: null,
   materialImportRows: [], materialImportPreview: null, locationImportRows: [], locationImportPreview: null,
   valuePickerTargetId: '', valuePickerKind: '', locationTarget: null,
   badgeScanner: null, itemScanner: null, receivingScanner: null, locationScanner: null, currentView: 'dashboard', busy: false
@@ -717,6 +717,7 @@ async function ensurePurchaseMaterials(){
 async function openPurchaseRequest(){
   try{await ensurePurchaseMaterials();}catch(e){toast(errorText(e.message),true);return;}
   S003.purchaseRequestLines=[];
+  S003.purchaseRequestSubmission=null;
   S003.purchaseSelectedMaterialId='';
   E('prUrgency').value='normal';E('prReason').value='';E('prNote').value='';E('prMaterialQty').value='1';
   renderPurchaseMaterialSelection();
@@ -778,8 +779,16 @@ async function submitPurchaseRequest(event){
   event.preventDefault();if(S003.busy)return;
   var lines=S003.purchaseRequestLines.filter(function(x){return Number(x.requested_qty)>0;}).map(function(x){return{material_id:x.material_id,requested_qty:Number(x.requested_qty),note:x.note||''};});
   if(!lines.length){toast(T('add_material_hint'),true);return;}
+  var data=Object.assign(operatorPayload(),{urgency:val('prUrgency'),request_reason:val('prReason'),note:val('prNote'),lines:lines});
+  var signature=JSON.stringify(data);
+  // Keep the original request ID when the response is lost after a commit.
+  // Changed form data or an explicitly opened new form starts a new request.
+  if(!S003.purchaseRequestSubmission||S003.purchaseRequestSubmission.signature!==signature){
+    S003.purchaseRequestSubmission={signature:signature,requestId:reqId('preq')};
+  }
+  data.client_req_id=S003.purchaseRequestSubmission.requestId;
   S003.busy=true;
-  try{var res=await api('v2_003_purchase_request_create',Object.assign(operatorPayload(),{urgency:val('prUrgency'),request_reason:val('prReason'),note:val('prNote'),lines:lines,client_req_id:reqId('preq')}));closeModal('purchaseRequestModal');toast(S003.lang==='ko'?'구매 요청이 제출되었습니다':'采购申请已提交');if(isAdmin())openPurchaseDetail(res.id);else loadFieldHome();}
+  try{var res=await api('v2_003_purchase_request_create',data);S003.purchaseRequestSubmission=null;closeModal('purchaseRequestModal');toast(S003.lang==='ko'?'구매 요청이 제출되었습니다':'采购申请已提交');if(isAdmin())openPurchaseDetail(res.id);else loadFieldHome();}
   catch(e){toast(errorText(e.message),true);}finally{S003.busy=false;}
 }
 

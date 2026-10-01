@@ -1,5 +1,6 @@
 // Staging dispatch ownership and validation shared by the original operation routes.
 import {nativeOwner} from './sop-dispatch.js';
+import {borrowedOut,crewBorrowStatements} from './crew-borrow.js';
 const q=(e,s,...a)=>e.DB.prepare(s).bind(...a);
 const rows=async(e,s,...a)=>(await q(e,s,...a).all()).results||[];
 const fail=m=>{throw Error(m);};
@@ -51,16 +52,18 @@ export async function nativePeople(body,env){
  if(workers.length&&!workers.some(w=>w.id===body.lead_id))fail('请选择本次主操作员 / 주 작업자를 선택하세요');
  const t=new Date().toISOString(),prior=JSON.parse(row.state),next={...prior,workers,lead_id:workers.length?body.lead_id:prior.lead_id,last_lead:workers.find(w=>w.id===body.lead_id)||prior.workers.find(w=>w.id===prior.lead_id)||prior.last_lead,last_adjustment:String(body.reason||'')};
  const active=await rows(env,"SELECT * FROM v2_ops_job_workers WHERE job_id=? AND left_at=''",job.id);
- const result={ok:true,job_id:job.id,revision:row.revision+1,lead:next.last_lead};
+ const out=await borrowedOut(env,job.id),away=new Set(out.map(b=>b.worker_id));
+ const result={ok:true,job_id:job.id,revision:row.revision+1,lead:next.last_lead,...(env.SOP_CREW_BORROW?{has_crew_borrows:true}:{})};
  const sql=[q(env,'INSERT INTO sop_events VALUES(?,?,?,?,?,?,?,?,?,?)',request,job.id,row.revision,'sop_native_people',env.SOP_REQUEST_USER.id,env.SOP_REQUEST_USER.name,row.state,JSON.stringify(next),JSON.stringify(result),t),q(env,'UPDATE sop_records SET state=?,revision=revision+1,updated_at=? WHERE id=?',JSON.stringify(next),t,job.id)];
  for(const s of active.filter(s=>!workers.some(w=>w.id===s.worker_id))){
   const minutes=Math.max(0,Math.round((Date.parse(t)-Date.parse(s.joined_at))/6000)/10);
   sql.push(q(env,"UPDATE v2_ops_job_workers SET left_at=?,minutes_worked=?,leave_reason='dispatcher_change' WHERE id=? AND left_at=''",t,minutes,s.id));
   if(job.job_type==='pick_direct')sql.push(q(env,"UPDATE v2_pick_worker_docs SET status='completed',finished_at=?,minutes_worked=? WHERE segment_id=? AND status='working'",t,minutes,s.id));
  }
- for(const w of workers.filter(w=>!active.some(s=>s.worker_id===w.id))){sql.push(q(env,"INSERT INTO v2_ops_job_workers(id,job_id,worker_id,worker_name,joined_at) VALUES(?,?,?,?,?)",'WS-'+crypto.randomUUID(),job.id,w.id,w.name,t));}
+ sql.push(...crewBorrowStatements(env,env.SOP_CREW_BORROW,job.id,t));
+ for(const w of workers.filter(w=>!away.has(w.id)&&!active.some(s=>s.worker_id===w.id))){sql.push(q(env,"INSERT INTO v2_ops_job_workers(id,job_id,worker_id,worker_name,joined_at) VALUES(?,?,?,?,?)",'WS-'+crypto.randomUUID(),job.id,w.id,w.name,t));}
  if(job.job_type==='pick_direct')sql.push(...pickTeamStatements(env,job.id,t));
- sql.push(q(env,"UPDATE v2_ops_jobs SET active_worker_count=(SELECT COUNT(DISTINCT worker_id) FROM v2_ops_job_workers WHERE job_id=? AND left_at=''),status=?,updated_at=? WHERE id=?",job.id,workers.length?'working':'awaiting_close',t,job.id));
+ sql.push(q(env,"UPDATE v2_ops_jobs SET active_worker_count=(SELECT COUNT(DISTINCT worker_id) FROM v2_ops_job_workers WHERE job_id=? AND left_at=''),status=CASE WHEN EXISTS(SELECT 1 FROM v2_ops_job_workers WHERE job_id=? AND left_at='') THEN 'working' ELSE 'awaiting_close' END,updated_at=? WHERE id=?",job.id,job.id,t,job.id));
  // Install after the SOP schema exists (legacy migrations run before SOP tables).
  await env.DB.prepare("CREATE TRIGGER IF NOT EXISTS ck_native_people_active BEFORE INSERT ON sop_events WHEN NEW.action='sop_native_people' AND NOT EXISTS(SELECT 1 FROM v2_ops_jobs WHERE id=NEW.record_id AND status IN ('pending','working','awaiting_close')) BEGIN SELECT RAISE(ABORT,'job_already_finished'); END").run();
  await env.DB.batch(sql);return result;

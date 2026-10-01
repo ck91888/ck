@@ -3,6 +3,7 @@ import {ensureSchema} from './schema-ready.js';
 import { attendanceReport, kstDay } from './attendance-time.js';
 import { EMPLOYEE_SCHEMA, employeeDepartments, employeeAction, isEmployee } from './employee-attendance.js';
 import { laborDepartment } from '../shared/labor-department.js';
+import {sourceActiveWorkers,personHasPendingReturn} from './crew-borrow.js';
 export const ATTENDANCE_SCHEMA=[
  ...EMPLOYEE_SCHEMA,
  `CREATE TABLE IF NOT EXISTS ck_attendance_people(id TEXT PRIMARY KEY,badge_id TEXT NOT NULL UNIQUE,name TEXT NOT NULL,agency TEXT NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('daily','permanent')),enabled INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL)`,
@@ -162,7 +163,7 @@ export async function handleAttendance(b,env){
   const busy=await q(env,"SELECT id FROM v2_ops_job_workers WHERE worker_id=? AND left_at='' LIMIT 1",before.worker_id).first();
   const eligible=[];if(!busy)for(const id of JSON.parse(open.job_ids_json)){const j=await q(env,"SELECT * FROM v2_ops_jobs WHERE id=? AND status IN ('working','awaiting_close')",id).first();if(j)eligible.push(j);}
   // Never restore multiple disputed concurrent jobs. A dispatcher must select one.
-  const resume=eligible.length===1?eligible:[],statements=[updateDay(env,before,after),q(env,"UPDATE ck_attendance_breaks SET ended_at=? WHERE id=? AND ended_at=''",t,open.id)];
+  const resume=eligible.length===1&&!await personHasPendingReturn(env,before.worker_id)?eligible:[],statements=[updateDay(env,before,after),q(env,"UPDATE ck_attendance_breaks SET ended_at=? WHERE id=? AND ended_at=''",t,open.id)];
   for(const j of resume)statements.push(q(env,"INSERT INTO v2_ops_job_workers(id,job_id,worker_id,worker_name,joined_at) VALUES(?,?,?,?,?)",uid('WS'),j.id,before.worker_id,before.name,t));
   statements.push(...countJobs(env,resume.map(j=>j.id),t));return commit(env,b,u,before,after,statements,{ok:true,record:publicDay(after),resumedJobs:resume.map(j=>j.id)});
  }
@@ -192,6 +193,7 @@ export async function guardAttendance(body,env){
  if(action==='sop_task_people'){const row=await q(env,"SELECT state FROM sop_records WHERE id=? AND kind='task'",body.id).first();if(row&&JSON.parse(row.state).status!=='working')return null;}
 
  if(action==='sop_task_start'){const row=await q(env,"SELECT state FROM sop_records WHERE id=? AND kind='task'",body.id).first();workers=row?JSON.parse(row.state).workers||[]:[];}
+ if(['sop_task_start','sop_task_people','sop_native_people'].includes(action)&&jobId)workers=await sourceActiveWorkers(env,jobId,workers);
  if(!workers.length&&(source.worker_id||source.handler_id))workers=[{id:source.worker_id||source.handler_id}];
  const daily=workers.filter(w=>/^(?:DA(?:F)?|EMP)-/.test(w.id||''));if(!daily.length)return null;
  await ensureAttendance(env);const day=kstDay(new Date().toISOString()),ids=JSON.stringify([...new Set(daily.map(w=>w.id))]);
@@ -201,6 +203,6 @@ export async function guardAttendance(body,env){
   q(env,"SELECT DISTINCT worker_id FROM v2_ops_job_workers WHERE worker_id IN (SELECT value FROM json_each(?)) AND left_at='' AND job_id!=?",ids,jobId||'')
  ]);
  const records=new Map(days.results.map(r=>[r.worker_id,r])),resting=new Set(rests.results.map(r=>r.worker_id)),occupied=new Set(busy.results.map(r=>r.worker_id));
- for(const w of daily){const record=records.get(w.id);if(!record)return (w.name||w.id)+' 请先办理当天签到 / 먼저 출근 등록하세요';if(record.signed_out)return record.name+' 已签退，不能开始作业 / 이미 퇴근했습니다';if(resting.has(w.id))return record.name+' 正在休息，请先结束休息 / 휴식을 먼저 종료하세요';if(occupied.has(w.id))return record.name+' 已在另一任务，请先办理交接';}
+ for(const w of daily){const record=records.get(w.id);if(!record)return (w.name||w.id)+' 请先办理当天签到 / 먼저 출근 등록하세요';if(record.signed_out)return record.name+' 已签退，不能开始作业 / 이미 퇴근했습니다';if(resting.has(w.id))return record.name+' 正在休息，请先结束休息 / 휴식을 먼저 종료하세요';if(occupied.has(w.id)&&!env.SOP_CREW_BORROW?.plans.some(p=>p.worker.id===w.id))return record.name+' 已在另一任务，请先办理交接';}
  return null;
 }

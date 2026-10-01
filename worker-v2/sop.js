@@ -4,6 +4,7 @@ import {readBatchMaterials} from './batch-work-materials.js';
 import { workChainEnabled, chainOutboundStatements, chainAllocation, guardWorkChain, workMaterialRead, workMaterials, notifyMaterialChange, assertShippingResult, shippingBasisStatements } from './work-chain.js';
 import { workPlanStatements } from './sop-planning.js';
 import { dispatchAccess } from './dispatch-access.js';
+import {sourceActiveWorkers} from './crew-borrow.js';
 /* SOP pilot: explicit opt-in, revision checked atomic mutations, immutable history.
  * No production migration or legacy job conversion on request paths.
  */
@@ -274,9 +275,10 @@ export async function handleSop(b,env) {
    if(b.action!=='sop_task_review' && !allowedOwner)fail('仅本任务负责人或获授权人员可操作');
    if(b.action==='sop_task_start') {
     if(!['assigned','paused','rework'].includes(d.status))fail('当前状态不能开始');
-    for(const w of d.workers)extra.push(stmt(env,"INSERT INTO v2_ops_job_workers(id,job_id,worker_id,worker_name,joined_at) VALUES(?,?,?,?,?)",uid('WS'),row.id,w.id,w.name,t));
+    const present=await sourceActiveWorkers(env,row.id,d.workers);
+    for(const w of present)extra.push(stmt(env,"INSERT INTO v2_ops_job_workers(id,job_id,worker_id,worker_name,joined_at) VALUES(?,?,?,?,?)",uid('WS'),row.id,w.id,w.name,t));
     d.status='working';d.started_at=d.started_at||t;d.pause_reason='';
-    extra.push(stmt(env,"UPDATE v2_ops_jobs SET status='working',active_worker_count=?,updated_at=? WHERE id=?",d.workers.length,t,row.id));
+    extra.push(stmt(env,"UPDATE v2_ops_jobs SET status='working',active_worker_count=?,updated_at=? WHERE id=?",present.length,t,row.id));
    } else if(b.action==='sop_task_people') {
     if(!['assigned','working','paused','rework'].includes(d.status))fail('当前状态不能调整人员');
     const workers=validateWorkers(b.workers,b.lead_id);required(b.reason,'调整原因');
@@ -284,8 +286,9 @@ export async function handleSop(b,env) {
      const live=await all(env,"SELECT worker_id AS id FROM v2_ops_job_workers WHERE job_id=? AND left_at=''",row.id);
      const removed=live.filter(w=>!workers.some(n=>n.id===w.id));
      for(const w of removed)extra.push(stmt(env,"UPDATE v2_ops_job_workers SET left_at=?,minutes_worked=MAX(0,ROUND((julianday(?)-julianday(joined_at))*1440,1)),leave_reason=? WHERE job_id=? AND worker_id=? AND left_at=''",t,t,text(b.reason),row.id,w.id));
-     for(const w of workers.filter(w=>!live.some(o=>o.id===w.id)))extra.push(stmt(env,"INSERT INTO v2_ops_job_workers(id,job_id,worker_id,worker_name,joined_at) VALUES(?,?,?,?,?)",uid('WS'),row.id,w.id,w.name,t));
-     extra.push(stmt(env,'UPDATE v2_ops_jobs SET active_worker_count=?,updated_at=? WHERE id=?',workers.length,t,row.id));
+     const present=await sourceActiveWorkers(env,row.id,workers);
+     for(const w of present.filter(w=>!live.some(o=>o.id===w.id)))extra.push(stmt(env,"INSERT INTO v2_ops_job_workers(id,job_id,worker_id,worker_name,joined_at) VALUES(?,?,?,?,?)",uid('WS'),row.id,w.id,w.name,t));
+     extra.push(stmt(env,'UPDATE v2_ops_jobs SET active_worker_count=?,updated_at=? WHERE id=?',present.length,t,row.id));
     }
     d.workers=workers;d.lead_id=text(b.lead_id);d.last_adjustment=text(b.reason);
    } else if(b.action==='sop_task_delegate') {

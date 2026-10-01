@@ -25,7 +25,7 @@
    if(result)result={...result,packed_count:result.packed_box_count,operated_box_count:result.total_operated_box_count,description:result.description||saved.remark||''};
    return {external:true,native:r,need:{display_no:j.business_no||j.display_no||j.related_doc_id,title:'外部作业 / 외부 작업',customer:j.customer||'',instructions:'按纸质作业单核对本次操作要求。 / 인쇄된 작업서를 확인하세요.'},
     source:j.outbound_plan_no?{number:j.outbound_plan_no}:null,segments:r.workers,
-    task:{id:j.id,revision:r.dispatch.revision,status:j.status,lead_id:d.lead_id,workers:live.map(w=>({id:w.worker_id,name:w.worker_name})),owner:d.owner,started_at:j.created_at,result,location:''},last_lead:d.last_lead||d.workers.find(w=>w.id===d.lead_id)};
+    task:{id:j.id,revision:r.dispatch.revision,status:j.status,lead_id:d.lead_id,workers:live.map(w=>({id:w.worker_id,name:w.worker_name})),borrowed_out:r.borrowed_out||[],owner:d.owner,started_at:j.created_at,result,location:''},last_lead:d.last_lead||d.workers.find(w=>w.id===d.lead_id)};
   }
   async function resolve(code,detail){
    if(closed)return;
@@ -94,7 +94,7 @@
    }
    if(['assigned','paused','rework'].includes(t.status))action('核对人员并开始 / 인원 확인·시작',()=>people('开始作业 / 작업 시작',t.workers,async staff=>{let revision=t.revision;if(JSON.stringify(staff.workers)!==JSON.stringify(t.workers)||staff.lead_id!==t.lead_id){const r=await write('sop_task_people',{id:t.id,revision,...staff,reason:'开工前核对到位人员'});revision=r.revision;}await write('sop_task_start',{id:t.id,revision});await resolve(t.id);}));
    if(t.status==='working'){
-    action('调整人员 / 인원 변경',()=>people('保存人员 / 인원 저장',live.map(w=>({id:w.worker_id,name:w.worker_name})),async staff=>{await write('sop_task_people',{id:t.id,revision:t.revision,...staff,reason:$('reason').value});await resolve(t.id);},true));
+     action('调整人员 / 인원 변경',()=>people('保存人员 / 인원 저장',live.map(w=>({id:w.worker_id,name:w.worker_name})),async staff=>{await write('sop_task_people',{id:t.id,revision:t.revision,...staff,reason:$('reason').value});await resolve(t.id);},true));
     action('登记休息 / 휴식 등록',()=>window.CKOpenFieldLabor?.());action('暂停作业 / 작업 중지',()=>pause(t));action('填写产出并审核结束 / 산출·검수 완료',()=>finish(t));
    }else if(t.status==='awaiting_review')action('审核原有产出 / 검수',()=>{
     $('editor').innerHTML=`${CKResultSummary(t.result)}${t.result?.location?`<p>${esc(t.result.location)}</p>`:''}${CKResultPhotos(t.result)}<form data-review><label>审核结论<select name="decision"><option value="pass">通过 / 통과</option><option value="return">退回整改 / 재작업</option></select></label><label>审核说明<textarea name="reason" required></textarea></label><button class="ck-primary">保存审核 / 검수 저장</button></form>`;
@@ -103,6 +103,7 @@
    else if(t.status==='completed')$('editor').innerHTML=`<h3>已审核完成 / 검수 완료</h3>${CKResultSummary(t.result)}${CKResultPhotos(t.result)}`;
   }
   function people(label,workers,save,adjust=false,fields=''){
+   workers=workers.map(w=>({...w}));for(const b of current.task?.borrowed_out||[])if(!workers.some(w=>w.id===b.worker_id))workers.push({id:b.worker_id,name:b.worker_name,borrowed:true});
    if(picker)picker.destroy();const host=$('editor')||$('content');
    host.innerHTML=`<form data-people class="ck-work-sheet"><span class="ck-step">02 / SCAN STAFF</span><h3>扫描操作员工牌 / 작업자 명찰</h3>${fields}${CKPeopleFields()}${adjust?'<label>调整原因 / 변경 사유<input data-reason required></label>':''}<button class="ck-primary" type="submit">${label}</button></form>`;
    picker=CKPeoplePicker($('people'),{workers,leadId:current.task?.lead_id,error:$('error'),allowEmpty:external&&adjust});

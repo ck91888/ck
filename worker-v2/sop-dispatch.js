@@ -2,11 +2,13 @@ import {pickTeamStatements} from './native-lifecycle.js';
 import {dispatchAccess} from './dispatch-access.js';
 import {documentCodeError} from '../shared/document-code.js';
 import {loadTripEnabled,startLoadTrip} from './outbound-load-trip.js';
+import {startBorrowableSimple} from './crew-borrow.js';
+import {startUnloadTrip} from './unload-trip.js';
 // Responsible-person assignment around existing operation handlers. Documents,
 // result forms and status transitions remain owned by those handlers.
 import { laborDepartment,startDepartment,departments } from '../shared/labor-department.js';
 const starts=new Set(['v2_unload_job_start','v2_unplanned_unload_start','v2_inbound_job_start','v2_import_delivery_job_start','v2_outbound_load_start','v2_outbound_stock_op_start','v2_issue_handle_start','v2_pick_job_start','v2_pick_job_start_by_docs','v2_bulk_op_job_start','v2_ops_job_start','v2_verify_job_start']);
-export async function startNative(body,env,invoke,guard){
+export async function startNative(body,env,invoke,guard,helpers={}){
  const u=env.SOP_REQUEST_USER;
  if(env.SOP_ENVIRONMENT!=='staging'||!['manager','dispatcher'].includes(u?.role))return {ok:false,error:'请以已授权的派审员登录 / 배정 담당자로 로그인하세요'};
  const p={...body.payload};if(!starts.has(p.action))return {ok:false,error:'无效作业类型'};
@@ -47,9 +49,14 @@ export async function startNative(body,env,invoke,guard){
   const issue=await env.DB.prepare('SELECT biz_class FROM v2_issue_tickets WHERE id=?').bind(p.issue_id).first();department=laborDepartment(issue||{});
  }
  if(!Object.hasOwn(departments,department))return {ok:false,error:'请选择本次用工部门 / 작업 부서를 선택하세요'};
- for(const w of workers){const busy=await env.DB.prepare("SELECT job_id FROM v2_ops_job_workers WHERE worker_id=? AND left_at='' AND job_id!=? LIMIT 1").bind(w.id,allowed||'').first();if(busy)return {ok:false,error:w.name+'仍在另一任务中，请先办理人员交接'};}
+ for(const w of workers){const busy=await env.DB.prepare("SELECT job_id FROM v2_ops_job_workers WHERE worker_id=? AND left_at='' AND job_id!=? LIMIT 1").bind(w.id,allowed||'').first();if(busy&&!env.SOP_CREW_BORROW?.plans.some(x=>x.worker.id===w.id&&x.source.job_id===busy.job_id))return {ok:false,error:w.name+'仍在另一任务中，请先办理人员交接'};}
  p.worker_id=lead.id;p.worker_name=lead.name;p.handler_id=lead.id;p.handler_name=lead.name;
  const blocked=await guard(p,env);if(blocked)return {ok:false,error:blocked};
+ if(env.SOP_CREW_BORROW?.plans.length){
+  const staff={workers,lead_id:lead.id,estimated_minutes:minutes,department};
+  if(p.action==='v2_unload_job_start')return {...await startUnloadTrip(env,{...p,plan_ids:p.plan_ids||[p.plan_id],worker_id:lead.id,worker_name:lead.name},staff),lead,assigned_workers:workers};
+  return startBorrowableSimple(env,p,staff,p.action==='v2_unplanned_unload_start'?await helpers.feedbackNumber():undefined);
+ }
  env.SOP_NATIVE_START=true;
  const result=await invoke(p);if(!result.ok||!result.job_id)return result;
  const job=await env.DB.prepare('SELECT * FROM v2_ops_jobs WHERE id=?').bind(result.job_id).first();

@@ -4,8 +4,9 @@ import {resetAction,TABLES,STAGING_HOST,STAGING_DATABASE,enabled,activeReset} fr
 import entry from '../worker-v2/staging-entry.js';
 import {ACCESS_SCHEMA} from '../worker-v2/access-control.js';
 import {LOAD_SCHEMA} from '../worker-v2/outbound-load-trip.js';
+import {CREW_BORROW_SCHEMA} from '../worker-v2/crew-borrow.js';
 const manager={id:'test-manager',role:'manager'};
-function setup(){const DB=database();for(const s of [...ATTENDANCE_SCHEMA,...ACCESS_SCHEMA,...LOAD_SCHEMA])DB.raw.exec(s);
+function setup(){const DB=database();for(const s of [...ATTENDANCE_SCHEMA,...ACCESS_SCHEMA,...LOAD_SCHEMA,...CREW_BORROW_SCHEMA])DB.raw.exec(s);
  DB.raw.exec("CREATE TABLE v2_schema_meta(key TEXT PRIMARY KEY,value TEXT); INSERT INTO v2_schema_meta VALUES('version','keep'); INSERT INTO v2_003_locations(id,location_name) VALUES('KEEP','location'); INSERT INTO v2_inbound_plans(id,customer,status) VALUES('TEST','fixture','pending'); INSERT INTO v2_idempotency_keys(idem_key,action,response_json,created_at) VALUES('old','test','{}','');");
  const prepare=DB.prepare;let queries=0;
  DB.prepare=sql=>{queries++;assert.ok(!/UNION/i.test(sql),'avoid D1 compound-select limit');return prepare(sql);};
