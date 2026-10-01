@@ -29,6 +29,8 @@ export async function recordNumbers(env,items){
  if(!items.length||env.SOP_UPGRADE_ENABLED!=='true')return items;
  const rows=(await env.DB.prepare(`SELECT s.id,n.display_no,wn.display_no AS work_plan_no,
  COALESCE(ib.display_no,ob.display_no,'') AS source_display_no,
+ COALESCE(ib.status,ob.status,'') AS source_status,
+ CASE WHEN ib.status='cancelled' OR COALESCE(ib.is_deleted,0)=1 OR ob.status='cancelled' THEN 1 ELSE 0 END AS source_cancelled,
  COALESCE(json_extract(w.state,'$.source_type'),json_extract(s.state,'$.source_type'),'') AS source_type
  FROM sop_records s LEFT JOIN sop_document_numbers n ON n.record_id=s.id
  LEFT JOIN sop_records w ON w.id=CASE WHEN s.kind='need' THEN s.id ELSE json_extract(s.state,'$.need_id') END
@@ -37,7 +39,7 @@ export async function recordNumbers(env,items){
  LEFT JOIN v2_outbound_orders ob ON json_extract(w.state,'$.source_type')='outbound' AND ob.id=json_extract(w.state,'$.source_id')
  WHERE s.id IN (SELECT value FROM json_each(?))`).bind(JSON.stringify(items.map(x=>x.id))).all()).results;
  const byId=new Map(rows.map(r=>[r.id,r]));
- return items.map(x=>{const n=byId.get(x.id);return n?{...x,display_no:n.display_no||'',work_plan_no:n.work_plan_no||'',source_display_no:n.source_display_no||'',source_type:x.source_type||n.source_type}:x;});
+ return items.map(x=>{const n=byId.get(x.id);return n?{...x,display_no:n.display_no||'',work_plan_no:n.work_plan_no||'',source_display_no:n.source_display_no||'',source_type:x.source_type||n.source_type,source_status:n.source_status,source_cancelled:!!n.source_cancelled,...(x.kind==='need'&&n.source_cancelled&&!x.result?{status:'cancelled'}:{})}:x;});
 }
 export async function resolveRecordId(env,code){
  if(!/^(?:ZY|RW|HD|WT)-\d{8}-\d{3,}$/i.test(code))return code;

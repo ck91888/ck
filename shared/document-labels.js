@@ -8,6 +8,7 @@
 
  function page(x){
   if(!x?.id||!x.display_no)throw Error(copy('请刷新作业计划后再打印','작업 계획을 새로고침 후 인쇄하세요'));
+  if(x.status==='cancelled'||x.source_cancelled)throw Error(copy('已取消的作业计划不能打印','취소된 작업 계획서는 인쇄할 수 없습니다'));
   qrcode.stringToBytes=qrcode.stringToBytesFuncs['UTF-8'];
   const code=qrcode(0,'M');
   code.addData('CKWORK|'+x.id+'|'+(x.requirement_version||1));
@@ -24,6 +25,16 @@
   const html=`<!doctype html><html lang="${ko()?'ko':'zh'}"><head><meta charset="utf-8"><title>${e(title)} ${copy('作业单','작업 계획서')}</title><style>@page{size:A4;margin:15mm}*{box-sizing:border-box}body{font:16px/1.7 'Microsoft YaHei','Malgun Gothic',sans-serif;color:#111;margin:0;background:#eef2f1}.sheet{width:210mm;min-height:297mm;margin:20px auto;padding:15mm;background:#fff;box-shadow:0 2px 12px #ccd4d0}header{display:flex;justify-content:space-between;align-items:center;border-bottom:3px solid #111;padding-bottom:14px;gap:16px}svg{width:38mm;height:38mm;flex-shrink:0}h1{font-size:25px}h2{font-size:22px}pre{font:inherit;white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid #aaa;padding:18px}.number{font-size:19px;font-weight:700}.version{font-size:13px;color:#444}.line{border-bottom:1px solid #aaa;padding:20px 0}@media print{body{background:#fff}.sheet{width:auto;min-height:0;margin:0;padding:0;box-shadow:none}.sheet:not(:last-child){break-after:page;page-break-after:always}header,pre{break-inside:avoid}}</style></head><body>${pages}</body></html>`;
   w.document.write(html);w.document.close();w.focus();w.print();
  }
- window.CKNeedPrint=x=>print([x],number(x));
- window.CKNeedBatchPrint=g=>print((g?.items||[]).filter(x=>x.status!=='cancelled'),g?.display_no||copy('本批','이번 일괄'));
+ window.CKNeedPrint=x=>window.CKSession?.request
+  ?window.CKSession.request('sop_get',{id:x.id}).then(r=>print([r.record],number(r.record)))
+  :print([x],number(x));
+ const printBatch=g=>print((g?.items||[]).filter(x=>x.status!=='cancelled'&&!x.source_cancelled),g?.display_no||copy('本批','이번 일괄'));
+ window.CKNeedBatchPrint=g=>{
+  if(!window.CKSession?.request)return printBatch(g);
+  const query=g.key?{group_key:g.key}:g.source_type&&g.source_id?{source_type:g.source_type,source_id:g.source_id}:{need_id:g.items?.[0]?.id};
+  return window.CKSession.request('sop_need_groups',query).then(r=>{
+   const fresh=(r.items||[]).find(x=>g.key?x.key===g.key:x.items?.some(i=>i.id===g.items?.[0]?.id));
+   return printBatch(fresh);
+  });
+ };
 })();

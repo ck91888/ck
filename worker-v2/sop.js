@@ -451,10 +451,12 @@ export async function handleSop(b,env) {
    } else if(b.action==='sop_issue_ack') {
     permit(u,row.department,['manager','dispatcher','reviewer']);if(Number(b.requirement_version)!==d.requirement_version)fail('存在更新版本，请重新查看');d.ack_version=d.requirement_version;d.ack_by=u.name;d.ack_at=t;
    } else if(b.action==='sop_issue_feedback') {
-    permit(u,row.department,['manager','dispatcher','reviewer']);if(d.ack_version!==d.requirement_version)fail('请先确认最新要求');
+    permit(u,row.department,['manager','dispatcher','reviewer']);if(d.status==='closed')fail('问题已关闭；新要求请由客服明确重新开启');if(d.ack_version!==d.requirement_version)fail('请先确认最新要求');
     d.messages.push({text:required(b.message,'反馈'),by:u.name,at:t,feedback:true});d.status='responded';
    } else if(b.action==='sop_issue_close') {
-    permit(u,row.department,['manager','service']);if(d.status!=='responded'||d.ack_version!==d.requirement_version)fail('需仓库反馈并确认最新要求');d.status='closed';
+    permit(u,row.department,['manager','service']);if(d.status!=='responded'||d.ack_version!==d.requirement_version)fail('需仓库反馈并确认最新要求');
+     if(d.native){const active=await stmt(env,"SELECT id FROM v2_issue_handle_runs WHERE issue_id=? AND run_status!='completed' LIMIT 1",d.legacy_id).first(),working=await stmt(env,"SELECT w.id FROM v2_ops_job_workers w JOIN v2_ops_jobs j ON j.id=w.job_id WHERE j.related_doc_type='issue' AND j.related_doc_id=? AND w.left_at='' LIMIT 1",d.legacy_id).first();if(active||working)fail('仓库仍在处理，请先完成最新处理轮次及交接');extra.push(stmt(env,"UPDATE sop_records SET revision=CASE WHEN NOT EXISTS(SELECT 1 FROM v2_issue_handle_runs WHERE issue_id=? AND run_status!='completed') AND NOT EXISTS(SELECT 1 FROM v2_ops_job_workers w JOIN v2_ops_jobs j ON j.id=w.job_id WHERE j.related_doc_type='issue' AND j.related_doc_id=? AND w.left_at='') THEN revision ELSE NULL END WHERE id=?",d.legacy_id,d.legacy_id,row.id));}
+     d.status='closed';
    } else if(b.action==='sop_issue_cancel') {
     permit(u,row.department,['manager','service']);const active=await stmt(env,"SELECT id FROM v2_issue_handle_runs WHERE issue_id=? AND run_status!='completed'",d.legacy_id).first();if(active)fail('仓库仍在处理，请先完成交接再取消');d.cancel_reason=required(b.reason,'取消原因');d.status='cancelled';
    } else fail('未知问题操作');
@@ -525,7 +527,7 @@ async function needGroups(env,u,b){
   if(g.source_type==='inbound'){const p=plans.find(p=>p.id===g.source_id);if(p){Object.assign(g,{plan:p,customer:p.customer||g.customer,display_no:p.display_no||'入库计划单号待补充',cargo_summary:p.cargo_summary,plan_date:p.plan_date,expected_arrival:p.expected_arrival});g.lines=lines.filter(l=>l.plan_id===g.source_id);}}
   if(g.source_type==='outbound')g.display_no=outbounds.find(p=>p.id===g.source_id)?.display_no||'出库计划单号待补充';
   g.items.sort((a,b)=>(a.created_at||'').localeCompare(b.created_at||'')||(a.instruction_order||0)-(b.instruction_order||0)||a.title.localeCompare(b.title,'zh',{numeric:true}));
-  const active=g.items.filter(x=>x.status!=='cancelled');g.completed=active.filter(x=>!!x.result||x.status==='closed').length;g.count=active.length;
+  const active=g.items.filter(x=>x.status!=='cancelled'&&!x.source_cancelled);g.completed=active.filter(x=>!!x.result||x.status==='closed').length;g.count=active.length;
   g.status=!active.length?'cancelled':g.completed===active.length?'completed':active.some(x=>x.status!=='pending')?'working':'pending';
  }
  return {ok:true,items,total,offset,more:offset+50<total};

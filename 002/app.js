@@ -4876,6 +4876,7 @@ var _currentVerifyBatchId = null;
 async function loadVerifyList() {
   var body = document.getElementById("checkListBody");
   if (!body) return;
+  var owner=body._ckWorkflowOwner,request=body._ckVerifyListRequest=(body._ckVerifyListRequest||0)+1;
   body.innerHTML = '<span class="muted">加载中...</span>';
   var status = (document.getElementById("checkFilterStatus") || {}).value || "";
   var customer = (document.getElementById("checkFilterCustomer") || {}).value || "";
@@ -4885,6 +4886,7 @@ async function loadVerifyList() {
     status: status, customer_name: customer,
     limit: _chPager.limit, offset: getOffset('check')
   });
+  if(body._ckWorkflowOwner!==owner||body._ckVerifyListRequest!==request)return;
   if (!res || !res.ok) { body.innerHTML = '<span class="muted">加载失败</span>'; return; }
   var items = res.items || [];
   var pagerHtml = renderPager('check', res, 'loadVerifyList');

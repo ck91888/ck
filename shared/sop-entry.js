@@ -14,7 +14,7 @@
  let instance=null,activeRoot=null;
  const detailNeeds={};
  const request=(action,data={})=>CKSession.request(action,data);
- function mount(root,options){if(instance)instance.destroy();activeRoot=root;instance=CKWorkflow(root,options);return instance;}
+ function mount(root,options){root._ckWorkflowOwner=(root._ckWorkflowOwner||0)+1;if(instance)instance.destroy();activeRoot=root;instance=CKWorkflow(root,options);return instance;}
  function button(label,fn){const b=document.createElement('button');b.type='button';b.className='btn btn-outline';b.textContent=label;b.onclick=async()=>{if(b.disabled)return;b.disabled=true;try{await fn();}catch(e){alert(e.message);}finally{b.disabled=false;}};return b;}
  function panel(parent){let el=parent.querySelector('[data-ck-workflow]');if(!el){el=document.createElement('div');el.dataset.ckWorkflow='true';parent.prepend(el);}return el;}
  function block(parent,text){let el=parent.querySelector('.ck-inline-heading');if(el)return el;el=document.createElement('div');el.className='ck-inline-heading';el.innerHTML='<b>'+esc(text)+'</b><div class="ck-buttons"></div>';parent.prepend(el);return el;}

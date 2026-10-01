@@ -24,9 +24,9 @@ function depInput(){const ds=user.role==='manager'?departments:Object.fromEntrie
 function form(title,html,action,build,after){
   planObserver?.disconnect();planObserver=null;$('editor').oninput=null;$('editor').onchange=null;$('modal').classList.toggle('ck-plan-editor',action==='sop_need_create'||action==='sop_need_from_outbound');
   if(copy)copy.bind($('editorTitle'),title);else $('editorTitle').textContent=title;$('fields').innerHTML=html;$('formError').textContent='';$('save').disabled=false;$('cancel').disabled=false;
-  let pending=null,submitting=false;const revision=current?.revision,id=current?.id;
+  let pending=null,pendingValues=null,submitting=false;const revision=current?.revision,id=current?.id;
   $('editor').onsubmit=async e=>{e.preventDefault();if(submitting)return;submitting=true;$('save').disabled=true;$('cancel').disabled=true;
- try{if(!pending){const values=Object.fromEntries(new FormData($('editor')));for(const el of $('editor').elements){if(!el._ckSources||!values[el.name])continue;const selected=el._ckSources.find(x=>x.id===values[el.name]||(x.number||x.label.split(' / ')[0])===values[el.name]);if(!selected)throw Error('请从列表选择有效单据');values[el.name]=selected.id;}pending={...await build(values),client_req_id:crypto.randomUUID()};if(id&&!pending.id&& !action.endsWith('_create')&&action!=='sop_issue_adopt'){pending.id=id;pending.revision=revision;}}
+ try{const values=Object.fromEntries(new FormData($('editor'))),valueKey=JSON.stringify(values);if(valueKey!==pendingValues){pending=null;pendingValues=valueKey;}if(!pending){for(const el of $('editor').elements){if(!el._ckSources||!values[el.name])continue;const selected=el._ckSources.find(x=>x.id===values[el.name]||(x.number||x.label.split(' / ')[0])===values[el.name]);if(!selected)throw Error('请从列表选择有效单据');values[el.name]=selected.id;}pending={...await build(values),client_req_id:crypto.randomUUID()};if(id&&!pending.id&& !action.endsWith('_create')&&action!=='sop_issue_adopt'){pending.id=id;pending.revision=revision;}}
   const result=await api(action,pending);await closeModal();await(after?after(result):id?detail(id):load());notice('已保存 / 저장 완료');
  }catch(e){$('formError').textContent=e.message; // Business errors return a response: allow corrections with a new request.
   if(!(e instanceof TypeError)){pending=null;}
@@ -128,6 +128,7 @@ async function detail(id,individual=!!window.CK_SOP_ROLLOUT?.workChain){const r=
   const changes=(x.changes||[]).map(m=>`<p class="warn">第 ${m.version} 版 · ${esc(m.by)}：${esc(m.text)}</p>`).join('');
   $('detailBody').innerHTML=`<article><h3>要求版本 ${x.requirement_version} / 已确认 ${x.ack_version}</h3>${changes}<h3>沟通与反馈</h3>${(x.messages||[]).map(m=>`<p><b>${esc(m.by)}</b> · ${esc(m.at)}<br>${esc(m.text)}</p>`).join('')}</article>`;
   if(x.status==='cancelled')return;
+   if(x.status==='closed'){if(['manager','service'].includes(user.role))action('修改作业要求并重新开启','sop_issue_change',area('message','最新完整要求及重新开启原因',x.requirement_text||x.title));return;}
   if(options.context!=='field'){action('取消问题','sop_issue_cancel',area('reason','取消原因'));}
   action('追加说明','sop_issue_append',area('message','追加内容'));
   action('修改作业要求','sop_issue_change',area('message','最新完整要求及修改原因（保留原记录）',x.requirement_text||x.title));

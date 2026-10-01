@@ -14,8 +14,12 @@ test('one truck three orders: one labor job, per-order quantities and history, c
  const result=s.finishBody(job,orders);result.order_results[1].box_count=28;await s.ok('v2_outbound_load_finish',result);await s.ok('v2_outbound_load_finish',result);
  for(const [i,o]of orders.entries()){const d=await s.ok('v2_outbound_order_detail',{id:o.id});assert.equal(d.order.status,'shipped');assert.equal(d.order.actual_box_count,result.order_results[i].box_count);assert.equal(d.order.actual_pallet_count,result.order_results[i].pallet_count);assert.ok(d.jobs.some(j=>j.id===job.job_id));assert.equal(JSON.parse(d.jobs.find(j=>j.id===job.job_id).shared_result_json).box_count,result.order_results[i].box_count);assert.equal(d.load_history[0].result.box_count,result.order_results[i].box_count);}
  assert.equal(s.DB.raw.prepare('SELECT COUNT(*) n FROM v2_ops_job_results WHERE job_id=?').get(job.job_id).n,1);assert.equal(count(s,'ck_load_order_claims'),0);assert.equal(s.DB.raw.prepare("SELECT COUNT(*) n FROM v2_ops_job_workers WHERE job_id=? AND left_at='' ").get(job.job_id).n,0);
- const minutes=s.DB.raw.prepare('SELECT SUM(minutes_worked) n FROM v2_ops_job_workers WHERE job_id=?').get(job.job_id).n;assert.ok(Math.abs(minutes-70)<.3);
- const dashboard=await s.ok('sop_dashboard');assert.equal(dashboard.person_hours,1.2,'70 person-minutes across three orders, not 210');assert.equal((await s.ok('sop_dispatch_list')).items.length,0);
+  const minutes=s.DB.raw.prepare('SELECT SUM(minutes_worked) n FROM v2_ops_job_workers WHERE job_id=?').get(job.job_id).n;assert.ok(Math.abs(minutes-70)<.3);
+  // Keep the report fixture within one Korean day even when this test runs at midnight.
+  // Native clock closures and their actual 70-minute total were verified above.
+  const reportEnd=Date.parse('2026-09-20T03:00:00Z');
+  for(const segment of s.DB.raw.prepare('SELECT id,minutes_worked FROM v2_ops_job_workers WHERE job_id=?').all(job.job_id))s.DB.raw.prepare('UPDATE v2_ops_job_workers SET joined_at=?,left_at=? WHERE id=?').run(new Date(reportEnd-segment.minutes_worked*60000).toISOString(),new Date(reportEnd).toISOString(),segment.id);
+  const dashboard=await s.ok('sop_dashboard',{date:'2026-09-20'});assert.equal(dashboard.person_hours,1.2,'70 person-minutes across three orders, not 210');assert.equal((await s.ok('sop_dispatch_list')).items.length,0);
 });
 test('an unreviewed, unissued, changed or occupied order names its reason and cannot be hidden in a multi-order request',async()=>{
  const s=await loadFixture(),a=await s.order('好单',5),bad=await s.order('未审核客户',2,'箱',{review:false}),unissued=await s.order('未下发客户',3,'箱',{issue:false});
