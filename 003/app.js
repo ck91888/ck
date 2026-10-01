@@ -3,7 +3,7 @@ var S003 = {
   lang: localStorage.getItem(V2_003_LANG_KEY) || 'zh',
   key: '', role: '', badge: '', operatorId: '', operatorName: '',
   locations: [], materialRows: [], currentMaterial: null, currentAsset: null, ledgerRows: [],
-  purchaseOrders: [], purchaseMaterials: [], purchaseRequestLines: [], purchaseRequestSubmission: null, purchaseSelectedMaterialId: '', currentPurchase: null, currentShipment: null,
+  purchaseOrders: [], purchaseMaterials: [], purchaseRequestLines: [], purchaseRequestSubmission: null, purchaseSelectedMaterialId: '', currentPurchase: null, currentShipment: null, shipmentSubmission: null,
   materialImportRows: [], materialImportPreview: null, locationImportRows: [], locationImportPreview: null,
   valuePickerTargetId: '', valuePickerKind: '', locationTarget: null,
   badgeScanner: null, itemScanner: null, receivingScanner: null, locationScanner: null, currentView: 'dashboard', busy: false
@@ -438,11 +438,14 @@ function openLocationScanner(trigger){
 
 async function startLocationScan(){
   if(S003.locationScanner){stopLocationScan();return;}E('locationScannerError').textContent='';
-  try{S003.locationScanner=new Html5Qrcode('locationReader');await S003.locationScanner.start({facingMode:'environment'},{fps:10,qrbox:{width:260,height:180}},function(text){applyScannedLocation(text);},function(){});E('locationScanStartBtn').textContent=T('close');}
-  catch(e){E('locationScannerError').textContent=S003.lang==='ko'?'카메라를 열 수 없습니다. 위치 코드를 직접 입력하세요.':'无法打开摄像头，请手动输入位置编码';stopLocationScan();}
+  var scanner;
+  try{scanner=new Html5Qrcode('locationReader');S003.locationScanner=scanner;await scanner.start({facingMode:'environment'},{fps:10,qrbox:{width:260,height:180}},function(text){if(S003.locationScanner===scanner)applyScannedLocation(text);},function(){});
+    if(S003.locationScanner!==scanner){Promise.resolve().then(function(){return scanner.stop();}).catch(function(){}).finally(function(){try{scanner.clear();}catch(e){}});return;}
+    E('locationScanStartBtn').textContent=T('close');}
+  catch(e){if(S003.locationScanner!==scanner)return;E('locationScannerError').textContent=S003.lang==='ko'?'카메라를 열 수 없습니다. 위치 코드를 직접 입력하세요.':'无法打开摄像头，请手动输入位置编码';stopLocationScan();}
 }
 
-function stopLocationScan(){if(!S003.locationScanner)return;var scanner=S003.locationScanner;S003.locationScanner=null;Promise.resolve(scanner.stop()).catch(function(){}).finally(function(){try{scanner.clear();}catch(e){}if(E('locationScanStartBtn'))E('locationScanStartBtn').textContent=T('start_scan');});}
+function stopLocationScan(){if(!S003.locationScanner)return;var scanner=S003.locationScanner;S003.locationScanner=null;Promise.resolve().then(function(){return scanner.stop();}).catch(function(){}).finally(function(){try{scanner.clear();}catch(e){}if(E('locationScanStartBtn'))E('locationScanStartBtn').textContent=T('start_scan');});}
 function applyScannedLocation(code){var x=findActiveLocation(code);if(!x){E('locationScannerError').textContent=errorText('location_not_registered');return;}setLocationControlValue(S003.locationTarget,x.location_code);closeLocationScanner();closeLocationPicker();toast((S003.lang==='ko'?'위치 선택: ':'已选择位置：')+x.location_code);}
 function applyManualLocationCode(){applyScannedLocation(val('manualLocationCode'));}
 function closeLocationScanner(){stopLocationScan();if(E('locationScannerModal'))E('locationScannerModal').classList.add('hidden');if(E('locationPickerModal').classList.contains('hidden'))S003.locationTarget=null;}
@@ -840,6 +843,7 @@ async function submitPurchaseOrder(event){
 }
 
 function openShipmentModal(){
+  S003.shipmentSubmission=null;
   var res=S003.currentPurchase;if(!res)return;var o=res.order;E('shOrderId').value=o.id;E('shTracking').value='';E('shSupplier').value=o.supplier||'';E('shExpectedDate').value=o.expected_date||'';E('shNote').value='';
   var radio=document.querySelector('input[name="deliveryMethod"][value="express"]');if(radio)radio.checked=true;toggleDeliveryMethod();
   var available=res.lines.filter(function(l){return Number(l.ordered_qty)>Number(l.scheduled_qty);});
@@ -851,7 +855,10 @@ function toggleShipmentLine(input){var row=input.closest('[data-line-id]'),qty=r
 function toggleDeliveryMethod(){var method=(document.querySelector('input[name="deliveryMethod"]:checked')||{}).value||'express';E('trackingField').classList.toggle('hidden',method!=='express');E('shTracking').required=method==='express';}
 async function submitShipment(event){
   event.preventDefault();if(S003.busy)return;var method=(document.querySelector('input[name="deliveryMethod"]:checked')||{}).value||'express',items=[],rows=Array.from(E('shLineEditor').querySelectorAll('[data-line-id]'));for(var i=0;i<rows.length;i++){var checked=rows[i].querySelector('.sh-selected'),qtyInput=rows[i].querySelector('.sh-qty');if(!checked.checked)continue;var raw=qtyInput.value.trim(),qty=Number(raw),max=Number(rows[i].dataset.remain);if(raw===''||!Number.isFinite(qty)||qty<=0||qty>max){toast(errorText('invalid_shipment_line'),true);qtyInput.focus();return;}items.push({order_line_id:rows[i].dataset.lineId,expected_qty:qty});}if(!items.length){toast(errorText('shipment_lines_required'),true);return;}S003.busy=true;
-  try{await api('v2_003_purchase_shipment_create',Object.assign(operatorPayload(),{order_id:val('shOrderId'),delivery_method:method,tracking_no:val('shTracking'),supplier:val('shSupplier'),expected_date:val('shExpectedDate'),note:val('shNote'),items:items,client_req_id:reqId('ship')}));closeModal('shipmentModal');toast(T('success'));openPurchaseDetail(val('shOrderId'));}catch(e){toast(errorText(e.message),true);}finally{S003.busy=false;}
+  var data=Object.assign(operatorPayload(),{order_id:val('shOrderId'),delivery_method:method,tracking_no:val('shTracking'),supplier:val('shSupplier'),expected_date:val('shExpectedDate'),note:val('shNote'),items:items}),signature=JSON.stringify(data);
+  if(!S003.shipmentSubmission||S003.shipmentSubmission.signature!==signature)S003.shipmentSubmission={signature:signature,requestId:reqId('ship')};
+  data.client_req_id=S003.shipmentSubmission.requestId;
+  try{await api('v2_003_purchase_shipment_create',data);S003.shipmentSubmission=null;closeModal('shipmentModal');toast(T('success'));openPurchaseDetail(val('shOrderId'));}catch(e){toast(errorText(e.message),true);}finally{S003.busy=false;}
 }
 
 async function closePurchaseOrder(mode){

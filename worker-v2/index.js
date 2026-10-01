@@ -12360,6 +12360,15 @@ route('v2_003_purchase_order_update', async (body, env) => {
 
 route('v2_003_purchase_shipment_create', async (body, env) => {
   if (!isAdmin(body, env)) return err('unauthorized_admin_only', 401);
+  const requestKey = String(body.client_req_id || '').trim();
+  const replay = async () => {
+    if (!requestKey) return null;
+    const cached = await env.DB.prepare("SELECT response_json FROM v2_idempotency_keys WHERE idem_key=? AND action='v2_003_purchase_shipment_create'").bind(requestKey).first();
+    if (!cached || !cached.response_json) return null;
+    try { return JSON.parse(cached.response_json); } catch { return null; }
+  };
+  const cached = await replay();
+  if (cached) return json(cached);
   const orderId = v003Text(body.order_id, 100);
   const method = ['express', 'supplier'].includes(String(body.delivery_method)) ? String(body.delivery_method) : '';
   const tracking = v003Text(body.tracking_no, 180);
@@ -12392,30 +12401,57 @@ route('v2_003_purchase_shipment_create', async (body, env) => {
     items.push({ line_id: lineId, material_id: line.material_id, qty });
   }
   if (!items.length) return err('shipment_lines_required');
-  return withIdem(env, body, 'v2_003_purchase_shipment_create', async () => {
     const shipmentId = v003Id('SHP');
     const shipmentNo = v003HumanNo(method === 'express' ? 'KD' : 'SC');
     const op = v003RequireOperator(body) || { id: 'ADMIN', name: '管理员' };
     const t = now();
+    const guards = [], guardArgs = [];
+    for (const item of items) {
+      guards.push(`EXISTS (SELECT 1 FROM v2_003_purchase_order_lines l WHERE l.id=? AND l.order_id=o.id
+        AND l.ordered_qty+0.0001>=?+COALESCE((SELECT SUM(si.expected_qty)
+          FROM v2_003_purchase_shipment_items si JOIN v2_003_purchase_shipments s ON s.id=si.shipment_id
+          WHERE si.order_line_id=l.id AND s.status!='cancelled'),0))`);
+      guardArgs.push(item.line_id, item.qty);
+    }
+    // The reservation, its items and the replay response commit together.
+    // Recheck live quantities inside the batch instead of trusting the earlier form snapshot.
+    const response = { ok: true, id: shipmentId, shipment_no: shipmentNo };
+    const responseJson = JSON.stringify(response);
     const statements = [env.DB.prepare(`INSERT INTO v2_003_purchase_shipments
       (id, shipment_no, order_id, delivery_method, tracking_no, supplier, expected_date, status,
        received_at, received_by, note, created_by, created_at, updated_at)
-      VALUES(?,?,?,?,?,?,?,'pending','','',?,?,?,?)`)
+      SELECT ?,?,?,?,?,?,?,'pending','','',?,?,?,? FROM v2_003_purchase_orders o
+      WHERE o.id=? AND o.status NOT IN ('completed','cancelled')
+        AND (?='' OR NOT EXISTS (SELECT 1 FROM v2_003_purchase_shipments WHERE tracking_no=?))
+        AND (?='' OR NOT EXISTS (SELECT 1 FROM v2_idempotency_keys WHERE idem_key=?))
+        AND ${guards.join(' AND ')}`)
       .bind(shipmentId, shipmentNo, orderId, method, tracking,
         v003Text(body.supplier || order.supplier, 160), normalizeDateOnly(body.expected_date),
-        v003Text(body.note, 1000), op.name, t, t)];
+        v003Text(body.note, 1000), op.name, t, t, orderId, tracking, tracking, requestKey, requestKey, ...guardArgs)];
     for (const item of items) {
       statements.push(env.DB.prepare(`INSERT INTO v2_003_purchase_shipment_items
         (id, shipment_id, order_line_id, material_id, expected_qty, received_qty, created_at, updated_at)
-        VALUES(?,?,?,?,?,0,?,?)`)
-        .bind(v003Id('PSI'), shipmentId, item.line_id, item.material_id, item.qty, t, t));
+        SELECT ?,?,?,?,?,0,?,? WHERE EXISTS (SELECT 1 FROM v2_003_purchase_shipments WHERE id=?)`)
+        .bind(v003Id('PSI'), shipmentId, item.line_id, item.material_id, item.qty, t, t, shipmentId));
     }
     statements.push(env.DB.prepare(`UPDATE v2_003_purchase_orders
-      SET status=CASE WHEN status='partial_received' THEN status ELSE 'shipped' END, updated_at=? WHERE id=?`)
-      .bind(t, orderId));
-    await env.DB.batch(statements);
-    return { ok: true, id: shipmentId, shipment_no: shipmentNo };
-  });
+      SET status=CASE WHEN status='partial_received' THEN status ELSE 'shipped' END, updated_at=? WHERE id=?
+        AND EXISTS (SELECT 1 FROM v2_003_purchase_shipments WHERE id=?)`)
+      .bind(t, orderId, shipmentId));
+    if (requestKey) statements.push(env.DB.prepare(`INSERT OR IGNORE INTO v2_idempotency_keys
+      (idem_key, action, response_json, created_at)
+      SELECT ?,'v2_003_purchase_shipment_create',?,? WHERE EXISTS (SELECT 1 FROM v2_003_purchase_shipments WHERE id=?)`)
+      .bind(requestKey, responseJson, t, shipmentId));
+    const results = await env.DB.batch(statements);
+    if (!v003Changes(results[0])) {
+      const committed = await replay();
+      if (committed) return json(committed);
+      const latestOrder = await env.DB.prepare('SELECT status FROM v2_003_purchase_orders WHERE id=?').bind(orderId).first();
+      if (!latestOrder || ['completed', 'cancelled'].includes(latestOrder.status)) return err('purchase_order_closed');
+      if (tracking && await env.DB.prepare('SELECT id FROM v2_003_purchase_shipments WHERE tracking_no=? LIMIT 1').bind(tracking).first()) return err('duplicate_tracking_no');
+      return err('shipment_qty_exceeds_ordered');
+    }
+    return json(response);
 });
 
 async function v003ReceivingDetail(env, shipment) {
@@ -12576,14 +12612,11 @@ route('v2_003_receipt_confirm', async (body, env) => {
   statements.push(env.DB.prepare(`UPDATE v2_003_purchase_orders SET
     has_discrepancy=CASE WHEN ?=1 THEN 1 ELSE has_discrepancy END,
     status=CASE
-      WHEN (SELECT COALESCE(SUM(received_qty),0) FROM v2_003_purchase_order_lines
-              WHERE order_id=v2_003_purchase_orders.id)
-        >= (SELECT COALESCE(SUM(ordered_qty),0) FROM v2_003_purchase_order_lines
-              WHERE order_id=v2_003_purchase_orders.id)
-       AND (SELECT COALESCE(SUM(ordered_qty),0) FROM v2_003_purchase_order_lines
-              WHERE order_id=v2_003_purchase_orders.id)>0
+      WHEN EXISTS (SELECT 1 FROM v2_003_purchase_order_lines
+              WHERE order_id=v2_003_purchase_orders.id AND ordered_qty>0)
        AND NOT EXISTS (SELECT 1 FROM v2_003_purchase_order_lines
-              WHERE order_id=v2_003_purchase_orders.id AND ordered_qty<=0)
+              WHERE order_id=v2_003_purchase_orders.id
+                AND (ordered_qty<=0 OR received_qty+0.0001<ordered_qty))
       THEN 'completed' ELSE 'partial_received' END,
     updated_at=? WHERE id=? AND EXISTS (SELECT 1 FROM v2_003_purchase_receipts WHERE id=?)`)
     .bind(hasDiscrepancy ? 1 : 0, t, shipment.order_id, receiptId));
