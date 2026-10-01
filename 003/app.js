@@ -2,7 +2,7 @@
 var S003 = {
   lang: localStorage.getItem(V2_003_LANG_KEY) || 'zh',
   key: '', role: '', badge: '', operatorId: '', operatorName: '',
-  locations: [], materialRows: [], currentMaterial: null, currentAsset: null, ledgerRows: [],
+  locations: [], materialRows: [], currentMaterial: null, currentAsset: null, ledgerRows: [], materialTxnSubmission: null,
   purchaseOrders: [], purchaseMaterials: [], purchaseRequestLines: [], purchaseRequestSubmission: null, purchaseSelectedMaterialId: '', currentPurchase: null, currentShipment: null, shipmentSubmission: null,
   materialImportRows: [], materialImportPreview: null, locationImportRows: [], locationImportPreview: null,
   valuePickerTargetId: '', valuePickerKind: '', locationTarget: null,
@@ -570,10 +570,11 @@ async function deleteMaterial(id) {
 }
 
 function openMaterialTxn(type) {
+  S003.materialTxnSubmission=null;
   var m=S003.currentMaterial&&S003.currentMaterial.item; if(!m)return;
   E('mtMaterialId').value=m.id; E('mtType').value=type; E('mtTitle').textContent=txnLabel(type); E('mtItemInfo').textContent=(S003.lang==='ko'&&m.name_ko?m.name_ko:m.name_zh)+' · '+fmtQty(m.current_qty)+' '+m.unit;
   ['mtQty','mtPurpose','mtDoc','mtNote'].forEach(function(id){E(id).value='';}); E('mtCost').value=m.unit_cost||''; E('mtSupplier').value=m.supplier||''; E('mtRecipient').value=S003.operatorName||''; E('mtDepartment').value='';
-  E('mtQty').min=type==='adjust'?'':'0.01'; E('mtQtyLabel').textContent=type==='stocktake'?T('counted_qty'):(type==='adjust'?T('delta_qty'):T('qty'));
+  E('mtQty').min=type==='adjust'?'':(type==='stocktake'?'0':'0.01'); E('mtQtyLabel').textContent=type==='stocktake'?T('counted_qty'):(type==='adjust'?T('delta_qty'):T('qty'));
   var needsPeople=!['inbound','adjust','stocktake'].includes(type);
   E('mtInboundFields').classList.toggle('hidden',type!=='inbound'); E('mtPeopleFields').classList.toggle('hidden',!needsPeople);
   E('mtRecipient').readOnly=isField(); E('mtRecipient').required=needsPeople; E('mtDepartment').required=needsPeople;
@@ -582,10 +583,11 @@ function openMaterialTxn(type) {
 
 async function submitMaterialTxn(event) {
   event.preventDefault(); if(S003.busy)return; S003.busy=true;
-  var type=val('mtType'), qty=num('mtQty'); var data=Object.assign(operatorPayload(),{material_id:val('mtMaterialId'),txn_type:type,recipient_name:val('mtRecipient'),department:val('mtDepartment'),purpose:val('mtPurpose'),related_doc_no:val('mtDoc'),unit_cost:num('mtCost'),supplier:val('mtSupplier'),note:val('mtNote'),client_req_id:reqId('mtx')});
+  var type=val('mtType'), qty=num('mtQty'); var data=Object.assign(operatorPayload(),{material_id:val('mtMaterialId'),txn_type:type,recipient_name:val('mtRecipient'),department:val('mtDepartment'),purpose:val('mtPurpose'),related_doc_no:val('mtDoc'),unit_cost:num('mtCost'),supplier:val('mtSupplier'),note:val('mtNote')});
   if(type==='adjust')data.delta=qty; else if(type==='stocktake')data.counted_qty=qty; else data.qty=qty;
   if(['issue','use','return'].includes(type)&&val('mtRecipient')===S003.operatorName)data.recipient_id=S003.operatorId;
-  try { await api('v2_003_material_txn',data); closeModal('materialTxnModal'); toast(T('success')); openMaterialDetail(data.material_id); }
+  var signature=JSON.stringify(data);if(!S003.materialTxnSubmission||S003.materialTxnSubmission.signature!==signature)S003.materialTxnSubmission={signature:signature,requestId:reqId('mtx')};data.client_req_id=S003.materialTxnSubmission.requestId;
+  try { await api('v2_003_material_txn',data); S003.materialTxnSubmission=null; closeModal('materialTxnModal'); toast(T('success')); openMaterialDetail(data.material_id); }
   catch(e){toast(errorText(e.message),true);} finally{S003.busy=false;}
 }
 
@@ -647,7 +649,7 @@ function renderMaterialImportPreview(preview,fileName){
 
 async function readMaterialImport(input){
   var file=input.files&&input.files[0];if(!file)return;E('confirmMaterialImportBtn').disabled=true;E('materialImportStatus').className='import-status';E('materialImportStatus').innerHTML='<span>'+esc(T('loading'))+'</span>';E('materialImportPreview').innerHTML='';
-  try{var buffer=await file.arrayBuffer(),wb=XLSX.read(buffer,{type:'array'}),sheet=wb.Sheets[wb.SheetNames[0]],raw=XLSX.utils.sheet_to_json(sheet,{defval:'',raw:false}),rows=mapMaterialImportRows(raw),localErrors=localMaterialImportErrors(rows);if(localErrors.length){renderMaterialImportErrors(localErrors);return;}var preview=await api('v2_003_material_bulk_import',Object.assign(operatorPayload(),{rows:rows,dry_run:1}));S003.materialImportRows=rows;S003.materialImportPreview=preview;renderMaterialImportPreview(preview,file.name);}catch(e){var errors=e.details&&e.details.errors;if(errors&&errors.length)renderMaterialImportErrors(errors);else{E('materialImportStatus').className='import-status error';E('materialImportStatus').textContent=errorText(e.message);}}
+  try{var buffer=await file.arrayBuffer(),wb=XLSX.read(buffer,{type:'array',codepage:/\.csv$/i.test(file.name)?65001:undefined}),sheet=wb.Sheets[wb.SheetNames[0]],raw=XLSX.utils.sheet_to_json(sheet,{defval:'',raw:false}),rows=mapMaterialImportRows(raw),localErrors=localMaterialImportErrors(rows);if(localErrors.length){renderMaterialImportErrors(localErrors);return;}var preview=await api('v2_003_material_bulk_import',Object.assign(operatorPayload(),{rows:rows,dry_run:1}));S003.materialImportRows=rows;S003.materialImportPreview=preview;renderMaterialImportPreview(preview,file.name);}catch(e){var errors=e.details&&e.details.errors;if(errors&&errors.length)renderMaterialImportErrors(errors);else{E('materialImportStatus').className='import-status error';E('materialImportStatus').textContent=errorText(e.message);}}
 }
 
 async function confirmMaterialImport(){if(S003.busy||!S003.materialImportRows.length)return;S003.busy=true;E('confirmMaterialImportBtn').disabled=true;try{var res=await api('v2_003_material_bulk_import',Object.assign(operatorPayload(),{rows:S003.materialImportRows,client_req_id:reqId('mimp')}));toast((S003.lang==='ko'?'일괄 등록 완료: 신규 ':'批量导入完成：新建 ')+res.created_count+(S003.lang==='ko'?', 수정 ':'，更新 ')+res.updated_count);S003.purchaseMaterials=[];closeMaterialImport();loadMaterials();loadDashboard();}catch(e){var errors=e.details&&e.details.errors;if(errors&&errors.length)renderMaterialImportErrors(errors);else toast(errorText(e.message),true);}finally{S003.busy=false;if(!E('materialImportModal').classList.contains('hidden'))E('confirmMaterialImportBtn').disabled=false;}}
@@ -942,7 +944,7 @@ function renderLocationImportPreview(preview,fileName){
 
 async function readLocationImport(input){
   var file=input.files&&input.files[0];if(!file)return;E('confirmLocationImportBtn').disabled=true;E('locationImportStatus').className='import-status';E('locationImportStatus').innerHTML='<span>'+esc(T('loading'))+'</span>';E('locationImportPreview').innerHTML='';
-  try{var buffer=await file.arrayBuffer(),wb=XLSX.read(buffer,{type:'array'}),sheet=wb.Sheets[wb.SheetNames[0]],raw=XLSX.utils.sheet_to_json(sheet,{defval:'',raw:false}),rows=mapLocationImportRows(raw),localErrors=localLocationImportErrors(rows);if(localErrors.length){renderLocationImportErrors(localErrors);return;}var preview=await api('v2_003_location_bulk_import',Object.assign(operatorPayload(),{rows:rows,dry_run:1}));S003.locationImportRows=rows;S003.locationImportPreview=preview;renderLocationImportPreview(preview,file.name);}catch(e){var errors=e.details&&e.details.errors;if(errors&&errors.length)renderLocationImportErrors(errors);else{E('locationImportStatus').className='import-status error';E('locationImportStatus').textContent=errorText(e.message);}}
+  try{var buffer=await file.arrayBuffer(),wb=XLSX.read(buffer,{type:'array',codepage:/\.csv$/i.test(file.name)?65001:undefined}),sheet=wb.Sheets[wb.SheetNames[0]],raw=XLSX.utils.sheet_to_json(sheet,{defval:'',raw:false}),rows=mapLocationImportRows(raw),localErrors=localLocationImportErrors(rows);if(localErrors.length){renderLocationImportErrors(localErrors);return;}var preview=await api('v2_003_location_bulk_import',Object.assign(operatorPayload(),{rows:rows,dry_run:1}));S003.locationImportRows=rows;S003.locationImportPreview=preview;renderLocationImportPreview(preview,file.name);}catch(e){var errors=e.details&&e.details.errors;if(errors&&errors.length)renderLocationImportErrors(errors);else{E('locationImportStatus').className='import-status error';E('locationImportStatus').textContent=errorText(e.message);}}
 }
 
 async function confirmLocationImport(){if(S003.busy||!S003.locationImportRows.length)return;S003.busy=true;E('confirmLocationImportBtn').disabled=true;try{var res=await api('v2_003_location_bulk_import',Object.assign(operatorPayload(),{rows:S003.locationImportRows,client_req_id:reqId('limp')}));toast((S003.lang==='ko'?'위치 일괄 등록 완료: 신규 ':'位置批量导入完成：新建 ')+res.created_count+(S003.lang==='ko'?', 수정 ':'，更新 ')+res.updated_count);closeLocationImport();await loadLocations(true);}catch(e){var errors=e.details&&e.details.errors;if(errors&&errors.length)renderLocationImportErrors(errors);else toast(errorText(e.message),true);}finally{S003.busy=false;if(!E('locationImportModal').classList.contains('hidden'))E('confirmLocationImportBtn').disabled=false;}}
