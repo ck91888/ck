@@ -48,6 +48,9 @@ const pairs=[
  ['预计可出库总数量','예상 출고 가능 총수량'],['出库成果单位','출고 산출 단위'],['预约数量','예약 수량'],['调整说明','변경 설명'],['保存出库数量与单位','출고 수량·단위 저장'],
  ['客服提供给仓库的作业资料','고객 담당자가 창고에 제공하는 작업 자료'],['托唛、出库单和产品条码标签由客服上传，仓库在这里下载。','팔레트 라벨, 출고 서류, 상품 바코드 라벨은 고객 담당자가 올리고 창고에서 내려받습니다.'],['暂无客服作业资料','고객 담당자 자료가 없습니다'],['上传客服资料','고객 담당자 자료 업로드'],
  ['仓库反馈给客服的作业说明／明细','창고에서 고객 담당자에게 전달하는 작업 설명·명세'],['现场上传作业说明或明细；办公室收到仓库反馈后也可代录，客服在这里查看下载。','현장에서 작업 설명이나 명세를 올립니다. 사무실에서도 창고 피드백을 대신 등록할 수 있으며 고객 담당자가 여기에서 확인합니다.'],['暂无仓库反馈','창고 작업 피드백이 없습니다'],['上传作业说明／明细','작업 설명·명세 업로드'],['代录仓库反馈','창고 피드백 대리 등록']
+, ['新增库存作业计划','재고 작업 계획 등록'],['库存来源','재고 출처'],['关联货物','연결 화물'],['作业要求与货量','작업 지시·화물 수량'],['出库预约（可选）','출고 예약 (선택)'],
+ ['供应链系统单号（必填）','외부 시스템 번호 (필수)'],['供应链系统单号（选填）','외부 시스템 번호 (선택)'],['箱唛／货物范围（选填）','박스 마크·화물 범위 (선택)'],['货物位置（选填）','화물 위치 (선택)'],['本计划货量（已知则填）','작업 전 수량 (확인 시 입력)'],['货量单位','화물 수량 단위'],['请选择单位','단위를 선택하세요'],['要求完成时间（选填）','완료 기한 (선택)'],['追加作业原因（必填）','추가 작업 사유 (필수)'],
+ ['使用已有库存；入库作业请从入库计划建立，人员在现场派工时选择。','기존 재고 작업입니다. 입고 작업은 입고계획에서 등록하고 작업자는 현장 배정 시 선택하세요.'],['沿用原单据客户和来源，人员在现场派工时选择。','기존 문서의 고객·출처를 사용합니다. 작업자는 현장에서 배정하세요.'],['填写作业前的货量；未预约可暂不填。直接转发或同时预约出库时，数量和单位必填。','작업 전 화물 수량입니다. 미예약 시 비워둘 수 있습니다. 직접 전달·출고 예약 시 수량과 단위가 필수입니다.']
 ];
 const keys=new Map();pairs.forEach(([source,ko],i)=>{const key='ck_plan_'+i;keys.set(source,key);LANG.zh[key]=source.replace(/\s*(?:\/|·)\s*[가-힣].*$/u,'');LANG.ko[key]=ko;});
 const key=value=>keys.get(value),text=value=>key(value)?L(key(value)):value;
@@ -60,6 +63,11 @@ const original=window.applyLang;window.applyLang=function(...args){const result=
 window.CKPlanCopy={text,html,attrs,bind,counts};
 // Newly opened panels inherit the current language without remounting forms.
 // The observer only touches our explicit static labels, never entered values.
-function translate(root){if(root.nodeType!==1)return;const items=root.matches('[data-i18n^="ck_plan_"]')?[root]:[];items.push(...root.querySelectorAll('[data-i18n^="ck_plan_"]'));for(const el of items){const value=L(el.dataset.i18n);if(el.textContent!==value)el.textContent=value;}}
+function translate(root){if(root.nodeType!==1)return;const items=root.matches('[data-i18n^="ck_plan_"]')?[root]:[];items.push(...root.querySelectorAll('[data-i18n^="ck_plan_"]'));for(const el of items){
+ // Older templates contain ordinal keys. Resolve their original visible caption
+ // before translating, so adding/removing a label cannot turn an action into a unit.
+ const caption=el.textContent.trim();if(caption!==L(el.dataset.i18n)){const resolved=keys.get(caption)||[...keys.values()].find(k=>LANG.zh[k]===caption||LANG.ko[k]===caption);if(resolved)el.dataset.i18n=resolved;}
+ const value=L(el.dataset.i18n);if(el.textContent!==value)el.textContent=value;
+}}
 new MutationObserver(changes=>{for(const change of changes)for(const node of change.addedNodes)translate(node);}).observe(document.body,{childList:true,subtree:true});
 })();

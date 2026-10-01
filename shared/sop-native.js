@@ -11,7 +11,7 @@ const entry=new URLSearchParams(options);
 const labels={need:'作业计划 / 작업 계획',task:'负责人派工 / 작업 배정',issue:'问题沟通 / 이슈',check:'出库核对 / 출고 확인',dashboard:'管理看板 / 관리 현황'};
 const departments={bulk:'大货 / 대량',direct_ship:'代发 / 출고대행',import:'进口 / 수입'};
 const states={pending:'待安排',assigned:'已分配',working:'作业中',paused:'已暂停',awaiting_review:'待审核',rework:'待整改',completed:'审核通过',waiting_customer:'待客户安排',linked:'已关联出库',closed:'已关闭',cancelled:'已作废',open:'处理中',responded:'已反馈'};
-let user=window.CKSession?.user,tab=Object.hasOwn(labels,entry.get('tab'))?entry.get('tab'):'need',offset=0,current=null,scanner=null,staffPicker=null,poll=null,listSnapshot='',currentGroup='';
+ let user=window.CKSession?.user,tab=Object.hasOwn(labels,entry.get('tab'))?entry.get('tab'):'need',offset=0,current=null,scanner=null,staffPicker=null,poll=null,listSnapshot='',currentGroup='',planObserver=null;
 async function api(action,data={}){const result=await window.CKSession.request(action,data);if(destroyed)throw Error('页面已切换');return result;}
 function notice(s){if(!destroyed)$('notice').textContent=s;}
 function btn(label,fn,cls=''){const b=document.createElement('button');if(copy)copy.bind(b,label);else b.textContent=label;b.className=cls;b.type='button';b.onclick=()=>Promise.resolve().then(fn).catch(e=>notice(e.message));return b;}
@@ -19,21 +19,22 @@ function input(name,label,type='text',value='',required=true){return `<label>${m
 function area(name,label,value='',required=true){return `<label>${mark(label)}<textarea name="${name}" ${required?'required':''}>${esc(value)}</textarea></label>`;}
 function select(name,label,values,value=''){return `<label>${mark(label)}<select name="${name}">${Object.entries(values).map(([k,v])=>`<option${copy?copy.attrs(v):''} value="${esc(k)}" ${k===value?'selected':''}>${esc(copy?copy.text(v):v)}</option>`).join('')}</select></label>`;}
 function depInput(){const ds=user.role==='manager'?departments:Object.fromEntries((user.departments||[]).map(k=>[k,departments[k]||k]));return select('department','部门 / 부서',ds);}
-async function closeModal(){const modal=$('modal'),picker=staffPicker;staffPicker=null;if(picker)await picker.destroy();if(scanner){await scanner.stop().catch(()=>{});scanner=null;}modal?.close();}
+ async function closeModal(){planObserver?.disconnect();planObserver=null;const modal=$('modal'),picker=staffPicker;staffPicker=null;if(picker)await picker.destroy();if(scanner){await scanner.stop().catch(()=>{});scanner=null;}modal?.close();}
 // Retry the identical request after a transport error. Never create a second mutation id.
 function form(title,html,action,build,after){
- if(copy)copy.bind($('editorTitle'),title);else $('editorTitle').textContent=title;$('fields').innerHTML=html;$('formError').textContent='';$('save').disabled=false;
- let pending=null;const revision=current?.revision,id=current?.id;
- $('editor').onsubmit=async e=>{e.preventDefault();$('save').disabled=true;
+  planObserver?.disconnect();planObserver=null;$('editor').oninput=null;$('editor').onchange=null;$('modal').classList.toggle('ck-plan-editor',action==='sop_need_create'||action==='sop_need_from_outbound');
+  if(copy)copy.bind($('editorTitle'),title);else $('editorTitle').textContent=title;$('fields').innerHTML=html;$('formError').textContent='';$('save').disabled=false;$('cancel').disabled=false;
+  let pending=null,submitting=false;const revision=current?.revision,id=current?.id;
+  $('editor').onsubmit=async e=>{e.preventDefault();if(submitting)return;submitting=true;$('save').disabled=true;$('cancel').disabled=true;
  try{if(!pending){const values=Object.fromEntries(new FormData($('editor')));for(const el of $('editor').elements){if(!el._ckSources||!values[el.name])continue;const selected=el._ckSources.find(x=>x.id===values[el.name]||(x.number||x.label.split(' / ')[0])===values[el.name]);if(!selected)throw Error('请从列表选择有效单据');values[el.name]=selected.id;}pending={...await build(values),client_req_id:crypto.randomUUID()};if(id&&!pending.id&& !action.endsWith('_create')&&action!=='sop_issue_adopt'){pending.id=id;pending.revision=revision;}}
   const result=await api(action,pending);await closeModal();await(after?after(result):id?detail(id):load());notice('已保存 / 저장 완료');
  }catch(e){$('formError').textContent=e.message; // Business errors return a response: allow corrections with a new request.
   if(!(e instanceof TypeError)){pending=null;}
- }finally{$('save').disabled=false;}};
+  }finally{submitting=false;$('save').disabled=false;$('cancel').disabled=false;}};
  $('modal').showModal();
 }
 $('cancel').onclick=closeModal;
-$('modal').addEventListener('cancel',e=>{e.preventDefault();closeModal();});
+ $('modal').addEventListener('cancel',e=>{e.preventDefault();if(!$('save').disabled)closeModal();});
 $('refresh').onclick=()=> (current?detail(current.id,true):currentGroup?groupDetail({group_key:currentGroup}):load()).catch(e=>notice(e.message));
 function renderTabs(){}
 let checkingUpdates=false;
@@ -68,8 +69,22 @@ async function groupDetail(query){
  const table=$('groupTable').querySelector('table');const th=document.createElement('th');th.textContent='操作';table.querySelector('thead tr').append(th);
  Array.from(table.querySelectorAll('tbody tr')).forEach((tr,i)=>{const td=document.createElement('td');td.append(btn(options.context==='field'?'派工／操作':'查看／处理',()=>detail(g.items[i].id,true),'light'));tr.append(td);});
 }
-function create(kind){current=null;
- if(kind==='need'){form('新建作业计划',depInput()+input('title','作业名称')+input('customer','客户')+select('source_type','关联来源',{inventory:'库内库存',inbound:'入库计划'})+input('supply_chain_no','供应链系统单号（库内库存必填）','text','',false)+input('scope_text','箱唛／货物范围','text','',false)+input('planned_quantity','本作业计划数量（同步出库必填）','number','',false)+select('planned_unit','计划单位',{箱:'箱',件:'件',托:'托'})+input('source_id','关联单据（可下拉选择）','text','',false)+select('operation_kind','作业类型 / 작업 종류',{operation:'需操作／加工',direct_forward:'直接转发（无加工）'})+area('instructions','操作要求')+input('owner','接单负责人')+input('deadline','要求完成时间','datetime-local','',false)+input('location','货物位置','text','',false)+input('reason','已有计划时的追加原因','text','',false)+'<div id=optionalOutbounds></div>','sop_need_create',v=>({...v,outbounds:readObs()}),r=>detail(r.id));const readObs=CKOptionalOutbounds($('optionalOutbounds'));$('editor').elements.source_type.onchange=e=>{if(e.target.value!=='inventory')attachSources('source_id',e.target.value);else $('editor').elements.source_id.value='';};}
+ function needFields({source='inventory',doc={},supplement=false}={}){
+  const section=(title,body)=>'<fieldset class="ck-plan-section"><legend>'+mark(title)+'</legend><div class="ck-plan-grid">'+body+'</div></fieldset>';
+  const origin=source==='inventory'?'<input type="hidden" name="source_type" value="inventory"><p class="ck-plan-wide muted">'+mark('使用已有库存；入库作业请从入库计划建立，人员在现场派工时选择。')+'</p>':'<p class="ck-plan-wide muted">'+mark('关联来源')+'：'+esc(doc.display_no||doc.title||source)+'。'+mark('沿用原单据客户和来源，人员在现场派工时选择。')+'</p>';
+  return section(source==='inventory'?'库存来源':'关联货物',origin+depInput()+input('customer','客户','text',doc.customer||'')+input('supply_chain_no',source==='inventory'?'供应链系统单号（必填）':'供应链系统单号（选填）','text',doc.supply_chain_no||'',source==='inventory')+input('scope_text','箱唛／货物范围（选填）','text','',false)+input('location','货物位置（选填）','text','',false))+
+   section('作业要求与货量',input('title','作业名称','text',doc.title?'关联作业 '+doc.title:'')+select('operation_kind','作业类型 / 작업 종류',{operation:'需操作／加工',direct_forward:'直接转发（无加工）'})+'<div class="ck-plan-wide">'+area('instructions','操作要求',doc.instructions||'')+'</div>'+input('planned_quantity','本计划货量（已知则填）','number','',false)+select('planned_unit','货量单位',{'':'请选择单位',箱:'箱',件:'件',托:'托'})+'<p class="ck-plan-wide muted" data-quantity-help>'+mark('填写作业前的货量；未预约可暂不填。直接转发或同时预约出库时，数量和单位必填。')+'</p>'+input('deadline','要求完成时间（选填）','datetime-local','',false)+(supplement?input('reason','追加作业原因（必填）'):'') )+
+   section('出库预约（可选）','<div id="optionalOutbounds" class="ck-plan-wide ck-work-plans"></div>');
+ }
+ function setupNeedFields(){
+  const editor=$('editor'),quantity=editor.elements.planned_quantity,unit=editor.elements.planned_unit;
+  quantity.min='1';quantity.step='1';
+  const read=CKOptionalOutbounds($('optionalOutbounds'),{unit:()=>unit.value,unitControl:unit});
+  const sync=()=>{const booking=!!$('optionalOutbounds').querySelector('[data-outbound-row]'),required=booking||editor.elements.operation_kind.value==='direct_forward';quantity.required=required;unit.required=required||!!quantity.value;};
+  editor.oninput=sync;editor.onchange=sync;planObserver=new MutationObserver(sync);planObserver.observe($('optionalOutbounds'),{childList:true,subtree:true});sync();return read;
+ }
+ function create(kind){current=null;
+  if(kind==='need'){let readObs;form('新增库存作业计划',needFields(),'sop_need_create',v=>({...v,outbounds:readObs()}),r=>detail(r.id));readObs=setupNeedFields();}
  if(kind==='task')taskForm();
  if(kind==='check')form('建立出库日期总清单',input('ship_date','出库日期','date'),'sop_check_create',v=>v,r=>detail(r.id));
  if(kind==='issue')form('接入现有问题',input('legacy_id','现有问题系统ID')+'<p class="warn">只接入没有正在进行处理轮次的问题。接入后统一在新版沟通，历史保留。</p>','sop_issue_adopt',v=>v,r=>detail(r.id));
@@ -164,8 +179,9 @@ async function openSource(){
  if(linked.items.length&&!options.supplement){await load();notice('此单已有作业计划，请引用已有记录。');for(const x of linked.items)$('content').prepend(btn('打开关联作业：'+x.title,()=>detail(x.id)));return;}
  const r=await api('sop_source_detail',{source_id,type:source});const doc=r.source;
  await load();
- form(source==='outbound'?'将出库操作统一为关联作业':'从入库计划创建作业计划',depInput()+input('title','作业名称','text','关联作业 '+doc.title)+input('customer','客户','text',doc.customer)+select('operation_kind','作业类型 / 작업 종류',{operation:'需操作／加工',direct_forward:'直接转发（无加工）'})+area('instructions','操作要求',doc.instructions)+input('owner','接单负责人')+input('scope_text','箱唛／货物范围','text','',false)+input('supply_chain_no','供应链系统单号','text','',false)+input('planned_quantity','计划数量（同步出库必填）','number','',false)+select('planned_unit','计划单位',{箱:'箱',件:'件',托:'托'})+'<div id=optionalOutbounds></div>'+input('location','货物位置','text','',false)+input('deadline','完成期限','datetime-local','',false)+(options.supplement?input('reason','新增作业原因（说明与原作业的区别）'):''),source==='outbound'?'sop_need_from_outbound':'sop_need_create',v=>({...v,source_id,source_type:source,outbounds:readObs()}),r=>detail(r.id));const readObs=CKOptionalOutbounds($('optionalOutbounds'));
- $('editor').elements.department.value=doc.department;
+  let readObs;form(source==='outbound'?'将出库操作统一为关联作业':'从入库计划创建作业计划',needFields({source,doc,supplement:options.supplement}),source==='outbound'?'sop_need_from_outbound':'sop_need_create',v=>({...v,source_id,source_type:source,outbounds:readObs()}),r=>detail(r.id));readObs=setupNeedFields();
+  $('editor').elements.department.value=doc.department;
+  $('editor').elements.customer.readOnly=true;
 }
 function scanForm(record,pallet){
  current=record;

@@ -28,3 +28,13 @@ body.ck-stage-home{display:block;min-height:100vh}body.ck-stage-home .nav{max-wi
 .ck-inline-heading.ck-inbound-work{background:#fff;border:1px solid #e8e8e8;border-radius:14px;padding:14px}.ck-inbound-work .ck-buttons{margin-top:10px}.ck-inbound-work button{font-size:13px;color:#1565c0;background:#fff;border:1px solid #ddd;border-radius:8px}
 #mainTabs button[data-tab=need]{border-radius:0;padding:10px 18px;margin:0;border-top:0;border-left:0;border-right:0}
 @media(max-width:650px){.ck-plan-facts{grid-template-columns:1fr}.ck-group-heading{flex-wrap:wrap}.ck-work-table{min-width:600px}}
+.ck-workflow dialog.ck-plan-editor{width:min(900px,96vw)!important;padding:0!important;max-height:92dvh!important;overscroll-behavior:contain}
+.ck-plan-editor #editorTitle{position:sticky;top:0;z-index:2;margin:0;padding:18px 22px;background:#fff;border-bottom:1px solid #e2e8e5}
+.ck-plan-editor #fields{padding:16px 22px}.ck-plan-editor .ck-plan-section{min-width:0;margin:0 0 16px;padding:14px 16px;border:1px solid #dce5e0;border-radius:10px;background:#fafcfb}
+.ck-plan-editor .ck-plan-section legend{padding:0 8px;font-size:15px;font-weight:700;color:#17584d}.ck-plan-editor .ck-plan-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px 18px}
+.ck-plan-editor .ck-plan-grid>label{margin:0}.ck-plan-editor .ck-plan-wide{grid-column:1/-1;min-width:0}.ck-plan-editor textarea{min-height:84px}.ck-plan-editor .muted{font-weight:400;line-height:1.6}
+.ck-plan-editor #editor>.toolbar{position:sticky;bottom:0;z-index:2;display:flex;justify-content:flex-end;margin:0;padding:12px 22px;background:#fff;border-top:1px solid #e2e8e5}
+.ck-plan-editor #formError:not(:empty){padding:12px 22px;margin:0;background:#fff4f0}.ck-plan-editor [data-ob-unit]{font-weight:700;color:#17584d}
+.ck-plan-editor [data-outbound-row]>label:has(textarea){grid-column:1/-1}
+.ck-system [data-ck-legacy-stock][hidden]{display:none!important}
+@media(max-width:650px){.ck-workflow dialog.ck-plan-editor{width:calc(100vw - 16px)!important;max-width:none;max-height:94dvh!important}.ck-plan-editor #fields{padding:12px}.ck-plan-editor .ck-plan-section{padding:12px}.ck-plan-editor .ck-plan-grid{grid-template-columns:1fr;gap:12px}.ck-plan-editor #editorTitle{padding:14px}.ck-plan-editor #editor>.toolbar{padding:12px}.ck-plan-editor button{min-height:44px}}

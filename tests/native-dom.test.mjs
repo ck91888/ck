@@ -33,6 +33,34 @@ async function fixture(){
 }
 async function until(condition,errors=[]){for(let i=0;i<100;i++){if(condition())return;await new Promise(r=>setTimeout(r,10));}throw Error('DOM condition timeout: '+errors.join('; '));}
 const opts={skip:!runtime};
+test('inventory-plan editor keeps unbooked work independent, defers crew assignment and clears cancelled drafts',opts,async()=>{
+ const f=await fixture();f.env.SOP_WORK_CHAIN_ENABLED='true';const p=await f.page('/002/?tab=need');
+ try{await until(()=>p.d.querySelector('.ck-needs-tools'),p.errors);p.d.querySelector('.ck-needs-tools button:nth-child(2)').click();await until(()=>p.d.querySelector('dialog[open] [name=title]'),p.errors);const editor=p.d.querySelector('#editor');
+  assert.equal(editor.querySelector('[name=owner],[name=status],[name=source_id],[name=reason]'),null);assert.equal(editor.elements.source_type.value,'inventory');assert.equal(editor.elements.supply_chain_no.required,true);assert.equal(editor.elements.planned_unit.value,'');assert.equal(editor.elements.planned_quantity.required,false);
+  editor.elements.operation_kind.value='direct_forward';editor.elements.operation_kind.dispatchEvent(new p.w.Event('change',{bubbles:true}));assert.equal(editor.elements.planned_quantity.required,true);assert.equal(editor.elements.planned_unit.required,true);assert.equal(editor.checkValidity(),false);
+  p.d.querySelector('#cancel').click();await until(()=>!p.d.querySelector('dialog[open]'));p.d.querySelector('.ck-needs-tools button:nth-child(2)').click();await until(()=>p.d.querySelector('dialog[open]'),p.errors);assert.equal(editor.elements.operation_kind.value,'operation');assert.equal(editor.elements.planned_quantity.value,'');
+  for(const [name,value]of Object.entries({title:'QA-DOM库存无预约',customer:'QA-DOM合成客户',supply_chain_no:'QA-DOM-STOCK-01',instructions:'整理后反馈，等客户预约'}))editor.elements[name].value=value;
+  editor.requestSubmit();await until(()=>!p.d.querySelector('dialog[open]'),p.errors);const row=f.env.DB.raw.prepare("SELECT state FROM sop_records WHERE kind='need' AND json_extract(state,'$.title')='QA-DOM库存无预约'").get();assert.ok(row);const data=JSON.parse(row.state);assert.equal(data.status,'pending');assert.equal(data.source_type,'inventory');assert.deepEqual(data.links,[]);assert.equal(data.created_by,'测试负责人');assert.deepEqual(p.errors,[]);
+ }finally{p.w.close();}
+});
+test('inventory booking quantity uses its labelled plan unit; excess allocations roll back and corrected saves remain linked',opts,async()=>{
+ const f=await fixture();f.env.SOP_WORK_CHAIN_ENABLED='true';const p=await f.page('/002/?tab=need');
+ try{await until(()=>p.d.querySelector('.ck-needs-tools'),p.errors);p.d.querySelector('.ck-needs-tools button:nth-child(2)').click();await until(()=>p.d.querySelector('dialog[open] [name=title]'),p.errors);const editor=p.d.querySelector('#editor');
+  for(const [name,value]of Object.entries({title:'QA-DOM库存预约',customer:'QA-DOM合成客户',supply_chain_no:'QA-DOM-STOCK-02',instructions:'三托整理，预约两托',planned_quantity:'3',planned_unit:'托'}))editor.elements[name].value=value;
+  await new Promise(r=>setTimeout(r,0));assert.match(p.d.querySelector('#optionalOutbounds>button').textContent,/客户已约出库/);assert.ok(!p.d.querySelector('#optionalOutbounds>button').textContent.includes('待安排'));
+  p.d.querySelector('#optionalOutbounds>button').click();await new Promise(r=>setTimeout(r,0));assert.equal(editor.elements.planned_quantity.required,true);assert.match(p.d.querySelector('[data-ob-unit]').textContent,/托/);assert.equal(editor.querySelectorAll('[data-ob=expected_ship_at]').length,1);assert.match(editor.querySelector('[data-outbound-row]>legend').textContent,/已预约出库/);assert.match(editor.querySelector('[data-outbound-row]>button').textContent,/删除此出库计划/);
+  for(const [name,value]of Object.entries({quantity:'4',expected_ship_at:'2026-10-05',outbound_mode:'customer_pickup'}))editor.querySelector('[data-ob='+name+']').value=value;
+  editor.requestSubmit();await until(()=>p.d.querySelector('#formError').textContent,p.errors);assert.match(p.d.querySelector('#formError').textContent,/超过/);assert.equal(editor.querySelector('[data-ob=quantity]').value,'4');assert.equal(f.env.DB.raw.prepare("SELECT count(*) n FROM sop_records WHERE kind='need' AND json_extract(state,'$.title')='QA-DOM库存预约'").get().n,0);
+  editor.querySelector('[data-ob=quantity]').value='2';editor.requestSubmit();await until(()=>!p.d.querySelector('dialog[open]'),p.errors);const n=JSON.parse(f.env.DB.raw.prepare("SELECT state FROM sop_records WHERE kind='need' AND json_extract(state,'$.title')='QA-DOM库存预约'").get().state);assert.equal(n.links.length,1);assert.equal(n.links[0].unit,'托');const ob=f.env.DB.raw.prepare('SELECT * FROM v2_outbound_orders WHERE id=?').get(n.links[0].outbound_id);assert.equal(ob.planned_pallet_count,2);assert.equal(ob.planned_box_count,0);assert.equal(ob.instruction,n.instructions);assert.deepEqual(p.errors,[]);
+ }finally{p.w.close();}
+});
+test('inventory-plan duplicate submit and lost-response retry create one requirement with one request id',opts,async()=>{
+ const f=await fixture();f.env.SOP_WORK_CHAIN_ENABLED='true';const p=await f.page('/002/?tab=need');
+ try{await until(()=>p.d.querySelector('.ck-needs-tools'),p.errors);p.d.querySelector('.ck-needs-tools button:nth-child(2)').click();await until(()=>p.d.querySelector('dialog[open] [name=title]'),p.errors);const editor=p.d.querySelector('#editor');for(const [name,value]of Object.entries({title:'QA-DOM库存重试',customer:'QA-DOM合成客户',supply_chain_no:'QA-DOM-STOCK-03',instructions:'整理库存'}))editor.elements[name].value=value;
+  const original=p.w.fetch,ids=[];let lost=true;p.w.fetch=async(url,options)=>{const b=JSON.parse(options.body);if(b.action==='sop_need_create'){ids.push(b.client_req_id);await new Promise(r=>setTimeout(r,10));}const response=await original(url,options);if(b.action==='sop_need_create'&&lost){lost=false;throw new p.w.TypeError('QA lost response');}return response;};
+  editor.requestSubmit();editor.requestSubmit();await until(()=>p.d.querySelector('#formError').textContent,p.errors);assert.equal(ids.length,1);assert.equal(editor.elements.title.value,'QA-DOM库存重试');editor.requestSubmit();await until(()=>!p.d.querySelector('dialog[open]'),p.errors);assert.equal(ids.length,2);assert.equal(ids[0],ids[1]);assert.equal(f.env.DB.raw.prepare("SELECT count(*) n FROM sop_records WHERE kind='need' AND json_extract(state,'$.title')='QA-DOM库存重试'").get().n,1);assert.deepEqual(p.errors,[]);
+ }finally{p.w.close();}
+});
 async function loadOrders(f,{extra=false}={}){
  f.env.SOP_WORK_CHAIN_ENABLED='true';const orders=[];
  const call=async(action,data={})=>{const r=await(await f.request({action,client_req_id:crypto.randomUUID(),...data})).json();assert.equal(r.ok,true,action+': '+r.error);return r;};
