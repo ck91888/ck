@@ -1,4 +1,5 @@
 import {recordNumbers} from './document-numbers.js';
+import {legacyLoadClaim} from './legacy-load.js';
 // One upstream requirement owns the work instructions and materials. Shipping
 // plans allocate its quantities; they never create a second work requirement.
 export const workChainEnabled = env => env.SOP_UPGRADE_ENABLED === 'true' && env.SOP_WORK_CHAIN_ENABLED === 'true';
@@ -90,7 +91,7 @@ export async function guardWorkChain(body, env) {
  if (load && body.job_id) id = (await q(env,'SELECT related_doc_id FROM v2_ops_jobs WHERE id=?',body.job_id).first())?.related_doc_id || id;
  if (!id) return null;
  const needs = await chainLinked(env,id);
- if (!needs.length && (load || body.status === 'issued')) return '此出库计划缺少作业需求，请先关联作业需求';
+ if (!needs.length && (load || body.status === 'issued') && !(body.action==='v2_outbound_load_finish'&&await legacyLoadClaim(env,body.job_id))) return '此出库计划缺少作业需求，请先关联作业需求';
  if (load && needs.some(n => !n.data.result || ['cancelled'].includes(n.data.status))) return '关联作业尚未完成审核；直接转发须先确认收货和可发货数量';
  if (load) {const order=await q(env,'SELECT status,warehouse_ack_required FROM v2_outbound_orders WHERE id=?',id).first();if(!order||frozen.includes(order.status))return '出库计划已取消或已完成';if(Number(order.warehouse_ack_required))return '作业要求或资料已更新，请先确认最新变更再装货';}
  if (body.action === 'v2_outbound_order_update' && needs.length) {

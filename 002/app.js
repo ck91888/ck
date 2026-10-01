@@ -83,7 +83,15 @@ var _WRITE_ACTIONS = [
 function _genReqId(action) {
   return action + '_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
 }
+var _createSubmissionIntents = {};
 async function api(params) {
+  var intentAction = params.action === 'v2_inbound_plan_create' || params.action === 'v2_outbound_order_create';
+  if (intentAction && !params.client_req_id) {
+    var intentData = Object.assign({}, params); delete intentData.k;
+    var signature = JSON.stringify(intentData), saved = _createSubmissionIntents[params.action];
+    if (!saved || saved.signature !== signature) saved = _createSubmissionIntents[params.action] = { signature: signature, requestId: _genReqId(params.action) };
+    params.client_req_id = saved.requestId;
+  }
   params.k = getKey();
   if (_WRITE_ACTIONS.indexOf(params.action) !== -1 && !params.client_req_id) {
     params.client_req_id = _genReqId(params.action);
@@ -94,7 +102,9 @@ async function api(params) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(params)
     });
-    return await res.json();
+    var result = await res.json();
+    if (intentAction && result && result.ok) delete _createSubmissionIntents[params.action];
+    return result;
   } catch(e) {
     // TypeError: Failed to fetch / NetworkError — 不是业务错误，是网络/域名问题
     return {
@@ -1536,6 +1546,7 @@ function removeOcMaterial(idx) {
 }
 
 function clearOcMaterials() {
+  delete _createSubmissionIntents.v2_outbound_order_create;
   _obCreateMaterials = [];
   _renderOcMaterialsList();
 }
@@ -1741,6 +1752,7 @@ function removeIbcMaterial(idx) {
   _renderIbcMaterialsList();
 }
 function clearIbcMaterials() {
+  delete _createSubmissionIntents.v2_inbound_plan_create;
   _ibCreateMaterials = [];
   _renderIbcMaterialsList();
 }

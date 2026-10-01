@@ -17,7 +17,8 @@
   window.CKOpenNativeJob=async function(job){
    try{
     if(job.task_kind==='task'){window.CKClearNativeJob();goPage('bulk_op',{task:job.id,external:false});return;}
-    const r=await api({action:'v2_ops_job_detail',job_id:job.id});
+     if(job.task_kind==='legacy')await CKSession.request('sop_native_adopt',{job_id:job.id,client_req_id:crypto.randomUUID()});
+     const r=await api({action:'v2_ops_job_detail',job_id:job.id});
     if(!r?.ok||!r.can_manage_dispatch)throw Error(r?.error||'你已不在此任务中，请联系派工人 / 배정 담당자에게 문의하세요');
     if(!['pending','working','awaiting_close'].includes(r.job.status))throw Error('任务已结束，请刷新列表 / 작업 종료, 목록을 새로고침하세요');
     const state=JSON.parse(r.dispatch.state),crew=r.workers.filter(w=>!w.left_at).map(w=>({id:w.worker_id,name:w.worker_name}));

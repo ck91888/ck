@@ -1,5 +1,8 @@
 import {ensureDocumentNumbers,jobNumbers,JOB_NUMBER_SQL} from './document-numbers.js';
 import {documentCodeError} from '../shared/document-code.js';
+import {effectiveResults} from './effective-results.js';
+import {atomicNativeFinish} from './atomic-native-finish.js';
+import {adoptLegacyLoad} from './legacy-load.js';
 import {uploadBatchMaterial} from './batch-work-materials.js';
 import {accessEnabled,accessGuard,accessAdminAction,accessFileAllowed} from './access-control.js';
 import {uploadUnloadPhoto,unloadPhotos,inboundAttachmentRead} from './unload-photos.js';
@@ -300,7 +303,7 @@ function parseOpsResultForExport(job_type, resultRows) {
     }
   };
 
-  rows.forEach(r => {
+  effectiveResults(rows).forEach(r => {
     out.box_count_sum += Number(r.box_count) || 0;
     out.pallet_count_sum += Number(r.pallet_count) || 0;
     if (r.remark) remarks.push(String(r.remark));
@@ -5920,6 +5923,15 @@ route("v2_inbound_job_finish", async (body, env) => {
       }
     }
 
+    if(inboundFlowEnabled(env)&&complete_job&&!leave_only){
+      const others=await env.DB.prepare("SELECT COUNT(*) AS n FROM v2_ops_job_workers WHERE job_id=? AND worker_id!=? AND left_at=''").bind(job_id,worker_id).first();
+      if(env.SOP_GROUP_FINISH||!others.n){
+        const plan=jobRow.related_doc_id?await env.DB.prepare('SELECT * FROM v2_inbound_plans WHERE id=?').bind(jobRow.related_doc_id).first():null;
+        const originalBiz=mapInboundJobTypeToBiz(jobRow.job_type)||jobRow.biz_class||'';
+        const biz=putawayTaskBiz(env,plan,originalBiz)||(originalBiz==='bulk'&&plan&&extractPlanBizClasses(plan).includes('direct_ship')?'direct_ship':originalBiz);
+        return atomicNativeFinish(env,body,jobRow,{inbound:true,biz});
+      }
+    }
     await closeAllOpenSegs(env, job_id, worker_id, t, leave_only ? 'leave' : 'finished');
     const realCount = await recalcActiveCount(env, job_id, t);
 
@@ -6816,6 +6828,11 @@ route("v2_ops_job_finish", async (body, env) => {
       return { ok: true, already_completed: true, error: "already_completed", cleaned_open_segments: cleaned, message: "任务已完成" };
     }
 
+    if(inboundFlowEnabled(env)){
+      const job=await env.DB.prepare('SELECT * FROM v2_ops_jobs WHERE id=?').bind(job_id).first();
+      if(!job)return {ok:false,error:'job not found'};
+      return atomicNativeFinish(env,body,job);
+    }
     await closeAllOpenSegs(env, job_id, worker_id, t, 'finished');
 
     const shared = body.shared_result || {};
@@ -9740,7 +9757,7 @@ route("v2_ops_job_result_update", async (body, env) => {
     const t = now();
     // 取最新 result 作为 previous_result_id，便于审计
     const prev = await env.DB.prepare(
-      "SELECT id FROM v2_ops_job_results WHERE job_id=? ORDER BY created_at DESC LIMIT 1"
+      "SELECT id FROM v2_ops_job_results WHERE job_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1"
     ).bind(job_id).first();
     const previous_result_id = prev ? prev.id : '';
 
@@ -9750,17 +9767,18 @@ route("v2_ops_job_result_update", async (body, env) => {
     if (result_note) resultObj.result_note = result_note;
     const summary = String(body.result_summary || _summarizeResultObj(resultObj) || '管理员修正').slice(0, 200);
 
-    await env.DB.prepare(`
+    const correction = env.DB.prepare(`
       INSERT INTO v2_ops_job_results(id, job_id, box_count, pallet_count, remark, result_json, created_by, created_at, source, previous_result_id)
-      VALUES(?,?,?,?,?,?,?,?,'manual_correction',?)
+      SELECT ?,?,?,?,?,?,?,?,'manual_correction',?
+      WHERE COALESCE((SELECT id FROM v2_ops_job_results WHERE job_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1),'')=?
     `).bind(
       result_id, job_id,
       Number(resultObj.box_count || 0), Number(resultObj.pallet_count || 0),
       String(resultObj.remark || result_note || ''),
       JSON.stringify(resultObj),
       operator, t,
-      previous_result_id
-    ).run();
+      previous_result_id, job_id, previous_result_id
+    );
 
     const sets = [
       "result_summary=?", "result_corrected=1", "result_corrected_by=?",
@@ -9769,9 +9787,10 @@ route("v2_ops_job_result_update", async (body, env) => {
     const binds = [summary, operator, t, reason, t];
     if (customer) { sets.push("customer=?"); binds.push(customer); }
     binds.push(job_id);
-    await env.DB.prepare(
-      "UPDATE v2_ops_jobs SET " + sets.join(', ') + " WHERE id=?"
-    ).bind(...binds).run();
+    await env.DB.batch([correction, env.DB.prepare(
+      "UPDATE v2_ops_jobs SET " + sets.join(', ') + " WHERE id=? AND EXISTS(SELECT 1 FROM v2_ops_job_results WHERE id=?)"
+    ).bind(...binds, result_id)]);
+    if (!await env.DB.prepare('SELECT id FROM v2_ops_job_results WHERE id=?').bind(result_id).first()) throw Error('产出刚被其他人修正，请刷新后核对最新结果');
 
     return { ok: true, job_id, result_id, previous_result_id, summary };
   });
@@ -10466,7 +10485,7 @@ route("v2_dashboard_order_list", async (body, env) => {
   // 批量取 results → 调 parseOpsResultForExport 生成业务摘要
   const jobIds = baseItems.map(j => j.id);
   const resultsAll = await batchSelectInGlobal(env,
-    `SELECT job_id, box_count, pallet_count, remark, diff_note, result_json, result_lines_json, created_by, created_at FROM v2_ops_job_results WHERE job_id IN (PLACEHOLDER)`,
+    `SELECT id, job_id, source, previous_result_id, box_count, pallet_count, remark, diff_note, result_json, result_lines_json, created_by, created_at FROM v2_ops_job_results WHERE job_id IN (PLACEHOLDER)`,
     jobIds);
   const resultsByJob = {};
   resultsAll.forEach(r => { (resultsByJob[r.job_id] = resultsByJob[r.job_id] || []).push(r); });
@@ -10623,7 +10642,7 @@ route("v2_dashboard_order_export", async (body, env) => {
        FROM v2_ops_job_workers WHERE job_id IN (PLACEHOLDER) ORDER BY joined_at ASC`,
       jobIds),
     batchSelectInGlobal(env,
-      `SELECT id, job_id, box_count, pallet_count, remark, diff_note, result_json, result_lines_json, created_by, created_at
+      `SELECT id, job_id, source, previous_result_id, box_count, pallet_count, remark, diff_note, result_json, result_lines_json, created_by, created_at
        FROM v2_ops_job_results WHERE job_id IN (PLACEHOLDER) ORDER BY created_at ASC`,
       jobIds),
     batchSelectInGlobal(env,
@@ -12749,6 +12768,7 @@ export default {
     }
     if(action==='v2_ops_job_resume'&&body.parent_job_id)body.job_id=body.parent_job_id;
     try{const attendanceBlock=await guardAttendance(body,env);if(attendanceBlock)return json({ok:false,error:attendanceBlock},409);}catch(e){return json({ok:false,error:e.message},400);}
+    if(action==='sop_native_adopt'){try{return json(await adoptLegacyLoad(body,env));}catch(e){return json({ok:false,error:e.message},409);}}
     if(action==='sop_native_people'){try{const allowed=await canCrewDestination(env,body),result=await nativePeople(body,env);if(allowed){try{result.crew_returns=await reconcileCrewReturns(env,body.job_id);}catch{result.crew_return_error='人员已调整，归还暂未完成，请重试归还';}}return json(result);}catch(e){return json({ok:false,error:e.message},409);}}
     if(action==='sop_native_start'){
       try{const result=await startNative(body,env,async input=>(await HANDLERS[input.action](input,env)).json(),guardLegacy,{feedbackNumber:()=>nextFeedbackDisplayNo(env,kstToday(),'XCXH')});if(result.ok&&env.SOP_CREW_BORROW)result.has_crew_borrows=true;return json(result);}

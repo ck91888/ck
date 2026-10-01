@@ -3,6 +3,7 @@ import {ensureSchema} from './schema-ready.js';
 import {workChainEnabled} from './work-chain.js';
 import {documentCodeError} from '../shared/document-code.js';
 import {crewBorrowStatements} from './crew-borrow.js';
+import {legacyLoadClaim} from './legacy-load.js';
 const q=(e,s,...a)=>e.DB.prepare(s).bind(...a),rows=async(e,s,...a)=>(await q(e,s,...a).all()).results||[];
 const parse=s=>JSON.parse(s||'{}'),active="('pending','working','awaiting_close')",loadable=['issued','working','ready_to_ship','preparing_outbound'];
 const fail=m=>{throw Error(m);},no=o=>o.display_no||o.id;
@@ -31,11 +32,13 @@ async function checked(e,orders,own=''){
   q(e,`SELECT o.id AS order_id,n.id,n.revision,n.state FROM v2_outbound_orders o JOIN sop_records n ON n.kind='need' AND ${needMatch} WHERE o.id IN (SELECT value FROM json_each(?))`,ids),
   q(e,`SELECT DISTINCT o.id AS order_id,j.id AS job_id FROM v2_outbound_orders o JOIN v2_ops_jobs j ON j.job_type='load_outbound' AND j.status IN ${active} AND j.id!=? AND (j.related_doc_id=o.id OR EXISTS(SELECT 1 FROM ck_load_order_links l WHERE l.job_id=j.id AND l.order_id=o.id)) WHERE o.id IN (SELECT value FROM json_each(?))`,own,ids)
  ]);
- return orders.map(order=>{
+  const continuingLegacy=await legacyLoadClaim(e,own);
+  return orders.map(order=>{
   const needs=ns.results.filter(n=>n.order_id===order.id),busy=js.results.find(j=>j.order_id===order.id);
   let reason='';
   if(!loadable.includes(order.status))reason=order.status==='pending_issue'?'尚未下发，请先打印下发':order.status==='shipped'?'已出库，不得重复装货':order.status==='cancelled'?'已取消':'当前状态不允许装货：'+order.status;
-  else if(workChainEnabled(e)&&!needs.length)reason='缺少关联作业计划';
+   else if(workChainEnabled(e)&&!needs.length&&!continuingLegacy)reason='缺少关联作业计划';
+   else if(continuingLegacy&&Number(order.uses_stock_operation)===1&&order.stock_operation_status!=='completed')reason='原工单库内作业尚未完成，不得装货';
   else if(needs.some(n=>{const d=parse(n.state);return workChainEnabled(e)?!d.result||d.status==='cancelled':!(d.result&&(d.links||[]).some(l=>l.outbound_id===order.id))&&!['linked','closed'].includes(d.status);}))reason='关联作业尚未审核完成；直接转发须先确认收货和可发货数量';
   else if(Number(order.warehouse_ack_required))reason='出库要求或资料已更新，请先查看并确认最新变更';
   else if(Number(order.pickup_confirm_required))reason='提货安排已更新，请先查看并确认提货信息';

@@ -5,6 +5,7 @@ import { workChainEnabled, chainOutboundStatements, chainAllocation, guardWorkCh
 import { workPlanStatements } from './sop-planning.js';
 import { dispatchAccess } from './dispatch-access.js';
 import {sourceActiveWorkers} from './crew-borrow.js';
+import {effectiveResults} from './effective-results.js';
 /* SOP pilot: explicit opt-in, revision checked atomic mutations, immutable history.
  * No production migration or legacy job conversion on request paths.
  */
@@ -151,7 +152,7 @@ export async function handleSop(b,env) {
   if(b.action==='sop_dispatch_list'){
    if(!['manager','dispatcher'].includes(u.role))fail('仅派审员可查看现场派工');
    const access=dispatchAccess(u),externalCode=text(b.external_code);
-   const rows=await all(env,`SELECT s.kind AS task_kind,s.state,j.*,wn.display_no AS work_plan_no,n.state AS need_state,
+    const rows=await all(env,`SELECT COALESCE(s.kind,'legacy') AS task_kind,COALESCE(s.state,'{}') AS state,j.*,wn.display_no AS work_plan_no,n.state AS need_state,
     ib.display_no AS inbound_no,ib.customer AS inbound_customer,
     ob.display_no AS outbound_no,ob.wms_work_order_no AS outbound_external_no,ob.customer AS outbound_customer,
     fb.display_no AS feedback_no,
@@ -159,16 +160,16 @@ export async function handleSop(b,env) {
     (SELECT json_group_array(pd.pick_doc_no) FROM v2_ops_job_pick_docs pd WHERE pd.job_id=j.id) AS pick_numbers,
     (SELECT json_group_array(json_object('number',p.display_no,'customer',p.customer)) FROM ck_unload_plan_links l JOIN v2_inbound_plans p ON p.id=l.plan_id WHERE l.job_id=j.id ORDER BY l.position) AS unload_plans,
     ${loadTripEnabled(env)?"(SELECT json_group_array(json_object('number',o.display_no,'customer',o.customer)) FROM ck_load_order_links l JOIN v2_outbound_orders o ON o.id=l.order_id WHERE l.job_id=j.id ORDER BY l.position)":"'[]'"} AS load_orders
-    FROM sop_records s JOIN v2_ops_jobs j ON j.id=s.id
+     FROM v2_ops_jobs j LEFT JOIN sop_records s ON j.id=s.id
     LEFT JOIN sop_records n ON n.id=json_extract(s.state,'$.need_id') AND n.kind='need'
     LEFT JOIN sop_document_numbers wn ON wn.record_id=n.id
     LEFT JOIN v2_inbound_plans ib ON j.related_doc_type='inbound_plan' AND ib.id=j.related_doc_id
     LEFT JOIN v2_outbound_orders ob ON ob.id=CASE WHEN j.linked_outbound_order_id!='' THEN j.linked_outbound_order_id WHEN j.related_doc_type='outbound_order' THEN j.related_doc_id END
     LEFT JOIN v2_field_feedbacks fb ON j.related_doc_type='field_feedback' AND fb.id=j.related_doc_id
-    WHERE s.kind IN ('dispatch','task') AND j.status NOT IN ('completed','cancelled')
-    AND ((s.kind='dispatch' AND ${access.sql}) OR (s.kind='task' AND s.department='bulk' AND (?='manager' OR s.department IN (SELECT value FROM json_each(?)))))
+     WHERE j.status NOT IN ('completed','cancelled')
+     AND ((s.kind='dispatch' AND ${access.sql}) OR (s.kind='task' AND s.department='bulk' AND (?='manager' OR s.department IN (SELECT value FROM json_each(?)))) OR (s.id IS NULL AND j.job_type='load_outbound' AND j.related_doc_type='outbound_order' AND (?='manager' OR j.biz_class IN (SELECT value FROM json_each(?)))))
     AND (?='' OR (s.kind='dispatch' AND j.job_type='bulk_op' AND (j.id=? OR j.related_doc_id=? OR j.display_no=? OR ob.display_no=? OR ob.wms_work_order_no=?)))
-    ORDER BY j.updated_at DESC LIMIT 200`,...access.args,u.role,JSON.stringify(u.departments||[]),...Array(6).fill(externalCode));
+     ORDER BY j.updated_at DESC LIMIT 200`,...access.args,u.role,JSON.stringify(u.departments||[]),u.role,JSON.stringify(u.departments||[]),...Array(6).fill(externalCode));
    return {ok:true,items:rows.map(r=>{
     const d=JSON.parse(r.state),plans=JSON.parse(r.unload_plans||'[]'),loads=JSON.parse(r.load_orders||'[]'),picks=JSON.parse(r.pick_numbers||'[]');
     const numbers=loads.length?loads.map(o=>o.number):r.job_type==='pick_direct'?picks:plans.length?plans.map(p=>p.number):[r.inbound_external_no||r.inbound_no||(r.related_doc_type==='work_order'?r.related_doc_id:'')||r.outbound_external_no||r.outbound_no||r.feedback_no||r.display_no];
@@ -557,7 +558,7 @@ async function dashboard(env,u,b){
  const nativeResults=await all(env,`SELECT r.* FROM v2_ops_job_results r JOIN sop_records s ON s.id=r.job_id WHERE s.kind='dispatch'${dep.replaceAll('department','s.department')}`,...args);
  for(const j of nativeJobs.filter(j=>j.status==='completed'&&j.finished_at>=start&&j.finished_at<end)){
   const r={quantity:0,unit:'箱',label_count:0,packed_count:0,operated_box_count:0,pallet_count:0};
-  for(const v of nativeResults.filter(r=>r.job_id===j.id)){let d={};try{d=JSON.parse(v.result_json||'{}');}catch{}r.quantity+=Number(v.box_count)||0;for(const [k] of metrics)r[k]+=Number(d[k]??(k==='pallet_count'?v.pallet_count:k==='operated_box_count'?v.box_count:0))||0;}
+   for(const v of effectiveResults(nativeResults.filter(r=>r.job_id===j.id))){let d={};try{d=JSON.parse(v.result_json||'{}');}catch{}r.quantity+=Number(v.box_count)||0;for(const [k] of metrics)r[k]+=Number(d[k]??(k==='pallet_count'?v.pallet_count:k==='operated_box_count'?v.box_count:0))||0;}
   const task={...j,department:records.find(r=>r.id===j.id)?.department||j.biz_class};allocate(task,r,reported,'原流程已完成');allocate(task,r,ranking,'原流程已完成');
  }
  const ranked=[...ranking.values()].sort((a,b)=>b.quantity-a.quantity);
@@ -606,7 +607,7 @@ export async function guardLegacy(b,env){
    if(Object.hasOwn(b,'uses_stock_operation')&&Number(b.uses_stock_operation)!==Number(old.uses_stock_operation))return '此单已关联统一作业，不能修改旧版操作开关';
   }
  }
- if(task && /start|join|finish|leave|resume|finalize|correct|force/.test(b.action||'')){
+  if(task && /start|join|finish|leave|resume|finalize|correct|force|result_update/.test(b.action||'')){
   const r=await read(env,task);if(r?.kind==='task')return '此任务由负责人派工，请在现场执行的派工与审核中处理';
  }
  if(b.action?.startsWith('v2_issue_')&&!/detail|list/.test(b.action)){
