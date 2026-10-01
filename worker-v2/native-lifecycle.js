@@ -98,7 +98,11 @@ export async function finishNativeOutbound(body,env){
    const all=[...prior,{box_count:box,pallet_count:pallet,remark,created_by:by,created_at:t}];
    const summary={total_box_count:all.reduce((n,r)=>n+Number(r.box_count||0),0),total_pallet_count:all.reduce((n,r)=>n+Number(r.pallet_count||0),0),last_box_count:box,last_pallet_count:pallet,last_remark:remark,results:all};
    sql.push(q(env,"UPDATE v2_outbound_orders SET status='pending_outbound_update',stock_operation_status='completed',stock_operation_completed_at=?,stock_operation_completed_by=?,stock_operation_result_json=?,updated_at=? WHERE id=?",t,env.SOP_REQUEST_USER.name,JSON.stringify(summary),t,job.related_doc_id));
-  }else sql.push(q(env,"UPDATE v2_outbound_orders SET status='shipped',actual_box_count=?,actual_pallet_count=?,updated_at=? WHERE id=?",box,pallet,t,job.related_doc_id));
+  }else{
+   const ship=q(env,"UPDATE v2_outbound_orders SET status='shipped',actual_box_count=?,actual_pallet_count=?,updated_at=? WHERE id=?",box,pallet,t,job.related_doc_id);
+   // In staging, the order guard must still see the active loading job during shipment.
+   if(env.SOP_ENVIRONMENT==='staging'&&env.SOP_UPGRADE_ENABLED==='true')sql.splice(2,0,ship);else sql.push(ship);
+  }
  }
  try{await env.DB.batch(sql);}catch(e){if((await q(env,'SELECT status FROM v2_ops_jobs WHERE id=?',id).first())?.status==='completed')return {ok:true,already_completed:true};throw e;}
  return {ok:true,result_id:resultId,status:'completed'};

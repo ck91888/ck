@@ -1,6 +1,7 @@
 import {pickTeamStatements} from './native-lifecycle.js';
 import {dispatchAccess} from './dispatch-access.js';
 import {documentCodeError} from '../shared/document-code.js';
+import {loadTripEnabled,startLoadTrip} from './outbound-load-trip.js';
 // Responsible-person assignment around existing operation handlers. Documents,
 // result forms and status transitions remain owned by those handlers.
 import { laborDepartment,startDepartment,departments } from '../shared/labor-department.js';
@@ -24,6 +25,11 @@ export async function startNative(body,env,invoke,guard){
  const lead=workers.find(x=>x.id===body.lead_id);if(!lead)return {ok:false,error:'请选择实际参与的主操作员'};
  const minutes=Number(body.estimated_minutes);if(!Number.isSafeInteger(minutes)||minutes<1)return {ok:false,error:'预计分钟数必须为正整数'};
  if(!p.client_req_id)return {ok:false,error:'缺少请求编号'};
+ if(loadTripEnabled(env)&&p.action==='v2_outbound_load_start'&&(p.order_ids||p.order_id)){
+  const department=body.labor_department||startDepartment(p);
+  if(!Object.hasOwn(departments,department))return {ok:false,error:'请选择本次用工部门 / 작업 부서를 선택하세요'};
+  return startLoadTrip(env,p,{workers:workers.map(w=>({id:w.id,name:w.name})),lead_id:lead.id,estimated_minutes:minutes,department});
+ }
  const prior=await env.DB.prepare('SELECT response_json FROM v2_idempotency_keys WHERE idem_key=?').bind(p.client_req_id).first();
  const allowed=prior?JSON.parse(prior.response_json).job_id:null;
  if(allowed){const existing=await env.DB.prepare("SELECT state FROM sop_records WHERE id=? AND kind='dispatch'").bind(allowed).first();if(existing){const saved=JSON.parse(existing.state);if(saved.owner_id!==u.id)return {ok:false,error:'此任务已有其他负责人'};return {...JSON.parse(prior.response_json),lead:saved.workers.find(w=>w.id===saved.lead_id),assigned_workers:saved.workers};}}

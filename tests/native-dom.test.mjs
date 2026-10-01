@@ -12,12 +12,13 @@ async function fixture(){
  let cookie='';async function request(body){return worker.fetch(new Request('https://fixture.test/api',{method:'POST',headers:{'Content-Type':'application/json',Cookie:cookie},body:JSON.stringify(body)}),env);}
  const login=await request({action:'sop_login',sop_key:JSON.parse(env.SOP_USERS_JSON)[0].key});cookie=login.headers.get('set-cookie').split(';')[0];
  const seed=await (await request({action:'sop_demo_prepare',client_req_id:'dom-seed'})).json();assert.equal(seed.ok,true,seed.error);
- async function page(url){
+ async function page(url,storage={}){
   const errors=[];const {JSDOM,requestInterceptor,VirtualConsole}=runtime;const vc=new VirtualConsole();vc.on('jsdomError',e=>{if(!/Not implemented:|Could not parse CSS stylesheet/.test(e.message))errors.push(e.message)});
   // jsdom does not execute dynamic module imports; inject the actual module exports below.
   const resources={interceptors:[requestInterceptor(req=>{const u=new URL(req.url);if(u.origin!=='https://fixture.test')throw Error('External request rejected: '+u.origin);let source=fs.readFileSync(path.join(assets,u.pathname),'utf8');source=source.replace(/import\('\/shared\/([a-z-]+)\.js'\)/g,(_m,name)=>'Promise.resolve(window.__fixtureModules["'+name+'"])');return new Response(source,{headers:{'Content-Type':u.pathname.endsWith('.js')?'application/javascript':'text/css'}});})]};
   const u=new URL(url,'https://fixture.test');const html=fs.readFileSync(path.join(assets,u.pathname,'index.html'),'utf8');
   const dom=new JSDOM(html,{url:u.href,runScripts:'dangerously',resources,virtualConsole:vc,pretendToBeVisual:true,beforeParse(w){
+   for(const [k,v] of Object.entries(storage))w.sessionStorage.setItem(k,v);
    w.CKDocumentCode=documentCode;
    w.__fixtureModules={'document-code':documentCode,'courier-rules':courierRules,'labor-department':laborDepartment};
    w.fetch=async(url,options={})=>{const endpoint=new URL(url,w.location.href);assert.equal(endpoint.origin,'https://fixture.test');assert.ok(['/api','/001/api','/attendance/api'].includes(endpoint.pathname));return request(JSON.parse(options.body));};
@@ -32,6 +33,55 @@ async function fixture(){
 }
 async function until(condition,errors=[]){for(let i=0;i<100;i++){if(condition())return;await new Promise(r=>setTimeout(r,10));}throw Error('DOM condition timeout: '+errors.join('; '));}
 const opts={skip:!runtime};
+async function loadOrders(f,{extra=false}={}){
+ f.env.SOP_WORK_CHAIN_ENABLED='true';const orders=[];
+ const call=async(action,data={})=>{const r=await(await f.request({action,client_req_id:crypto.randomUUID(),...data})).json();assert.equal(r.ok,true,action+': '+r.error);return r;};
+ for(let i=0;i<(extra?5:3);i++){
+  const customer='DOM装货客户 '+i,quantity=i===1?2:5+i,unit=i===1?'托':'箱';
+  const n=await call('sop_need_create',{department:'bulk',source_type:'inventory',supply_chain_no:'LOAD-DOM-'+i,title:'DOM装货计划',customer,instructions:'按纸质单装货',planned_quantity:quantity,planned_unit:unit});
+  const o=await call('v2_outbound_order_create',{customer,biz_class:'bulk',outbound_mode:'customer_pickup',expected_ship_at:'2026-10-03',sop_existing_need_id:n.id,sop_need_revision:n.revision,sop_link_quantity:quantity});await call('v2_outbound_order_update_status',{id:o.id,status:'issued'});
+  if(i!==4){const staff=[{id:'PREP-DOM-'+i,name:'前序操作員'}],j=await call('sop_task_create',{department:'bulk',need_id:n.id,title:'DOM前序',job_type:'bulk_op',workers:staff,lead_id:staff[0].id,estimated_minutes:10});await call('sop_task_start',{id:j.id,revision:j.revision});const current=(await call('sop_get',{id:j.id})).record;await call('sop_task_complete_review',{id:j.id,revision:current.revision,result:{quantity,unit},decision:'pass',reason:'DOM验收'});}
+  orders.push({...o,customer,box:i===1?0:quantity,pallet:i===1?2:0});
+ }
+ return {orders,call};
+}
+const storageOf=w=>Object.fromEntries(Array.from({length:w.sessionStorage.length},(_,i)=>{const k=w.sessionStorage.key(i);return[k,w.sessionStorage.getItem(k)];}));
+async function scanLoad(p,code){p.d.querySelector('#ck-load-code').value=code;p.d.querySelector('#ck-load-scan').requestSubmit();await new Promise(r=>setTimeout(r,35));}
+async function staffLoad(p){p.d.querySelector('#ck-load-start').click();await until(()=>p.d.querySelector('dialog[open] [data-staff-badge]'),p.errors);const form=p.d.querySelector('dialog[open] form');form.querySelector('[data-staff-badge]').value='LOAD-DOM-A|装货甲';form.querySelector('[data-staff-add]').click();form.querySelector('[data-staff-badge]').value='LOAD-DOM-B|装货乙';form.querySelector('[data-staff-add]').click();form.requestSubmit();}
+test('loading UI scans and multi-selects three orders, deduplicates, removes wrong picks, blocks bad orders and retains input after staff changes and reload',opts,async()=>{
+ const f=await fixture(),{orders,call}=await loadOrders(f,{extra:true});let p=await f.page('/001/');
+ try{
+  p.w.goPage('outbound_load');await until(()=>!p.d.querySelector('#ck-load-entry').hidden,p.errors);
+  await scanLoad(p,orders[0].display_no);await scanLoad(p,orders[0].display_no);assert.equal(p.d.querySelectorAll('#ck-load-selected article').length,1);assert.match(p.d.querySelector('#ck-load-message').textContent,/不会重复/);
+  p.d.querySelector('#ck-load-lookup').open=true;await new Promise(r=>setTimeout(r,70));assert.ok(p.d.querySelector('[data-select="'+orders[1].id+'"]'),p.d.querySelector('#ck-load-message').textContent+'; '+p.d.querySelector('#ck-load-candidates').innerHTML);p.d.querySelector('[data-select="'+orders[1].id+'"]').click();await scanLoad(p,orders[2].display_no);await scanLoad(p,orders[3].display_no);
+  p.d.querySelector('[data-remove="'+orders[3].id+'"]').click();assert.equal(p.d.querySelectorAll('#ck-load-selected article').length,3);
+  await scanLoad(p,orders[4].display_no);assert.equal(p.d.querySelector('[data-select="'+orders[4].id+'"]').disabled,true);assert.match(p.d.querySelector('#ck-load-message').textContent,/审核/);assert.equal(p.d.querySelectorAll('#ck-load-selected article').length,3);
+  for(const o of orders.slice(0,3))assert.ok(p.d.querySelector('#ck-load-selected').textContent.includes(o.customer));
+  await staffLoad(p);await until(()=>p.d.querySelectorAll('#ck-load-working [data-result]').length===3,p.errors);const job=p.w._activeJobId;
+  const row=p.d.querySelector('#ck-load-working [data-result="'+orders[0].id+'"]');row.querySelector('[name=box]').value='4';row.querySelector('[name=box]').dispatchEvent(new p.w.Event('input',{bubbles:true}));
+  await call('sop_native_people',{job_id:job,revision:1,workers:[{id:'LOAD-DOM-A',name:'装货甲'},{id:'LOAD-DOM-C',name:'装货丙'}],lead_id:'LOAD-DOM-A'});const refreshed=await p.w.api({action:'v2_ops_job_detail',job_id:job});p.w.dispatchEvent(new p.w.CustomEvent('ck-native-people-changed',{detail:refreshed}));
+  await until(()=>p.d.querySelector('[data-working-crew]').textContent.includes('装货丙'),p.errors);assert.equal(p.d.querySelector('[data-result="'+orders[0].id+'"] [name=box]').value,'4');
+  const saved=storageOf(p.w);assert.deepEqual(p.errors,[]);p.w.close();p=await f.page('/001/',saved);await until(()=>p.d.querySelectorAll('#ck-load-working [data-result]').length===3,p.errors);assert.equal(p.w._activeJobId,job);assert.equal(p.d.querySelector('[data-result="'+orders[0].id+'"] [name=box]').value,'4');
+  for(const o of orders.slice(0,3)){const r=p.d.querySelector('[data-result="'+o.id+'"]');r.querySelector('[data-planned]').click();}
+  p.d.querySelector('#ck-load-working form').requestSubmit();await until(()=>p.d.querySelector('#page-home.active'),p.errors);assert.equal(p.w._activeJobId,null);for(const o of orders.slice(0,3)){const d=await call('v2_outbound_order_detail',{id:o.id});assert.equal(d.order.status,'shipped');assert.equal(d.order.actual_box_count,o.box);assert.equal(d.order.actual_pallet_count,o.pallet);}assert.deepEqual(p.errors,[]);
+ }finally{p.w.close();}
+});
+test('loading UI replays the frozen start request after a lost response and reload without scanning staff or creating another job',opts,async()=>{
+ const f=await fixture(),{orders}=await loadOrders(f);let p=await f.page('/001/');try{
+  p.w.goPage('outbound_load');await until(()=>!p.d.querySelector('#ck-load-entry').hidden,p.errors);for(const o of orders)await scanLoad(p,o.display_no);
+  const original=p.w.fetch;let lost=false;p.w.fetch=async(url,options)=>{const r=await original(url,options);if(!lost&&JSON.parse(options.body).action==='sop_native_start'){lost=true;throw Error('fixture lost start response');}return r;};
+  await staffLoad(p);await until(()=>/重试本次派工/.test(p.d.querySelector('#ck-load-start').textContent)&&!p.d.querySelector('#ck-load-start').disabled,p.errors);assert.equal(f.env.DB.raw.prepare('SELECT COUNT(*) n FROM ck_load_trips').get().n,1);
+  const saved=storageOf(p.w);p.w.close();p=await f.page('/001/',saved);p.w.goPage('outbound_load');await until(()=>/重试本次派工/.test(p.d.querySelector('#ck-load-start').textContent)&&!p.d.querySelector('#ck-load-start').disabled,p.errors);p.d.querySelector('#ck-load-start').click();await until(()=>p.d.querySelectorAll('#ck-load-working [data-result]').length===3,p.errors);assert.equal(p.d.querySelector('dialog[open]'),null);assert.equal(f.env.DB.raw.prepare('SELECT COUNT(*) n FROM ck_load_trips').get().n,1);assert.deepEqual(p.errors,[]);
+ }finally{p.w.close();}
+});
+test('lost finish response preserves frozen quantities; retry and reload never duplicate results or clocks',opts,async()=>{
+ const f=await fixture(),{orders,call}=await loadOrders(f),p=await f.page('/001/');try{
+  p.w.goPage('outbound_load');await until(()=>!p.d.querySelector('#ck-load-entry').hidden,p.errors);for(const o of orders)await scanLoad(p,o.display_no);await staffLoad(p);await until(()=>p.d.querySelectorAll('#ck-load-working [data-result]').length===3,p.errors);const job=p.w._activeJobId;
+  p.d.querySelectorAll('#ck-load-working [data-planned]').forEach(b=>b.click());const original=p.w.fetch;let lost=false;p.w.fetch=async(url,options)=>{const r=await original(url,options);if(!lost&&JSON.parse(options.body).action==='v2_outbound_load_finish'){lost=true;throw Error('fixture lost finish response');}return r;};
+  p.d.querySelector('#ck-load-working form').requestSubmit();await until(()=>/lost finish/.test(p.d.querySelector('[data-finish-message]').textContent),p.errors);assert.equal(p.d.querySelector('#ck-load-working [name=box]').disabled,true);assert.equal(f.env.DB.raw.prepare('SELECT COUNT(*) n FROM v2_ops_job_results WHERE job_id=?').get(job).n,1);
+  p.d.querySelector('#ck-load-working form').requestSubmit();await until(()=>p.d.querySelector('#page-home.active'),p.errors);assert.equal(f.env.DB.raw.prepare('SELECT COUNT(*) n FROM v2_ops_job_results WHERE job_id=?').get(job).n,1);assert.equal((await call('v2_ops_job_detail',{job_id:job})).workers.filter(w=>!w.left_at).length,0);assert.deepEqual(p.errors,[]);
+ }finally{p.w.close();}
+});
 test('original four modules initialize under shared session without old login prompts',opts,async()=>{
  const f=await fixture();for(const app of ['/','/001/','/002/','/003/','/shuju/']){const p=await f.page(app);try{
  assert.equal(p.d.querySelector('#ck-auth-gate'),null);assert.deepEqual(p.errors,[],app);

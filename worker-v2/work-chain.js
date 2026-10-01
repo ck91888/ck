@@ -48,7 +48,8 @@ export async function shippingBasisStatements(env, row, data, body, user, t) {
  if ([...values.values()].reduce((n,v)=>n+v,0)>quantity) throw Error('预约合计超过预计可出库总数量');
  const statements=[];
  for (const l of a.links) {
-  const loading=await q(env,"SELECT id FROM v2_ops_jobs WHERE related_doc_type='outbound_order' AND related_doc_id=? AND job_type='load_outbound' AND status IN ('pending','working','completed') LIMIT 1",l.outbound_id).first();
+  const multi=env.SOP_ENVIRONMENT==='staging';
+  const loading=await q(env,"SELECT id FROM v2_ops_jobs j WHERE job_type='load_outbound' AND status IN ("+(multi?"'pending','working','awaiting_close','completed'":"'pending','working','completed'")+") AND ((related_doc_type='outbound_order' AND related_doc_id=?)"+(multi?" OR EXISTS(SELECT 1 FROM ck_load_order_links l WHERE l.job_id=j.id AND l.order_id=?)":"")+") LIMIT 1",l.outbound_id,...(multi?[l.outbound_id]:[])).first();
   if (loading) throw Error('已开始装货的计划不能调整');
   statements.push(q(env,'UPDATE v2_outbound_orders SET planned_box_count=?,planned_pallet_count=?,updated_at=? WHERE id=?',unit==='箱'?values.get(l.outbound_id):0,unit==='托'?values.get(l.outbound_id):0,t,l.outbound_id));
  }

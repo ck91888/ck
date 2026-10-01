@@ -6,6 +6,7 @@ import {uploadUnloadPhoto,unloadPhotos,inboundAttachmentRead} from './unload-pho
 import {handleFeedbackLink,feedbackLinkDetail} from './feedback-link.js';
 import {validateNativeMutation, nativePeople, finishNativePick, finishNativeOutbound} from './native-lifecycle.js';
 import {findUnloadPlan, startUnloadTrip, finishUnloadTrip, tripPlans} from './unload-trip.js';
+import {ensureLoadSchema,loadTripEnabled,loadCandidates,resolveLoadOrder,loadOrdersForJob,finishLoadTrip,validateLegacyLoadFinish} from './outbound-load-trip.js';
 import {handleCourier,validateCourierLines,courierPlanStatements,courierProgress,courierReady,protectCourierEdit,syncCourierArrival} from './courier.js';
 import { inboundFlowEnabled, inboundCode, inboundCodes, inboundReferenceValue, inboundCodeProgress, selectInboundReference, validateInboundCode, resolveInboundPlan, putawayTaskBiz, completeUnloadedDispositions, bindInboundCode, inboundLabels, inboundReferenceData, departmentCodes, putawayClasses } from './inbound-flow.js';
 import { handleAttendance, guardAttendance } from './attendance.js';
@@ -2825,6 +2826,7 @@ route("v2_outbound_order_create", async (body, env) => {
 
 route("v2_outbound_order_list", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  if(loadTripEnabled(env)&&body.scene==='load_trip')return json(await loadCandidates(env,body));
   const start = String(body.start_date || "").trim();
   const end = String(body.end_date || "").trim();
   // date_basis：'expected_ship_at'（默认，按预计出库日期）/ 'order_date'（兼容旧调用）
@@ -2903,8 +2905,8 @@ route("v2_outbound_order_detail", async (body, env) => {
   const [reads,needs] = await Promise.all([
     env.DB.batch([
       env.DB.prepare('SELECT * FROM v2_outbound_order_lines WHERE order_id=? ORDER BY line_no').bind(id),
-      env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE (related_doc_type='outbound_order' AND related_doc_id=?) OR linked_outbound_order_id=? ORDER BY created_at DESC").bind(id,id),
-      env.DB.prepare("SELECT * FROM v2_attachments WHERE (related_doc_type='outbound_order' AND related_doc_id=?) OR related_doc_id IN (SELECT id FROM v2_ops_jobs WHERE (related_doc_type='outbound_order' AND related_doc_id=?) OR linked_outbound_order_id=?) ORDER BY created_at DESC").bind(id,id,id),
+      env.DB.prepare("SELECT * FROM v2_ops_jobs j WHERE (related_doc_type='outbound_order' AND related_doc_id=?) OR linked_outbound_order_id=?"+(loadTripEnabled(env)?" OR EXISTS(SELECT 1 FROM ck_load_order_links l WHERE l.job_id=j.id AND l.order_id=?)":"")+" ORDER BY created_at DESC").bind(id,id,...(loadTripEnabled(env)?[id]:[])),
+      env.DB.prepare("SELECT * FROM v2_attachments WHERE (related_doc_type='outbound_order' AND related_doc_id=?) OR related_doc_id IN (SELECT id FROM v2_ops_jobs j WHERE (related_doc_type='outbound_order' AND related_doc_id=?) OR linked_outbound_order_id=?"+(loadTripEnabled(env)?" OR EXISTS(SELECT 1 FROM ck_load_order_links l WHERE l.job_id=j.id AND l.order_id=?)":"")+") ORDER BY created_at DESC").bind(id,id,id,...(loadTripEnabled(env)?[id]:[])),
       env.DB.prepare('SELECT * FROM v2_outbound_order_change_logs WHERE order_id=? ORDER BY revision_no DESC,changed_at DESC LIMIT 50').bind(id)
     ]),env.SOP_UPGRADE_ENABLED==='true'?chainLinked(env,id):[]
   ]);
@@ -2931,13 +2933,15 @@ route("v2_outbound_order_detail", async (body, env) => {
   });
   const pending_change_logs = change_logs.filter(x => x.warehouse_ack_required === 1);
   const latest_change_log = change_logs.length > 0 ? change_logs[0] : null;
+  const loadHistory=loadTripEnabled(env)?(await env.DB.prepare('SELECT job_id,result_json FROM ck_load_order_links WHERE order_id=? ORDER BY job_id').bind(id).all()).results.map(x=>({job_id:x.job_id,result:x.result_json?JSON.parse(x.result_json):null})):[];
 
   return json({
     ok: true,
     order: row,
     sop_needs: await linkedNeeds(env,id,needs),
     lines: lines.results || [],
-    jobs: jobs.results || [],
+    jobs: (jobs.results||[]).map(j=>{const own=loadHistory.find(x=>x.job_id===j.id)?.result;return own?{...j,shared_result_json:JSON.stringify({box_count:own.box_count,pallet_count:own.pallet_count,remark:JSON.parse(j.shared_result_json||'{}').remark||'',order_id:id})}:j;}),
+    load_history: loadHistory,
     attachments: allAtts,
     change_logs,
     pending_change_logs,
@@ -2980,9 +2984,9 @@ route("v2_outbound_order_update_status", async (body, env) => {
     const loadedJob = await env.DB.prepare(
       `SELECT id FROM v2_ops_jobs
        WHERE job_type='load_outbound' AND status='completed'
-         AND (related_doc_id=? OR linked_outbound_order_id=?)
+         AND (related_doc_id=? OR linked_outbound_order_id=?${loadTripEnabled(env)?' OR EXISTS(SELECT 1 FROM ck_load_order_links l WHERE l.job_id=v2_ops_jobs.id AND l.order_id=?)':''})
        LIMIT 1`
-    ).bind(id, id).first();
+    ).bind(id, id,...(loadTripEnabled(env)?[id]:[])).first();
     if (loadedJob) {
       return json({ ok: false, error: "outbound_already_shipped_cannot_reopen",
         message: "该出库作业单已完成出库，不能设为待再操作 / 해당 출고작업단은 이미 출고 완료되어 재작업 대기로 변경할 수 없습니다" });
@@ -2995,9 +2999,9 @@ route("v2_outbound_order_update_status", async (body, env) => {
       `SELECT id FROM v2_ops_jobs
        WHERE status IN ('working','awaiting_close','pending')
          AND (linked_outbound_order_id=?
-           OR (related_doc_type='outbound_order' AND related_doc_id=?))
+           OR (related_doc_type='outbound_order' AND related_doc_id=?)${loadTripEnabled(env)?' OR EXISTS(SELECT 1 FROM ck_load_order_links l WHERE l.job_id=v2_ops_jobs.id AND l.order_id=?)':''})
        LIMIT 1`
-    ).bind(id, id).first();
+    ).bind(id, id,...(loadTripEnabled(env)?[id]:[])).first();
     if (activeJob) {
       return json({ ok: false, error: "has_active_job",
         message: "当前有进行中的现场作业，不能取消" });
@@ -3351,6 +3355,7 @@ route("v2_outbound_order_admin_realign_order_date", async (body, env) => {
 // =====================================================
 route("v2_outbound_order_resolve_code", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  if(loadTripEnabled(env)&&body.scene==='load_trip')return json(await resolveLoadOrder(env,body));
   const code = String(body.code || "").trim();
   if (!code) return err("missing code");
 
@@ -3453,9 +3458,17 @@ route("v2_outbound_load_start", async (body, env) => {
 });
 
 route("v2_outbound_load_finish", async (body, env) => {
+  if(loadTripEnabled(env)){
+    if(!isOpsAuth(body,env))return err('unauthorized',401);
+    const result=await finishLoadTrip(env,body);if(result)return json(result);
+    const old=await validateLegacyLoadFinish(env,body);if(old)return json(old);
+  }
   const chainError=await guardWorkChain(body,env);if(chainError)return err(chainError);
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
-  if(env.SOP_GROUP_FINISH && body.complete_job===true)return json(await finishNativeOutbound(body,env));
+  if(env.SOP_GROUP_FINISH && body.complete_job===true){
+    try{return json(await finishNativeOutbound(body,env));}
+    catch(error){if(loadTripEnabled(env))await validateLegacyLoadFinish(env,body);throw error;}
+  }
   const job_id = String(body.job_id || "").trim();
   const worker_id = String(body.worker_id || "").trim();
   if (!job_id) return err("missing job_id");
@@ -6850,6 +6863,8 @@ route("v2_ops_job_detail", async (body, env) => {
   job.active_worker_count=new Set(workers.results.filter(w=>!w.left_at).map(w=>w.worker_id)).size;
   return json({
     ok: true, dispatch: inboundFlowEnabled(env)?dispatchRows?.results[0]||null:null, job, can_manage_dispatch: canManage, unload_plans: job.job_type==='unload'?await tripPlans(env,job_id):[],
+    load_orders: await loadOrdersForJob(env,job),
+    load_trip: loadTripEnabled(env)&&job.job_type==='load_outbound'?await env.DB.prepare('SELECT vehicle_no,driver_name,finished_at FROM ck_load_trips WHERE job_id=?').bind(job.id).first():null,
     workers: workers.results || [],
     results: results.results || [],
     attachments: atts.results || []
@@ -12671,6 +12686,7 @@ export default {
     }
     const accessBlock=accessGuard(body,env,request);if(accessBlock)return accessBlock;
     await ensureDocumentNumbers(env);
+    await ensureLoadSchema(env);
     const authResponse = await sessionAction(body, env,request);
     if (authResponse) return authResponse;
     if(accessEnabled(env)){const adminAction=await accessAdminAction(body,env);if(adminAction)return adminAction;}

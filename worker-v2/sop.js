@@ -1,4 +1,5 @@
 import {ensureDocumentNumbers,recordNumbers,resolveRecordId,jobNumbers} from './document-numbers.js';
+import {loadTripEnabled} from './outbound-load-trip.js';
 import {readBatchMaterials} from './batch-work-materials.js';
 import { workChainEnabled, chainOutboundStatements, chainAllocation, guardWorkChain, workMaterialRead, workMaterials, notifyMaterialChange, assertShippingResult, shippingBasisStatements } from './work-chain.js';
 import { workPlanStatements } from './sop-planning.js';
@@ -155,7 +156,8 @@ export async function handleSop(b,env) {
     fb.display_no AS feedback_no,
     (SELECT json_group_array(json_object('id',w.worker_id,'name',w.worker_name)) FROM v2_ops_job_workers w WHERE w.job_id=j.id AND w.left_at='') AS active_crew,
     (SELECT json_group_array(pd.pick_doc_no) FROM v2_ops_job_pick_docs pd WHERE pd.job_id=j.id) AS pick_numbers,
-    (SELECT json_group_array(json_object('number',p.display_no,'customer',p.customer)) FROM ck_unload_plan_links l JOIN v2_inbound_plans p ON p.id=l.plan_id WHERE l.job_id=j.id ORDER BY l.position) AS unload_plans
+    (SELECT json_group_array(json_object('number',p.display_no,'customer',p.customer)) FROM ck_unload_plan_links l JOIN v2_inbound_plans p ON p.id=l.plan_id WHERE l.job_id=j.id ORDER BY l.position) AS unload_plans,
+    ${loadTripEnabled(env)?"(SELECT json_group_array(json_object('number',o.display_no,'customer',o.customer)) FROM ck_load_order_links l JOIN v2_outbound_orders o ON o.id=l.order_id WHERE l.job_id=j.id ORDER BY l.position)":"'[]'"} AS load_orders
     FROM sop_records s JOIN v2_ops_jobs j ON j.id=s.id
     LEFT JOIN sop_records n ON n.id=json_extract(s.state,'$.need_id') AND n.kind='need'
     LEFT JOIN sop_document_numbers wn ON wn.record_id=n.id
@@ -167,11 +169,11 @@ export async function handleSop(b,env) {
     AND (?='' OR (s.kind='dispatch' AND j.job_type='bulk_op' AND (j.id=? OR j.related_doc_id=? OR j.display_no=? OR ob.display_no=? OR ob.wms_work_order_no=?)))
     ORDER BY j.updated_at DESC LIMIT 200`,...access.args,u.role,JSON.stringify(u.departments||[]),...Array(6).fill(externalCode));
    return {ok:true,items:rows.map(r=>{
-    const d=JSON.parse(r.state),plans=JSON.parse(r.unload_plans||'[]'),picks=JSON.parse(r.pick_numbers||'[]');
-    const numbers=r.job_type==='pick_direct'?picks:plans.length?plans.map(p=>p.number):[r.inbound_external_no||r.inbound_no||(r.related_doc_type==='work_order'?r.related_doc_id:'')||r.outbound_external_no||r.outbound_no||r.feedback_no||r.display_no];
+    const d=JSON.parse(r.state),plans=JSON.parse(r.unload_plans||'[]'),loads=JSON.parse(r.load_orders||'[]'),picks=JSON.parse(r.pick_numbers||'[]');
+    const numbers=loads.length?loads.map(o=>o.number):r.job_type==='pick_direct'?picks:plans.length?plans.map(p=>p.number):[r.inbound_external_no||r.inbound_no||(r.related_doc_type==='work_order'?r.related_doc_id:'')||r.outbound_external_no||r.outbound_no||r.feedback_no||r.display_no];
     const business_no=r.task_kind==='task'?r.work_plan_no||'作业单号待补充':[...new Set(numbers.filter(Boolean))].join('、');
-    const customer=[...new Set(plans.length?plans.map(p=>p.customer).filter(Boolean):[r.customer||r.inbound_customer||r.outbound_customer].filter(Boolean))].join('、');
-    return {id:r.id,task_kind:r.task_kind,job_type:r.job_type,title:r.task_kind==='task'?JSON.parse(r.need_state||'{}').title||d.title:'',status:r.task_kind==='task'?d.status:r.status,source_type:r.related_doc_type,source_id:r.related_doc_id,lead_id:d.lead_id,last_lead:d.last_lead,display_no:r.display_no,business_no,customer,workers:JSON.parse(r.active_crew||'[]'),owner:d.owner,estimated_minutes:d.estimated_minutes};
+    const customer=[...new Set(loads.length?loads.map(o=>o.customer).filter(Boolean):plans.length?plans.map(p=>p.customer).filter(Boolean):[r.customer||r.inbound_customer||r.outbound_customer].filter(Boolean))].join('、');
+    return {id:r.id,task_kind:r.task_kind,job_type:r.job_type,title:r.task_kind==='task'?JSON.parse(r.need_state||'{}').title||d.title:loads.length?'本车装货 · '+loads.length+' 单':'',status:r.task_kind==='task'?d.status:r.status,source_type:r.related_doc_type,source_id:r.related_doc_id,lead_id:d.lead_id,last_lead:d.last_lead,display_no:r.display_no,business_no,customer,workers:JSON.parse(r.active_crew||'[]'),owner:d.owner,estimated_minutes:d.estimated_minutes};
    })};
   }
   if(b.action==='sop_dashboard') return await dashboard(env,u,b);
@@ -577,6 +579,11 @@ export async function linkedNeeds(env,id,knownRows){
 }
 export async function guardLegacy(b,env){
  if(env.SOP_UPGRADE_ENABLED!=='true')return null;
+ if(loadTripEnabled(env)&&b.action==='v2_outbound_load_finish'&&b.job_id&&await stmt(env,"SELECT id FROM v2_ops_jobs WHERE id=? AND job_type='load_outbound' AND status='completed'",b.job_id).first())return null;
+ if(loadTripEnabled(env)&&b.job_id&&await stmt(env,'SELECT job_id FROM ck_load_trips WHERE job_id=?',b.job_id).first()){
+  if(b.action==='v2_outbound_load_finish')return null; // The truck handler checks every order, including retries after shipment.
+  if(['v2_ops_job_finish','v2_ops_job_manual_finalize','v2_ops_job_result_update'].includes(b.action))return '请从本车装货任务逐单核对并结束';
+ }
  const chainError=await guardWorkChain(b,env);if(chainError)return chainError;
  const task=b.job_id||b.active_job_id;
  if(task&&['v2_ops_job_finish','v2_ops_job_manual_finalize','v2_ops_job_result_update'].includes(b.action)&&await stmt(env,'SELECT job_id FROM ck_unload_trips WHERE job_id=?',task).first())return '请从整车卸货任务中逐单填写结果并完成 / 차량 하차 작업에서 완료하세요';
