@@ -39,7 +39,7 @@ await writeFile(resolve(out,'office-login/index.html'),'<!doctype html><html lan
 await copyFile(resolve(root,'docs/sop-acceptance.html'),resolve(out,'验收说明.html'));
 await writeFile(resolve(out,'_redirects'),'/sop/ / 302\n/sop / 302\n');
 await writeFile(resolve(out,'_headers'),'/*\n  Cache-Control: no-store\n  X-Content-Type-Options: nosniff\n  Referrer-Policy: same-origin\n');
-await writeFile(resolve(out,'release.json'),JSON.stringify({release:'20260930-unified-field-work',builtAt:new Date().toISOString(),modules:apps}));
+await writeFile(resolve(out,'release.json'),JSON.stringify({release:'20261001-field-review-return-home',builtAt:new Date().toISOString(),modules:apps}));
 // Content-addressed script/style URLs permit browser reuse without stale deployments.
 for(const html of ['index.html','office-login/index.html',...apps.map(a=>a+'/index.html')]){
  const filename=resolve(out,html),content=await readFile(filename,'utf8');

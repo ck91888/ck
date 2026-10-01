@@ -119,21 +119,48 @@ test('home opens both work-plan and external jobs in the shared workspace; finis
   await until(()=>card(number)&&card('EXT-0')&&card('EXT-1'),p.errors);assert.match(card(number).textContent,/计划客户/);assert.match(card('EXT-0').textContent,/外部客户 0/);
   card(number).click();await until(()=>p.d.querySelector('#page-bulk_op .ck-work-number b')?.textContent===number,p.errors);
   assert.equal(p.d.querySelector('#page-bulk_op [data-mode=need]').getAttribute('aria-pressed'),'true');
-  let form=await openFinish();form.elements.quantity.value='2';form.elements.unit.value='托';form.elements.pallet_count.value='2';form.elements.operated_box_count.value='28';form.elements.reason.value='核对完成';form.requestSubmit();
-  await until(()=>status(task.id)==='completed',p.errors);await until(()=>/已完成/.test(p.d.querySelector('#page-bulk_op .ck-state')?.textContent),p.errors);
-  p.w.goPage('home');await until(()=>card('EXT-0')&&!card(number),p.errors);
+  let form=await openFinish();form.elements.quantity.value='2';form.elements.unit.value='托';form.elements.pallet_count.value='2';form.elements.operated_box_count.value='28';form.elements.reason.value='核对完成';
+  const original=p.w.CKSession.request;let failOnce=true;p.w.CKSession.request=(action,...args)=>{if(action==='sop_task_complete_review'&&failOnce){failOnce=false;return Promise.reject(Object.assign(Error('虚拟审核失败'),{businessError:true}));}return original(action,...args);};
+  form.requestSubmit();await until(()=>p.d.querySelector('#page-bulk_op [data-error]')?.textContent==='虚拟审核失败',p.errors);
+  assert.equal(status(task.id),'working');assert.ok(p.d.querySelector('#page-bulk_op').classList.contains('active'));assert.equal(form.elements.operated_box_count.value,'28');assert.equal(form.querySelector('button').disabled,false);
+  form.requestSubmit();await until(()=>status(task.id)==='completed',p.errors);await until(()=>p.d.querySelector('#page-home').classList.contains('active')&&card('EXT-0')&&!card(number),p.errors);
+  assert.equal(p.w._activeJobId,null);assert.equal(p.w._navStack.length,0);assert.equal(Object.keys(p.w._pageParams).length,0);
   card('EXT-0').click();await until(()=>p.d.querySelector('#page-bulk_op .ck-work-number b')?.textContent==='EXT-0',p.errors);
   assert.equal(p.d.querySelector('#bulkStateWorking').style.display,'none');assert.equal(p.d.querySelector('#page-bulk_op [data-mode=external]').getAttribute('aria-pressed'),'true');
   assert.match(p.d.querySelector('#page-bulk_op [data-content]').textContent,/外部员工 0/);
   form=await openFinish();assert.equal(form.elements.customer.value,'外部客户 0');assert.equal(form.elements.pallet_count.value,'0');assert.equal(form.elements.pallet_count.disabled,false);
   form.elements.pallet_count.value='3';form.elements.packed_count.value='4';form.elements.operated_box_count.value='28';form.elements.reason.value='外部单核对完成';form.requestSubmit();
-  await until(()=>status(external[0].job_id)==='completed',p.errors);await until(()=>/已完成/.test(p.d.querySelector('#page-bulk_op .ck-state')?.textContent),p.errors);
+  await until(()=>status(external[0].job_id)==='completed',p.errors);await until(()=>p.d.querySelector('#page-home').classList.contains('active')&&card('EXT-1')&&!card('EXT-0'),p.errors);
+  assert.equal(p.w._activeJobId,null);assert.equal(p.w._navStack.length,0);
   const result=JSON.parse(f.env.DB.raw.prepare('SELECT result_json FROM v2_ops_job_results WHERE job_id=?').get(external[0].job_id).result_json);
   assert.equal(result.packed_box_count,4);assert.equal(result.pallet_count,3);assert.equal(result.total_operated_box_count,28);assert.equal(result.result_note,'外部单核对完成');
   assert.equal(f.env.DB.raw.prepare("SELECT COUNT(*) n FROM v2_ops_job_workers WHERE job_id=? AND left_at=''").get(external[0].job_id).n,0);
-  p.w.goPage('home');await until(()=>card('EXT-1')&&!card('EXT-0'),p.errors);card('EXT-1').click();await until(()=>p.d.querySelector('#page-bulk_op .ck-work-number b')?.textContent==='EXT-1',p.errors);
+  card('EXT-1').click();await until(()=>p.d.querySelector('#page-bulk_op .ck-work-number b')?.textContent==='EXT-1',p.errors);
   form=await openFinish();assert.equal(form.elements.customer.value,'外部客户 1');assert.equal(form.elements.pallet_count.value,'0');assert.equal(form.elements.packed_count.value,'0');assert.equal(form.elements.reason.value,'');assert.equal(form.elements.pallet_count.disabled,false);
   assert.equal(p.d.querySelector('#page-bulk_op .chain-material-group'),null);assert.deepEqual(p.errors,[]);
+ }finally{p.w.close();}
+});
+
+test('reviewing saved work returns home only on approval; correction stays on the task',opts,async()=>{
+ const f=await fixture(),call=async(action,data={})=>{const r=await (await f.request({action,client_req_id:crypto.randomUUID(),...data})).json();assert.equal(r.ok,true,r.error);return r;},orders=[];
+ for(const decision of ['return','pass']){
+  const need=await call('sop_need_create',{department:'bulk',source_type:'inventory',supply_chain_no:'REVIEW-'+decision,title:'审核测试',customer:'审核客户',instructions:'核对一箱',planned_quantity:1,planned_unit:'箱'});
+  const task=await call('sop_task_dispatch',{department:'bulk',need_id:need.id,title:'审核测试',job_type:'bulk_op',estimated_minutes:30,workers:[{id:'REVIEW-W-'+decision,name:'审核员工'}],lead_id:'REVIEW-W-'+decision});
+  await call('sop_task_finish',{id:task.id,revision:task.revision,result:{quantity:1,unit:'箱'}});orders.push({id:task.id,decision,number:(await call('sop_get',{id:need.id})).record.display_no});
+ }
+ const p=await f.page('/001/');try{
+  for(const order of orders){
+   if(order.decision==='pass')p.w.goPage('home');
+   const card=()=>[...p.d.querySelectorAll('#page-home .ck-native-task')].find(b=>b.querySelector('strong').textContent===order.number);
+   await until(()=>card(),p.errors);card().click();await until(()=>p.d.querySelector('#page-bulk_op .ck-work-number b')?.textContent===order.number,p.errors);
+   [...p.d.querySelectorAll('#page-bulk_op [data-actions] button')].find(b=>b.textContent.startsWith('审核原有')).click();
+   const form=p.d.querySelector('#page-bulk_op [data-review]');form.elements.decision.value=order.decision;form.elements.reason.value='现场核对';form.requestSubmit();
+   const status=()=>f.env.DB.raw.prepare('SELECT status FROM v2_ops_jobs WHERE id=?').get(order.id).status;
+   await until(()=>status()===(order.decision==='pass'?'completed':'pending'),p.errors);
+   if(order.decision==='pass'){await until(()=>p.d.querySelector('#page-home').classList.contains('active')&&!card(),p.errors);assert.equal(p.w._navStack.length,0);}
+   else{await until(()=>p.d.querySelector('#page-bulk_op .ck-state')?.textContent.startsWith('待整改'),p.errors);assert.ok(p.d.querySelector('#page-bulk_op').classList.contains('active'));}
+  }
+  assert.deepEqual(p.errors,[]);
  }finally{p.w.close();}
 });
 

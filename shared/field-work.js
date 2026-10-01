@@ -10,6 +10,7 @@
   let picker=null,scan=null,current=null,closed=false,loadSequence=0,requestId='',requestSignature='';
   async function cleanup(){if(picker){await picker.destroy();picker=null;}if(scan){const old=scan;scan=null;await old.stop().catch(()=>{});}}
   function error(x){if(!closed&&$('error')){$('error').textContent=x.message;$('error').hidden=false;}}
+  function complete(){if(closed)return;current=null;options.onChange?.(null);if(options.onComplete)options.onComplete();else window.goPage('home');}
   async function write(action,data){
    const signature=JSON.stringify({action,data});
    if(signature!==requestSignature||!requestId){requestSignature=signature;requestId=crypto.randomUUID();}
@@ -97,7 +98,7 @@
     action('登记休息 / 휴식 등록',()=>window.CKOpenFieldLabor?.());action('暂停作业 / 작업 중지',()=>pause(t));action('填写产出并审核结束 / 산출·검수 완료',()=>finish(t));
    }else if(t.status==='awaiting_review')action('审核原有产出 / 검수',()=>{
     $('editor').innerHTML=`${CKResultSummary(t.result)}${t.result?.location?`<p>${esc(t.result.location)}</p>`:''}${CKResultPhotos(t.result)}<form data-review><label>审核结论<select name="decision"><option value="pass">通过 / 통과</option><option value="return">退回整改 / 재작업</option></select></label><label>审核说明<textarea name="reason" required></textarea></label><button class="ck-primary">保存审核 / 검수 저장</button></form>`;
-    $('review').onsubmit=async ev=>{ev.preventDefault();const submit=ev.submitter||ev.target.querySelector('button[type=submit],button:not([type])');if(submit.disabled)return;submit.disabled=true;try{await write('sop_task_review',{id:t.id,revision:t.revision,...Object.fromEntries(new FormData(ev.target))});await resolve(t.id);}catch(x){error(x);submit.disabled=false;}};
+    $('review').onsubmit=async ev=>{ev.preventDefault();const submit=ev.submitter||ev.target.querySelector('button[type=submit],button:not([type])');if(submit.disabled)return;submit.disabled=true;try{const review=Object.fromEntries(new FormData(ev.target));await write('sop_task_review',{id:t.id,revision:t.revision,...review});if(review.decision==='pass')complete();else await resolve(t.id);}catch(x){error(x);submit.disabled=false;}};
    });
    else if(t.status==='completed')$('editor').innerHTML=`<h3>已审核完成 / 검수 완료</h3>${CKResultSummary(t.result)}${CKResultPhotos(t.result)}`;
   }
@@ -128,7 +129,7 @@
      result.used_forklift=!!result.used_forklift;result.location_photos=await photos.read();
      if(external)await write('v2_bulk_op_job_finish',{...result,job_id:t.id,worker_id:leadId,complete_job:true,packed_box_count:result.packed_count,total_operated_box_count:result.operated_box_count,remark:result.description,result_note:reason});
      else await write('sop_task_complete_review',{id:t.id,revision:t.revision,result,decision:'pass',reason});
-     await resolve(t.id);
+     complete();
     }catch(x){error(x);submit.disabled=false;}
    };
   }
