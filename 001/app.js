@@ -1838,18 +1838,41 @@ async function startInbound(btnEl) {
 }
 
 var _inboundPlanData = null;
+var _inboundPlanLoad = { sequence: 0, jobId: '', planId: '', status: 'idle' };
 
 async function loadInboundPlanInfo(planId) {
+  var context = { sequence: _inboundPlanLoad.sequence + 1, jobId: _activeJobId, planId: planId || '', status: 'loading' };
+  _inboundPlanLoad = context;
   _inboundPlanData = null;
   var infoEl = document.getElementById("inboundPlanInfo");
   var linesEl = document.getElementById("inboundResultLines");
+  var finishButton = document.querySelector('button[onclick="finishInbound(this)"]');
+  if (finishButton) finishButton.disabled = true;
+  if (linesEl) linesEl.innerHTML = '';
+  if (infoEl) infoEl.innerHTML = '<span class="muted">正在读取本次入库计划 / 이번 입고계획 확인 중</span>';
+  var current = function() { return _inboundPlanLoad === context && context.jobId === _activeJobId && _currentPage === 'inbound'; };
+  var failed = function() {
+    if (!current()) return { rendered: false, stale: true };
+    context.status = 'failed';
+    if (infoEl) infoEl.innerHTML = '<p>本单资料尚未读取，不能完成理货 / 계획 확인 후 완료하세요</p><button type="button" onclick="loadInboundPlanInfo(_inboundPlanLoad.planId)">重新读取本单 / 다시 확인</button>';
+    return { rendered: false, failed: true };
+  };
   if (!planId) {
-    if (infoEl) infoEl.innerHTML = '<span class="muted">--</span>';
-    if (linesEl) linesEl.innerHTML = '';
-    return;
+    var legacy;
+    try { legacy = await api({ action: 'v2_ops_job_detail', job_id: context.jobId }); } catch(e) { return failed(); }
+    if (!current()) return { rendered: false, stale: true };
+    if (legacy && legacy.ok && legacy.job && legacy.job.id === context.jobId && /^inbound_/.test(legacy.job.job_type) && legacy.job.related_doc_type !== 'inbound_plan') {
+      context.status = 'legacy_ready';
+      if (infoEl) infoEl.innerHTML = '<span class="muted">原有无计划作业 / 기존 계획 없는 작업</span>';
+      if (finishButton) finishButton.disabled = false;
+      return { rendered: false, legacy: true };
+    }
+    return failed();
   }
-  var res = await api({ action: "v2_inbound_plan_detail", id: planId });
-  if (!res || !res.ok || !res.plan) return;
+  var res;
+  try { res = await api({ action: "v2_inbound_plan_detail", id: planId }); } catch(e) { return failed(); }
+  if (!current()) return { rendered: false, stale: true };
+  if (!res || !res.ok || !res.plan || res.plan.id !== planId) return failed();
   _inboundPlanData = res;
   var p = res.plan;
   var lines = res.lines || [];
@@ -1885,6 +1908,9 @@ async function loadInboundPlanInfo(planId) {
       linesEl.innerHTML = '<div style="font-size:12px;color:#999;">无明细行，完成时仅记录备注</div>';
     }
   }
+  context.status = 'ready';
+  if (finishButton) finishButton.disabled = false;
+  return { rendered: true, data: res, jobId: context.jobId, sequence: context.sequence };
 }
 
 async function inboundLeave(btnEl) {
@@ -1908,6 +1934,10 @@ async function inboundLeave(btnEl) {
 
 async function finishInbound(btnEl) {
   if (!_activeJobId) { alert("没有进行中的任务 / 진행 중인 작업 없음"); return; }
+  if (_inboundPlanLoad.jobId !== _activeJobId || !['ready','legacy_ready'].includes(_inboundPlanLoad.status) || (_inboundPlanLoad.status === 'ready' && (!_inboundPlanData || _inboundPlanData.plan.id !== _inboundPlanLoad.planId))) {
+    alert("请先读取本单资料，再完成理货 / 이번 계획을 확인한 후 완료하세요");
+    return;
+  }
   // Front-end pre-check: block finish if unload not done
   if (_inboundPlanData && _inboundPlanData.plan) {
     var pStatus = _inboundPlanData.plan.status;
