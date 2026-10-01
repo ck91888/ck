@@ -42,8 +42,7 @@
   document.querySelector('#pickCreateSection .card-title').textContent='新建拣货并派工 / 피킹 생성·배정';
   const createHint=document.querySelector('#pickCreateSection .card-title').nextElementSibling;if(createHint)createHint.textContent='扫描本趟拣货单后分配人员，确认即开始实际操作员计时。 / 피킹번호 스캔 후 인원 배정과 동시에 작업시간을 기록합니다.';
   window.interruptToUnload=()=>{CKClearNativeJob();goPage('unload');};window.interruptToLoad=()=>{CKClearNativeJob();goPage('outbound_load');};
-  document.querySelectorAll('[onclick="interruptToUnload()"]').forEach(b=>b.textContent='到仓卸货 / 도착 하차');
-  document.querySelectorAll('[onclick="interruptToLoad()"]').forEach(b=>b.textContent='出库装货 / 출고 상차');
+  document.querySelectorAll('[onclick="interruptToUnload()"],[onclick="interruptToLoad()"]').forEach(b=>b.remove());
   const switchMode=window.switchPickMode;window.switchPickMode=function(){switchMode('start');$('pickModeBar').hidden=true;};
   document.querySelector('#pickStartSection .card-title').textContent='扫描拣货单并派工 / 피킹번호 스캔·배정';
   document.querySelector('#pickStartSection .card-title').nextElementSibling.textContent='可连续扫描多个外部拣货单号，点“分配人员并开始”后再扫工牌。确认后开始本趟计时。 / 외부 피킹번호를 스캔한 뒤 인원을 배정하세요.';
