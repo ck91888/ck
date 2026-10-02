@@ -33,6 +33,21 @@ async function fixture(){
 }
 async function until(condition,errors=[]){for(let i=0;i<100;i++){if(condition())return;await new Promise(r=>setTimeout(r,10));}throw Error('DOM condition timeout: '+errors.join('; '));}
 const opts={skip:!runtime};
+test('shared batch file controls confirm whole-plan removal, preserve retry identity and restore localized rows',opts,async()=>{
+ const f=await fixture();f.env.SOP_WORK_CHAIN_ENABLED='true';
+ const call=async(action,b={})=>{const r=await(await f.request({action,client_req_id:crypto.randomUUID(),...b})).json();assert.equal(r.ok,true,r.error);return r;};
+ const plan=await call('v2_inbound_plan_create',{customer:'QA DOM shared',biz_classes:['bulk']}),n=await call('sop_need_create',{customer:'QA DOM shared',title:'QA shared work',instructions:'QA instructions',source_type:'inbound',source_id:plan.id,department:'bulk',owner:'QA owner',planned_quantity:10,planned_unit:'箱'});
+ f.env.DB.raw.prepare("INSERT INTO v2_attachments(id,related_doc_type,related_doc_id,attachment_category,file_name,file_key,created_at) VALUES('QA-DOM-BATCH','inbound_plan',?,'batch_work_material','QA-shared.csv','qa-blob',?)").run(plan.id,new Date().toISOString());
+ const p=await f.page('/002/');try{
+  const host=p.d.createElement('section');p.d.body.append(host);const group={source_type:'inbound',source_id:plan.id,items:[{id:n.id}]};await p.w.CKWorkChain.batchMaterials(host,group);
+  const alerts=[];p.w.alert=m=>alerts.push(m);p.w.confirm=()=>false;host.querySelector('[data-batch-material-action=remove]').click();await new Promise(r=>setTimeout(r,15));assert.equal(f.env.DB.raw.prepare('SELECT count(*) n FROM ck_batch_material_events').get().n,0);
+  let confirm='';p.w.confirm=m=>{confirm=m;return true;};const original=p.w.CKSession.request,attempts=[];let lost=false;
+  p.w.CKSession.request=async(action,body)=>{const r=await original(action,body);if(action==='sop_batch_work_material_remove'){attempts.push(JSON.stringify(body));if(!lost){lost=true;throw new TypeError('QA response lost');}}return r;};
+  const remove=host.querySelector('[data-batch-material-action=remove]');remove.click();await until(()=>alerts.length,p.errors);assert.match(confirm,/全部关联作业/);assert.match(confirm,/可恢复/);assert.equal(remove.disabled,false);remove.click();await until(()=>host.querySelector('[data-batch-material-action=restore]'),p.errors);assert.equal(attempts[0],attempts[1]);assert.equal(f.env.DB.raw.prepare('SELECT count(*) n FROM ck_batch_material_events').get().n,1);
+  p.w.setLang('ko');p.w.applyLang();assert.equal(host.querySelector('[data-batch-material-action=restore]').textContent,'복구');host.querySelector('[data-batch-material-action=restore]').click();await until(()=>host.querySelector('[data-batch-material-action=remove]'),p.errors);assert.equal(host.querySelector('[data-batch-material-action=remove]').textContent,'제거');assert.equal(host.querySelector('.chain-removed-materials'),null);
+  p.w.CKSession.user.scope='field';await p.w.CKWorkChain.batchMaterials(host,group);assert.equal(host.children.length,0);assert.deepEqual(p.errors,[]);
+ }finally{p.w.close();}
+});
 async function issueFixture(){const f=await fixture(),call=async(action,data={})=>{const r=await(await f.request({action,client_req_id:crypto.randomUUID(),...data})).json();assert.equal(r.ok,true,r.error);return r;},issue=await call('v2_issue_create',{biz_class:'bulk',customer:'QA DOM issue',issue_description:'QA original issue requirement'});const get=async()=> (await call('sop_get',{id:'ISSUE-'+issue.id})).record;return{...f,call,issue,get};}
 test('issue workflow refresh updates the original field requirement and closed state, not only the added panel',opts,async()=>{
  const f=await issueFixture(),p=await f.page('/001/');try{p.w.openIssue(f.issue.id);await until(()=>p.d.querySelector('#issueDetailBody .ck-workflow #actions'),p.errors);let n=await f.get();await f.call('sop_issue_change',{id:n.id,revision:n.revision,message:'QA updated green label'});

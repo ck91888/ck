@@ -160,6 +160,16 @@ test('selected departments may defer codes, but supplied codes keep department s
  assert.equal((await call('v2_inbound_plan_create',{customer:'Fixture',biz_classes:['direct_ship','bulk_putaway'],external_inbound_no:'D\nB',direct_external_inbound_no:'B',bulk_external_inbound_no:'B'},false)).ok,false);
  const p=await plan(['bulk_putaway'],{external_inbound_no:'B-OLD'});await call('v2_inbound_plan_update',{id:p.id,biz_classes:['bulk_putaway'],external_inbound_no:'B-NEW',bulk_external_inbound_no:'B-NEW'});assert.equal((await detail(p)).plan.bulk_external_inbound_no,'B-NEW');
 });
+test('backfill success uses returned plan identity despite D1 trigger-inflated change counts',async()=>{
+ const s=setup(),p=await s.plan(['direct_ship','bulk_putaway']),original=s.DB.batch.bind(s.DB);
+ s.DB.batch=async statements=>{const r=await original(statements);for(let i=0;i<statements.length;i++)if(statements[i].sql.startsWith('UPDATE v2_inbound_plans SET external_inbound_no='))r[i].meta.changes=5;return r;};
+ const req=crypto.randomUUID(),body={id:p.id,previous_code:'',previous_bulk_code:'',external_inbound_no:'QA-D1-D',bulk_external_inbound_no:'QA-D1-B',client_req_id:req};
+ const first=await s.call('v2_inbound_plan_bind_external',body);assert.equal(first.ok,true);assert.deepEqual(await s.call('v2_inbound_plan_bind_external',body),first);
+ assert.equal((await s.detail(p)).plan.external_reference_history.length,2);
+ const second=await s.plan(['direct_ship']);let raced=false;
+ s.DB.batch=async statements=>{if(!raced&&statements.some(x=>x.sql.startsWith('UPDATE v2_inbound_plans SET external_inbound_no='))){raced=true;s.DB.raw.prepare('UPDATE v2_inbound_plans SET external_inbound_no=? WHERE id=?').run('QA-WINNER',second.id);}return original(statements);};
+ const failed=await s.call('v2_inbound_plan_bind_external',{id:second.id,previous_code:'',external_inbound_no:'QA-LOSER'},false);assert.equal(failed.ok,false);assert.equal((await s.detail(second)).plan.external_inbound_no,'QA-WINNER');
+});
 test('both departments supplement the original received plan exactly once, retaining cargo and labor history',async()=>{
  const {plan,call,detail,unload,DB}=setup();
  const p=await plan(['direct_ship','bulk_putaway']);let d=await detail(p);

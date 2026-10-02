@@ -19,7 +19,8 @@ import {handleCourier,validateCourierLines,courierPlanStatements,courierProgress
 import { inboundFlowEnabled, inboundCode, inboundCodes, inboundReferenceValue, inboundCodeProgress, selectInboundReference, validateInboundCode, resolveInboundPlan, putawayTaskBiz, completeUnloadedDispositions, bindInboundCode, inboundLabels, inboundReferenceData, departmentCodes, putawayClasses } from './inbound-flow.js';
 import { handleAttendance, guardAttendance, ensureAttendance } from './attendance.js';
 import {crewBorrowEnabled,ensureCrewBorrow,prepareCrewBorrow,crewAvailability,crewStatus,crewRetry,canCrewDestination,reconcileCrewReturns,reconcilePersonReturns,borrowedOut} from './crew-borrow.js';
-import { workChainEnabled, guardWorkChain, chainLinked, workMaterials, uploadWorkMaterial, workMaterialCountSql } from './work-chain.js';
+import { workChainEnabled, guardWorkChain, chainLinked, workMaterials, uploadWorkMaterial, workMaterialCountFor } from './work-chain.js';
+import {ensureBatchMaterialState,batchVisibleSql,batchStateEnabled} from './batch-material-state.js';
 import { workPlanStatements } from './sop-planning.js';
 import { nextOutboundDisplayNo } from './outbound-number.js';
 import { handleSop, guardLegacy, linkedNeeds, linkedCheck, outboundNeedStatements } from './sop.js';
@@ -2863,13 +2864,13 @@ route("v2_outbound_order_list", async (body, env) => {
   if (customer_keyword) { where += " AND customer LIKE ?"; binds.push('%' + customer_keyword + '%'); }
   if (usesStockRaw === "1") { where += " AND uses_stock_operation=1"; }
   else if (usesStockRaw === "0") { where += " AND (uses_stock_operation IS NULL OR uses_stock_operation=0)"; }
-  if(workChainEnabled(env)&&['0','1'].includes(hasMaterialRaw)) {where+=' AND '+workMaterialCountSql+(hasMaterialRaw==='1'?'>0':'=0');}
+  if(workChainEnabled(env)&&['0','1'].includes(hasMaterialRaw)) {where+=' AND '+workMaterialCountFor(env)+(hasMaterialRaw==='1'?'>0':'=0');}
   else if (hasMaterialRaw === "1") {
     where += " AND EXISTS (SELECT 1 FROM v2_attachments a WHERE a.related_doc_type='outbound_order' AND a.related_doc_id=v2_outbound_orders.id AND a.attachment_category='outbound_material')";
   } else if (hasMaterialRaw === "0") {
     where += " AND NOT EXISTS (SELECT 1 FROM v2_attachments a WHERE a.related_doc_type='outbound_order' AND a.related_doc_id=v2_outbound_orders.id AND a.attachment_category='outbound_material')";
   }
-  const listSql = "SELECT *"+(workChainEnabled(env)?", "+workMaterialCountSql+" AS material_count":"")+" FROM v2_outbound_orders" + where + " ORDER BY " + _dateExpr + " DESC, created_at DESC LIMIT ? OFFSET ?";
+  const listSql = "SELECT *"+(workChainEnabled(env)?", "+workMaterialCountFor(env)+" AS material_count":"")+" FROM v2_outbound_orders" + where + " ORDER BY " + _dateExpr + " DESC, created_at DESC LIMIT ? OFFSET ?";
   const [countRs,rs]=await env.DB.batch([env.DB.prepare('SELECT COUNT(*) AS c FROM v2_outbound_orders'+where).bind(...binds),env.DB.prepare(listSql).bind(...binds,limit,offset)]);
   const total=Number(countRs.results?.[0]?.c||0);
   const items = rs.results || [];
@@ -7135,7 +7136,7 @@ route("v2_attachment_list", async (body, env) => {
   if (!doc_type || !doc_id) return err("missing related_doc_type or related_doc_id");
   if(workChainEnabled(env)&&doc_type==='outbound_order'){const base=(await env.DB.prepare('SELECT * FROM v2_attachments WHERE related_doc_type=? AND related_doc_id=?').bind(doc_type,doc_id).all()).results||[];const files=await workMaterials(env,await chainLinked(env,doc_id));const items=new Map(base.map(f=>[f.id,f]));for(const f of files)items.set(f.id,{...f,attachment_category:'outbound_material',canonical_material:true});return json({ok:true,items:[...items.values()]});}
   const rs = await env.DB.prepare(
-    "SELECT * FROM v2_attachments WHERE related_doc_type=? AND related_doc_id=? ORDER BY created_at DESC"
+    "SELECT a.* FROM v2_attachments a WHERE a.related_doc_type=? AND a.related_doc_id=?"+batchVisibleSql(env)+" ORDER BY a.created_at DESC"
   ).bind(doc_type, doc_id).all();
   return json({ ok: true, items: rs.results || [] });
 });
@@ -7163,6 +7164,7 @@ route("v2_attachment_delete", async (body, env) => {
     const att = await env.DB.prepare("SELECT * FROM v2_attachments WHERE id=?").bind(id).first();
     if (!att) return { ok: false, error: "not_found", message: "附件不存在或已被删除" };
     if(workChainEnabled(env)&&(att.related_doc_type==='sop_need'||['inbound_material','outbound_material'].includes(att.attachment_category)))return {ok:false,error:'作业资料请在关联作业需求中管理；历史来源资料保留只读'};
+    if(batchStateEnabled(env)&&att.attachment_category==='batch_work_material')return {ok:false,error:'本批总作业明细请从作业组可恢复移除，不能永久删除'};
 
     // 已 frozen 的出库单不允许删除其资料
     if (att.related_doc_type === 'outbound_order' && att.attachment_category === 'outbound_material') {
@@ -12737,6 +12739,7 @@ export default {
       await ensureMigrated(env.DB);
       await ensureInboundReferenceGuard(env);
       await ensureInboundDocuments(env);
+      await ensureBatchMaterialState(env);
       await ensureReferenceHistory(env);
     } catch (e) {
       return json({ ok: false, error: "migration failed: " + e.message }, 500);

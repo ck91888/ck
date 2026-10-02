@@ -1,10 +1,11 @@
 import {nativeOwner} from './sop-dispatch.js';
+import {batchVisibleSql} from './batch-material-state.js';
 const q=(env,sql,...args)=>env.DB.prepare(sql).bind(...args);
 const fail=message=>{throw Error(message);};
 const category='unload_photo';
 export function inboundAttachmentRead(env,id){
- return q(env,`SELECT a.* FROM v2_attachments a WHERE (a.related_doc_type='inbound_plan' AND a.related_doc_id=?) OR
-  (a.attachment_category='unload_photo' AND a.related_doc_type='field_feedback' AND (a.related_doc_id IN (SELECT id FROM v2_field_feedbacks WHERE inbound_plan_id=?) OR a.related_doc_id IN (SELECT source_feedback_id FROM v2_inbound_plans WHERE id=?))) ORDER BY a.created_at DESC,a.id`,id,id,id);
+ return q(env,`SELECT a.* FROM v2_attachments a WHERE 1${batchVisibleSql(env)} AND ((a.related_doc_type='inbound_plan' AND a.related_doc_id=?) OR
+  (a.attachment_category='unload_photo' AND a.related_doc_type='field_feedback' AND (a.related_doc_id IN (SELECT id FROM v2_field_feedbacks WHERE inbound_plan_id=?) OR a.related_doc_id IN (SELECT source_feedback_id FROM v2_inbound_plans WHERE id=?)))) ORDER BY a.created_at DESC,a.id`,id,id,id);
 }
 export async function unloadPhotos(env,type,id){
  if(env.SOP_ENVIRONMENT!=='staging'||env.SOP_UPGRADE_ENABLED!=='true')return [];

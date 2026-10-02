@@ -1,5 +1,6 @@
 import {recordNumbers} from './document-numbers.js';
 import {legacyLoadClaim} from './legacy-load.js';
+import {batchVisibleSql,ensureBatchMaterialState} from './batch-material-state.js';
 // One upstream requirement owns the work instructions and materials. Shipping
 // plans allocate its quantities; they never create a second work requirement.
 export const workChainEnabled = env => env.SOP_UPGRADE_ENABLED === 'true' && env.SOP_WORK_CHAIN_ENABLED === 'true';
@@ -103,9 +104,10 @@ export async function guardWorkChain(body, env) {
 // Old source attachments remain retrievable and are labelled as historical.
 // No copying of blobs: all consumers receive the same attachment ID/file key.
 export async function workMaterials(env, rows) {
- if (!rows.length) return [];
+  if (!rows.length) return [];
+  await ensureBatchMaterialState(env);
  const files=(await q(env,`SELECT DISTINCT a.* FROM v2_attachments a JOIN sop_records n ON n.kind='need' AND n.id IN (SELECT value FROM json_each(?))
- WHERE NOT EXISTS(SELECT 1 FROM json_each(n.state,'$.removed_material_ids') r WHERE r.value=a.id) AND (
+  WHERE NOT EXISTS(SELECT 1 FROM json_each(n.state,'$.removed_material_ids') r WHERE r.value=a.id)${batchVisibleSql(env)} AND (
  (a.related_doc_type='sop_need' AND a.related_doc_id=n.id) OR
  (a.related_doc_type='inbound_plan' AND a.attachment_category IN ('inbound_material','batch_work_material') AND json_extract(n.state,'$.source_type')='inbound' AND a.related_doc_id=json_extract(n.state,'$.source_id')) OR
  (a.related_doc_type='outbound_order' AND a.attachment_category='outbound_material' AND (
@@ -167,4 +169,5 @@ export const workMaterialCountSql = `(SELECT COUNT(DISTINCT a.id) FROM v2_attach
  AND NOT EXISTS(SELECT 1 FROM json_each(n.state,'$.removed_material_ids') r WHERE r.value=a.id)
  AND ((a.related_doc_type='sop_need' AND a.related_doc_id=n.id) OR
  (a.related_doc_type='inbound_plan' AND a.attachment_category IN ('inbound_material','batch_work_material') AND json_extract(n.state,'$.source_type')='inbound' AND a.related_doc_id=json_extract(n.state,'$.source_id')) OR
- (a.related_doc_type='outbound_order' AND a.attachment_category='outbound_material' AND (a.related_doc_id=json_extract(n.state,'$.source_id') OR EXISTS(SELECT 1 FROM json_each(n.state,'$.links') l WHERE json_extract(l.value,'$.outbound_id')=a.related_doc_id))))))`;
+  (a.related_doc_type='outbound_order' AND a.attachment_category='outbound_material' AND (a.related_doc_id=json_extract(n.state,'$.source_id') OR EXISTS(SELECT 1 FROM json_each(n.state,'$.links') l WHERE json_extract(l.value,'$.outbound_id')=a.related_doc_id))))))`;
+export const workMaterialCountFor=env=>batchVisibleSql(env)?workMaterialCountSql.replace(' WHERE\n',' WHERE 1'+batchVisibleSql(env)+' AND (\n').slice(0,-1)+'))':workMaterialCountSql;

@@ -1,6 +1,6 @@
 import {ensureDocumentNumbers,recordNumbers,resolveRecordId,jobNumbers} from './document-numbers.js';
 import {loadTripEnabled} from './outbound-load-trip.js';
-import {readBatchMaterials} from './batch-work-materials.js';
+import {readBatchMaterials,changeBatchMaterial} from './batch-work-materials.js';
 import {completionDate} from './completion-date.js';
 import { workChainEnabled, chainOutboundStatements, chainAllocation, guardWorkChain, workMaterialRead, workMaterials, notifyMaterialChange, assertShippingResult, shippingBasisStatements } from './work-chain.js';
 import { workPlanStatements } from './sop-planning.js';
@@ -102,6 +102,7 @@ export async function handleSop(b,env) {
  try {
   await ensureDocumentNumbers(env);
   const batchMaterials=await readBatchMaterials(b,env,u);if(batchMaterials)return batchMaterials;
+  const batchChange=await changeBatchMaterial(b,env,u);if(batchChange)return batchChange;
   const materialRead=await workMaterialRead(b,env,u);if(materialRead)return materialRead;
   if(env.SOP_ACCEPT_NEW==='false' && (/_create$|_adopt$|_from_outbound$/.test(b.action)||b.action==='sop_task_dispatch'))fail('新版已暂停接收新任务，现有任务仍可收尾');
   if(b.action==='sop_session') return {ok:true,user:{id:u.id,name:u.name,role:u.role,departments:u.departments||[]},mode:env.SOP_ENVIRONMENT||'pilot'};

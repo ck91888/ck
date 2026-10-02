@@ -107,7 +107,21 @@ async function batchMaterials(host,group,{field=false}={}){
  const need=group.items[0];
  const r=await api('sop_batch_work_materials',{id:need.id});if(!host.isConnected)return;
  host.className='chain-batch-materials';host.innerHTML='<h3>'+text('本批总作业明细','입고 건 전체 작업 명세')+'</h3><p class="muted">'+text('本入库计划下所有作业共用，点文件名或“下载”即可获取。','이 입고계획의 모든 작업에서 공유합니다. 파일명 또는 다운로드를 누르세요.')+'</p><div data-batch-files>'+ (r.items.length?filesTable(r.items):'<p class="muted">'+text('暂未上传总作业明细','전체 작업 명세가 없습니다')+'</p>')+'</div>';
- if(field||!['manager','service'].includes(CKSession.user?.role))return;
+  if(field||!['manager','service'].includes(CKSession.user?.role))return;
+  if(r.can_manage){
+   const removed=r.removed_items||[];
+   if(removed.length){const bin=document.createElement('details');bin.className='chain-removed-materials';bin.innerHTML='<summary>'+text('已移除资料（可恢复）','제거한 자료（복구 가능）')+' · '+removed.length+'</summary>'+filesTable(removed);host.append(bin);}
+   const changedLabel=window.getLang?.()==='ko'?'변경: ':'操作：';
+   for(const f of [...r.items,...removed]){
+    const slot=[...host.querySelectorAll('[data-remove-file]')].find(x=>x.dataset.removeFile===f.id);if(!slot)continue;
+    const restore=!!f.removed;let pending=null;
+    const action=button(restore?'恢复':'移除',async()=>{
+     if(!pending){const message=restore?(window.getLang?.()==='ko'?'이 입고계획의 모든 연결 작업에 이 자료를 복구합니다. 계속하시겠습니까?':'将此资料恢复到本入库计划的全部关联作业，是否继续？'):(window.getLang?.()==='ko'?'이 자료를 입고계획의 모든 연결 작업에서 제거합니다. 파일은 보관되며 복구할 수 있습니다. 계속하시겠습니까?':'将此资料从本入库计划的全部关联作业中移除，文件保留且可恢复，是否继续？');if(!confirm(message))return;pending={id:need.id,attachment_id:f.id,material_revision:f.material_revision,client_req_id:crypto.randomUUID()};}
+     await api(restore?'sop_batch_work_material_restore':'sop_batch_work_material_remove',pending);await batchMaterials(host,group,{field});
+    });action.dataset.batchMaterialAction=restore?'restore':'remove';slot.append(action);
+    if(f.changed_at){const audit=document.createElement('small');audit.textContent=changedLabel+(f.changed_by||'')+' · '+(window.CKWorkDate?CKWorkDate.time(f.changed_at):new Date(f.changed_at).toLocaleString('zh-CN',{timeZone:'Asia/Seoul',hour12:false}));slot.append(audit);}
+   }
+  }
  const form=document.createElement('form');form.className='chain-upload';form.innerHTML='<label>'+text('选择总作业明细（可多选）','전체 작업 명세 선택（복수 가능）')+'<input type="file" multiple required accept=".xlsx,.xls,.csv,.pdf,.jpg,.jpeg,.png,.webp"></label><button type="submit">'+text('上传总作业明细','전체 명세 업로드')+'</button><p class="muted">'+text('支持 Excel、CSV、PDF、图片，每个文件不超过 20MB。','Excel, CSV, PDF, 이미지 · 파일당 최대 20MB')+'</p><p role="status"></p>';host.append(form);
  let pending=[];const input=form.querySelector('input');input.onchange=()=>{pending=[];};
  form.onsubmit=async event=>{event.preventDefault();const submit=form.querySelector('button'),status=form.querySelector('[role=status]');submit.disabled=true;input.disabled=true;
