@@ -87,7 +87,7 @@ test('scanning an existing dispatched order cannot silently add only one of a ne
 });
 test('independent import trips do not merge crews and both finish from the dispatcher page',async()=>{
  const {start,ok,count,status}=setup();const a=await start('v2_import_delivery_job_start'),b=await start('v2_import_delivery_job_start',{},[{id:'D',name:'丁'},{id:'E',name:'戊'}]);assert.notEqual(a.job_id,b.job_id);assert.equal(count(a.job_id),3);assert.equal(count(b.job_id),2);
- await ok('v2_import_delivery_job_finish',{job_id:a.job_id,worker_id:'A',complete_job:true});assert.equal(status(a.job_id),'completed');assert.equal(count(b.job_id),2);await ok('v2_import_delivery_job_finish',{job_id:b.job_id,worker_id:'D',complete_job:true});assert.equal(count(b.job_id),0);
+  await ok('v2_import_delivery_job_finish',{job_id:a.job_id,worker_id:'A',complete_job:true,destination_note:'QA first dock'});assert.equal(status(a.job_id),'completed');assert.equal(count(b.job_id),2);await ok('v2_import_delivery_job_finish',{job_id:b.job_id,worker_id:'D',complete_job:true,destination_note:'QA second dock'});assert.equal(count(b.job_id),0);
 });
 test('return receiving and barcode verification both close the assigned three-person crew',async()=>{
  const {ok,start,count,status}=setup();const j=await start('v2_inbound_job_start',{job_type:'inbound_return',biz_class:'return'});await ok('v2_inbound_job_finish',{job_id:j.job_id,worker_id:'A',complete_job:true});assert.equal(count(j.job_id),0);assert.equal(status(j.job_id),'completed');

@@ -4,7 +4,7 @@ import {documentCodeError} from '../shared/document-code.js';
 import {loadTripEnabled,startLoadTrip} from './outbound-load-trip.js';
 import {startBorrowableSimple} from './crew-borrow.js';
 import {startUnloadTrip} from './unload-trip.js';
-import {startAtomicGeneric,startAtomicInbound,startAtomicBulk,startAtomicDocument,dispatchSignature,ensureDispatchStartGuard} from './atomic-native-start.js';
+import {startAtomicGeneric,startAtomicInbound,startAtomicBulk,startAtomicDocument,startAtomicImportDelivery,dispatchSignature,ensureDispatchStartGuard} from './atomic-native-start.js';
 // Responsible-person assignment around existing operation handlers. Documents,
 // result forms and status transitions remain owned by those handlers.
 import { laborDepartment,startDepartment,departments } from '../shared/labor-department.js';
@@ -56,7 +56,8 @@ export async function startNative(body,env,invoke,guard,helpers={}){
   await ensureDispatchStartGuard(env);
   if(p.action==='v2_unload_job_start')return {...await startUnloadTrip(env,{...p,plan_ids:p.plan_ids||[p.plan_id]},{workers,lead_id:lead.id,estimated_minutes:minutes,department}),lead,assigned_workers:workers};
   if(p.action==='v2_unplanned_unload_start'||p.action==='v2_outbound_load_start')return startBorrowableSimple(env,p,{workers,lead_id:lead.id,estimated_minutes:minutes,department,signature:dispatchSignature(env,p,{workers,lead_id:lead.id,estimated_minutes:minutes,department})},p.action==='v2_unplanned_unload_start'?await helpers.feedbackNumber():undefined);
-  if(p.action==='v2_ops_job_start'&&!env.SOP_CREW_BORROW?.plans.length)return startAtomicGeneric(env,p,{workers,lead_id:lead.id,estimated_minutes:minutes,department});
+   if(p.action==='v2_import_delivery_job_start')return startAtomicImportDelivery(env,p,{workers,lead_id:lead.id,estimated_minutes:minutes,department});
+   if(p.action==='v2_ops_job_start'&&!env.SOP_CREW_BORROW?.plans.length)return startAtomicGeneric(env,p,{workers,lead_id:lead.id,estimated_minutes:minutes,department});
   if(p.action==='v2_inbound_job_start'&&!env.SOP_CREW_BORROW?.plans.length)return startAtomicInbound(env,p,{workers,lead_id:lead.id,estimated_minutes:minutes,department},helpers.inboundNumber);
   if(p.action==='v2_bulk_op_job_start'&&!env.SOP_CREW_BORROW?.plans.length)return startAtomicBulk(env,p,{workers,lead_id:lead.id,estimated_minutes:minutes,department},helpers.findOutbound,helpers.linkedNeeds);
   if(['v2_pick_job_start','v2_pick_job_start_by_docs','v2_outbound_stock_op_start','v2_issue_handle_start','v2_verify_job_start'].includes(p.action)&&!env.SOP_CREW_BORROW?.plans.length)return startAtomicDocument(env,p,{workers,lead_id:lead.id,estimated_minutes:minutes,department},helpers.pickNumber);

@@ -6083,6 +6083,8 @@ route("v2_import_delivery_job_finish", async (body, env) => {
   const leave_only = body.leave_only === true;
   if (!job_id) return err("missing job_id");
 
+  if(env.SOP_GROUP_FINISH&&complete_job){const job=await env.DB.prepare('SELECT * FROM v2_ops_jobs WHERE id=?').bind(job_id).first();if(!job)return err('job not found');if(job.status==='completed')return json({ok:true,already_completed:true});return json(await atomicNativeFinish(env,body,job,{delivery:true}));}
+
   return withIdem(env, body, "v2_import_delivery_job_finish", async () => {
     const t = now();
 

@@ -2,19 +2,19 @@ import {departmentCodes,inboundCodes,needsPutaway} from './inbound-flow.js';
 const q=(e,s,...a)=>e.DB.prepare(s).bind(...a);
 const active="('pending','working','awaiting_close')";
 // The stable result primary key claims one completion; a failed batch rolls back the claim too.
-export async function atomicNativeFinish(env,body,job,{inbound=false,biz=''}={}){
+export async function atomicNativeFinish(env,body,job,{inbound=false,biz='',delivery=false}={}){
  const t=new Date().toISOString(),id=job.id,resultId='RES-FINAL-'+id,token=crypto.randomUUID(),by=String(body.worker_id||env.SOP_REQUEST_USER?.id||'');
- const isReturn=job.job_type==='inbound_return',lines=isReturn?[]:(body.result_lines||[]),data=inbound?{remark:String(body.remark||''),result_note:String(body.result_note||''),result_lines:lines,...(isReturn?{is_return:true}:{extra_ops:body.extra_ops||{}})}:(body.shared_result||{});
+ const isReturn=job.job_type==='inbound_return',lines=isReturn?[]:(body.result_lines||[]),data=delivery?{destination_note:String(body.destination_note||'').trim(),estimated_piece_count:Number(body.estimated_piece_count||0),remark:String(body.remark||'').trim()}:inbound?{remark:String(body.remark||''),result_note:String(body.result_note||''),result_lines:lines,...(isReturn?{is_return:true}:{extra_ops:body.extra_ops||{}})}:(body.shared_result||{});
  const plan=inbound&&job.related_doc_id?await q(env,'SELECT * FROM v2_inbound_plans WHERE id=?',job.related_doc_id).first():null;
- const json=JSON.stringify({...data,_completion_request:token}),result=inbound?{ok:true,result_id:resultId}:{ok:true},claimKey='NATIVE-FINISH:'+id;
+ const json=JSON.stringify({...data,_completion_request:token}),result=inbound||delivery?{ok:true,result_id:resultId}:{ok:true},claimKey='NATIVE-FINISH:'+id;
  const gate=inbound?"EXISTS(SELECT 1 FROM v2_ops_job_results WHERE id=? AND json_extract(result_json,'$._completion_request')=?)":"EXISTS(SELECT 1 FROM v2_idempotency_keys WHERE idem_key=? AND json_extract(response_json,'$._completion_request')=?)",g=[inbound?resultId:claimKey,token],sql=[];
  const planGuard=plan?` AND EXISTS(SELECT 1 FROM v2_inbound_plans p WHERE p.id=? AND COALESCE(p.is_deleted,0)=0 AND ${isReturn?"p.status!='cancelled'":"p.status IN ('putting_away','partially_completed')"} AND COALESCE(p.external_inbound_no,'')=? AND COALESCE(p.bulk_external_inbound_no,'')=?)${isReturn?'':` AND NOT EXISTS(SELECT 1 FROM v2_inbound_plan_jobs uj WHERE uj.plan_id=? AND uj.related_doc_type='inbound_plan' AND uj.job_type='unload' AND uj.status IN ${active}) AND NOT EXISTS(SELECT 1 FROM ck_courier_plan_items ci WHERE ci.plan_id=? AND NOT EXISTS(SELECT 1 FROM ck_courier_receipts cr WHERE cr.tracking_no=ci.tracking_no))`}`:'';
  const planArgs=plan?[plan.id,plan.external_inbound_no||'',plan.bulk_external_inbound_no||'',...(isReturn?[]:[plan.id,plan.id])]:[];
  if(inbound)sql.push(q(env,`INSERT INTO v2_ops_job_results(id,job_id,box_count,pallet_count,remark,result_json,result_lines_json,created_by,created_at)
  SELECT ?,?,?,?,?,?,?,?,? FROM v2_ops_jobs WHERE id=? AND status IN ${active}${planGuard}`,resultId,id,0,0,String(body.remark||''),json,JSON.stringify(lines),by,t,id,...planArgs));
  else{
-  sql.push(q(env,`INSERT INTO v2_idempotency_keys(idem_key,action,response_json,created_at) SELECT ?,'v2_ops_job_finish',?,? FROM v2_ops_jobs WHERE id=? AND status IN ${active}`,claimKey,JSON.stringify({...result,_completion_request:token}),t,id));
-  if(body.box_count!=null||body.pallet_count!=null||body.remark)sql.push(q(env,`INSERT INTO v2_ops_job_results(id,job_id,box_count,pallet_count,remark,result_json,created_by,created_at) SELECT ?,?,?,?,?,?,?,? WHERE ${gate}`,resultId,id,Number(body.box_count||0),Number(body.pallet_count||0),String(body.remark||''),JSON.stringify(data),by,t,...g));
+   sql.push(q(env,`INSERT INTO v2_idempotency_keys(idem_key,action,response_json,created_at) SELECT ?,?,?,? FROM v2_ops_jobs WHERE id=? AND status IN ${active}`,claimKey,body.action||'v2_ops_job_finish',JSON.stringify({...result,_completion_request:token}),t,id));
+   if(delivery||body.box_count!=null||body.pallet_count!=null||body.remark)sql.push(q(env,`INSERT INTO v2_ops_job_results(id,job_id,box_count,pallet_count,remark,result_json,created_by,created_at) SELECT ?,?,?,?,?,?,?,? WHERE ${gate}`,resultId,id,Number(body.box_count||0),Number(body.pallet_count||0),String(body.remark||''),JSON.stringify(data),by,t,...g));
  }
  sql.push(q(env,`UPDATE v2_ops_job_workers SET left_at=?,minutes_worked=MAX(0,ROUND((julianday(?)-julianday(joined_at))*14400)/10.0),leave_reason='job_completed' WHERE job_id=? AND left_at='' AND ${gate}`,t,t,id,...g));
  sql.push(q(env,`UPDATE v2_ops_jobs SET status='completed',active_worker_count=0,shared_result_json=?,finished_at=?,updated_at=? WHERE id=? AND ${gate}`,JSON.stringify(data),t,t,id,...g));

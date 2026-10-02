@@ -16,7 +16,11 @@ export async function validateNativeMutation(body,env){
  if(body.action==='v2_ops_job_finish'&&Object.values(types).flat().includes(job.job_type))fail('请从原任务填写产出并结束 / 원래 작업에서 산출을 입력하고 종료하세요');
  if(body.action==='v2_unplanned_unload_finish'&&job.related_doc_type!=='field_feedback')fail('请从原卸货任务完成 / 원래 하차 작업에서 완료하세요');
  if(body.action==='v2_unload_job_finish'&&job.related_doc_type==='field_feedback')fail('临时卸货请从原任务完成 / 임시 하차 작업에서 완료하세요');
- if(body.leave_only||body.action.endsWith('_leave')||body.action.endsWith('_resume')||job.status==='completed')return;
+  if(body.leave_only||body.action.endsWith('_leave')||body.action.endsWith('_resume')||job.status==='completed')return;
+  if(body.action==='v2_import_delivery_job_finish'){
+   if(!String(body.destination_note||'').trim())fail('请填写去向 / 목적지를 입력하세요');
+   const count=Number(body.estimated_piece_count??0);if(!Number.isFinite(count)||count<0||count>1e8)fail('大概件数不能为负数或无效数字 / 올바른 수량을 입력하세요');
+  }
  for(const key of quantityKeys){const n=Number(body[key]??0);if(!Number.isFinite(n)||n<0||n>1e8)fail('产出数量不能为负数或无效数字 / 올바른 산출 수량을 입력하세요');}
  for(const key of ['sort_qty','label_qty','repair_box_qty']){const n=Number(body.extra_ops?.[key]??0);if(!Number.isFinite(n)||n<0||n>1e8)fail('附加操作数量无效 / 추가 작업 수량 오류');}
  for(const line of body.result_lines||[]){for(const key of ['actual_qty','putaway_qty'])if(line[key]!=null&&(!Number.isFinite(Number(line[key]))||Number(line[key])<0||Number(line[key])>1e8))fail('实际数量无效 / 실제 수량 오류');}

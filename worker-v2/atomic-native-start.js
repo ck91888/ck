@@ -84,6 +84,10 @@ export async function startAtomicBulk(e,p,staff,findOutbound,needs){
  return commitPrepared(e,p,staff,{id,t,sql,jobType:'bulk_op',sourceType:'work_order',sourceId:order?.id||no,extra:order?{linked_outbound:{...order}}:{}});
 }
 export function dispatchSignature(e,p,staff){const payload={...p};if(['v2_pick_job_start','v2_pick_job_start_by_docs'].includes(payload.action))payload.action='v2_pick_job_start';for(const key of ['client_req_id','k','worker_id','worker_name','handler_id','handler_name'])delete payload[key];return JSON.stringify({actor:e.SOP_REQUEST_USER.id,payload,workers:staff.workers,lead_id:staff.lead_id,department:staff.department,estimated_minutes:staff.estimated_minutes});}
+export async function startAtomicImportDelivery(e,p,staff){
+ const id='JOB-'+crypto.randomUUID(),t=new Date().toISOString(),lead=staff.workers.find(w=>w.id===staff.lead_id);
+ return commitPrepared(e,p,staff,{id,t,sql:[q(e,"INSERT INTO v2_ops_jobs(id,flow_stage,biz_class,job_type,related_doc_type,related_doc_id,status,created_by,created_at,updated_at,active_worker_count) VALUES(?,'import','import','pickup_delivery_import','','','working',?,?,?,?)",id,lead.id,t,t,staff.workers.length)],sourceType:'',sourceId:'',jobType:'pickup_delivery_import'});
+}
 export async function startAtomicGeneric(e,p,staff){
  const id='JOB-'+crypto.randomUUID(),t=new Date().toISOString(),lead=staff.workers.find(w=>w.id===staff.lead_id),seg='WS-'+crypto.randomUUID(),signature=dispatchSignature(e,p,staff),result={ok:true,job_id:id,worker_seg_id:seg,is_new_job:true,lead,assigned_workers:staff.workers,_dispatch_signature:signature};
  if(p.related_doc_type&&p.related_doc_id){const old=await q(e,"SELECT id FROM v2_ops_jobs WHERE related_doc_type=? AND related_doc_id=? AND job_type=? AND status IN ('pending','working','awaiting_close')",p.related_doc_type,p.related_doc_id,p.job_type).first();if(old)return {ok:false,error:'此单已有旧任务，请继续原任务并核对人员',active_job_id:old.id};}
