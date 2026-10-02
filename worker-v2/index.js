@@ -21,6 +21,7 @@ import { handleAttendance, guardAttendance, ensureAttendance } from './attendanc
 import {crewBorrowEnabled,ensureCrewBorrow,prepareCrewBorrow,crewAvailability,crewStatus,crewRetry,canCrewDestination,reconcileCrewReturns,reconcilePersonReturns,borrowedOut} from './crew-borrow.js';
 import { workChainEnabled, guardWorkChain, chainLinked, workMaterials, uploadWorkMaterial, workMaterialCountFor } from './work-chain.js';
 import {ensureBatchMaterialState,batchVisibleSql,batchStateEnabled} from './batch-material-state.js';
+import {createOutboundBookingBatch} from './outbound-booking-batch.js';
 import { workPlanStatements } from './sop-planning.js';
 import { nextOutboundDisplayNo } from './outbound-number.js';
 import { handleSop, guardLegacy, linkedNeeds, linkedCheck, outboundNeedStatements } from './sop.js';
@@ -2763,6 +2764,10 @@ route("v2_issue_handle_finish", async (body, env) => {
 // =====================================================
 // OUTBOUND ORDERS — Collab side
 // =====================================================
+route('v2_outbound_order_batch_create',async(body,env)=>{
+  if(!isAuth(body,env))return err('unauthorized',401);
+  return json(await createOutboundBookingBatch(body,env));
+});
 route("v2_outbound_order_create", async (body, env) => {
   if (!isAuth(body, env)) return err("unauthorized", 401);
   // 业务分类必填（direct_ship/bulk/return）
