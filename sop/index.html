@@ -1,0 +1,7 @@
+<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CK 作业与调度 / 작업·배정</title><link rel="stylesheet" href="style.css"></head><body>
+<header><b>CK · 作业与调度 <small>작업·배정</small></b><span id="identity"></span></header>
+<main><div id="notice" role="status" aria-live="polite"></div>
+<section id="login" class="card"><h1>负责人工作台 / 담당자 작업대</h1><p>个人授权码识别派工、审核与客服权限。工牌仅用于登记实际操作人员。</p><form id="loginForm"><label>个人授权码 / 개인 접속 코드<input id="token" type="password" autocomplete="current-password" required></label><button>进入 / 접속</button></form><p id="configHint"></p></section>
+<div id="workspace" hidden><nav id="tabs"></nav><div class="toolbar"><button id="refresh">刷新 / 새로고침</button><span id="updates"></span><button id="logout" class="light">退出 / 로그아웃</button></div><section id="content"></section></div>
+</main><dialog id="modal"><form id="editor"><h2 id="editorTitle"></h2><div id="fields"></div><div class="toolbar"><button type="submit" id="save">保存 / 저장</button><button type="button" class="light" id="cancel">关闭 / 닫기</button></div><p id="formError" role="alert"></p></form></dialog>
+<script src="../shared/html5-qrcode.min.js"></script><script src="../shared/xlsx.full.min.js"></script><script src="config.js"></script><script src="app.js"></script></body></html>
