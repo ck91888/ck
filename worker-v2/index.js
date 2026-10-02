@@ -10490,7 +10490,7 @@ route("v2_dashboard_order_list", async (body, env) => {
   if (job_type)   { where += " AND j.job_type=?"; binds.push(job_type); }
   if (status)     { where += " AND j.status=?"; binds.push(status); }
   if (doc_no) {
-    where += " AND (j.display_no LIKE ? OR j.related_doc_id LIKE ? OR j.linked_outbound_order_id LIKE ?"+(env.SOP_UPGRADE_ENABLED==='true'?" OR  EXISTS (SELECT 1 FROM sop_document_numbers dn LEFT JOIN sop_records sr ON sr.id=j.id AND sr.kind='task' WHERE (dn.record_id=json_extract(sr.state,'$.need_id') OR dn.record_id=j.related_doc_id) AND dn.display_no LIKE ?) OR EXISTS(SELECT 1 FROM v2_inbound_plans ip WHERE ip.id=j.related_doc_id AND ip.display_no LIKE ?) OR EXISTS(SELECT 1 FROM v2_outbound_orders op WHERE (op.id=j.related_doc_id OR op.id=j.linked_outbound_order_id) AND op.display_no LIKE ?)":"")+")";
+    where += " AND (j.display_no LIKE ? OR j.related_doc_id LIKE ? OR j.linked_outbound_order_id LIKE ?"+(env.SOP_UPGRADE_ENABLED==='true'?" OR  EXISTS (SELECT 1 FROM sop_document_numbers dn LEFT JOIN sop_records sr ON sr.id=j.id AND sr.kind='task' WHERE (dn.record_id=j.id OR dn.record_id=json_extract(sr.state,'$.need_id') OR dn.record_id=j.related_doc_id) AND dn.display_no LIKE ?) OR EXISTS(SELECT 1 FROM v2_inbound_plans ip WHERE ip.id=j.related_doc_id AND ip.display_no LIKE ?) OR EXISTS(SELECT 1 FROM v2_outbound_orders op WHERE (op.id=j.related_doc_id OR op.id=j.linked_outbound_order_id) AND op.display_no LIKE ?)":"")+")";
     const pat = "%" + doc_no + "%";
     binds.push(pat, pat, pat);if(env.SOP_UPGRADE_ENABLED==='true')binds.push(pat,pat,pat);
   }
@@ -10641,7 +10641,7 @@ route("v2_dashboard_order_export", async (body, env) => {
   if (job_type)   { where += " AND j.job_type=?"; binds.push(job_type); }
   if (status)     { where += " AND j.status=?"; binds.push(status); }
   if (doc_no) {
-    where += " AND (j.display_no LIKE ? OR j.related_doc_id LIKE ? OR j.linked_outbound_order_id LIKE ?"+(env.SOP_UPGRADE_ENABLED==='true'?" OR  EXISTS (SELECT 1 FROM sop_document_numbers dn LEFT JOIN sop_records sr ON sr.id=j.id AND sr.kind='task' WHERE (dn.record_id=json_extract(sr.state,'$.need_id') OR dn.record_id=j.related_doc_id) AND dn.display_no LIKE ?) OR EXISTS(SELECT 1 FROM v2_inbound_plans ip WHERE ip.id=j.related_doc_id AND ip.display_no LIKE ?) OR EXISTS(SELECT 1 FROM v2_outbound_orders op WHERE (op.id=j.related_doc_id OR op.id=j.linked_outbound_order_id) AND op.display_no LIKE ?)":"")+")";
+    where += " AND (j.display_no LIKE ? OR j.related_doc_id LIKE ? OR j.linked_outbound_order_id LIKE ?"+(env.SOP_UPGRADE_ENABLED==='true'?" OR  EXISTS (SELECT 1 FROM sop_document_numbers dn LEFT JOIN sop_records sr ON sr.id=j.id AND sr.kind='task' WHERE (dn.record_id=j.id OR dn.record_id=json_extract(sr.state,'$.need_id') OR dn.record_id=j.related_doc_id) AND dn.display_no LIKE ?) OR EXISTS(SELECT 1 FROM v2_inbound_plans ip WHERE ip.id=j.related_doc_id AND ip.display_no LIKE ?) OR EXISTS(SELECT 1 FROM v2_outbound_orders op WHERE (op.id=j.related_doc_id OR op.id=j.linked_outbound_order_id) AND op.display_no LIKE ?)":"")+")";
     const pat = "%" + doc_no + "%";
     binds.push(pat, pat, pat);if(env.SOP_UPGRADE_ENABLED==='true')binds.push(pat,pat,pat);
   }
