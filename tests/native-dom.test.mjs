@@ -33,6 +33,26 @@ async function fixture(){
 }
 async function until(condition,errors=[]){for(let i=0;i<100;i++){if(condition())return;await new Promise(r=>setTimeout(r,10));}throw Error('DOM condition timeout: '+errors.join('; '));}
 const opts={skip:!runtime};
+async function issueFixture(){const f=await fixture(),call=async(action,data={})=>{const r=await(await f.request({action,client_req_id:crypto.randomUUID(),...data})).json();assert.equal(r.ok,true,r.error);return r;},issue=await call('v2_issue_create',{biz_class:'bulk',customer:'QA DOM issue',issue_description:'QA original issue requirement'});const get=async()=> (await call('sop_get',{id:'ISSUE-'+issue.id})).record;return{...f,call,issue,get};}
+test('issue workflow refresh updates the original field requirement and closed state, not only the added panel',opts,async()=>{
+ const f=await issueFixture(),p=await f.page('/001/');try{p.w.openIssue(f.issue.id);await until(()=>p.d.querySelector('#issueDetailBody .ck-workflow #actions'),p.errors);let n=await f.get();await f.call('sop_issue_change',{id:n.id,revision:n.revision,message:'QA updated green label'});
+  const refresh=()=>p.d.querySelector('#issueDetailBody .ck-workflow #refresh').click();refresh();await until(()=>p.d.querySelector('#issueDetailBody .ck-workflow #detailBody')?.textContent.includes('QA updated green label'),p.errors);
+  assert.ok([...p.d.querySelectorAll('#issueDetailBody .detail-section')].some(x=>x.textContent.includes('QA updated green label')),'original requirement section must refresh with latest workflow requirements');
+  n=await f.get();await f.call('sop_issue_ack',{id:n.id,revision:n.revision,requirement_version:n.requirement_version});n=await f.get();await f.call('sop_issue_feedback',{id:n.id,revision:n.revision,message:'QA finished'});n=await f.get();await f.call('sop_issue_close',{id:n.id,revision:n.revision});refresh();await until(()=>p.d.querySelector('#issueDetailBody .ck-workflow .status')?.textContent==='已关闭',p.errors);
+  assert.match(p.d.querySelector('#issueDetailBody .detail-field .st')?.textContent||'',/完成/);assert.equal(p.d.querySelector('#issueDetailBody button[onclick*="handleIssueStart"]'),null);assert.deepEqual(p.errors,[]);
+ }finally{p.w.close();}
+});
+test('saving issue requirements from original office workflow refreshes retained original details',opts,async()=>{
+ const f=await issueFixture(),p=await f.page('/002/?issue='+f.issue.id);try{await until(()=>p.d.querySelector('#issueDetailBody .ck-workflow #actions'),p.errors);[...p.d.querySelectorAll('#issueDetailBody .ck-workflow #actions button')].find(x=>x.textContent==='修改作业要求').click();await until(()=>p.d.querySelector('dialog[open]'),p.errors);const form=p.d.querySelector('dialog[open] #editor');form.elements.message.value='QA saved updated office instruction';form.requestSubmit();await until(()=>p.d.querySelector('#issueDetailBody .ck-workflow #detailBody')?.textContent.includes('QA saved updated office instruction')&&!p.d.querySelector('dialog[open]'),p.errors);
+  assert.ok([...p.d.querySelectorAll('#issueDetailBody .detail-section')].some(x=>x.textContent.includes('QA saved updated office instruction')),'original office description must update after save');assert.equal((await f.get()).changes.length,1);assert.deepEqual(p.errors,[]);
+ }finally{p.w.close();}
+});
+test('issue workflow buttons follow the same existing roles as backend without exposing forbidden field mutations',opts,async()=>{
+ const f=await issueFixture(),p=await f.page('/001/');try{p.w.openIssue(f.issue.id);await until(()=>p.d.querySelector('#issueDetailBody .ck-workflow #actions'),p.errors);let n=await f.get();await f.call('sop_issue_feedback',{id:n.id,revision:n.revision,message:'QA responded'});
+  for(const role of ['manager','service','dispatcher','reviewer']){p.w.CKSession.user.role=role;await p.w.loadIssueDetail();await until(()=>p.d.querySelector('#issueDetailBody .ck-workflow #actions'),p.errors);const labels=[...p.d.querySelectorAll('#issueDetailBody .ck-workflow #actions button')].map(x=>x.textContent);assert.equal(labels.includes('修改作业要求'),['manager','service'].includes(role),role);assert.equal(labels.includes('追加说明'),['manager','service'].includes(role),role);assert.equal(labels.includes('确认关闭'),['manager','service'].includes(role),role);assert.equal(labels.includes('仓库反馈'),['manager','dispatcher','reviewer'].includes(role),role);}
+  assert.deepEqual(p.errors,[]);
+ }finally{p.w.close();}
+});
 test('inventory-plan editor keeps unbooked work independent, defers crew assignment and clears cancelled drafts',opts,async()=>{
  const f=await fixture();f.env.SOP_WORK_CHAIN_ENABLED='true';const p=await f.page('/002/?tab=need');
  try{await until(()=>p.d.querySelector('.ck-needs-tools'),p.errors);p.d.querySelector('.ck-needs-tools button:nth-child(2)').click();await until(()=>p.d.querySelector('dialog[open] [name=title]'),p.errors);const editor=p.d.querySelector('#editor');

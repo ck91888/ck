@@ -27,15 +27,15 @@ function form(title,html,action,build,after){
   let pending=null,pendingValues=null,submitting=false;const revision=current?.revision,id=current?.id;
   $('editor').onsubmit=async e=>{e.preventDefault();if(submitting)return;submitting=true;$('save').disabled=true;$('cancel').disabled=true;
  try{const values=Object.fromEntries(new FormData($('editor'))),valueKey=JSON.stringify(values);if(valueKey!==pendingValues){pending=null;pendingValues=valueKey;}if(!pending){for(const el of $('editor').elements){if(!el._ckSources||!values[el.name])continue;const selected=el._ckSources.find(x=>x.id===values[el.name]||(x.number||x.label.split(' / ')[0])===values[el.name]);if(!selected)throw Error('请从列表选择有效单据');values[el.name]=selected.id;}pending={...await build(values),client_req_id:crypto.randomUUID()};if(id&&!pending.id&& !action.endsWith('_create')&&action!=='sop_issue_adopt'){pending.id=id;pending.revision=revision;}}
-  const result=await api(action,pending);await closeModal();await(after?after(result):id?detail(id):load());notice('已保存 / 저장 완료');
+   const result=await api(action,pending);await closeModal();await(after?after(result):id?detail(id):load());if(current?.kind==='issue'&&options.onSaved)await options.onSaved(result);notice('已保存 / 저장 완료');
  }catch(e){$('formError').textContent=e.message; // Business errors return a response: allow corrections with a new request.
   if(!(e instanceof TypeError)){pending=null;}
-  }finally{submitting=false;$('save').disabled=false;$('cancel').disabled=false;}};
+   }finally{submitting=false;const save=$('save'),cancel=$('cancel');if(save)save.disabled=false;if(cancel)cancel.disabled=false;}};
  $('modal').showModal();
 }
 $('cancel').onclick=closeModal;
  $('modal').addEventListener('cancel',e=>{e.preventDefault();if(!$('save').disabled)closeModal();});
-$('refresh').onclick=()=> (current?detail(current.id,true):currentGroup?groupDetail({group_key:currentGroup}):load()).catch(e=>notice(e.message));
+ $('refresh').onclick=()=> (options.onRefresh?options.onRefresh():current?detail(current.id,true):currentGroup?groupDetail({group_key:currentGroup}):load()).catch(e=>notice(e.message));
 function renderTabs(){}
 let checkingUpdates=false;
 async function checkUpdates(){if(checkingUpdates)return;checkingUpdates=true;try{await checkUpdatesOnce();}finally{checkingUpdates=false;}}
@@ -129,12 +129,16 @@ async function detail(id,individual=!!window.CK_SOP_ROLLOUT?.workChain){const r=
   $('detailBody').innerHTML=`<article><h3>要求版本 ${x.requirement_version} / 已确认 ${x.ack_version}</h3>${changes}<h3>沟通与反馈</h3>${(x.messages||[]).map(m=>`<p><b>${esc(m.by)}</b> · ${esc(m.at)}<br>${esc(m.text)}</p>`).join('')}</article>`;
   if(x.status==='cancelled')return;
    if(x.status==='closed'){if(['manager','service'].includes(user.role))action('修改作业要求并重新开启','sop_issue_change',area('message','最新完整要求及重新开启原因',x.requirement_text||x.title));return;}
-  if(options.context!=='field'){action('取消问题','sop_issue_cancel',area('reason','取消原因'));}
-  action('追加说明','sop_issue_append',area('message','追加内容'));
-  action('修改作业要求','sop_issue_change',area('message','最新完整要求及修改原因（保留原记录）',x.requirement_text||x.title));
-  if(x.requirement_version>x.ack_version)action('确认已阅读最新要求','sop_issue_ack','<p>确认当前页面展示的最新要求；提交后如再次变更，仍需重新确认。</p>',()=>({requirement_version:x.requirement_version}));
-  action('仓库反馈','sop_issue_feedback',area('message','处理结果'));
-  if(x.status==='responded')action('确认关闭','sop_issue_close','<p>确认仓库已完成最新要求。</p>');
+   if(['manager','service'].includes(user.role)){
+    if(options.context!=='field')action('取消问题','sop_issue_cancel',area('reason','取消原因'));
+    action('追加说明','sop_issue_append',area('message','追加内容'));
+    action('修改作业要求','sop_issue_change',area('message','最新完整要求及修改原因（保留原记录）',x.requirement_text||x.title));
+    if(x.status==='responded')action('确认关闭','sop_issue_close','<p>确认仓库已完成最新要求。</p>');
+   }
+   if(['manager','dispatcher','reviewer'].includes(user.role)){
+    if(x.requirement_version>x.ack_version)action('确认已阅读最新要求','sop_issue_ack','<p>确认当前页面展示的最新要求；提交后如再次变更，仍需重新确认。</p>',()=>({requirement_version:x.requirement_version}));
+    action('仓库反馈','sop_issue_feedback',area('message','处理结果'));
+   }
  } else if(x.kind==='check')renderCheck(x,a,action);
  if(officeFiles&&x.kind==='need'&&window.CKWorkChain?.enabled()){const host=document.createElement('section');$('detailBody').append(host);await CKWorkChain.mountNeed(host,x,{onChange:()=>detail(x.id,true)});}
  const history=document.createElement('details');history.className='card';history.innerHTML=`<summary>操作历史（最近100次，含修改前后）</summary>${r.events.map(e=>`<p><b>${esc(e.actor_name)}</b> · ${esc(e.created_at)} · ${esc(e.action)}</p><details><summary>查看修改前后</summary><pre>${esc(e.before_json)}\n→\n${esc(e.after_json)}</pre></details>`).join('')}`;c.append(history);
