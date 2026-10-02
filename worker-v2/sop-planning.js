@@ -1,5 +1,6 @@
 import { workChainEnabled, chainDate } from './work-chain.js';
 import { nextOutboundDisplayNo } from './outbound-number.js';
+import {completionDate} from './completion-date.js';
 // Work requirements and optional dispatch plans share the inbound transaction.
 const str=v=>String(v??'').trim();
 const required=(v,label)=>{const s=str(v);if(!s)throw Error(label+'不能为空');return s;};
@@ -12,7 +13,7 @@ export async function workPlanStatements(env,rows,source,actor,t){
  for(const [position,item] of rows.entries()){
   const id=item.id||'NEED-'+crypto.randomUUID(),department=item.department||'bulk';
   if(!['bulk','direct_ship','import'].includes(department))throw Error('业务类型无效');
-  const data={instruction_order:position+1,title:required(item.title,'作业名称'),customer:required(source.customer,'客户'),source_type:source.type,source_id:source.id||'',supply_chain_no:str(item.supply_chain_no||source.supply_chain_no),instructions:required(item.instructions,'客服文字要求'),scope_text:str(item.scope_text),owner:str(item.owner)||'工单处理员待接单',location:str(item.location),deadline:str(item.deadline),status:'pending',links:[],created_at:t,created_by:actor.name};
+  const data={instruction_order:position+1,title:required(item.title,'作业名称'),customer:required(source.customer,'客户'),source_type:source.type,source_id:source.id||'',supply_chain_no:str(item.supply_chain_no||source.supply_chain_no),instructions:required(item.instructions,'客服文字要求'),scope_text:str(item.scope_text),owner:str(item.owner)||'工单处理员待接单',location:str(item.location),deadline:env.SOP_ENVIRONMENT==='staging'?completionDate(item.deadline):str(item.deadline),status:'pending',links:[],created_at:t,created_by:actor.name};
   if(workChainEnabled(env)){data.operation_kind=item.operation_kind||'operation';if(!['operation','direct_forward'].includes(data.operation_kind))throw Error('作业类型无效');if(data.operation_kind==='direct_forward'&&!item.planned_quantity)throw Error('直接转发请填写货物数量和单位');}
   if(source.type==='inventory')required(data.supply_chain_no,'供应链系统单号');
   if(item.planned_quantity){data.planned_quantity=qty(item.planned_quantity);data.planned_unit=required(item.planned_unit,'计划单位');}

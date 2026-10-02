@@ -24,10 +24,11 @@ export function courierPlanStatements(env,planId,lineId,line){
  return line.tracking_nos.map(code=>q(env,'INSERT INTO ck_courier_plan_items(tracking_no,plan_id,line_id) VALUES(?,?,?)',code,planId,lineId));
 }
 export async function courierProgress(env,planId){
- if(!inboundFlowEnabled(env))return null;
- const items=await rows(env,`SELECT i.tracking_no,r.id AS receipt_id,r.owner,r.received_at,r.scanner_name,r.status,r.handed_to,r.handed_at FROM ck_courier_plan_items i LEFT JOIN ck_courier_receipts r ON r.tracking_no=i.tracking_no WHERE i.plan_id=? ORDER BY i.tracking_no`,planId);
- return items.length?{total:items.length,received:items.filter(x=>x.receipt_id).length,items}:null;
+  if(!inboundFlowEnabled(env))return null;
+  return courierProgressRows((await courierProgressRead(env,planId).all()).results||[]);
 }
+export const courierProgressRead=(env,planId)=>q(env,`SELECT i.tracking_no,r.id AS receipt_id,r.owner,r.received_at,r.scanner_name,r.status,r.handed_to,r.handed_at FROM ck_courier_plan_items i LEFT JOIN ck_courier_receipts r ON r.tracking_no=i.tracking_no WHERE i.plan_id=? ORDER BY i.tracking_no`,planId);
+export const courierProgressRows=items=>items.length?{total:items.length,received:items.filter(x=>x.receipt_id).length,items}:null;
 export async function courierReady(env,planId){const p=await courierProgress(env,planId);return !p||p.total===p.received;}
 export async function protectCourierEdit(env,id){
  if(!inboundFlowEnabled(env))return;

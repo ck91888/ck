@@ -2392,6 +2392,7 @@ async function loadInboundList() {
       html += '<span class="st" style="background:#f3e5f5;color:#6a1b9a;border:1px solid #ce93d8;">手动完成 / 수동 완료</span> ';
     }
     html += accountTag(p);
+    if(window.CKInboundIssueTag)html+=CKInboundIssueTag(p);
     html += dynTag;
     // 多业务类型 tag（兼容老数据：列表后端注入 biz_classes，缺则回退 biz_class 单值）
     var bizArr = (p.biz_classes && p.biz_classes.length) ? p.biz_classes : (p.biz_class ? [p.biz_class] : []);
@@ -2399,6 +2400,7 @@ async function loadInboundList() {
       html += '<span class="biz-tag biz-' + esc(bizArr[bi]) + '" style="margin-right:4px;">' + esc((window.CKInboundLabel ? CKInboundLabel(bizArr[bi]) : bizLabel(bizArr[bi]))) + '</span>';
     }
     html += ' ' + esc(p.display_no || p.id) + ' · ' + esc(p.customer || "--") + ' · ' + esc(p.cargo_summary || "");
+    if(window.CKInboundReferenceNotice)html+=CKInboundReferenceNotice(p);
     html += '</div>';
     var ibMeta = (window.CK_SOP_ROLLOUT?.staging ? '预计到达 ' + esc(dateOnly(p.expected_arrival) || '待定') : esc(p.plan_date || '') + ' · ' + esc(dateOnly(p.expected_arrival) || '')) + ' · ' + esc(fmtTime(p.created_at));
     // line summary：箱/托/件 — 仅显示有数量的项
@@ -3956,6 +3958,7 @@ async function printIbQr() {
   try{latest=await api({action:'v2_inbound_plan_detail',id:planId});if(!latest||!latest.ok)throw Error(latest&&(latest.error||latest.message)||'读取失败');}
   catch(e){win.close();alert('未能读取最新作业要求，未打印旧版。请重试：'+e.message);return;}
   var plan = latest.plan;
+  if(window.CK_SOP_ROLLOUT?.staging&&plan.status==='cancelled'){win.close();alert('已取消的入库计划不能打印下发 / 취소된 입고계획은 배포할 수 없습니다');return;}
   var displayNo = plan.display_no || planId;
   var printNeeds=latest.sop_needs||[];
   var printStatus={pending:'待安排',assigned:'已分配',working:'作业中',paused:'已暂停',awaiting_review:'待审核',rework:'待整改',waiting_customer:'已审核·待客户安排',linked:'已关联出库',closed:'已关闭',cancelled:'已取消·不得执行'};
@@ -4016,7 +4019,8 @@ async function printIbQr() {
       '<div><span class="label">客户：</span>' + esc(plan.customer || '') + '</div>' +
       '<div><span class="label">提出人：</span>' + esc(plan.created_by || '') + '</div>' +
       '<div><span class="label">业务分类：</span>' + esc(bizText) + '</div>' +
-      (window.CKInboundLabel ? '<div><span class="label">外部系统入库单号：</span>' + esc(plan.external_inbound_no || '—') + '</div>' : '') +
+      (window.CKInboundLabel ? '<div><span class="label">外部系统入库单号：</span>' + esc(plan.external_inbound_no || '待补充 / 보완 대기') + '</div>' : '') +
+      (plan.issue_state?'<div><span class="label">计划版本：</span>V'+esc(plan.issue_state.revision)+'</div>':'')+
       (plan.remark ? '<div><span class="label">备注：</span>' + esc(plan.remark) + '</div>' : '') +
       (plan.purpose ? '<div style="grid-column:1/-1;"><span class="label">入库目的：</span>' + esc(plan.purpose) + '</div>' : '') +
     '</div>' +
@@ -4033,6 +4037,7 @@ async function printIbQr() {
   win.document.open();
   win.document.write(html);
   win.document.close();
+  if(window.CKInboundPrintOpened)await CKInboundPrintOpened(plan);
 }
 
 async function cancelInboundPlan(btnEl) {

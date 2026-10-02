@@ -42,8 +42,9 @@ async function reconcile(env,link,hooks){
  return {ok:true,inbound_plan_id:p.id,display_no:p.display_no,status:latest.status,job_id:link.job_id};
 }
 export async function feedbackLinkDetail(env,id){
- return q(env,`SELECT l.feedback_id,l.plan_id,l.job_id,l.linked_by,l.linked_name,l.linked_at,p.display_no,p.customer,f.display_no AS feedback_no FROM ck_feedback_plan_links l JOIN v2_inbound_plans p ON p.id=l.plan_id JOIN v2_field_feedbacks f ON f.id=l.feedback_id WHERE l.feedback_id=? OR l.plan_id=? LIMIT 1`,id,id).first();
+ return feedbackLinkRead(env,id).first();
 }
+export const feedbackLinkRead=(env,id)=>q(env,`SELECT l.feedback_id,l.plan_id,l.job_id,l.linked_by,l.linked_name,l.linked_at,p.display_no,p.customer,f.display_no AS feedback_no FROM ck_feedback_plan_links l JOIN v2_inbound_plans p ON p.id=l.plan_id JOIN v2_field_feedbacks f ON f.id=l.feedback_id WHERE l.feedback_id=? OR l.plan_id=? LIMIT 1`,id,id);
 export async function handleFeedbackLink(b,env,hooks){
  const u=actor(env),id=String(b.feedback_id||'').trim();if(!id||id.length>120)fail('缺少反馈编号');
  if(b.action==='sop_feedback_link_save'){

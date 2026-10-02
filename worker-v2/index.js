@@ -5,15 +5,17 @@ import {dashboardRange,segmentMinutes,reportWorkerId} from './dashboard-time.js'
 import {atomicNativeFinish} from './atomic-native-finish.js';
 import {atomicBulkFinish} from './atomic-bulk-finish.js';
 import {ensureInboundReferenceGuard} from './inbound-reference-guard.js';
+import {referenceWriteBatch,ensureReferenceHistory} from './inbound-reference-history.js';
+import {ensureInboundDocuments,inboundDocumentStates,inboundDocumentStateRead,documentStatesFromRows,confirmInboundIssue} from './inbound-documents.js';
 import {adoptLegacyLoad} from './legacy-load.js';
 import {uploadBatchMaterial} from './batch-work-materials.js';
 import {accessEnabled,accessGuard,accessAdminAction,accessFileAllowed} from './access-control.js';
 import {uploadUnloadPhoto,unloadPhotos,inboundAttachmentRead} from './unload-photos.js';
-import {handleFeedbackLink,feedbackLinkDetail} from './feedback-link.js';
+import {handleFeedbackLink,feedbackLinkDetail,feedbackLinkRead} from './feedback-link.js';
 import {validateNativeMutation, nativePeople, finishNativePick, finishNativeOutbound} from './native-lifecycle.js';
 import {findUnloadPlan, startUnloadTrip, finishUnloadTrip, tripPlans} from './unload-trip.js';
 import {ensureLoadSchema,loadTripEnabled,loadCandidates,resolveLoadOrder,loadOrdersForJob,finishLoadTrip,validateLegacyLoadFinish} from './outbound-load-trip.js';
-import {handleCourier,validateCourierLines,courierPlanStatements,courierProgress,courierReady,protectCourierEdit,syncCourierArrival} from './courier.js';
+import {handleCourier,validateCourierLines,courierPlanStatements,courierProgress,courierProgressRead,courierProgressRows,courierReady,protectCourierEdit,syncCourierArrival} from './courier.js';
 import { inboundFlowEnabled, inboundCode, inboundCodes, inboundReferenceValue, inboundCodeProgress, selectInboundReference, validateInboundCode, resolveInboundPlan, putawayTaskBiz, completeUnloadedDispositions, bindInboundCode, inboundLabels, inboundReferenceData, departmentCodes, putawayClasses } from './inbound-flow.js';
 import { handleAttendance, guardAttendance, ensureAttendance } from './attendance.js';
 import {crewBorrowEnabled,ensureCrewBorrow,prepareCrewBorrow,crewAvailability,crewStatus,crewRetry,canCrewDestination,reconcileCrewReturns,reconcilePersonReturns,borrowedOut} from './crew-borrow.js';
@@ -3985,6 +3987,7 @@ async function markInboundBizTaskCompleted(env, plan_id, biz_class, payload) {
   if(inboundFlowEnabled(env)&&putawayClasses.includes(biz_class)){
     const plan=await env.DB.prepare('SELECT * FROM v2_inbound_plans WHERE id=?').bind(plan_id).first();
     const progress=await inboundCodeProgress(env,plan,undefined,biz_class);
+    if(progress?.missing_departments?.length)return;
     if(progress?.total>1){
       if(progress.completed<progress.total)return;
       const ids=progress.items.map(x=>x.job_id);
@@ -4072,7 +4075,7 @@ async function recalcInboundPlanCompletion(env, plan_id, t, opts) {
   const tasks = await listInboundPlanBizTasks(env, plan_id);
   if (tasks.length > 0) {
     const completedCnt = tasks.filter(x => x.status === 'completed').length;
-    const allCompleted = (completedCnt === tasks.length)&&(!referenceProgress?.total||referenceProgress.completed===referenceProgress.total);
+    const allCompleted = (completedCnt === tasks.length)&&!referenceProgress?.missing_departments?.length&&(!referenceProgress?.total||referenceProgress.completed===referenceProgress.total);
     const someCompleted = (completedCnt > 0)||(referenceProgress?.completed>0);
     let next;
     if (allCompleted && !otherInbound) {
@@ -4249,6 +4252,8 @@ route("v2_inbound_plan_list", async (body, env) => {
       inbound_material_count: materialCountByPlan[p.id] || 0
     });
   }
+  const documentStates=await inboundDocumentStates(env,items.map(x=>x.id));
+  for(const p of items)if(documentStates.has(p.id))p.issue_state=documentStates.get(p.id);
   return json({ ok: true, items, ...pageMeta(total, limit, offset) });
 });
 
@@ -4256,6 +4261,7 @@ route("v2_inbound_plan_detail", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
   const id = String(body.id || "").trim();
   if (!id) return err("missing id");
+  const documentBefore=(await inboundDocumentStates(env,[id])).get(id);
   const row = await env.DB.prepare("SELECT * FROM v2_inbound_plans WHERE id=?").bind(id).first();
   if (!row) return err("not found", 404);
   // 退件入库会话不属于正式入库计划口径，协同中心不应打开
@@ -4263,7 +4269,7 @@ route("v2_inbound_plan_detail", async (body, env) => {
   // Independent detail reads share one D1 round trip. Job history is fetched in
   // sets, so the number of queries does not grow with the number of jobs.
   const inPlan = "SELECT id FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=?";
-  const [reads, courier_progress, existing_feedback_link, sop_needs] = await Promise.all([
+  const [reads, sop_needs] = await Promise.all([
     env.DB.batch([
       env.DB.prepare('SELECT * FROM v2_inbound_plan_biz_tasks WHERE plan_id=? ORDER BY biz_class').bind(id),
       env.DB.prepare('SELECT * FROM v2_inbound_plan_lines WHERE plan_id=? ORDER BY line_no').bind(id),
@@ -4272,13 +4278,14 @@ route("v2_inbound_plan_detail", async (body, env) => {
       env.DB.prepare('SELECT job_id,worker_name,minutes_worked,left_at FROM v2_ops_job_workers WHERE job_id IN ('+inPlan+') ORDER BY joined_at').bind(id),
       env.DB.prepare('SELECT * FROM (SELECT job_id,result_lines_json,diff_note,remark,result_json,created_at,ROW_NUMBER() OVER (PARTITION BY job_id ORDER BY created_at DESC,rowid DESC) AS latest FROM v2_ops_job_results WHERE job_id IN ('+inPlan+')) WHERE latest=1').bind(id),
       env.DB.prepare('SELECT job_id,result_json FROM ck_unload_plan_links WHERE plan_id=?').bind(id),
-      env.DB.prepare('SELECT id, display_no, status, customer, biz_class, outbound_mode, expected_ship_at, planned_box_count, planned_pallet_count, order_date, uses_stock_operation FROM v2_outbound_orders WHERE source_inbound_plan_id=? ORDER BY created_at ASC').bind(id)
+      env.DB.prepare('SELECT id, display_no, status, customer, biz_class, outbound_mode, expected_ship_at, planned_box_count, planned_pallet_count, order_date, uses_stock_operation FROM v2_outbound_orders WHERE source_inbound_plan_id=? ORDER BY created_at ASC').bind(id),
+      inboundFlowEnabled(env)?courierProgressRead(env,id):env.DB.prepare('SELECT 1 WHERE 0'),
+      inboundFlowEnabled(env)?feedbackLinkRead(env,id):env.DB.prepare('SELECT 1 WHERE 0')
     ]),
-    inboundFlowEnabled(env)?courierProgress(env,id):null,
-    inboundFlowEnabled(env)?feedbackLinkDetail(env,id):null,
     linkedNeeds(env,id)
   ]);
-  const [taskRows, planLines, jobs, atts, workers, results, unloadLinks, linkedObRs] = reads;
+  const [taskRows, planLines, jobs, atts, workers, results, unloadLinks, linkedObRs,courierRows,feedbackRows] = reads;
+  const courier_progress=inboundFlowEnabled(env)?courierProgressRows(courierRows.results||[]):null,existing_feedback_link=feedbackRows.results?.[0]||null;
   let biz_tasks = taskRows.results || [];
   const biz_classes = extractPlanBizClasses(row);
   // Older plans still receive missing business tasks; ordinary reads never write.
@@ -4364,9 +4371,12 @@ route("v2_inbound_plan_detail", async (body, env) => {
   const inboundFiles=workChainEnabled(env)?await workMaterials(env,sop_needs):[];
   const arrival_photos=(atts.results||[]).filter(a=>a.attachment_category==='unload_photo');
   const allInboundAttachments=[...new Map([...(atts.results||[]),...inboundFiles.map(f=>({...f,attachment_category:'inbound_material',canonical_material:true}))].map(f=>[f.id,f])).values()];
+  const finalReads=inboundFlowEnabled(env)?await env.DB.batch([inboundDocumentStateRead(env,[id]),env.DB.prepare('SELECT * FROM ck_inbound_reference_history WHERE plan_id=? ORDER BY created_at,biz_class').bind(id)]):[];
+  const documentAfter=documentStatesFromRows(finalReads[0]?.results||[]).get(id);
+  if(documentBefore?.revision!==documentAfter?.revision)return err('入库计划已变化，请重新读取当前版本');
   return json({
     ok: true,
-    plan: { ...row, biz_classes, ...(inboundFlowEnabled(env)?{external_inbound_nos:inboundCodes(row.external_inbound_no),inbound_progress,courier_progress}:{}) },
+    plan: { ...row, biz_classes, ...(inboundFlowEnabled(env)?{external_inbound_nos:inboundCodes(row.external_inbound_no),inbound_progress,courier_progress,external_reference_history:finalReads[1]?.results||[],issue_state:documentAfter}:{}) },
     biz_tasks,
     biz_classes,
     completed_biz_classes,
@@ -4656,7 +4666,7 @@ route("v2_inbound_plan_update", async (body, env) => {
     const biz_classes_json = JSON.stringify(bizNorm.list);
     const {externalNo,bulkExternalNo} = await inboundReferenceData(env,bizNorm.list,body,plan);
 
-    await env.DB.prepare(
+    await referenceWriteBatch(env,id,[env.DB.prepare(
       `UPDATE v2_inbound_plans SET plan_date=?, customer=?, biz_class=?, biz_classes_json=?,
         cargo_summary=?, expected_arrival=?, purpose=?, remark=?, external_inbound_no=?, bulk_external_inbound_no=?, updated_at=? WHERE id=?`
     ).bind(
@@ -4668,7 +4678,7 @@ route("v2_inbound_plan_update", async (body, env) => {
       String(body.purpose != null ? body.purpose : (plan.purpose || "")),
       String(body.remark != null ? body.remark : (plan.remark || "")),
       externalNo, bulkExternalNo, t, id
-    ).run();
+    )]);
 
     // biz_tasks 同步：pending 可增删；completed 不允许删
     const existing = await env.DB.prepare(
@@ -4717,6 +4727,10 @@ route("v2_inbound_plan_update", async (body, env) => {
 route("v2_inbound_plan_bind_external", async (body, env) => {
   if (!inboundFlowEnabled(env) || !isAdmin(body,env)) return err("unauthorized",401);
   return withIdem(env,body,"v2_inbound_plan_bind_external",()=>bindInboundCode(env,body));
+});
+route('v2_inbound_plan_confirm_issue',async(body,env)=>{
+  if(!inboundFlowEnabled(env)||!isAuth(body,env))return err('unauthorized',401);
+  return json(await confirmInboundIssue(env,body));
 });
 
 route("v2_inbound_plan_mark_accounted", async (body, env) => {
@@ -6215,6 +6229,7 @@ route("v2_inbound_plan_force_complete", async (body, env) => {
     if (plan.status === 'cancelled') return { ok: false, error: "cancelled_cannot_complete" };
     if(!await courierReady(env,id))return {ok:false,error:'courier_not_received',message:'快递尚未收齐，不能完结 / 택배 미수령'};
     const referenceProgress=await inboundCodeProgress(env,plan);
+    if(referenceProgress?.missing_departments?.length)return {ok:false,error:'external_references_missing',message:'外部入库单号待补充，不能直接完结整张计划'};
     if(referenceProgress?.total>1&&referenceProgress.completed<referenceProgress.total)return {ok:false,error:'external_inbounds_pending',message:'多个外部入库单须逐单完成：当前 '+referenceProgress.completed+'/'+referenceProgress.total+'，不能直接完结整张计划'};
 
     const ALLOWED = ['pending', 'arrived_pending_putaway', 'putting_away', 'partially_completed'];
@@ -12721,6 +12736,8 @@ export default {
     try {
       await ensureMigrated(env.DB);
       await ensureInboundReferenceGuard(env);
+      await ensureInboundDocuments(env);
+      await ensureReferenceHistory(env);
     } catch (e) {
       return json({ ok: false, error: "migration failed: " + e.message }, 500);
     }

@@ -1,5 +1,6 @@
 // Inbound dispositions use the existing storage keys for compatibility.
 // Cross-dock retains `bulk`; only `bulk_putaway` denotes bulk putaway.
+import {referenceWriteBatch} from './inbound-reference-history.js';
 export const inboundLabels={direct_ship:'代发理货上架',bulk_putaway:'大货理货上架',bulk:'直进直出',return:'整托退回',change_order:'换单'};
 export const inboundFlowEnabled=env=>env.SOP_ENVIRONMENT==='staging'&&env.SOP_UPGRADE_ENABLED==='true';
 export const inboundCode=value=>String(value??'').normalize('NFKC').trim();
@@ -21,8 +22,8 @@ export async function inboundReferenceData(env,classes,body,plan={}){
  const combined=[...new Set([...all,...bulk])];
  if(inboundFlowEnabled(env)){
   if(body.direct_external_inbound_no!==undefined&&inboundCodes(body.direct_external_inbound_no).some(x=>bulk.includes(x)))throw Error('两部门不能使用同一外部入库单号');
-  if(classes.includes('bulk_putaway')&&!bulk.length)throw Error('大货理货上架必须填写对应的外部入库单号 / 대량화물 입고번호를 입력하세요');
-  if(classes.includes('direct_ship')&&!combined.some(x=>!bulk.includes(x)))throw Error('代发理货上架必须填写对应的外部入库单号，两部门不能使用同一单号 / 부서별 입고번호를 구분하세요');
+  if(classes.includes('bulk_putaway')&&departmentCodes(plan,'bulk_putaway').length&&!bulk.length)throw Error('已有的大货外部入库单号不能清空');
+  if(classes.includes('direct_ship')&&departmentCodes(plan,'direct_ship').length&&!combined.some(x=>!bulk.includes(x)))throw Error('已有的代发外部入库单号不能清空');
   if(!classes.includes('direct_ship')&&classes.includes('bulk_putaway')&&combined.some(x=>!bulk.includes(x)))throw Error('存在未分配理货部门的入库单号');
  }
  return {externalNo:await validateInboundCode(env,classes,combined,plan.id||''),bulkExternalNo:bulk.join('\n')};
@@ -37,10 +38,12 @@ export async function inboundCodeProgress(env,plan,knownJobs,biz){
   const historicalComplete=codes.length===1&&plan.status==='completed';
   return {external_no:code,biz_class:inboundCodes(plan.bulk_external_inbound_no).includes(code)?'bulk_putaway':'direct_ship',status:job?.status==='completed'||historicalComplete?'completed':job?'working':'pending',job_id:job?.id||'',completed_at:job?.status==='completed'?job.updated_at:historicalComplete?(plan.manual_completed_at||plan.updated_at||''):''};
  });
- return {total:items.length,completed:items.filter(x=>x.status==='completed').length,items};
+ const missing_departments=planClasses(plan).filter(x=>putawayClasses.includes(x)&&(!biz||x===biz)&&!departmentCodes(plan,x).length);
+ return {total:items.length,completed:items.filter(x=>x.status==='completed').length,items,missing_departments};
 }
 export async function selectInboundReference(env,plan,value,biz){
  const progress=await inboundCodeProgress(env,plan,undefined,biz);const codes=departmentCodes(plan,biz);let code=inboundCode(value);
+ if(!codes.length)throw Error('本部门外部入库单号待补充，请办公室在原计划补填后再开始理货 / 외부 입고번호 보완 후 작업을 시작하세요');
  if(!code||code===plan.id||code===plan.display_no){if(codes.length!==1)throw Error('此计划有多个外部入库单号，请扫描或选择本次操作的单号 / 작업할 외부 입고번호를 선택하세요');code=codes[0];}
  if(!codes.includes(code))throw Error('外部单号不属于本部门的理货计划，请确认代发／大货入口 / 해당 부서의 입고번호가 아닙니다');
  if(progress?.items.some(x=>x.external_no===code&&x.status==='completed'))throw Error('此外部入库单已完成，请勿重复开工 / 이미 완료된 입고번호입니다');
@@ -54,7 +57,6 @@ export function putawayTaskBiz(env,plan,biz){
 export async function validateInboundCode(env,classes,value,id=''){
  if(!inboundFlowEnabled(env))return inboundCode(value);
  const codes=inboundCodes(value);
- if(classes.some(x=>putawayClasses.includes(x))&&!codes.length)throw Error('理货上架必须填写外部系统入库单号 / 검수·적치는 외부 입고번호가 필요합니다');
  if(codes.length>50)throw Error('一张计划最多关联50个外部入库单号');
  for(const code of codes){
   if(code.length>120||/[\u0000-\u001f]/.test(code))throw Error('外部入库单号格式无效 / 외부 입고번호 형식 오류');
@@ -113,7 +115,7 @@ export async function bindInboundCode(env,body){
   if(next.some(x=>!progress?.items.some(i=>i.external_no===x&&i.status==='completed')))statements.push(env.DB.prepare("UPDATE v2_inbound_plan_biz_tasks SET status='pending',completed_at='',completed_by='',updated_at=? WHERE plan_id=? AND biz_class=? AND EXISTS(SELECT 1 FROM v2_inbound_plans WHERE id=? AND COALESCE(external_inbound_no,'')=? AND COALESCE(bulk_external_inbound_no,'')=?) AND NOT EXISTS(SELECT 1 FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type LIKE 'inbound%' AND status IN ('pending','working','awaiting_close'))").bind(t,plan.id,biz,plan.id,plan.external_inbound_no||'',plan.bulk_external_inbound_no||'',plan.id));
  }
  statements.push(env.DB.prepare("UPDATE v2_inbound_plans SET external_inbound_no=?,bulk_external_inbound_no=?,updated_at=? WHERE id=? AND COALESCE(external_inbound_no,'')=? AND COALESCE(bulk_external_inbound_no,'')=? AND NOT EXISTS(SELECT 1 FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type LIKE 'inbound%' AND status IN ('pending','working','awaiting_close'))").bind(code,bulkExternalNo,t,plan.id,plan.external_inbound_no||'',plan.bulk_external_inbound_no||'',plan.id));
- const results=await env.DB.batch(statements),updated=results[results.length-1];
+ const results=await referenceWriteBatch(env,plan.id,statements),updated=results[results.length-1];
  if(updated.meta?.changes!==1)throw Error('记录已变化，请刷新后重试');
  return {ok:true,id:plan.id,external_inbound_no:code};
 }

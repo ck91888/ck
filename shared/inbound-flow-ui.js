@@ -10,18 +10,38 @@ const mark=(zh,ko)=>window.CKPlanCopy?CKPlanCopy.html(zh):esc(copy(zh,ko));
 function externalField(id,value='',bulkValue=''){
  const box=document.createElement('div');box.className='form-group ck-external-field';
  const bulk=codes(bulkValue),direct=codes(value).filter(x=>!bulk.includes(x));
- box.innerHTML=['direct_ship','bulk_putaway'].map((biz,i)=>'<div data-reference-dept="'+biz+'"><label for="'+id+(i?'-bulk':'')+'">'+mark(...labels[biz])+' · '+mark('外部入库单号（可多个）','외부 입고번호（복수 가능）')+' *</label><textarea data-reference="'+biz+'" id="'+id+(i?'-bulk':'')+'" rows="2" maxlength="6050" autocomplete="off" placeholder="'+copy('每行一个，也可用逗号分隔','한 줄에 한 번호 또는 쉼표로 구분')+'">'+esc((i?bulk:direct).join('\n'))+'</textarea></div>').join('')+'<p class="muted">'+mark('按部门填写单号，现场逐单完成；所有部门的关联单号全部完成后，整单才入库完成。','부서별 입고번호를 입력하세요. 모든 부서의 입고번호가 완료되어야 전체 입고가 완료됩니다.')+'</p>';return box;
+  box.innerHTML=['direct_ship','bulk_putaway'].map((biz,i)=>'<div data-reference-dept="'+biz+'"><label for="'+id+(i?'-bulk':'')+'">'+mark(...labels[biz])+' · '+mark('外部入库单号（可多个）','외부 입고번호（복수 가능）')+'</label><textarea data-reference="'+biz+'" id="'+id+(i?'-bulk':'')+'" rows="2" maxlength="6050" autocomplete="off" placeholder="'+copy('可暂缺，后期在原单补充；每行一个或逗号分隔','나중에 원래 계획에서 보완 가능; 한 줄에 한 번호 또는 쉼표 구분')+'">'+esc((i?bulk:direct).join('\n'))+'</textarea></div>').join('')+'<p class="muted">'+copy('可先建单、接收货物，外部号待补充；实际理货开工前须按部门补齐。所有关联单号逐单完成后，整单才入库完成。','계획 생성·입고 수령 후 외부 입고번호 보완 가능. 검수 시작 전 부서별 번호를 입력하고 모든 번호를 완료해야 전체 입고가 완료됩니다.')+'</p>';return box;
 }
-function showFields(field,biz){field.hidden=!biz.some(x=>['direct_ship','bulk_putaway'].includes(x));for(const group of field.querySelectorAll('[data-reference-dept]')){group.hidden=!biz.includes(group.dataset.referenceDept);group.querySelector('textarea').required=!group.hidden;}}
+ function showFields(field,biz){field.hidden=!biz.some(x=>['direct_ship','bulk_putaway'].includes(x));for(const group of field.querySelectorAll('[data-reference-dept]')){group.hidden=!biz.includes(group.dataset.referenceDept);group.querySelector('textarea').required=false;}}
 function fieldData(field){
  const value=biz=>{const input=field.querySelector('[data-reference="'+biz+'"]');return input&&!input.parentElement.hidden?codes(input.value):[];};
  const direct=value('direct_ship'),bulk=value('bulk_putaway');
  if(direct.some(x=>bulk.includes(x)))throw Error(copy('两部门不能使用同一外部入库单号，请分开填写','동일 입고번호를 두 부서에 지정할 수 없습니다'));
  return {external_inbound_no:[...direct,...bulk].join('\n'),direct_external_inbound_no:direct.join('\n'),bulk_external_inbound_no:bulk.join('\n')};
 }
-function progressHtml(p){const progress=p?.inbound_progress;if(!progress?.total)return '';
+ function referenceNotice(p){
+  const all=codes(p?.external_inbound_no),bulk=codes(p?.bulk_external_inbound_no),missing=classes(p||{}).filter(b=>['direct_ship','bulk_putaway'].includes(b)&&!(b==='bulk_putaway'?bulk:all.filter(x=>!bulk.includes(x))).length);
+  let html=missing.length?'<p class="ck-reference-pending"><strong>'+copy('外部入库单号待补充','외부 입고번호 보완 대기')+'</strong>：'+missing.map(b=>esc(CKInboundLabel(b))).join('、')+'</p>':'';
+  for(const x of p?.external_reference_history||[]){const t=new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Seoul',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).format(new Date(x.created_at));html+='<p class="ck-reference-supplemented"><strong>'+copy('外部入库单号已补充','외부 입고번호 보완 완료')+'</strong> · '+esc(CKInboundLabel(x.biz_class))+' · '+esc(x.actor_name)+' · '+esc(t)+' KST</p>';}
+  return html;
+ }
+window.CKInboundReferenceNotice=referenceNotice;
+const printPreviews=new Map(),issueRequests=new Map();
+window.CKInboundIssueTag=p=>{const s=p?.issue_state;if(!s)return '';const label={unissued:['未下发','미배포'],issued:['已打印下发','인쇄·배포 완료'],needs_reissue:['内容已更新，需重新打印下发','변경됨 · 재인쇄·배포 필요'],cancelled:['已取消，不可下发','취소됨 · 배포 불가']}[s.state];return '<span class="st ck-inbound-issue-status">'+esc(copy(...label))+' · V'+esc(s.revision)+'</span>';};
+function issuePanel(host,p){
+ const state=p.issue_state;if(!state)return;
+ const panel=document.createElement('section');panel.className='ck-inbound-issue';panel.innerHTML=CKInboundIssueTag(p)+'<p>'+copy('打印预览不会记为下发；实际打印并交给仓库后，再确认。','인쇄 미리보기는 배포 기록이 아닙니다. 실제 인쇄 후 창고에 전달하고 확인하세요.')+'</p>'+(state.confirmed_at?'<p>'+esc(state.actor_name)+' · '+esc(new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Seoul',dateStyle:'short',timeStyle:'medium',hour12:false}).format(new Date(state.confirmed_at)))+' KST</p>':'');
+ if(state.state!=='cancelled'&&CKSession.user?.scope!=='field'&&['manager','service'].includes(CKSession.user?.role)){
+  const button=document.createElement('button');button.type='button';button.className='btn btn-outline';button.textContent=copy('确认已打印下发','인쇄·배포 완료 확인');button.disabled=state.state==='issued'||printPreviews.get(p.id)!==state.revision;panel.append(button);
+  const status=document.createElement('p');status.setAttribute('role','status');panel.append(status);
+  button.onclick=async()=>{if(!confirm(copy('确认已实际打印当前版本并下发给仓库？取消打印时请勿确认。','현재 버전을 실제 인쇄하여 창고에 전달했습니까? 인쇄 취소 시 확인하지 마세요.')))return;button.disabled=true;const key=p.id+':'+state.revision;if(!issueRequests.has(key))issueRequests.set(key,crypto.randomUUID());try{await CKSession.request('v2_inbound_plan_confirm_issue',{id:p.id,revision:state.revision,client_req_id:issueRequests.get(key)});await loadInboundDetail();}catch(error){status.textContent=error.message;button.disabled=false;}};
+ }
+ host.prepend(panel);
+}
+window.CKInboundPrintOpened=async p=>{if(!p.issue_state||p.issue_state.state==='cancelled')return;printPreviews.set(p.id,p.issue_state.revision);await loadInboundDetail();};
+ function progressHtml(p){const progress=p?.inbound_progress,notice=referenceNotice(p);if(!progress?.total)return notice;
  const state={pending:copy('待理货','대기'),working:copy('理货中','작업 중'),completed:copy('已入库','완료')};
- return '<div class="ck-inbound-progress"><strong>'+copy('外部单理货进度','입고 진행')+'：'+progress.completed+' / '+progress.total+'</strong><table class="line-table"><thead><tr><th>'+copy('理货部门','입고 부서')+'</th><th>'+copy('外部入库单号','입고번호')+'</th><th>'+copy('状态','상태')+'</th></tr></thead><tbody>'+progress.items.map(x=>'<tr><td>'+esc(CKInboundLabel(x.biz_class||'direct_ship'))+'</td><td>'+esc(x.external_no)+'</td><td>'+state[x.status]+'</td></tr>').join('')+'</tbody></table></div>';
+  return notice+'<div class="ck-inbound-progress"><strong>'+copy('外部单理货进度','입고 진행')+'：'+progress.completed+' / '+progress.total+'</strong><table class="line-table"><thead><tr><th>'+copy('理货部门','입고 부서')+'</th><th>'+copy('外部入库单号','입고번호')+'</th><th>'+copy('状态','상태')+'</th></tr></thead><tbody>'+progress.items.map(x=>'<tr><td>'+esc(CKInboundLabel(x.biz_class||'direct_ship'))+'</td><td>'+esc(x.external_no)+'</td><td>'+state[x.status]+'</td></tr>').join('')+'</tbody></table></div>';
 }
 function choices(host,selector,id,p={}){
  if(!host)return;host.classList.add('ck-inbound-choices');
@@ -56,8 +76,8 @@ window.CKInstallInboundFlow=function(app){
    const box=document.createElement('section');box.className='ck-inbound-reference';box.innerHTML=progressHtml(p)||'<strong>外部系统入库单号 / 외부 입고번호</strong><span>'+esc(p.external_inbound_no||'未填写 / 미등록')+'</span>';
    if(!['completed','cancelled'].includes(p.status)&&p.source_type!=='return_session'){
     const button=document.createElement('button');button.type='button';button.className='btn btn-outline btn-sm';button.textContent='填写／更正单号 / 번호 수정';box.append(button);
-    button.onclick=()=>{button.hidden=true;const form=document.createElement('form');const fields=externalField('ck-bind-external',p.external_inbound_no,p.bulk_external_inbound_no);showFields(fields,classes(p));form.append(fields);form.insertAdjacentHTML('beforeend','<button type="submit" class="btn btn-primary">保存单号 / 저장</button><button type="button" class="btn btn-outline">取消 / 취소</button><p role="alert"></p>');box.append(form);form.querySelector('[type=button]').onclick=()=>{form.remove();button.hidden=false;};form.onsubmit=async e=>{e.preventDefault();const save=form.querySelector('[type=submit]');save.disabled=true;try{await CKSession.request('v2_inbound_plan_bind_external',{id:p.id,previous_code:p.external_inbound_no||'',previous_bulk_code:p.bulk_external_inbound_no||'',...fieldData(fields),client_req_id:crypto.randomUUID()});await loadInboundDetail();}catch(err){form.querySelector('[role=alert]').textContent=err.message;save.disabled=false;}};};
-   }host.prepend(box);selectField(document.getElementById('dynBiz'),'ck-dyn-external',p);
+    button.onclick=()=>{button.hidden=true;const form=document.createElement('form');const fields=externalField('ck-bind-external',p.external_inbound_no,p.bulk_external_inbound_no);showFields(fields,classes(p));form.append(fields);form.insertAdjacentHTML('beforeend','<button type="submit" class="btn btn-primary">保存单号 / 저장</button><button type="button" class="btn btn-outline">取消 / 취소</button><p role="alert"></p>');box.append(form);form.querySelector('[type=button]').onclick=()=>{form.remove();button.hidden=false;};let pending=null;form.addEventListener('input',()=>{pending=null;});form.onsubmit=async e=>{e.preventDefault();const save=form.querySelector('[type=submit]');save.disabled=true;try{if(!pending)pending={id:p.id,previous_code:p.external_inbound_no||'',previous_bulk_code:p.bulk_external_inbound_no||'',...fieldData(fields),client_req_id:crypto.randomUUID()};await CKSession.request('v2_inbound_plan_bind_external',pending);await loadInboundDetail();}catch(err){form.querySelector('[role=alert]').textContent=err.message;save.disabled=false;}};};
+   }host.prepend(box);issuePanel(host,p);selectField(document.getElementById('dynBiz'),'ck-dyn-external',p);
   };
   const feedback=window.loadFeedbackDetail;window.loadFeedbackDetail=async function(...args){await feedback(...args);selectField(document.getElementById('fb-conv-biz'),'ck-fb-external');};
   const original=window.api;window.api=async function(body){

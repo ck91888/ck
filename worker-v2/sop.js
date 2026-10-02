@@ -1,6 +1,7 @@
 import {ensureDocumentNumbers,recordNumbers,resolveRecordId,jobNumbers} from './document-numbers.js';
 import {loadTripEnabled} from './outbound-load-trip.js';
 import {readBatchMaterials} from './batch-work-materials.js';
+import {completionDate} from './completion-date.js';
 import { workChainEnabled, chainOutboundStatements, chainAllocation, guardWorkChain, workMaterialRead, workMaterials, notifyMaterialChange, assertShippingResult, shippingBasisStatements } from './work-chain.js';
 import { workPlanStatements } from './sop-planning.js';
 import { dispatchAccess } from './dispatch-access.js';
@@ -357,8 +358,8 @@ export async function handleSop(b,env) {
     for(const l of a.links)extra.push(stmt(env,"UPDATE v2_outbound_orders SET stock_operation_status='completed',stock_operation_completed_at=?,stock_operation_result_json=?,updated_at=? WHERE id=?",t,JSON.stringify(d.result),t,l.outbound_id));
    } else if(b.action==='sop_need_update') {
     if(d.status!=='pending')fail('已派工需求须先暂停并撤回任务；完成后追加请新建关联需求');
-    if(workChainEnabled(env)&&b.planned_quantity!==undefined&&str(b.planned_quantity)!==''){const quantity=positive(b.planned_quantity),unit=required(b.planned_unit,'计划单位'),a=await chainAllocation(env,d);if(!d.shipping_basis&&(a.used>quantity||a.links.some(l=>l.unit!==unit)))fail('计划数量和单位不能小于或改变已分配的出库数量');d.planned_quantity=quantity;d.planned_unit=unit;}
-    d.requirement_version=(d.requirement_version||1)+1;d.instructions=required(b.instructions,'要求');d.needs_clarification=false;d.location=text(b.location);d.owner=required(b.owner,'责任人');d.deadline=text(b.deadline);
+    if(workChainEnabled(env)&&b.planned_quantity!==undefined&&text(b.planned_quantity)!==''){const quantity=positive(b.planned_quantity),unit=required(b.planned_unit,'计划单位'),a=await chainAllocation(env,d);if(!d.shipping_basis&&(a.used>quantity||a.links.some(l=>l.unit!==unit)))fail('计划数量和单位不能小于或改变已分配的出库数量');d.planned_quantity=quantity;d.planned_unit=unit;}
+    d.requirement_version=(d.requirement_version||1)+1;d.instructions=required(b.instructions,'要求');d.needs_clarification=false;d.location=text(b.location);d.owner=required(b.owner,'责任人');d.deadline=env.SOP_ENVIRONMENT==='staging'?completionDate(b.deadline===undefined?d.deadline:b.deadline,d.deadline):text(b.deadline);
     for(const link of d.links||[])extra.push(stmt(env,'UPDATE v2_outbound_orders SET instruction=?,updated_at=? WHERE id=?',d.instructions,t,link.outbound_id));
     if(workChainEnabled(env))extra.push(...notifyMaterialChange(env,row,u,t,'作业要求已更新，请重新确认',{type:'requirement_update',diff:{instruction:{from:row.data.instructions,to:d.instructions}}}));
     if(d.source_type==='outbound')extra.push(stmt(env,'UPDATE v2_outbound_orders SET instruction=?,updated_at=? WHERE id=?',d.instructions,t,d.source_id));

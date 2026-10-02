@@ -53,6 +53,55 @@ test('issue workflow buttons follow the same existing roles as backend without e
   assert.deepEqual(p.errors,[]);
  }finally{p.w.close();}
 });
+test('inbound work-plan add button keeps its action and caption through language changes',opts,async()=>{
+ const f=await fixture(),p=await f.page('/002/?tab=inbound');
+ try{
+  p.w.goTab('inbound_create');await until(()=>p.d.querySelector('[data-add-work]'),p.errors);
+  const button=p.d.querySelector('[data-add-work]'),list=button.parentElement.querySelector('[data-work-list]');
+  p.w.applyLang();assert.equal(button.textContent,'新增');
+  button.click();assert.equal(list.children.length,1);button.click();assert.equal(list.children.length,2);
+  const remove=list.firstElementChild.querySelector('[data-remove]');assert.match(remove.textContent,/删除此计划/);
+  p.w.setLang('ko');p.w.applyLang();assert.equal(button.textContent,'추가');
+  assert.match(remove.textContent,/삭제/);button.click();assert.equal(list.children.length,3);
+  p.w.setLang('zh');p.w.applyLang();assert.equal(button.textContent,'新增');
+  remove.click();assert.equal(list.children.length,2);assert.deepEqual(p.errors,[]);
+ }finally{p.w.close();}
+});
+test('inbound deferred references survive lost responses and retain a visible backfill audit',opts,async()=>{
+ const f=await fixture(),created=await(await f.request({action:'v2_inbound_plan_create',customer:'QA-DOM deferred',biz_classes:['direct_ship','bulk_putaway'],client_req_id:crypto.randomUUID()})).json();assert.equal(created.ok,true,created.error);
+ const p=await f.page('/002/?tab=inbound');
+ try{p.w.openInboundDetail(created.id);await until(()=>p.d.querySelector('.ck-inbound-reference>button'),p.errors);
+  const button=p.d.querySelector('.ck-inbound-reference>button');button.click();const form=p.d.querySelector('.ck-inbound-reference form');
+  assert.ok([...form.querySelectorAll('textarea')].every(x=>!x.required));form.querySelector('[data-reference=direct_ship]').value='QA-DOM-D1\nQA-DOM-D2';form.querySelector('[data-reference=bulk_putaway]').value='QA-DOM-B1';
+  const original=p.w.CKSession.request;let lost=false;const attempts=[];
+  p.w.CKSession.request=async(action,body)=>{const result=await original(action,body);if(action==='v2_inbound_plan_bind_external'){attempts.push(JSON.stringify(body));if(!lost){lost=true;throw Error('QA simulated lost response');}}return result;};
+  form.requestSubmit();await until(()=>form.querySelector('[role=alert]').textContent.includes('lost response'),p.errors);assert.equal(form.querySelector('[data-reference=direct_ship]').value,'QA-DOM-D1\nQA-DOM-D2');
+  form.requestSubmit();await until(()=>p.d.querySelectorAll('.ck-inbound-reference .ck-reference-supplemented').length===2,p.errors);assert.equal(attempts[0],attempts[1]);assert.equal(p.d.querySelector('.ck-inbound-reference .ck-reference-pending'),null);
+  await p.w.loadInboundDetail();assert.equal(p.d.querySelectorAll('.ck-reference-supplemented').length,2);assert.ok(p.d.querySelector('.ck-reference-supplemented').textContent.includes('外部入库单号已补充'));
+  assert.equal(f.env.DB.raw.prepare('SELECT count(*) n FROM ck_inbound_reference_history WHERE plan_id=?').get(created.id).n,2);assert.deepEqual(p.errors,[]);
+ }finally{p.w.close();}
+});
+test('inbound print preview has no issue side effect and explicit confirmation marks only the printed version',opts,async()=>{
+ const f=await fixture(),created=await(await f.request({action:'v2_inbound_plan_create',customer:'QA-DOM issue',biz_classes:['bulk'],client_req_id:crypto.randomUUID()})).json();assert.equal(created.ok,true,created.error);
+ const p=await f.page('/002/?tab=inbound');
+ try{p.w.openInboundDetail(created.id);await until(()=>p.d.querySelector('.ck-inbound-issue'),p.errors);let button=p.d.querySelector('.ck-inbound-issue button');assert.equal(button.disabled,true);
+  let printHtml='';p.w.open=()=>({document:{open(){printHtml='';},write(x){printHtml+=x;},close(){}},close(){}});
+  await p.w.printIbQr();assert.match(printHtml,/入库计划单/);assert.match(printHtml,/计划版本/);assert.equal(f.env.DB.raw.prepare('SELECT count(*) n FROM ck_inbound_document_issues').get().n,0);
+  button=p.d.querySelector('.ck-inbound-issue button');assert.equal(button.disabled,false);button.click();await until(()=>p.d.querySelector('.ck-inbound-issue .ck-inbound-issue-status')?.textContent.includes('已打印下发'),p.errors);
+  assert.equal(f.env.DB.raw.prepare('SELECT status FROM v2_inbound_plans WHERE id=?').get(created.id).status,'pending');
+  await(await f.request({action:'v2_inbound_plan_update',id:created.id,biz_classes:['bulk'],remark:'QA changed cargo instruction',client_req_id:crypto.randomUUID()})).json();await p.w.loadInboundDetail();assert.match(p.d.querySelector('.ck-inbound-issue .ck-inbound-issue-status').textContent,/重新打印/);assert.equal(p.d.querySelector('.ck-inbound-issue button').disabled,true);assert.deepEqual(p.errors,[]);
+ }finally{p.w.close();}
+});
+test('work completion-date editor, detail and print share the Korean day while history remains readable',opts,async()=>{
+ const f=await fixture();f.env.SOP_WORK_CHAIN_ENABLED='true';const created=await(await f.request({action:'sop_need_create',source_type:'inventory',department:'bulk',customer:'QA-date DOM',title:'QA-date DOM work',supply_chain_no:'QA-date stock',instructions:'QA-date original requirements',deadline:'2026-10-05',client_req_id:crypto.randomUUID()})).json();assert.equal(created.ok,true,created.error);
+ const row=f.env.DB.raw.prepare('SELECT state FROM sop_records WHERE id=?').get(created.id),legacy=JSON.parse(row.state);legacy.deadline='2026-10-04T15:00:01Z';f.env.DB.raw.prepare('UPDATE sop_records SET state=? WHERE id=?').run(JSON.stringify(legacy),created.id);
+ const p=await f.page('/002/?need='+created.id+'&individual=1');
+ try{await until(()=>p.d.querySelector('.ck-work-audit'),p.errors);const content=p.d.querySelector('#view-need #content');assert.match(content.querySelector('article').textContent,/要求完成日期：2026-10-05/);assert.ok(!content.querySelector('article').textContent.includes('15:00:01'));
+  [...content.querySelectorAll('#actions button')].find(b=>b.textContent==='修改作业要求').click();await until(()=>p.d.querySelector('#view-need dialog[open]'),p.errors);const form=p.d.querySelector('#view-need #editor');assert.equal(form.elements.deadline.type,'date');assert.equal(form.elements.deadline.value,'2026-10-05');assert.match(form.elements.deadline.closest('label').textContent,/要求完成日期/);form.elements.instructions.value='QA-date revised requirements';assert.ok(form.checkValidity(),[...form.elements].filter(e=>!e.checkValidity()).map(e=>e.name+': '+e.validationMessage).join('; '));form.requestSubmit();await until(()=>!p.d.querySelector('#view-need dialog[open]')||p.d.querySelector('#view-need #formError').textContent,p.errors);assert.equal(p.d.querySelector('#view-need #formError').textContent,'');await until(()=>content.querySelector('article').textContent.includes('revised requirements'),p.errors);
+  await until(()=>content.querySelector('.ck-work-audit'),p.errors);assert.equal(JSON.parse(f.env.DB.raw.prepare('SELECT state FROM sop_records WHERE id=?').get(created.id).state).deadline,legacy.deadline);assert.match(content.querySelector('.ck-work-audit').textContent,/修改作业要求/);assert.ok(!content.querySelector('.ck-work-audit').textContent.includes('sop_need_update'));
+  let printed='';p.w.open=()=>({document:{write(h){printed=h;},close(){}},focus(){},print(){}});await p.w.CKNeedPrint({id:created.id});assert.match(printed,/要求完成日期：2026-10-05/);assert.ok(!printed.includes('15:00:01'));assert.deepEqual(p.errors,[]);
+ }finally{p.w.close();}
+});
 test('inventory-plan editor keeps unbooked work independent, defers crew assignment and clears cancelled drafts',opts,async()=>{
  const f=await fixture();f.env.SOP_WORK_CHAIN_ENABLED='true';const p=await f.page('/002/?tab=need');
  try{await until(()=>p.d.querySelector('.ck-needs-tools'),p.errors);p.d.querySelector('.ck-needs-tools button:nth-child(2)').click();await until(()=>p.d.querySelector('dialog[open] [name=title]'),p.errors);const editor=p.d.querySelector('#editor');

@@ -6,9 +6,9 @@ function setup(){const DB=database(),env={DB,SOP_ENVIRONMENT:'staging',SOP_UPGRA
  const unload=async p=>{const j=await call('v2_unload_job_start',{plan_id:p.id,worker_id:'UNLOAD',worker_name:'卸货甲',biz_class:'bulk'});await call('v2_unload_job_finish',{job_id:j.job_id,worker_id:'UNLOAD',complete_job:true,result_lines:[{unit_type:'carton',actual_qty:50}],box_count:50});return j;};
  const detail=p=>call('v2_inbound_plan_detail',{id:p.id});return {DB,env,call,plan,unload,detail};}
 
-test('putaway code is required, normalized, editable and rejects duplicate references before saving',async()=>{
+test('putaway reference may be deferred, and populated references normalize and reject duplicates',async()=>{
  const {plan,call,DB,detail}=setup();
- const missing=await call('v2_inbound_plan_create',{customer:'测试',biz_classes:['direct_ship']},false);assert.equal(missing.ok,false);assert.match(missing.error,/外部/);assert.equal(DB.raw.prepare('SELECT count(*) n FROM v2_inbound_plans').get().n,0);
+ const missing=await call('v2_inbound_plan_create',{customer:'测试',biz_classes:['direct_ship']});assert.equal((await detail(missing)).plan.external_inbound_no,'');assert.equal(DB.raw.prepare('SELECT count(*) n FROM v2_inbound_plans').get().n,1);
  const p=await plan(['direct_ship'],{external_inbound_no:'  WMS-TEST-001  '});assert.equal((await detail(p)).plan.external_inbound_no,'WMS-TEST-001');
  const dup=await call('v2_inbound_plan_create',{customer:'重复',biz_classes:['direct_ship'],external_inbound_no:'WMS-TEST-001'},false);assert.equal(dup.ok,false);
  await call('v2_inbound_plan_update',{id:p.id,biz_classes:['direct_ship'],external_inbound_no:'WMS-TEST-002'});assert.equal((await detail(p)).plan.external_inbound_no,'WMS-TEST-002');
@@ -69,7 +69,6 @@ test('unplanned unloading finalized by office follows the same putaway and autom
  for(const [biz,code,status] of [['direct_ship','WMS-FEEDBACK','arrived_pending_putaway'],['bulk','','completed']]){
   const u=await call('v2_unplanned_unload_start',{worker_id:'FB-U',worker_name:'反馈卸货甲'});
   await call('v2_unplanned_unload_finish',{job_id:u.job_id,worker_id:'FB-U',result_lines:[{unit_type:'carton',actual_qty:10}]});
-  if(code){const missing=await call('v2_feedback_finalize_to_inbound',{feedback_id:u.feedback_id,customer:'反馈客户',biz_classes:[biz]},false);assert.equal(missing.ok,false);assert.equal(DB.raw.prepare('SELECT status FROM v2_field_feedbacks WHERE id=?').get(u.feedback_id).status,'unloaded_pending_info');}
   const result=await call('v2_feedback_finalize_to_inbound',{feedback_id:u.feedback_id,customer:'反馈客户',biz_classes:[biz],external_inbound_no:code});
   const d=await detail({id:result.inbound_plan_id});assert.equal(d.plan.status,status);assert.equal(d.plan.external_inbound_no,code);assert.ok(d.plan.unload_completed_at);
  }
@@ -155,10 +154,36 @@ test('department references stay separate through scanning, parallel work and al
  await finish(await start('B3','bulk','B3W'),'B3W');row=await detail(p);assert.equal(row.plan.status,'completed');assert.equal(row.plan.inbound_progress.completed,4);
  assert.deepEqual(DB.raw.prepare("SELECT DISTINCT biz_class FROM v2_ops_jobs WHERE job_type='inbound_bulk'").all().map(x=>x.biz_class),['bulk']);
 });
-test('each selected putaway department needs its own codes and bulk-only codes can be edited',async()=>{
+test('selected departments may defer codes, but supplied codes keep department separation',async()=>{
  const {call,plan,detail}=setup();
- for(const b of [{biz_classes:['bulk_putaway']},{biz_classes:['direct_ship','bulk_putaway'],external_inbound_no:'X'},{biz_classes:['direct_ship','bulk_putaway'],external_inbound_no:'X',bulk_external_inbound_no:'X'},{biz_classes:['direct_ship','bulk_putaway'],external_inbound_no:'D\nB',direct_external_inbound_no:'B',bulk_external_inbound_no:'B'}])assert.equal((await call('v2_inbound_plan_create',{customer:'Fixture',...b},false)).ok,false);
+ for(const b of [{biz_classes:['bulk_putaway']},{biz_classes:['direct_ship','bulk_putaway'],external_inbound_no:'X'},{biz_classes:['direct_ship','bulk_putaway'],external_inbound_no:'Y',bulk_external_inbound_no:'Y'}])assert.equal((await call('v2_inbound_plan_create',{customer:'Fixture',...b})).ok,true);
+ assert.equal((await call('v2_inbound_plan_create',{customer:'Fixture',biz_classes:['direct_ship','bulk_putaway'],external_inbound_no:'D\nB',direct_external_inbound_no:'B',bulk_external_inbound_no:'B'},false)).ok,false);
  const p=await plan(['bulk_putaway'],{external_inbound_no:'B-OLD'});await call('v2_inbound_plan_update',{id:p.id,biz_classes:['bulk_putaway'],external_inbound_no:'B-NEW',bulk_external_inbound_no:'B-NEW'});assert.equal((await detail(p)).plan.bulk_external_inbound_no,'B-NEW');
+});
+test('both departments supplement the original received plan exactly once, retaining cargo and labor history',async()=>{
+ const {plan,call,detail,unload,DB}=setup();
+ const p=await plan(['direct_ship','bulk_putaway']);let d=await detail(p);
+ assert.deepEqual(d.plan.inbound_progress.missing_departments,['direct_ship','bulk_putaway']);
+ assert.deepEqual(d.plan.external_reference_history,[]);const unloading=await unload(p);
+ DB.raw.prepare("INSERT INTO v2_attachments(id,related_doc_type,related_doc_id,file_name,file_key) VALUES('QA-KEPT','inbound_plan',?,'QA-original.txt','QA-original')").run(p.id);
+ d=await detail(p);assert.notEqual(d.plan.status,'completed');
+ const labor=DB.raw.prepare('SELECT * FROM v2_ops_job_workers WHERE job_id=?').all(unloading.job_id);
+ const premature=await call('v2_inbound_job_start',{plan_id:p.id,job_type:'inbound_direct',biz_class:'direct_ship',worker_id:'P'},false);assert.equal(premature.ok,false);
+ const forced=await call('v2_inbound_plan_force_complete',{id:p.id,reason:'QA should remain incomplete'},false);assert.equal(forced.error,'external_references_missing');
+ const other=await plan(['direct_ship'],{external_inbound_no:'QA-TAKEN'});
+ const dup=await call('v2_inbound_plan_bind_external',{id:p.id,previous_code:'',previous_bulk_code:'',external_inbound_no:'QA-TAKEN'},false);assert.equal(dup.ok,false);
+ assert.equal((await detail(p)).plan.external_reference_history.length,0);
+ const body={id:p.id,previous_code:'',previous_bulk_code:'',external_inbound_no:'D-QA-1\nD-QA-2\nB-QA-1',bulk_external_inbound_no:'B-QA-1',client_req_id:'QA-backfill-same-request'};
+ await call('v2_inbound_plan_bind_external',body);await call('v2_inbound_plan_bind_external',body);
+ d=await detail(p);assert.equal(d.plan.id,p.id);assert.equal(d.lines[0].actual_qty,50);assert.equal(d.plan.external_reference_history.length,2);
+ assert.ok(d.plan.external_reference_history.every(x=>x.actor_name==='测试负责人'&&x.created_at));
+ assert.equal(d.plan.external_reference_history.find(x=>x.biz_class==='direct_ship').external_nos,'D-QA-1\nD-QA-2');assert.equal(d.plan.external_reference_history.find(x=>x.biz_class==='bulk_putaway').external_nos,'B-QA-1');
+ assert.equal(d.plan.inbound_progress.total,3);assert.equal(d.plan.inbound_progress.completed,0);assert.deepEqual(d.plan.inbound_progress.missing_departments,[]);
+ assert.equal(d.jobs.length,1);assert.equal(d.attachments[0].id,'QA-KEPT');assert.deepEqual(DB.raw.prepare('SELECT * FROM v2_ops_job_workers WHERE job_id=?').all(unloading.job_id),labor);
+ assert.equal(DB.raw.prepare('SELECT count(*) n FROM ck_inbound_reference_context').get().n,0);
+ assert.equal((await detail(other)).plan.external_reference_history.length,0);
+ assert.equal((await call('v2_inbound_resolve_code',{code:'D-QA-1',biz_class:'direct_ship'})).plan.id,p.id);
+ assert.equal((await call('v2_inbound_resolve_code',{code:'B-QA-1',biz_class:'bulk'})).plan.id,p.id);
 });
 test('legacy shared bulk job still finishes against its original generic putaway disposition',async()=>{
  const {plan,call,detail,unload,DB}=setup();const p=await plan(['bulk_putaway'],{external_inbound_no:'LEGACY'});await unload(p);const j=await call('v2_inbound_job_start',{plan_id:p.id,job_type:'inbound_bulk',biz_class:'bulk',worker_id:'OLD'});
