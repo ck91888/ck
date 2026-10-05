@@ -78,17 +78,31 @@ test('password rotation invalidates existing new-password sessions and accepts t
  for(const {scope,cookie} of old){assert.equal((await f.request(scope,'sop_identity',{}, {cookie})).response.status,401);assert.equal((await f.login(scope,password)).response.status,403);assert.equal((await f.login(scope,f.env.SOP_ADMIN_PASSWORD)).response.status,200);}
 });
 test('configured blank, whitespace, short, overlong or invalid password closes both administrator entrances without legacy fallback',async()=>{
- for(const value of ['', ' '.repeat(15),'short',password+' ', ' '+password,'a'.repeat(129),'😀'.repeat(6),password+'\n',null,undefined,123]){
+  for(const value of ['', ' '.repeat(15),'four',password+' ', ' '+password,'a'.repeat(129),'😀'.repeat(4),password+'\n',null,undefined,123]){
   const f=await setup();const old=f.cookies.office;f.env.SOP_ADMIN_PASSWORD=value;
   assert.equal((await f.request('office','sop_identity',{}, {cookie:old})).response.status,401);
-  for(const scope of ['office','kiosk'])for(const code of [oldCode,jsonCode,password])assert.equal((await f.login(scope,code)).response.status,403);
+   for(const scope of ['office','kiosk'])for(const code of [oldCode,jsonCode,password,...(typeof value==='string'?[value]:[])])assert.equal((await f.login(scope,code)).response.status,403);
  }
 });
-test('password accepts 12–128 Unicode characters exactly and rejects case changes or surrounding whitespace',async()=>{
- for(const value of ['a'.repeat(12),'z'.repeat(128),'😀'.repeat(12),'密'.repeat(128)]){
+test('password accepts 5–128 Unicode characters, retains 12/128 support and rejects shorter guesses or surrounding whitespace',async()=>{
+  for(const value of ['a'.repeat(5),'a'.repeat(12),'z'.repeat(128),'😀'.repeat(5),'😀'.repeat(12),'密'.repeat(128)]){
   const f=await setup();f.env.SOP_ADMIN_PASSWORD=value;assert.equal((await f.login('office',value)).response.status,200);
   for(const wrong of [' '+value,value+' ',value.slice(1)])assert.equal((await f.login('office',wrong)).response.status,403);
  }
+});
+test('an already configured five-character Secret works on both test hosts without rewriting the binding',async()=>{
+ const f=await setup(),configured='Q7b2X',old=f.cookies.office;
+ Object.defineProperty(f.env,'SOP_ADMIN_PASSWORD',{value:configured,writable:false,configurable:false,enumerable:true});
+ assert.equal((await f.request('office','sop_identity',{}, {cookie:old})).response.status,401);
+ for(const origin of hosts)for(const scope of ['office','kiosk']){
+  assert.equal((await f.login(scope,'Q7b2',{origin})).response.status,403);
+  assert.equal((await f.login(scope,oldCode,{origin})).response.status,403);
+  assert.equal((await f.login(scope,jsonCode,{origin})).response.status,403);
+  assert.equal((await f.login(scope,configured,{origin})).response.status,200);
+  assert.equal((await f.request(scope,'sop_identity',{}, {origin})).response.status,200);
+ }
+ assert.equal(f.env.SOP_ADMIN_PASSWORD,configured);
+ assert.equal(Object.getOwnPropertyDescriptor(f.env,'SOP_ADMIN_PASSWORD').writable,false);
 });
 test('existing employee field session, badge login and attendance remain valid after administrator password enablement or invalid configuration',async()=>{
  const f=await setup();const person=(await f.request('office','sop_attendance_employee_register',{name:'虚拟现场职员',employeeNo:'FIELD-PASSWORD-FIXTURE',department:'bulk'})).body.person;

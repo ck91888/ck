@@ -28,7 +28,7 @@ export async function ensureAccess(env){
 function rawToken(request,scope){return (request.headers.get('Cookie')||'').split(';').map(s=>s.trim()).find(s=>s.startsWith(cookieName(scope)+'='))?.slice(cookieName(scope).length+1)||'';}
 function safeUser(s){return {id:s.user_id,name:s.name,role:s.role,departments:JSON.parse(s.departments),scope:s.scope};}
 const passwordConfigured=env=>accessEnabled(env)&&Object.prototype.hasOwnProperty.call(env,'SOP_ADMIN_PASSWORD');
-const validPassword=value=>typeof value==='string'&&value.length>=12&&value.length<=256&&[...value].length>=12&&[...value].length<=128&&value===value.trim()&&!/\p{Cc}/u.test(value);
+const validPassword=value=>typeof value==='string'&&value.length>=5&&value.length<=256&&[...value].length>=5&&[...value].length<=128&&value===value.trim()&&!/\p{Cc}/u.test(value);
 // Fixed-size comparison and a versioned, keyed verifier keep passwords out of
 // responses/session records and distinguish new sessions from legacy codes.
 function equalVerifier(a,b){
