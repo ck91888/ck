@@ -2,6 +2,7 @@ import {ensureSchema} from './schema-ready.js';
 // Manager-triggered maintenance for the isolated staging database only.
 // Every table is archived and cleared in one D1 transaction. No scheduled reset.
 export const STAGING_HOST = 'ck-v2-api-sop-staging.ck91888.workers.dev';
+export const STAGING_HOSTS = Object.freeze([STAGING_HOST, 'sop-test.ck91888.cn']);
 export const STAGING_DATABASE = 'ba1eba33-bcdd-4de2-8927-d37dc3788396';
 export const TABLES = [
  'ck_crew_borrows','ck_crew_requests',
@@ -18,7 +19,7 @@ export const TABLES = [
 const q=(env,sql,...args)=>env.DB.prepare(sql).bind(...args);
 const rows=async(env,sql,...args)=>(await q(env,sql,...args).all()).results;
 const fail=(message,status=400)=>{throw Object.assign(Error(message),{status});};
-export const enabled=(request,env)=>new URL(request.url).hostname===STAGING_HOST&&env.SOP_ENVIRONMENT==='staging'&&env.SOP_UPGRADE_ENABLED==='true'&&env.SOP_TEST_RESET_ENABLED==='true'&&env.SOP_TEST_RESET_DATABASE===STAGING_DATABASE;
+export const enabled=(request,env)=>STAGING_HOSTS.includes(new URL(request.url).hostname)&&env.SOP_ENVIRONMENT==='staging'&&env.SOP_UPGRADE_ENABLED==='true'&&env.SOP_TEST_RESET_ENABLED==='true'&&env.SOP_TEST_RESET_DATABASE===STAGING_DATABASE;
 export async function ensureResetSchema(env){
  return ensureSchema(env.DB,'ensureResetSchema-v1',async()=>{
  await env.DB.batch([

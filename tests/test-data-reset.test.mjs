@@ -1,6 +1,6 @@
 import test from 'node:test';import assert from 'node:assert/strict';
 import {database} from './d1-adapter.mjs';import {ATTENDANCE_SCHEMA} from '../worker-v2/attendance.js';
-import {resetAction,TABLES,STAGING_HOST,STAGING_DATABASE,enabled,activeReset} from '../worker-v2/test-data-reset.js';
+import {resetAction,TABLES,STAGING_HOST,STAGING_HOSTS,STAGING_DATABASE,enabled,activeReset} from '../worker-v2/test-data-reset.js';
 import entry from '../worker-v2/staging-entry.js';
 import {ACCESS_SCHEMA} from '../worker-v2/access-control.js';
 import {LOAD_SCHEMA} from '../worker-v2/outbound-load-trip.js';
@@ -57,4 +57,73 @@ test('concurrent start and step requests share one run and archive each table on
  const env=setup();const starts=await Promise.all([resetAction('start',input(),env,manager),resetAction('start',input(),env,manager)]);assert.equal(starts[0].run.id,starts[1].run.id);
  const id=starts[0].run.id;await Promise.all([resetAction('step',{runId:id},env,manager),resetAction('step',{runId:id},env,manager)]);await complete(env,id);
  assert.equal(env.DB.raw.prepare('SELECT COUNT(*) n FROM ck_test_resets').get().n,1);assert.equal(env.DB.raw.prepare('SELECT COUNT(*) n FROM ck_test_reset_items').get().n,TABLES.length);
+});
+
+const domainRequest=(host,path,method='GET',body={},options={})=>new Request('https://'+host+path,{
+ method,headers:method==='POST'?{'Content-Type':'application/json','Origin':'https://'+host,'X-CK-Test-Reset':'1',...options.headers}:options.headers,
+ body:method==='POST'?JSON.stringify(body):undefined
+});
+test('reset accepts exactly the two approved test hosts and rejects production and similar names',async()=>{
+ const env=setup();assert.deepEqual(STAGING_HOSTS,[STAGING_HOST,'sop-test.ck91888.cn']);
+ for(const host of STAGING_HOSTS)assert.equal(enabled(domainRequest(host,'/api/test-data/status'),env),true);
+ for(const host of ['api.ck91888.cn','ck91888.cn','test.ck91888.cn','other.ck91888.cn','sop-test.ck91888.cn.evil.invalid','ck-v2-api-sop-staging.other.workers.dev']){
+  assert.equal(enabled(domainRequest(host,'/api/test-data/status'),env),false);
+  assert.equal((await entry.fetch(domainRequest(host,'/api/test-data/status'),env)).status,404);
+ }
+ assert.equal(env.measure(),0);
+});
+test('custom test host still requires staging environment, upgrade/reset flags and exact database marker',async()=>{
+ const env=setup();for(const change of [{SOP_ENVIRONMENT:'production'},{SOP_ENVIRONMENT:undefined},{SOP_UPGRADE_ENABLED:'false'},{SOP_TEST_RESET_ENABLED:'false'},{SOP_TEST_RESET_DATABASE:'production'},{SOP_TEST_RESET_DATABASE:undefined}]){
+  assert.equal(enabled(domainRequest('sop-test.ck91888.cn','/api/test-data/status'),{...env,...change}),false);
+  assert.equal((await entry.fetch(domainRequest('sop-test.ck91888.cn','/api/test-data/start','POST',input()),{...env,...change})).status,404);
+ }
+ assert.equal(env.measure(),0);
+});
+test('both test hosts reject unauthenticated reset status and execution before creating a run',async()=>{
+ const env={...setup(),SOP_ACCESS_CONTROL:'true',SOP_PUBLIC_TEST_ACCESS:'false'};
+ for(const host of STAGING_HOSTS){
+  assert.equal((await entry.fetch(domainRequest(host,'/api/test-data/status'),env)).status,403);
+  assert.equal((await entry.fetch(domainRequest(host,'/api/test-data/start','POST',input()),env)).status,403);
+ }
+ assert.equal(env.DB.raw.prepare('SELECT COUNT(*) n FROM sqlite_master WHERE name=?').get('ck_test_resets').n,0);
+ assert.equal(env.DB.raw.prepare('SELECT COUNT(*) n FROM v2_inbound_plans').get().n,1);
+});
+test('normal isolated administrator login permits status on each approved host without clearing records',async()=>{
+ // Login runs the normal migration path; the maintenance-only UNION budget wrapper does not apply.
+ const env={DB:database(),SOP_ENVIRONMENT:'staging',SOP_UPGRADE_ENABLED:'true',SOP_TEST_RESET_ENABLED:'true',SOP_TEST_RESET_DATABASE:STAGING_DATABASE,SOP_ACCESS_CONTROL:'true',SOP_PUBLIC_TEST_ACCESS:'false',SOP_USERS_JSON:JSON.stringify([{id:'fixture-domain-manager',name:'Fixture manager',role:'manager',key:'isolated-domain-fixture-only'}])};
+ env.DB.raw.exec("INSERT INTO v2_inbound_plans(id,customer,status) VALUES('TEST','fixture','pending')");
+ for(const host of STAGING_HOSTS){
+  const login=await entry.fetch(domainRequest(host,'/api','POST',{action:'sop_login',sop_key:'isolated-domain-fixture-only'}),env);assert.equal(login.status,200,await login.clone().text());
+  const cookie=login.headers.get('set-cookie').split(';')[0];
+  const response=await entry.fetch(domainRequest(host,'/api/test-data/status','GET',{}, {headers:{Cookie:cookie}}),env);assert.equal(response.status,200);
+  const status=await response.json();assert.equal(status.ok,true);assert.equal(status.run,null);assert.equal(status.counts.find(x=>x.table_name==='v2_inbound_plans').count,1);
+ }
+ assert.equal(env.DB.raw.prepare('SELECT COUNT(*) n FROM ck_test_resets').get().n,0);
+});
+test('custom domain keeps POST, header and per-origin checks including cross-origin requests between test hosts',async()=>{
+ const env=setup();assert.equal((await entry.fetch(domainRequest('sop-test.ck91888.cn','/api/test-data/start'),env)).status,405);
+ for(const host of STAGING_HOSTS){const other=STAGING_HOSTS.find(x=>x!==host);
+  assert.equal((await entry.fetch(domainRequest(host,'/api/test-data/start','POST',input(),{headers:{Origin:'https://'+other}}),env)).status,403);
+  assert.equal((await entry.fetch(domainRequest(host,'/api/test-data/start','POST',input(),{headers:{'X-CK-Test-Reset':'0'}}),env)).status,403);
+  assert.equal((await entry.fetch(domainRequest(host,'/api/test-data/start','POST',input(),{headers:{'Content-Type':'text/plain'}}),env)).status,403);
+ }
+ assert.equal(env.DB.raw.prepare('SELECT COUNT(*) n FROM sqlite_master WHERE name=?').get('ck_test_resets').n,0);
+});
+test('a reset started from either host blocks office, field and attendance writes on both hosts',async()=>{
+ for(const startHost of STAGING_HOSTS){const env=setup();
+  const start=await entry.fetch(domainRequest(startHost,'/api/test-data/start','POST',input()),env);assert.equal(start.status,200);const {run}=await start.json();
+  for(const host of STAGING_HOSTS)for(const [path,action]of [['/api','v2_inbound_plan_create'],['/api','v2_003_purchase_request_create'],['/001/api','sop_native_start'],['/attendance/api','sop_attendance_checkin']]){
+   const response=await entry.fetch(domainRequest(host,path,'POST',{action,customer:'must not be created'}),env);assert.equal(response.status,503);
+  }
+  for(const host of STAGING_HOSTS){const status=await(await entry.fetch(domainRequest(host,'/api/test-data/status'),env)).json();assert.equal(status.run.id,run.id);}
+  assert.equal(env.DB.raw.prepare('SELECT COUNT(*) n FROM v2_inbound_plans').get().n,1);
+ }
+});
+test('custom-domain start and alternating-host steps share one backup and retain settings',async()=>{
+ const env=setup(),body=input();const start=await entry.fetch(domainRequest('sop-test.ck91888.cn','/api/test-data/start','POST',body),env);assert.equal(start.status,200);const first=await start.json();
+ const replay=await(await entry.fetch(domainRequest(STAGING_HOST,'/api/test-data/start','POST',body),env)).json();assert.equal(replay.run.id,first.run.id);
+ let done=first;for(let i=0;i<20&&!done.run.completedAt;i++){const response=await entry.fetch(domainRequest(STAGING_HOSTS[i%2],'/api/test-data/step','POST',{runId:first.run.id}),env);assert.equal(response.status,200);done=await response.json();}
+ assert.ok(done.run.completedAt);assert.equal(done.run.done,TABLES.length);assert.equal(env.DB.raw.prepare('SELECT COUNT(*) n FROM ck_test_resets').get().n,1);
+ assert.equal(env.DB.raw.prepare(`SELECT customer FROM ck_backup_${first.run.id}_v2_inbound_plans`).get().customer,'fixture');
+ assert.equal(env.DB.raw.prepare('SELECT COUNT(*) n FROM v2_003_locations').get().n,1);assert.equal(env.DB.raw.prepare('SELECT value FROM v2_schema_meta').get().value,'keep');
 });
