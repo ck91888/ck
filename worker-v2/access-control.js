@@ -27,7 +27,26 @@ export async function ensureAccess(env){
 }
 function rawToken(request,scope){return (request.headers.get('Cookie')||'').split(';').map(s=>s.trim()).find(s=>s.startsWith(cookieName(scope)+'='))?.slice(cookieName(scope).length+1)||'';}
 function safeUser(s){return {id:s.user_id,name:s.name,role:s.role,departments:JSON.parse(s.departments),scope:s.scope};}
+const passwordConfigured=env=>accessEnabled(env)&&Object.prototype.hasOwnProperty.call(env,'SOP_ADMIN_PASSWORD');
+const validPassword=value=>typeof value==='string'&&value.length>=12&&value.length<=256&&[...value].length>=12&&[...value].length<=128&&value===value.trim()&&!/\p{Cc}/u.test(value);
+// Fixed-size comparison and a versioned, keyed verifier keep passwords out of
+// responses/session records and distinguish new sessions from legacy codes.
+function equalVerifier(a,b){
+ if(typeof a!=='string'||typeof b!=='string'||a.length!==b.length)return false;
+ let different=0;for(let i=0;i<a.length;i++)different|=a.charCodeAt(i)^b.charCodeAt(i);return different===0;
+}
+async function passwordVerifier(value){
+ const key=await crypto.subtle.importKey('raw',new TextEncoder().encode(value),{name:'HMAC',hash:'SHA-256'},false,['sign']);
+ const bytes=new Uint8Array(await crypto.subtle.sign('HMAC',key,new TextEncoder().encode('ck:staging:admin-password:v1')));
+ return 'password-v1:'+Array.from(bytes,x=>x.toString(16).padStart(2,'0')).join('');
+}
 async function adminByCode(code,env){
+ if(passwordConfigured(env)){
+  if(!validPassword(env.SOP_ADMIN_PASSWORD)||!validPassword(code))return null;
+  const hash=await passwordVerifier(env.SOP_ADMIN_PASSWORD);
+  if(!equalVerifier(await passwordVerifier(code),hash))return null;
+  return {id:'ck-office-admin',name:'管理员',role:'manager',departments:['bulk','direct_ship','import'],hash};
+ }
  if(typeof code!=='string'||code.length>256||!code)return null;
  const hash=await digest(code.trim());
  // This optional verifier is for a randomly generated 256-bit recovery code, not a human password.
@@ -37,6 +56,7 @@ async function adminByCode(code,env){
  return null;
 }
 async function credentialCurrent(s,env){
+ if(passwordConfigured(env))return validPassword(env.SOP_ADMIN_PASSWORD)&&s.user_id==='ck-office-admin'&&equalVerifier(s.credential_hash,await passwordVerifier(env.SOP_ADMIN_PASSWORD));
  if(s.credential_hash===env.SOP_ADMIN_CODE_SHA256&&s.user_id==='ck-office-admin')return true;
  let users=[];try{users=JSON.parse(env.SOP_USERS_JSON||'[]');}catch{}
  for(const u of Array.isArray(users)?users:[])if(u.id===s.user_id&&u.role==='manager'&&u.key&&await digest(u.key)===s.credential_hash)return true;
@@ -74,7 +94,7 @@ export async function accessSessionAction(b,env,request){
   if(!day)return denied('今天尚未上班签到或已经签退，请先在签到点打卡 / 오늘 출근 등록을 먼저 해주세요',403);
   u={id:p.id,name:p.name,role:'dispatcher',departments:['bulk','direct_ship','import','other']};attendance=day.id;version=p.version;
  }else{
-  u=await adminByCode(b.sop_key,env);if(!u)return denied('管理员授权码不正确 / 관리자 인증 코드를 확인하세요',403);credential=u.hash;
+   u=await adminByCode(b.sop_key,env);if(!u)return denied('管理员密码或授权码不正确 / 관리자 비밀번호 또는 인증 코드를 확인하세요',403);credential=u.hash;
  }
  const raw=token(),seconds=scope==='kiosk'?30*86400:12*3600;
  const s={user_id:u.id,name:scope==='kiosk'?'签到点 / 출퇴근 등록':u.name,role:scope==='kiosk'?'kiosk':u.role,departments:JSON.stringify(u.departments||[]),scope};
