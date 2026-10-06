@@ -48,7 +48,7 @@ export const documentStatesFromRows=rows=>new Map(rows.map(r=>[r.plan_id,{revisi
 export async function confirmInboundIssue(env,body){
  if(!inboundFlowEnabled(env))throw Error('打印下发功能未启用');
  const user=env.SOP_REQUEST_USER;
- if(!user||user.scope==='field'||!['manager','service'].includes(user.role))throw Error('请由办公室客服或管理员确认打印下发');
+  if(!user||user.scope==='field'||!['manager','service'].includes(user.role))throw Error('请由办公室客服或管理员打印下发');
  const id=String(body.id||''),revision=Number(body.revision);
  if(!id||!Number.isSafeInteger(revision)||revision<1)throw Error('请先打印当前入库计划版本');
  await ensureInboundDocuments(env);const t=new Date().toISOString();
@@ -57,7 +57,7 @@ export async function confirmInboundIssue(env,body){
   WHERE p.id=? AND v.revision=? AND p.status!='cancelled' AND COALESCE(p.is_deleted,0)=0`,t,user.id,user.name,id,revision).run();
  const state=(await inboundDocumentStates(env,[id])).get(id);
  if(!state||state.state==='cancelled')throw Error('已取消或删除的入库计划不能下发');
- if(state.revision!==revision)throw Error('计划内容已更新，请重新打印后确认下发');
- if(state.state!=='issued')throw Error('未能确认下发，请重试');
+  if(state.revision!==revision)throw Error('计划内容已更新，请重新打印');
+  if(state.state!=='issued')throw Error('未能记录打印下发，请重试打印');
  return {ok:true,id,issue_state:state};
 }

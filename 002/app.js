@@ -3161,7 +3161,7 @@ async function loadInboundDetail() {
   window._currentInboundLines = lines;
 
   html += '<div class="card">';
-  html += '<button class="btn btn-outline btn-sm" onclick="printIbQr()">' + L("print") + '</button> ';
+  html += '<button class="btn btn-outline btn-sm" onclick="printIbQr(this)">' + L("print") + '</button> ';
 
   if (isCompletable) {
     if (hasActiveJob) {
@@ -3949,15 +3949,23 @@ function buildInboundQrHtml(text, cellSize) {
 }
 
 // 入库计划单 A4 打印：左上抬头 + 右上小二维码 + 双列信息 + 明细表 + 签字行
-async function printIbQr() {
+var _inboundPrintPending = false;
+async function printIbQr(btnEl) {
+  if(_inboundPrintPending)return;
   var planId = _currentInboundId || '';
-  if(!planId){alert('请先打开入库计划');return;}
-  var win = window.open('', '_blank');
-  if(!win){alert('请允许浏览器打开打印窗口');return;}
-  win.document.write('<p>正在读取最新入库计划和作业要求…</p>');
+  var text=function(zh,ko){return getLang()==='ko'?ko:zh;};
+  if(!planId){alert(text('请先打开入库计划','입고계획을 먼저 여세요.'));return;}
+  _inboundPrintPending=true;
+  var button=btnEl||document.querySelector('#inboundDetailBody button[onclick^="printIbQr("]');
+  if(button)button.disabled=true;
+  var win,recorded=false;
+  try{
+  win = window.open('', '_blank');
+  if(!win){alert(text('请允许浏览器打开打印窗口，尚未记录下发。','팝업을 허용하세요. 배포는 아직 기록되지 않았습니다.'));return;}
+  win.document.write('<p>'+text('正在读取最新入库计划和作业要求…','최신 입고계획과 작업 지시를 불러오는 중…')+'</p>');
   var latest;
   try{latest=await api({action:'v2_inbound_plan_detail',id:planId});if(!latest||!latest.ok)throw Error(latest&&(latest.error||latest.message)||'读取失败');}
-  catch(e){win.close();alert('未能读取最新作业要求，未打印旧版。请重试：'+e.message);return;}
+  catch(e){win.close();alert(text('未能读取最新作业要求，未打印旧版。请重试：','최신 작업 지시를 읽지 못했습니다. 이전 버전은 인쇄하지 않았습니다. 다시 시도하세요: ')+e.message);return;}
   var plan = latest.plan;
   if(window.CK_SOP_ROLLOUT?.staging&&plan.status==='cancelled'){win.close();alert('已取消的入库计划不能打印下发 / 취소된 입고계획은 배포할 수 없습니다');return;}
   var displayNo = plan.display_no || planId;
@@ -4037,8 +4045,18 @@ async function printIbQr() {
     '</body></html>';
   win.document.open();
   win.document.write(html);
-  win.document.close();
-  if(window.CKInboundPrintOpened)await CKInboundPrintOpened(plan);
+  if(win.closed)return;
+  var issueResult;
+  if(window.CK_SOP_ROLLOUT?.staging){
+    if(!window.CKInboundRecordPrintIssue)throw Error(text('打印下发功能未就绪，请刷新后重试','인쇄·배포 기능이 준비되지 않았습니다. 새로고침 후 다시 시도하세요.'));
+    issueResult=await CKInboundRecordPrintIssue(plan);
+    if(!issueResult?.ok)throw Error(issueResult?.error||text('未能记录下发','배포를 기록하지 못했습니다.'));
+    recorded=true;
+  }
+  if(!win.closed)win.document.close();
+  if(recorded&&window.CKInboundPrintIssued){try{await CKInboundPrintIssued(plan,issueResult);}catch(e){alert(text('已记录下发，但页面刷新失败，请刷新查看：','배포는 기록되었으나 화면을 갱신하지 못했습니다. 새로고침하세요: ')+e.message);}}
+  }catch(e){if(win&&!win.closed)win.close();alert((recorded?text('已记录下发，但打印未完成，请重试打印：','배포는 기록되었으나 인쇄가 완료되지 않았습니다. 다시 인쇄하세요: '):text('未能确认下发结果，打印已停止。请重试打印：','배포 결과를 확인하지 못해 인쇄를 중단했습니다. 다시 인쇄하세요: '))+e.message);}
+  finally{_inboundPrintPending=false;if(button?.isConnected)button.disabled=false;}
 }
 
 async function cancelInboundPlan(btnEl) {
