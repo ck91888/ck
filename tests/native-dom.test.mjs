@@ -124,10 +124,19 @@ test('inbound print preview has no issue side effect and explicit confirmation m
  try{p.w.openInboundDetail(created.id);await until(()=>p.d.querySelector('.ck-inbound-issue'),p.errors);let button=p.d.querySelector('.ck-inbound-issue button');assert.equal(button.disabled,true);
   let printHtml='';p.w.open=()=>({document:{open(){printHtml='';},write(x){printHtml+=x;},close(){}},close(){}});
   await p.w.printIbQr();assert.match(printHtml,/入库计划单/);assert.match(printHtml,/计划版本/);assert.equal(f.env.DB.raw.prepare('SELECT count(*) n FROM ck_inbound_document_issues').get().n,0);
-  button=p.d.querySelector('.ck-inbound-issue button');assert.equal(button.disabled,false);button.click();await until(()=>p.d.querySelector('.ck-inbound-issue .ck-inbound-issue-status')?.textContent.includes('已打印下发'),p.errors);
+  button=p.d.querySelector('.ck-inbound-issue button');assert.equal(button.disabled,false);
+  p.w.confirm=()=>false;button.click();await new Promise(r=>setTimeout(r,15));assert.equal(f.env.DB.raw.prepare('SELECT count(*) n FROM ck_inbound_document_issues').get().n,0);
+  p.w.goTab('inbound');await until(()=>p.d.querySelector('#inboundListBody [onclick*="'+created.id+'"] .ck-inbound-issue-status'),p.errors);assert.match(p.d.querySelector('#inboundListBody [onclick*="'+created.id+'"] .ck-inbound-issue-status').textContent,/未下发/);
+  const fresh=await f.page('/002/?tab=inbound');try{fresh.w.openInboundDetail(created.id);await until(()=>fresh.d.querySelector('.ck-inbound-issue button'),fresh.errors);assert.equal(fresh.d.querySelector('.ck-inbound-issue button').disabled,true);assert.match(fresh.d.querySelector('.ck-inbound-issue [role=status]').textContent,/详情底部/);}finally{fresh.w.close();}
+  p.w.openInboundDetail(created.id);await until(()=>p.d.querySelector('.ck-inbound-issue button'),p.errors);button=p.d.querySelector('.ck-inbound-issue button');assert.equal(button.disabled,false);
+  p.w.confirm=()=>true;const original=p.w.CKSession.request,attempts=[];let lost=false;
+  p.w.CKSession.request=async(action,body)=>{const result=await original(action,body);if(action==='v2_inbound_plan_confirm_issue'){attempts.push(JSON.stringify(body));if(!lost){lost=true;throw Error('QA issue response lost');}}return result;};
+  button.click();await until(()=>p.d.querySelector('.ck-inbound-issue [role=status]')?.textContent.includes('QA issue response lost'),p.errors);assert.equal(button.disabled,false);assert.equal(f.env.DB.raw.prepare('SELECT count(*) n FROM ck_inbound_document_issues').get().n,1);
+  button.click();await until(()=>p.d.querySelector('.ck-inbound-issue .ck-inbound-issue-status')?.textContent.includes('已打印下发'),p.errors);assert.equal(attempts[0],attempts[1]);assert.equal(f.env.DB.raw.prepare('SELECT count(*) n FROM ck_inbound_document_issues').get().n,1);
+  p.w.goTab('inbound');await until(()=>p.d.querySelector('#inboundListBody [onclick*="'+created.id+'"] .ck-inbound-issue-status')?.textContent.includes('已打印下发'),p.errors);p.w.openInboundDetail(created.id);await until(()=>p.d.querySelector('.ck-inbound-issue .ck-inbound-issue-status')?.textContent.includes('已打印下发'),p.errors);
   assert.equal(f.env.DB.raw.prepare('SELECT status FROM v2_inbound_plans WHERE id=?').get(created.id).status,'pending');
   await(await f.request({action:'v2_inbound_plan_update',id:created.id,biz_classes:['bulk'],remark:'QA changed cargo instruction',client_req_id:crypto.randomUUID()})).json();await p.w.loadInboundDetail();assert.match(p.d.querySelector('.ck-inbound-issue .ck-inbound-issue-status').textContent,/重新打印/);assert.equal(p.d.querySelector('.ck-inbound-issue button').disabled,true);assert.deepEqual(p.errors,[]);
- }finally{p.w.close();}
+  }finally{p.w.close();}
 });
 test('work completion-date editor, detail and print share the Korean day while history remains readable',opts,async()=>{
  const f=await fixture();f.env.SOP_WORK_CHAIN_ENABLED='true';const created=await(await f.request({action:'sop_need_create',source_type:'inventory',department:'bulk',customer:'QA-date DOM',title:'QA-date DOM work',supply_chain_no:'QA-date stock',instructions:'QA-date original requirements',deadline:'2026-10-05',client_req_id:crypto.randomUUID()})).json();assert.equal(created.ok,true,created.error);

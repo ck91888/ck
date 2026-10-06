@@ -27,13 +27,15 @@ function fieldData(field){
  }
 window.CKInboundReferenceNotice=referenceNotice;
 const printPreviews=new Map(),issueRequests=new Map();
-window.CKInboundIssueTag=p=>{const s=p?.issue_state;if(!s)return '';const label={unissued:['未下发','미배포'],issued:['已打印下发','인쇄·배포 완료'],needs_reissue:['内容已更新，需重新打印下发','변경됨 · 재인쇄·배포 필요'],cancelled:['已取消，不可下发','취소됨 · 배포 불가']}[s.state];return '<span class="st ck-inbound-issue-status">'+esc(copy(...label))+' · V'+esc(s.revision)+'</span>';};
+window.CKInboundIssueTag=p=>{const s=p?.issue_state;if(!s)return '';const label={unissued:['未下发','미배포'],issued:['已打印下发','인쇄·배포 완료'],needs_reissue:['内容已更新，需重新打印下发','변경됨 · 재인쇄·배포 필요'],cancelled:['已取消，不可下发','취소됨 · 배포 불가']}[s.state];return '<span class="ck-inbound-issue-status" data-issue-state="'+esc(s.state)+'">'+esc(copy(...label))+' · V'+esc(s.revision)+'</span>';};
 function issuePanel(host,p){
  const state=p.issue_state;if(!state)return;
  const panel=document.createElement('section');panel.className='ck-inbound-issue';panel.innerHTML=CKInboundIssueTag(p)+'<p>'+copy('打印预览不会记为下发；实际打印并交给仓库后，再确认。','인쇄 미리보기는 배포 기록이 아닙니다. 실제 인쇄 후 창고에 전달하고 확인하세요.')+'</p>'+(state.confirmed_at?'<p>'+esc(state.actor_name)+' · '+esc(new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Seoul',dateStyle:'short',timeStyle:'medium',hour12:false}).format(new Date(state.confirmed_at)))+' KST</p>':'');
  if(state.state!=='cancelled'&&CKSession.user?.scope!=='field'&&['manager','service'].includes(CKSession.user?.role)){
   const button=document.createElement('button');button.type='button';button.className='btn btn-outline';button.textContent=copy('确认已打印下发','인쇄·배포 완료 확인');button.disabled=state.state==='issued'||printPreviews.get(p.id)!==state.revision;panel.append(button);
-  const status=document.createElement('p');status.setAttribute('role','status');panel.append(status);
+  const status=document.createElement('p');status.setAttribute('role','status');
+  if(state.state!=='issued')status.textContent=printPreviews.get(p.id)===state.revision?copy('当前版本预览已打开。实际打印并交给仓库后，点击上方“确认已打印下发”。','현재 버전 미리보기가 열렸습니다. 실제 인쇄하여 창고에 전달한 후 위의 완료 확인 버튼을 누르세요.'):copy('先点击详情底部“打印”打开当前版本，打印后返回本页顶部确认下发。刷新页面后需重新打开预览。','상세 하단의 인쇄로 현재 버전을 열고, 인쇄 후 이 화면 상단에서 배포를 확인하세요. 새로고침 후에는 미리보기를 다시 여세요.');
+  panel.append(status);
   button.onclick=async()=>{if(!confirm(copy('确认已实际打印当前版本并下发给仓库？取消打印时请勿确认。','현재 버전을 실제 인쇄하여 창고에 전달했습니까? 인쇄 취소 시 확인하지 마세요.')))return;button.disabled=true;const key=p.id+':'+state.revision;if(!issueRequests.has(key))issueRequests.set(key,crypto.randomUUID());try{await CKSession.request('v2_inbound_plan_confirm_issue',{id:p.id,revision:state.revision,client_req_id:issueRequests.get(key)});await loadInboundDetail();}catch(error){status.textContent=error.message;button.disabled=false;}};
  }
  host.prepend(panel);
