@@ -67,16 +67,16 @@ const dir=process.env.CK_COURIER_DETAIL_OUTPUT||'/tmp/ck-courier-detail-review';
    await d.screenshot({path:dir+'/after-return-from-receipt-'+suffix+'.png'});await close();
    // Slow real response: a visible loading state, then the real two rows.
    mode={kind:'hold',action:'sop_courier_list',id:batches[0].id};const pending=new Promise(resolve=>held=resolve);
-   await open(0);await pending;await d.locator('[role=status]').filter({hasText:'正在加载'}).waitFor();assert.equal(await d.getAttribute('aria-busy'),'true');
+   await open(0);await pending;await d.locator('.courier-batch-feedback [role=status]').filter({hasText:'正在加载'}).waitFor();assert.equal(await d.getAttribute('aria-busy'),'true');
    assert.equal(await d.locator('tbody [data-detail]').count(),0);assert.equal(await d.locator('.courier-pager').isVisible(),false);
-   await d.screenshot({path:dir+'/after-loading-'+suffix+'.png'});mode=null;release();await ready(2);assert.equal(await d.locator('[role=status]').textContent(),'');await close();
+   await d.screenshot({path:dir+'/after-loading-'+suffix+'.png'});mode=null;release();await ready(2);assert.equal(await d.locator('.courier-batch-feedback [role=status]').textContent(),'');await close();
    // Failure is distinct from empty. Retry uses the unchanged batch scope.
    mode={kind:'failure',action:'sop_courier_list',id:batches[0].id};await open(0);await d.locator('[data-retry]').waitFor({state:'visible'});
-   assert.match(await d.locator('[role=status]').textContent(),/读取失败.*服务暂不可用/s);assert.equal(await d.locator('tbody [data-detail]').count(),0);
+   assert.match(await d.locator('.courier-batch-feedback [role=status]').textContent(),/读取失败.*服务暂不可用/s);assert.equal(await d.locator('tbody [data-detail]').count(),0);
    await d.screenshot({path:dir+'/after-error-'+suffix+'.png'});mode=null;await d.locator('[data-retry]').click();await ready(2);assert.equal(await d.locator('[data-retry]').isVisible(),false);
    await d.screenshot({path:dir+'/after-retry-restored-'+suffix+'.png'});await close();
    mode={kind:'failure',action:'sop_courier_detail',id:batches[0].id};await open(0);await d.locator('[data-retry]').waitFor({state:'visible'});mode=null;await d.locator('[data-retry]').click();await ready(2);await close();
-   mode={kind:'mismatch',action:'sop_courier_list',id:batches[0].id};await open(0);await d.locator('[data-retry]').waitFor({state:'visible'});assert.match(await d.locator('[role=status]').textContent(),/件数与明细不一致/);mode=null;await close();
+   mode={kind:'mismatch',action:'sop_courier_list',id:batches[0].id};await open(0);await d.locator('[data-retry]').waitFor({state:'visible'});assert.match(await d.locator('.courier-batch-feedback [role=status]').textContent(),/件数与明细不一致/);mode=null;await close();
    await open(2);await ready(0);assert.match(await d.locator('tbody').textContent(),/本批暂无收货记录/);assert.equal(await d.locator('[data-retry]').isVisible(),false);
    if(width<600)assert.deepEqual(await d.locator('td.courier-empty').evaluate(x=>{const s=getComputedStyle(x);return [s.gridColumnStart,s.gridColumnEnd,s.gridRowStart,s.textAlign];}),['1','-1','auto','center']);
    await d.screenshot({path:dir+'/after-empty-'+suffix+'.png'});await close();
@@ -91,7 +91,7 @@ const dir=process.env.CK_COURIER_DETAIL_OUTPUT||'/tmp/ck-courier-detail-review';
    await open(0);await ready(2);const receiptId=await d.locator('[data-detail]').first().getAttribute('data-detail');
    let delivered;const receiptDelivered=new Promise(resolve=>delivered=resolve);mode={kind:'hold',action:'sop_courier_detail',id:receiptId,delivered};
    const receiptPending=new Promise(resolve=>held=resolve);await d.locator('[data-detail]').first().click();await receiptPending;
-   assert.match(await d.locator('[role=status]').textContent(),/正在读取单票/);assert.equal(await d.locator('[data-detail]').first().isDisabled(),true);
+   assert.match(await d.locator('.courier-batch-feedback [role=status]').textContent(),/正在读取单票/);assert.equal(await d.locator('[data-detail]').first().isDisabled(),true);
    await close();mode=null;await open(1);await ready(1);release();await receiptDelivered;await p.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
    assert.equal(await p.locator('dialog.courier-receipt-detail[open]').count(),0);assert.equal(await d.locator('h3').textContent(),batches[1].batch_no);await close();
    await open(3);await ready(50);assert.equal(await d.locator('[data-pages]').isVisible(),true);assert.equal(await d.locator('[data-prev]').isDisabled(),true);assert.equal(await d.locator('[data-next]').isDisabled(),false);
@@ -105,7 +105,7 @@ const dir=process.env.CK_COURIER_DETAIL_OUTPUT||'/tmp/ck-courier-detail-review';
    if(suffix==='desktop-zh'){
     // An unanswered request becomes retryable at the local 15-second boundary.
     await view.locator('[data-clear]').click();await view.locator('[data-batch]').first().waitFor();mode={kind:'hold',action:'sop_courier_list',id:batches[0].id};const timeoutHeld=new Promise(resolve=>held=resolve);await open(0);await timeoutHeld;
-    await d.locator('[data-retry]').waitFor({state:'visible',timeout:20000});assert.match(await d.locator('[role=status]').textContent(),/读取超时/);mode=null;await d.locator('[data-retry]').click();await ready(2);release();await close();
+    await d.locator('[data-retry]').waitFor({state:'visible',timeout:20000});assert.match(await d.locator('.courier-batch-feedback [role=status]').textContent(),/读取超时/);mode=null;await d.locator('[data-retry]').click();await ready(2);release();await close();
    }
    assert.equal(await p.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);results.push({viewport:width+'x'+height,lang,geometry,ok:true});await c.close();
   }

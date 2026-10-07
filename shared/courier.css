@@ -5,6 +5,8 @@
 .courier-batch-detail.ck-workflow{width:min(920px,calc(100vw - 28px))!important;max-width:920px;margin:auto!important;overscroll-behavior:contain}
 .courier-receipt-detail .courier-owner-buttons button[aria-pressed=false]{background:#fff;color:#163e37;border:1px solid #b6cdc6}
 .courier-receipt-detail .courier-dialog-head button{background:#fff;color:#17594c;border:1px solid #cddbd7;padding:0;min-height:40px;width:40px;flex:none}
+.courier-batch-tools{display:flex;justify-content:space-between;align-items:center;gap:12px;margin:16px 0 8px}.courier-batch-tools h4{margin:0;min-width:0}.courier-batch-tools button{width:auto;max-width:52%;flex:none;margin:0;min-height:40px}.courier-export-scope{font-size:12px;color:#647870;margin:0 0 12px;overflow-wrap:anywhere}
+@media(max-width:600px){.courier-batch-tools{align-items:flex-start;gap:8px}.courier-batch-tools h4 small{display:block;margin:3px 0 0}.courier-batch-tools button{min-height:44px;font-size:12px;padding:7px 10px}.courier-export-scope{font-size:11px}}
 .courier-batch-detail [hidden]{display:none!important}.courier-batch-detail .courier-dialog-head{align-items:flex-start;padding-bottom:16px;border-bottom:1px solid var(--ck-line,#cddbd7)}
 .courier-batch-detail .courier-dialog-head h3{margin:0;font-size:22px}.courier-batch-eyebrow{font-size:12px;color:var(--ck-muted,#647870);margin:0 0 4px}
 .courier-batch-detail .courier-dialog-head button{flex:none;margin:0;width:40px;height:40px;padding:0;min-height:40px;font-size:24px;line-height:1}

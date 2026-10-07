@@ -77,3 +77,29 @@ test('simultaneous independent crews get distinct daily numbers; failed start co
 test('off-duty, resting, disabled and not-yet-attended badges cannot create a batch',async()=>{
  for(const state of ['signed_out','resting','disabled','no_attendance']){const f=await fixture();if(state==='signed_out')await f.ok('sop_attendance_checkout',{badge:f.staff[2].id});if(state==='resting')await f.ok('sop_attendance_break_start',{badge:f.staff[2].id});if(state==='disabled')f.DB.raw.prepare('UPDATE ck_attendance_people SET enabled=0 WHERE id=?').run(f.people[2].person_id);if(state==='no_attendance')f.DB.raw.prepare('DELETE FROM ck_attendance_days WHERE worker_id=?').run(f.staff[2].id);assert.equal((await f.request('sop_courier_receive',{operation:'start',workers:[f.staff[2]],lead_id:f.staff[2].id},'field')).ok,false,state);assert.equal(f.DB.raw.prepare('SELECT count(*) n FROM ck_courier_batches').get().n,0);}
 });
+
+test('batch export requires one existing batch and pages all its receipts without inheriting UI filters',async()=>{
+ const f=await fixture(),a=(await f.start()).batch,b=(await f.start([2,3],{},'office')).batch;
+ for(const code of ['0012345678901','301000000182','JJD123456789012345678'])assert.equal((await f.scan(a,code)).ok,true);
+ assert.equal((await f.scan(b,'301000000183','8-4',f.staff[2].id,'office')).ok,true);
+ f.DB.raw.exec("INSERT INTO ck_courier_receipts(id,tracking_no,owner,received_at,scanner_id,scanner_name,actor_id,actor_name) VALUES('EXPORT-HISTORY','301000000184','unknown','2020-01-01T01:00:00Z','OLD','历史','OLD','历史')");
+ for(const body of [{},{batch_id:'missing'},{batch_id:a.id,history:true}])assert.equal((await f.request('sop_courier_list',{mode:'batch_export',...body})).ok,false);
+ const first=await f.ok('sop_courier_list',{mode:'batch_export',batch_id:a.id,limit:2,keyword:'301000000183',owner:'8-4',from:'2020-01-01',status:'handed_over'});
+ assert.equal(first.total,3);assert.equal(first.items.length,2);assert.equal(first.batch.id,a.id);assert.equal(first.items.every(x=>x.batch_id===a.id),true);
+ const next=await f.ok('sop_courier_list',{mode:'batch_export',batch_id:a.id,limit:2,offset:2,snapshot:first.snapshot});assert.equal(next.items.length,1);assert.equal(next.snapshot,first.snapshot);
+ assert.deepEqual(new Set([...first.items,...next.items].map(x=>x.tracking_no)),new Set(['0012345678901','301000000182','JJD123456789012345678']));
+ const viewer=await handleCourier({action:'sop_courier_list',mode:'batch_export',batch_id:a.id},{...f.env,SOP_REQUEST_USER:{id:'READ',name:'只读',role:'viewer'}},()=>{});assert.equal(viewer.total,3);
+ await assert.rejects(handleCourier({action:'sop_courier_list',mode:'batch_export',batch_id:a.id},{...f.env,SOP_REQUEST_USER:null},()=>{}),/权限/);
+});
+test('export marker rejects a correction even when counts and receipt totals stay the same',async()=>{
+ const f=await fixture(),a=(await f.start()).batch,r=await f.scan(a,'301000000185');const before=await f.ok('sop_courier_list',{mode:'batch_export',batch_id:a.id});
+ await f.ok('sop_courier_update',{id:r.item.id,version:r.item.version,tracking_no:'301000000186',owner:r.item.owner});
+ const stale=await f.request('sop_courier_list',{mode:'batch_export',batch_id:a.id,snapshot:before.snapshot});assert.equal(stale.ok,false);assert.match(stale.error,/明细已变化/);
+ const after=await f.ok('sop_courier_list',{mode:'batch_export',batch_id:a.id});assert.equal(after.total,before.total);assert.notEqual(after.snapshot,before.snapshot);assert.equal(after.items[0].tracking_no,'301000000186');
+});
+test('export marker rejects scans between pages and empty batches cannot leak historical receipts',async()=>{
+ const f=await fixture(),a=(await f.start()).batch;const empty=await f.ok('sop_courier_list',{mode:'batch_export',batch_id:a.id});assert.equal(empty.total,0);assert.deepEqual(empty.items,[]);
+ assert.equal((await f.scan(a,'301000000187')).ok,true);assert.equal((await f.request('sop_courier_list',{mode:'batch_export',batch_id:a.id,snapshot:empty.snapshot})).ok,false);
+ const fresh=await f.ok('sop_courier_list',{mode:'batch_export',batch_id:a.id});assert.equal(fresh.total,1);
+ await f.finish(await f.get(a));const completed=await f.ok('sop_courier_list',{mode:'batch_export',batch_id:a.id,snapshot:fresh.snapshot});assert.equal(completed.total,1);assert.equal(completed.items.length,1);
+});

@@ -28,14 +28,14 @@ async function batchDetail(id,history=false,filters={}){
  document.querySelectorAll('dialog.courier-batch-detail[open]').forEach(x=>x.close());
  const d=document.createElement('dialog'),titleId='courier-batch-'+crypto.randomUUID();
  d.className='courier-dialog courier-office ck-workflow courier-batch-detail';d.setAttribute('aria-labelledby',titleId);
- d.innerHTML='<form method="dialog" class="courier-dialog-head"><div><p class="courier-batch-eyebrow">扫描批次明细 / 스캔 차수 상세</p><h3 id="'+titleId+'">'+(history?'历史收货（无批次） / 과거 수령 (차수 없음)':'读取批次 / 차수 조회')+'</h3></div><button class="light" aria-label="关闭 / 닫기" autofocus>×</button></form><div data-summary></div><div class="courier-batch-query"><p data-query></p><button type="button" data-all class="courier-link" hidden>查看本批全部 / 차수 전체 보기</button></div><div class="courier-batch-feedback"><p role="status" aria-live="polite"></p><button type="button" data-retry class="btn btn-outline" hidden>重新加载 / 다시 불러오기</button></div><h4>运单明细 / 송장 목록 <small>韩国时间 / 한국 시간</small></h4><div class="courier-table-scroll"><table aria-label="运单明细 / 송장 목록"><thead><tr><th>运单 / 송장</th><th>所属 / 소속</th><th>扫描人 / 스캔 담당</th><th>收货时间 / 수령 시간</th><th>操作 / 작업</th></tr></thead><tbody></tbody></table></div><div class="courier-pager" hidden><span></span><div data-pages hidden><button class="btn btn-outline" data-prev>上一页 / 이전</button><button class="btn btn-outline" data-next>下一页 / 다음</button></div></div>';
- document.body.append(d);d.showModal();let offset=0,seq=0,busy=false,matching=Boolean(filters.keyword);const limit=50;
- d.onclose=()=>{seq++;d.remove();};
- const message=d.querySelector('[role=status]'),retry=d.querySelector('[data-retry]'),body=d.querySelector('tbody'),pager=d.querySelector('.courier-pager'),all=d.querySelector('[data-all]');
+ d.innerHTML='<form method="dialog" class="courier-dialog-head"><div><p class="courier-batch-eyebrow">扫描批次明细 / 스캔 차수 상세</p><h3 id="'+titleId+'">'+(history?'历史收货（无批次） / 과거 수령 (차수 없음)':'读取批次 / 차수 조회')+'</h3></div><button class="light" aria-label="关闭 / 닫기" autofocus>×</button></form><div data-summary></div><div class="courier-batch-query"><p data-query></p><button type="button" data-all class="courier-link" hidden>查看本批全部 / 차수 전체 보기</button></div><div class="courier-batch-feedback"><p role="status" aria-live="polite"></p><button type="button" data-retry class="btn btn-outline" hidden>重新加载 / 다시 불러오기</button></div><div class="courier-batch-tools"><h4>运单明细 / 송장 목록 <small>韩国时间 / 한국 시간</small></h4><button type="button" class="btn btn-outline light" data-export hidden disabled>导出明细 / 상세 내보내기</button></div><p data-export-scope class="courier-export-scope" hidden>导出本批全部运单（不限当前分页或筛选） / 차수 전체 송장 내보내기 (페이지·필터 무관)</p><p data-export-status class="courier-feedback" role="status" aria-live="polite" hidden></p><div class="courier-table-scroll"><table aria-label="运单明细 / 송장 목록"><thead><tr><th>运单 / 송장</th><th>所属 / 소속</th><th>扫描人 / 스캔 담당</th><th>收货时间 / 수령 시간</th><th>操作 / 작업</th></tr></thead><tbody></tbody></table></div><div class="courier-pager" hidden><span></span><div data-pages hidden><button class="btn btn-outline" data-prev>上一页 / 이전</button><button class="btn btn-outline" data-next>下一页 / 다음</button></div></div>';
+ document.body.append(d);d.showModal();let offset=0,seq=0,busy=false,exporting=false,exportSeq=0,currentBatch=null,matching=Boolean(filters.keyword);const limit=50;
+ d.onclose=()=>{seq++;exportSeq++;d.remove();};
+ const message=d.querySelector('[role=status]'),retry=d.querySelector('[data-retry]'),body=d.querySelector('tbody'),pager=d.querySelector('.courier-pager'),all=d.querySelector('[data-all]'),exportButton=d.querySelector('[data-export]'),exportStatus=d.querySelector('[data-export-status]');
  const request=async(action,data)=>{let timer;try{return await Promise.race([api(action,data),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('读取超时，请重新加载 / 조회 시간 초과·다시 불러오세요')),15000);})]);}finally{clearTimeout(timer);}};
  const load=async()=>{
   const current=++seq,pageOffset=offset,pageMatching=matching;busy=true;d.setAttribute('aria-busy','true');body.replaceChildren();pager.hidden=true;retry.hidden=true;all.disabled=true;
-  alertText(message,'正在加载运单明细… / 송장 목록을 불러오는 중…');
+  exportButton.disabled=true;alertText(message,'正在加载运单明细… / 송장 목록을 불러오는 중…');
   try{
    const [info,r]=await Promise.all([history?Promise.resolve(null):request('detail',{batch_id:id}),request('list',{...(history?{...filters,history:true}:{batch_id:id,...(pageMatching?{keyword:filters.keyword,owner:filters.owner,status:filters.status}:{})}),limit,offset:pageOffset})]);
    if(seq!==current||!d.open)return;
@@ -43,7 +43,7 @@ async function batchDetail(id,history=false,filters={}){
    if(pageOffset&&pageOffset>=r.total){offset=Math.max(0,(Math.ceil(r.total/limit)-1)*limit);return load();}
    if(!r.items.length&&r.total>pageOffset)throw Error('件数与明细不一致，请重新加载 / 수량과 송장 목록이 다릅니다·다시 불러오세요');
    if(!history&&!pageMatching&&!r.total&&info.batch.total>0)throw Error('批次件数与明细不一致，请重新加载 / 차수 수량과 송장 목록이 다릅니다·다시 불러오세요');
-   if(!history){d.querySelector('h3').textContent=info.batch.batch_no;d.querySelector('[data-summary]').innerHTML=countsHtml(info.batch);}
+   if(!history){currentBatch=info.batch;exportButton.hidden=false;d.querySelector('[data-export-scope]').hidden=false;d.querySelector('h3').textContent=info.batch.batch_no;d.querySelector('[data-summary]').innerHTML=countsHtml(info.batch);}
    const keyword=String(filters.keyword||'').trim().toUpperCase().replace(/[ -]/g,'');
    body.innerHTML=r.items.map(x=>'<tr><td data-label="运单 / 송장" class="courier-waybill">'+(keyword&&x.tracking_no.toUpperCase().replace(/[ -]/g,'').includes(keyword)?'<mark class="courier-match">'+esc(x.tracking_no)+'</mark>':esc(x.tracking_no))+'</td><td data-label="所属 / 소속">'+esc(label(x.owner))+'</td><td data-label="扫描人 / 스캔 담당">'+esc(x.scanner_name||'—')+'</td><td data-label="收货时间 / 수령 시간">'+esc(time(x.received_at))+'</td><td data-label="操作 / 작업"><button class="courier-link" data-detail="'+esc(x.id)+'">明细 / 상세</button></td></tr>').join('')||'<tr><td colspan="5" class="courier-empty">'+(keyword||filters.owner||filters.status?'没有匹配运单 / 일치하는 송장 없음':history?'暂无历史收货记录 / 과거 수령 기록 없음':'本批暂无收货记录 / 이 차수의 수령 기록 없음')+'</td></tr>';
    d.querySelector('[data-query]').textContent=keyword?((history||pageMatching?'匹配运单 / 일치 송장: ':'本批全部；查询运单 / 차수 전체·검색 송장: ')+filters.keyword):'';
@@ -58,7 +58,38 @@ async function batchDetail(id,history=false,filters={}){
     finally{opening=false;b.disabled=false;}
    });
   }catch(e){if(seq===current&&d.open){alertText(message,'运单明细读取失败 / 송장 목록 조회 실패\n'+e.message,true);retry.hidden=false;}}
-  finally{if(seq===current&&d.open){busy=false;d.removeAttribute('aria-busy');all.disabled=false;}}
+  finally{if(seq===current&&d.open){busy=false;d.removeAttribute('aria-busy');all.disabled=false;exportButton.disabled=exporting||!currentBatch?.total||retry.hidden===false;}}
+ };
+ exportButton.onclick=async()=>{
+  if(exporting||busy||history||!currentBatch?.total)return;
+  exporting=true;exportButton.disabled=true;const token=++exportSeq,alive=()=>d.open&&token===exportSeq;
+  exportButton.textContent='导出中… / 내보내는 중…';exportStatus.hidden=false;alertText(exportStatus,'正在读取本批全部明细… / 차수 전체 상세를 읽는 중…');
+  try{
+   if(!window.XLSX?.utils||!window.XLSX?.writeFile)throw Error('Excel导出组件尚未加载，请重试 / Excel 구성 요소 로딩 후 다시 시도하세요');
+   const items=[],seen=new Set();let snapshot='',total=null,batchNo='';
+   const check=(r,pageOffset)=>{
+    if(r.batch?.id!==id||!r.batch.batch_no||!Array.isArray(r.items)||!Number.isInteger(r.total)||r.total<0||typeof r.snapshot!=='string'||!r.snapshot)throw Error('导出响应不完整 / 내보내기 응답이 불완전합니다');
+    if(total===null){total=r.total;snapshot=r.snapshot;batchNo=r.batch.batch_no;}
+    if(r.total!==total||r.snapshot!==snapshot||r.batch.batch_no!==batchNo)throw Error('本批明细已变化，请重新导出 / 차수 상세가 변경되었습니다·다시 내보내세요');
+    if(r.items.length!==Math.min(100,Math.max(0,total-pageOffset))||r.items.some(x=>!x.id||x.batch_id!==id||x.batch_no!==batchNo||typeof x.tracking_no!=='string'))throw Error('批次或件数与明细不一致，请重新导出 / 차수·수량을 확인하고 다시 내보내세요');
+   };
+   for(let pageOffset=0;total===null||pageOffset<total;pageOffset+=100){
+    const r=await request('list',{mode:'batch_export',batch_id:id,limit:100,offset:pageOffset,...(snapshot?{snapshot}:{})});if(!alive())return;check(r,pageOffset);
+    for(const x of r.items){if(seen.has(x.id))throw Error('明细重复，请重新导出 / 중복 상세·다시 내보내세요');seen.add(x.id);items.push(x);}
+    alertText(exportStatus,'已读取 '+items.length+' / '+total+' 件 / '+items.length+' / '+total+'건 읽음');
+   }
+   if(!total){alertText(exportStatus,'本批暂无收货记录，无明细可导出 / 수령 기록이 없어 내보낼 수 없습니다');return;}
+   // Validate the marker once more after all pages; no partial workbook is emitted.
+   const verified=await request('list',{mode:'batch_export',batch_id:id,limit:100,offset:0,snapshot});if(!alive())return;check(verified,0);
+   const data=[['批次号 / 차수','快递单号 / 송장번호','所属 / 소속','扫描人 / 스캔 담당','扫描时间（韩国） / 스캔 시간 (한국)'],...items.map(x=>[batchNo,x.tracking_no,label(x.owner),x.scanner_name||'',time(x.received_at)])];
+   const sheet=XLSX.utils.aoa_to_sheet(data.map(row=>row.map(x=>String(x??''))));
+   for(const key of Object.keys(sheet)){if(key[0]==='!')continue;sheet[key].t='s';sheet[key].z='@';delete sheet[key].f;}
+   sheet['!cols']=[{wch:22},{wch:28},{wch:30},{wch:24},{wch:32}];sheet['!autofilter']={ref:sheet['!ref']};
+   const workbook=XLSX.utils.book_new();XLSX.utils.book_append_sheet(workbook,sheet,'批次明细');
+   if(!alive())return;XLSX.writeFile(workbook,'CK-快递收货-'+batchNo.replace(/[^0-9A-Za-z_-]/g,'_')+'.xlsx',{bookType:'xlsx'});
+   alertText(exportStatus,'已生成本批 '+total+' 件明细 / 차수 '+total+'건 파일 생성');
+  }catch(e){if(alive())alertText(exportStatus,'导出失败 / 내보내기 실패\n'+e.message+'\n请重新点击导出明细 / 상세 내보내기를 다시 누르세요',true);}
+  finally{if(alive()){exporting=false;exportButton.textContent='导出明细 / 상세 내보내기';exportButton.disabled=busy||!currentBatch?.total||retry.hidden===false;}}
  };
  retry.onclick=()=>load();all.onclick=()=>{if(busy)return;matching=!matching;offset=0;load();};d.querySelector('[data-prev]').onclick=()=>{if(busy)return;offset=Math.max(0,offset-limit);load();};d.querySelector('[data-next]').onclick=()=>{if(busy)return;offset+=limit;load();};await load();
 }

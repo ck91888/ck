@@ -82,6 +82,21 @@ export async function handleCourier(b,env,recalc){
  if(b.action==='sop_courier_config'&&b.operation==='scanner'){const access=courierCommitAccess(env,String(b.batch_id||''));const badge=String(b.badge||'').trim().split('|');const found=await q(env,`SELECT worker_id AS id,worker_name AS name FROM v2_ops_job_workers WHERE job_id=? AND worker_id=? AND left_at='' AND ${courierScanGuard} AND ${access.sql}`,String(b.batch_id||''),badge[0],String(b.batch_id||''),badge[0],...access.args).first();if(!found||found.name!==badge[1])fail('工牌不在本批、未在岗或本批已完成 / 차수·명찰 상태를 확인하세요');return {ok:true,scanner:found};}
  if(b.action==='sop_courier_config')return {ok:true,owners:courierOwners,user:{id:u.id,name:u.name},formats:'11–14位数字；LP/EZ + 9位数字 + CN；JJD + 18位数字'};
  if(b.action==='sop_courier_list'){
+  if(b.mode==='batch_export'){
+   const batchId=limited(b.batch_id,100);if(!batchId||b.history)fail('导出必须指定当前批次 / 내보낼 차수를 선택하세요');
+   const limit=Math.min(100,Math.max(1,parseInt(b.limit)||100)),offset=Math.max(0,parseInt(b.offset)||0);
+   // One read statement gives each page and its change marker the same snapshot.
+   // Receipt versions increase on corrections; count changes on new receipts.
+   const result=await rows(env,`WITH selected AS (
+    SELECT r.id,r.tracking_no,r.owner,r.scanner_name,r.received_at,r.version FROM ck_courier_batch_items i JOIN ck_courier_receipts r ON r.id=i.receipt_id WHERE i.batch_id=?
+   ), stats AS (SELECT COUNT(*) AS total,COALESCE(SUM(version),0) AS version_total FROM selected),
+   paged AS (SELECT * FROM selected ORDER BY received_at DESC,id DESC LIMIT ? OFFSET ?)
+   SELECT b.id AS batch_id,b.batch_no,stats.total,stats.version_total,paged.* FROM ck_courier_batches b JOIN v2_ops_jobs j ON j.id=b.id JOIN sop_records s ON s.id=b.id CROSS JOIN stats LEFT JOIN paged ON 1=1 WHERE b.id=? ORDER BY paged.received_at DESC,paged.id DESC`,batchId,limit,offset,batchId);
+   if(!result.length)fail('快递批次不存在 / 택배 차수가 없습니다');
+   const first=result[0],snapshot=batchId+':'+first.total+':'+first.version_total;
+   if(b.snapshot&&String(b.snapshot)!==snapshot)fail('本批明细已变化，请重新导出 / 차수 상세가 변경되었습니다·다시 내보내세요');
+   return {ok:true,batch:{id:batchId,batch_no:first.batch_no},total:first.total,snapshot,limit,offset,items:result.filter(x=>x.id).map(x=>({id:x.id,batch_id:x.batch_id,batch_no:x.batch_no,tracking_no:x.tracking_no,owner:x.owner,scanner_name:x.scanner_name,received_at:x.received_at,version:x.version}))};
+  }
   const owner=limited(b.owner,30),keyword=limited(b.keyword,80).replace(/[ -]/g,'').toUpperCase(),from=rangeDate(b.from),to=rangeDate(b.to);
   if(owner&&!ownerIds.has(owner))fail('所属无效');if(from&&to&&from>to)fail('起止日期顺序不正确');
   const where=['1=1'],args=[];
