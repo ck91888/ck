@@ -11,7 +11,7 @@ test('human-readable change notices handle historical malformed diffs and escape
 });
 
 test('read coalescing shares only simultaneous reads and never caches results or suppresses mutations',async()=>{
- const pending=[],c={URL,Response,location:new URL('https://fixture.test/002/'),document:{documentElement:{classList:{add(){}}},addEventListener(){}},CK_SOP_ROLLOUT:{staging:true},SOP_API:'/api',fetch:(url,init)=>new Promise((resolve,reject)=>pending.push({body:JSON.parse(init.body),resolve,reject}))};c.window=c;
+ const pending=[],c={URL,Response,Headers,location:new URL('https://fixture.test/002/'),document:{documentElement:{classList:{add(){}}},addEventListener(){}},CK_SOP_ROLLOUT:{staging:true},SOP_API:'/api',fetch:(url,init)=>new Promise((resolve,reject)=>pending.push({body:JSON.parse(init.body),resolve,reject}))};c.window=c;
  vm.runInNewContext(source('shared/sop-session.js'),c);
  const call=(action='sop_get')=>c.fetch('/api',{method:'POST',body:JSON.stringify({action,id:'A'})});
  const a=call(),b=call();assert.equal(pending.length,1);pending[0].resolve(Response.json({value:1}));assert.deepEqual(await (await a).json(),{value:1});assert.deepEqual(await (await b).json(),{value:1});

@@ -1,11 +1,12 @@
+import {operationHeaders,rememberOperation,confirmOperation} from './office-operator-fixture.mjs';
 import test from 'node:test';import assert from 'node:assert/strict';
 import worker from '../worker-v2/index.js';import {database} from './d1-adapter.mjs';
 import {changeBatchMaterial,readBatchMaterials} from '../worker-v2/batch-work-materials.js';
 async function fixture(){
  const DB=database(),objects=new Map(),principal={id:'M',name:'QA manager',role:'manager',scope:'office'};
  const env={DB,SOP_ENVIRONMENT:'staging',SOP_UPGRADE_ENABLED:'true',SOP_WORK_CHAIN_ENABLED:'true',SOP_ACCESS_CONTROL:'true',SOP_ACCEPT_NEW:'true',SOP_USERS_JSON:JSON.stringify([{...principal,key:'batch-fixture-only'}]),R2_BUCKET:{async put(key,bytes,meta){objects.set(key,{body:bytes,httpMetadata:meta.httpMetadata});},async get(key){return objects.get(key);},async delete(){throw Error('Must not delete any object');}}};let cookie='';
- const raw=async b=>{const multi=b instanceof FormData,r=await worker.fetch(new Request('https://fixture.test/api',{method:'POST',headers:{Cookie:cookie,...(!multi?{'Content-Type':'application/json'}:{})},body:multi?b:JSON.stringify(b)}),env);if(r.headers.has('set-cookie'))cookie=r.headers.get('set-cookie').split(';')[0];return r.json();};
- const call=(action,b={})=>raw({action,client_req_id:crypto.randomUUID(),...b});await call('sop_login',{sop_key:'batch-fixture-only'});
+ const raw=async b=>{const multi=b instanceof FormData,r=await worker.fetch(new Request('https://fixture.test/api',{method:'POST',headers:{Cookie:cookie,...operationHeaders(cookie),...(!multi?{'Content-Type':'application/json'}:{})},body:multi?b:JSON.stringify(b)}),env);if(r.headers.has('set-cookie'))cookie=r.headers.get('set-cookie').split(';')[0];return rememberOperation(await r.json(),cookie);};
+ const call=(action,b={})=>raw({action,client_req_id:crypto.randomUUID(),...b});await call('sop_login',{sop_key:'batch-fixture-only'});await confirmOperation(call,principal.name);
  const plan=await call('v2_inbound_plan_create',{customer:'QA batch',biz_classes:['bulk']});assert.equal(plan.ok,true,plan.error);
  const create=async(department='bulk',source=plan.id)=>{const r=await call('sop_need_create',{customer:'QA batch',title:'QA shared materials',instructions:'QA instructions',source_type:'inbound',source_id:source,planned_quantity:10,planned_unit:'箱',department,owner:'QA office',reason:'QA additional department work'});assert.equal(r.ok,true,r.error);return (await call('sop_get',{id:r.id})).record;};
  const a=await create(),b=await create('direct_ship');

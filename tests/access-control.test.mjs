@@ -1,3 +1,4 @@
+import {operationHeaders,rememberOperation,confirmOperation} from './office-operator-fixture.mjs';
 import test from 'node:test';import assert from 'node:assert/strict';
 import worker from '../worker-v2/index.js';import entry from '../worker-v2/staging-entry.js';
 import {database} from './d1-adapter.mjs';import {digest} from '../worker-v2/access-control.js';
@@ -7,11 +8,11 @@ async function setup(){
  const cookies={office:'',field:'',kiosk:''},paths={office:'/api',field:'/001/api',kiosk:'/attendance/api'};
  async function raw(scope,b,options={}){
   const path=options.path||paths[scope],method=options.method||'POST';
-  return (options.entry?entry:worker).fetch(new Request(origin+path+(method==='GET'&&b?'?'+new URLSearchParams(b):''),{method,headers:{'Content-Type':'application/json',Origin:origin,Cookie:options.cookie??cookies[scope],...options.headers},...(method==='GET'?{}:{body:JSON.stringify({client_req_id:crypto.randomUUID(),...b})})}),env);
+  return (options.entry?entry:worker).fetch(new Request(origin+path+(method==='GET'&&b?'?'+new URLSearchParams(b):''),{method,headers:{'Content-Type':'application/json',Origin:origin,Cookie:options.cookie??cookies[scope],...operationHeaders(options.cookie??cookies[scope]),...options.headers},...(method==='GET'?{}:{body:JSON.stringify({client_req_id:crypto.randomUUID(),...b})})}),env);
  }
- async function call(scope,action,b={},options){const r=await raw(scope,{action,...b},options);if(action==='sop_login'&&r.ok)cookies[scope]=r.headers.get('set-cookie')?.split(';')[0]||'';return r.json();}
+ async function call(scope,action,b={},options){const r=await raw(scope,{action,...b},options);if(action==='sop_login'&&r.ok)cookies[scope]=r.headers.get('set-cookie')?.split(';')[0]||'';return rememberOperation(await r.json(),cookies[scope]);}
  const ok=async(s,a,b={})=>{const r=await call(s,a,b);assert.equal(r.ok,true,r.error);return r;};
- await ok('office','sop_login',{sop_key:'fixture-only-code'});await ok('office','sop_attendance_config');
+ await ok('office','sop_login',{sop_key:'fixture-only-code'});await confirmOperation((a,b)=>call('office',a,b),'隔离管理测试员');await ok('office','sop_attendance_config');
  const employee=async(no='FIXTURE-A')=>(await ok('office','sop_attendance_employee_register',{name:'虚拟职员',employeeNo:no,department:'bulk'})).person;
  const grant=(p,enabled=true,version=0)=>ok('office','sop_access_update',{person_id:p.id,enabled,version});
  const checkin=async p=>(await ok('office','sop_attendance_checkin',{badge:p.badgeId})).record;

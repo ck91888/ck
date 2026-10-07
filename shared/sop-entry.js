@@ -24,6 +24,10 @@
   const fresh=detailNeeds[type];
   const r=fresh?.id===id?{items:fresh.items}:await request('sop_linked',{source_id:id});
   if((type==='inbound'?window._currentInboundId:window._currentOutboundId)!==id)return;
+  if(fresh?.id===id){
+   body.querySelector('[data-operation-audit]')?.remove();const card=document.createElement('section');card.className='card ck-operation-audit';card.dataset.operationAudit='true';
+   card.innerHTML='<div class="card-title">计划操作记录 / 계획 작업 기록</div><p>创建人 / 생성자: '+esc(fresh.creator||'历史记录未填写 / 기존 기록 없음')+'</p><p class="muted">姓名为操作人自行填写的标签 / 작업자가 직접 입력한 이름</p>'+(fresh.audit.length?'<ol>'+fresh.audit.map(a=>'<li><b>'+esc(a.actor_name)+'</b> · '+(a.kind==='create'?'创建 / 생성':'修改 / 수정')+' · '+esc(new Date(a.created_at).toLocaleString('sv-SE',{timeZone:'Asia/Seoul',hour12:false}))+' KST</li>').join('')+'</ol>':'<p>此功能启用前的记录不补填操作姓名 / 기능 도입 전 기록은 소급 작성하지 않습니다.</p>');body.prepend(card);
+  }
   window.CKWorkChain?.hideFileControls(body,type);
   const head=block(body,'关联作业：操作要求、结果和数量在这里统一追踪');const buttons=head.querySelector('.ck-buttons');buttons.replaceChildren();
   if(type==='inbound'&&r.items.length){
@@ -76,7 +80,7 @@
   const type=body.action==='v2_inbound_plan_detail'?'inbound':body.action==='v2_outbound_order_detail'?'outbound':'';
   if(type)delete detailNeeds[type];
   const result=await nativeApi(body);
-  if(type&&result.ok&&Array.isArray(result.sop_needs))detailNeeds[type]={id:body.id,items:result.sop_needs};
+  if(type&&result.ok&&Array.isArray(result.sop_needs))detailNeeds[type]={id:body.id,items:result.sop_needs,audit:result.operation_audit||[],creator:(result.plan||result.order)?.created_by||''};
   return result;
  };
  async function setup(){
@@ -88,7 +92,7 @@
   if(app==='002'){
    const originalPager=window.renderPager;window.renderPager=function(key,res,reload){const html=originalPager(key,res,reload),p=getPager(key);return p.total<=p.limit?html.replace('class="pager-bar"','class="pager-bar pager-single"'):html;};
    document.querySelectorAll('.filter-bar').forEach(bar=>{const drawer=document.createElement('details');drawer.className='ck-filter-drawer';drawer.open=matchMedia('(min-width:701px)').matches;const summary=document.createElement('summary');summary.textContent='查询筛选 / 검색 필터';drawer.append(summary);bar.before(drawer);drawer.append(bar);});
-   localStorage.removeItem(V2_KEY_STORAGE);setUser(u.name);window.promptUserName=()=>{};
+   localStorage.removeItem(V2_KEY_STORAGE);window.getUser=()=>CKSession.user?.operation_context?.name||CKSession.user?.name||'';window.promptUserName=()=>CKSession.changeOperator();
    const tabs=document.getElementById('mainTabs'),inbound=tabs.querySelector('[data-tab=inbound]'),outbound=tabs.querySelector('[data-tab=outbound]');tabs.insertBefore(inbound,outbound);
    LANG.zh.tab_outbound='出库计划';LANG.ko.tab_outbound='출고 계획';LANG.zh.app_subtitle='入库计划 · 作业计划 · 出库计划 · 问题沟通 · 核对';LANG.ko.app_subtitle='입고 계획 · 작업 계획 · 출고 계획 · 이슈 · 확인';LANG.zh.tab_need='作业计划';LANG.ko.tab_need='작업 계획';
    const needButton=button(L('tab_need'),()=>goTab('need'));needButton.dataset.tab='need';needButton.dataset.i18n='tab_need';tabs.insertBefore(needButton,outbound);
@@ -101,7 +105,7 @@
    document.getElementById('btnNewCheck').onclick=()=>{goView('check');mount(document.getElementById('checkListBody'),{tab:'check',context:'collab',create:'check'});};
    const originalGoView=window.goView;window.goView=function(name){originalGoView(name);if(name==='outbound_create')outboundPicker().catch(e=>alert(e.message));};
    const wh=document.createElement('section');wh.className='ck-inline-heading ck-workflow ck-work-plans';document.getElementById('ibc-remark').closest('.form-group').after(wh);window.CKInboundWorks=CKWorkFields(wh);CKConnectInboundOutbounds(wh);window.CKWorkChain?.installOffice();
-   showMain();if(params.get('need')&&params.get('create_outbound'))goView('outbound_create');else if(params.get('need')){goTab('need');mount(v,{tab:'need',id:params.get('need'),individual:params.get('individual')==='1',context:'collab'});}else if(params.get('outbound'))openOutboundDetail(params.get('outbound'));else if(params.get('inbound'))openInboundDetail(params.get('inbound'));else if(params.get('issue'))openIssueDetail(params.get('issue'));else if(params.get('tab'))goTab(params.get('tab'));
+   showMain();document.getElementById('userBadge').title='切换操作姓名 / 작업자 이름 변경';if(params.get('need')&&params.get('create_outbound'))goView('outbound_create');else if(params.get('need')){goTab('need');mount(v,{tab:'need',id:params.get('need'),individual:params.get('individual')==='1',context:'collab'});}else if(params.get('outbound'))openOutboundDetail(params.get('outbound'));else if(params.get('inbound'))openInboundDetail(params.get('inbound'));else if(params.get('issue'))openIssueDetail(params.get('issue'));else if(params.get('tab'))goTab(params.get('tab'));
   }else if(app==='001'){
    window.CKInstallDispatch();
    if(window.CKWorkChain?.enabled()){

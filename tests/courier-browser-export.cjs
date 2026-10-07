@@ -24,7 +24,7 @@ const dir='/tmp/ck-courier-export-review';fs.mkdirSync(dir,{recursive:true});
     if(m.kind==='hold'){held?.();await new Promise(resolve=>release=resolve);await r.fulfill({response});m.delivered?.();return;}
     return r.fulfill({response});
    });
-   await p.goto(origin+'/');await p.locator('#ck-login-code').fill('local-browser-fixture-only');await p.locator('.ck-login-submit').click();await p.locator('.ck-home-grid').waitFor();
+   await p.goto(origin+'/');await p.locator('#ck-login-code').fill('local-browser-fixture-only');await p.locator('.ck-login-submit').click();await p.locator('#ck-operator-name').waitFor();await p.locator('#ck-operator-name').fill('隔离浏览器测试员');await p.locator('[data-operator-confirm]').click();await p.locator('.ck-home-grid').waitFor();
    await p.locator('.ck-home-grid a[href="/002/"]').click();await p.locator('#mainTabs [data-tab=courier]').waitFor();await p.evaluate(lang=>{setLang(lang);applyLang();},lang);await p.locator('#mainTabs [data-tab=courier]').click();
    const view=p.locator('#view-courier'),d=p.locator('dialog.courier-batch-detail[open]');
    const open=async index=>{await view.locator('[data-batch="'+fixture.batches[index].id+'"]').click();await d.locator('[data-summary] b').waitFor();await p.waitForFunction(()=>!document.querySelector('dialog.courier-batch-detail[open]')?.hasAttribute('aria-busy'));};

@@ -11,3 +11,11 @@
 .ck-stage-banner{display:flex;align-items:center;gap:12px}.ck-stage-banner>span{margin:0}
 html.ck-auth-pending body>.ck-stage-banner{display:flex!important}
 @media(max-width:520px){#ck-auth-gate.ck-access-gate{margin:24px auto;padding:22px}.ck-stage-banner{gap:7px;flex-wrap:wrap}.ck-login-hint{font-size:13px}}
+
+/* Reuse the common centered workflow dialog for mandatory operation labels. */
+.ck-auth-pending #ck-auth-gate:has(.ck-operator-dialog){margin:0;padding:0;border:0;box-shadow:none}
+.ck-operator-dialog form input{box-sizing:border-box;min-height:48px;font:inherit;padding:10px;border:1px solid #aac8bd;border-radius:6px}
+.ck-operator-dialog p{line-height:1.7;overflow-wrap:anywhere}.ck-operator-dialog [role=alert]{color:#a73524;min-height:24px}
+.ck-operator-dialog button{min-height:44px}.ck-operation-audit li{padding:5px 0;overflow-wrap:anywhere}.ck-operation-audit .muted{color:#657184;font-size:13px}
+
+#ck-auth-gate .ck-operator-dialog [data-operator-confirm],.ck-operator-dialog [data-operator-confirm]{background:#175b4e;color:#fff;border:1px solid #175b4e}#ck-auth-gate .ck-operator-dialog [data-operator-cancel],.ck-operator-dialog [data-operator-cancel]{background:#e8eef6;color:#193859;border:1px solid #aac8bd}

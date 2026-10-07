@@ -1,10 +1,11 @@
+import {operationHeaders,rememberOperation,confirmOperation} from './office-operator-fixture.mjs';
 // Local, fictional acceptance only. No remote storage, credentials or records.
 import https from 'node:https';import fs from 'node:fs';import path from 'node:path';
 import entry from '../worker-v2/staging-entry.js';import {database} from './d1-adapter.mjs';import {digest} from '../worker-v2/access-control.js';
 const root=path.resolve('worker-v2/.sop-staging-assets'),DB=database(),env={DB,SOP_ENVIRONMENT:'staging',SOP_UPGRADE_ENABLED:'true',SOP_ATTENDANCE_ENABLED:'true',SOP_ACCESS_CONTROL:'true',SOP_WORK_CHAIN_ENABLED:'true',SOP_ADMIN_CODE_SHA256:await digest('local-browser-fixture-only')};
 const port=Number(process.env.CK_COURIER_FIXTURE_PORT||7833),origin='https://127.0.0.1:'+port;let cookie='';
-const call=async(action,b={})=>{const r=await entry.fetch(new Request(origin+'/api',{method:'POST',headers:{'Content-Type':'application/json',Origin:origin,Cookie:cookie},body:JSON.stringify({action,client_req_id:crypto.randomUUID(),...b})}),env);if(action==='sop_login')cookie=r.headers.get('set-cookie').split(';')[0];const out=await r.json();if(!out.ok)throw Error(out.error);return out;};
-await call('sop_login',{sop_key:'local-browser-fixture-only'});const staff=[];
+const call=async(action,b={})=>{const r=await entry.fetch(new Request(origin+'/api',{method:'POST',headers:{'Content-Type':'application/json',Origin:origin,Cookie:cookie,...operationHeaders(cookie)},body:JSON.stringify({action,client_req_id:crypto.randomUUID(),...b})}),env);if(action==='sop_login')cookie=r.headers.get('set-cookie').split(';')[0];const out=rememberOperation(await r.json(),cookie);if(!out.ok)throw Error(out.error);return out;};
+await call('sop_login',{sop_key:'local-browser-fixture-only'});await confirmOperation(call,'隔离派工员');const staff=[];
 for(let i=0;i<3;i++){const p=(await call('sop_attendance_employee_register',{name:['隔离派工员','隔离扫描员','가상작업자'][i],employeeNo:'BROWSER-'+i,department:'direct_ship'})).person;await call('sop_attendance_checkin',{badge:p.badgeId});staff.push({id:p.badgeId,name:p.name});}
 await call('sop_courier_config');DB.raw.exec("INSERT INTO ck_courier_receipts(id,tracking_no,owner,received_at,scanner_id,scanner_name,actor_id,actor_name) VALUES('BROWSER-HISTORY','301000009999','unknown','2020-01-01T01:00:00Z','OLD','历史人员','OLD','历史人员')");
 fs.writeFileSync('/tmp/ck-courier-browser-staff.json',JSON.stringify(staff));

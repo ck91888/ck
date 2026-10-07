@@ -1,3 +1,4 @@
+import {operationHeaders,rememberOperation,confirmOperation} from './office-operator-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {database} from './d1-adapter.mjs';
@@ -35,14 +36,14 @@ test('warm requests avoid DDL; detail query count is fixed as history grows and 
  const env={DB,SOP_ENVIRONMENT:'staging',SOP_UPGRADE_ENABLED:'true',SOP_ACCEPT_NEW:'true',SOP_ATTENDANCE_ENABLED:'true',SOP_ACCESS_CONTROL:'true',SOP_ADMIN_CODE_SHA256:await digest('fixture-only'),SOP_TEST_RESET_ENABLED:'true',SOP_TEST_RESET_DATABASE:STAGING_DATABASE};
  let cookie='';
  async function api(action,body={}){
-  const r=await entry.fetch(new Request('https://'+STAGING_HOST+'/api',{method:'POST',headers:{'Content-Type':'application/json',Cookie:cookie},body:JSON.stringify({action,client_req_id:crypto.randomUUID(),...body})}),env);
+  const r=await entry.fetch(new Request('https://'+STAGING_HOST+'/api',{method:'POST',headers:{'Content-Type':'application/json',Cookie:cookie,...operationHeaders(cookie)},body:JSON.stringify({action,client_req_id:crypto.randomUUID(),...body})}),env);
   if(action==='sop_login')cookie=r.headers.get('set-cookie').split(';')[0];
-  const out=await r.json();assert.equal(out.ok,true,out.error);return out;
+  const out=rememberOperation(await r.json(),cookie);assert.equal(out.ok,true,out.error);return out;
  }
- await api('sop_login',{sop_key:'fixture-only'});await api('sop_attendance_config');
+ await api('sop_login',{sop_key:'fixture-only'});await confirmOperation(api,'Fixture');await api('sop_attendance_config');
  const p=await api('v2_inbound_plan_create',{customer:'Fixture',biz_classes:['direct_ship'],external_inbound_nos:['FIXTURE-A','FIXTURE-B'],lines:[{unit_type:'carton',planned_qty:20}]});
- calls=[];await api('sop_identity');assert.equal(calls.length,2);assert.ok(calls.every(s=>!s.includes('CREATE')));
- calls=[];await api('v2_inbound_plan_detail',{id:p.id});const emptyCount=calls.length;assert.ok(emptyCount<=7);
+ calls=[];await api('sop_identity');assert.equal(calls.length,3);assert.ok(calls.every(s=>!s.includes('CREATE')));
+ calls=[];await api('v2_inbound_plan_detail',{id:p.id});const emptyCount=calls.length;assert.ok(emptyCount<=9);
  for(let i=0;i<12;i++){
   const job='FIXTURE-JOB-'+i;
   DB.raw.prepare("INSERT INTO v2_ops_jobs(id,related_doc_type,related_doc_id,job_type,status,inbound_external_no,created_at,updated_at) VALUES(?,'inbound_plan',?,'inbound_direct','completed',?,'2026-01-01T01:00:00Z','2026-01-01T02:00:00Z')").run(job,p.id,i===0?'FIXTURE-A':'');
@@ -58,6 +59,6 @@ test('warm requests avoid DDL; detail query count is fixed as history grows and 
  DB.raw.prepare("UPDATE v2_inbound_plan_biz_tasks SET status='completed' WHERE plan_id=?").run(p.id);
  assert.deepEqual((await api('v2_inbound_plan_detail',{id:p.id})).pending_biz_classes,[]);
  DB.raw.prepare('DELETE FROM ck_access_sessions').run();
- const r=await entry.fetch(new Request('https://'+STAGING_HOST+'/api',{method:'POST',headers:{'Content-Type':'application/json',Cookie:cookie},body:JSON.stringify({action:'sop_identity'})}),env);
+ const r=await entry.fetch(new Request('https://'+STAGING_HOST+'/api',{method:'POST',headers:{'Content-Type':'application/json',Cookie:cookie,...operationHeaders(cookie)},body:JSON.stringify({action:'sop_identity'})}),env);
  assert.equal(r.status,401,'schema optimization must never cache a revoked session');
 });

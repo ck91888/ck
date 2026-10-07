@@ -24,7 +24,7 @@ const dir=process.env.CK_COURIER_DETAIL_OUTPUT||'/tmp/ck-courier-detail-review';
     return route.continue();
    });
    const p=await c.newPage();p.on('pageerror',e=>errors.push(e.message));
-   await p.goto(origin+'/');await p.locator('#ck-login-code').fill('local-browser-fixture-only');await p.locator('.ck-login-submit').click();await p.locator('.ck-home-grid').waitFor();
+   await p.goto(origin+'/');await p.locator('#ck-login-code').fill('local-browser-fixture-only');await p.locator('.ck-login-submit').click();await p.locator('#ck-operator-name').waitFor();await p.locator('#ck-operator-name').fill('隔离浏览器测试员');await p.locator('[data-operator-confirm]').click();await p.locator('.ck-home-grid').waitFor();
    if(!batches)batches=await p.evaluate(async staff=>{
     const out=[];
     for(const codes of [[['601000000101','8-1'],['601000000102','8-4']],[['JJD123456789012345678','tent']],[],Array.from({length:51},(_,i)=>['601000000'+(200+i),'8-3'])]){
@@ -44,7 +44,7 @@ const dir=process.env.CK_COURIER_DETAIL_OUTPUT||'/tmp/ck-courier-detail-review';
    const geometry=await d.evaluate(el=>{const r=el.getBoundingClientRect();return {left:r.left,top:r.top,width:r.width,height:r.height,viewport:innerWidth,overflow:el.scrollWidth>el.clientWidth};});
    assert.ok(Math.abs(geometry.left-(width-geometry.width)/2)<2);assert.ok(geometry.top>0);assert.equal(geometry.overflow,false);
    assert.equal(await d.locator('h3').textContent(),batches[0].batch_no);assert.match(await d.locator('[data-summary]').textContent(),/2 件/);
-   assert.match(await d.locator('.courier-batch-meta').textContent(),/派工人.*管理员.*主操作员.*隔离派工员.*参与人员.*隔离派工员、隔离扫描员/s);
+   assert.match(await d.locator('.courier-batch-meta').textContent(),/派工人.*隔离浏览器测试员.*主操作员.*隔离派工员.*参与人员.*隔离派工员、隔离扫描员/s);
    assert.match(await d.locator('.courier-batch-state').textContent(),/已完成/);
    assert.deepEqual(await d.locator('.courier-batch-counts .has-receipts').allTextContents(),['8-11','8-41']);
    assert.deepEqual(await d.locator('.courier-waybill').allTextContents(),['601000000102','601000000101']);

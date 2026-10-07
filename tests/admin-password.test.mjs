@@ -1,3 +1,4 @@
+import {operationHeaders,rememberOperation} from './office-operator-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -11,10 +12,10 @@ async function setup(){
  const DB=database(),env={DB,SOP_ENVIRONMENT:'staging',SOP_UPGRADE_ENABLED:'true',SOP_ACCEPT_NEW:'true',SOP_ATTENDANCE_ENABLED:'true',SOP_ACCESS_CONTROL:'true',SOP_ADMIN_CODE_SHA256:await digest(oldCode),SOP_USERS_JSON:JSON.stringify([{id:'fixture-json-admin',name:'Fixture manager',role:'manager',departments:['bulk'],key:jsonCode}]),ASSETS:{async fetch(){return new Response('fixture asset');}}};
  const cookies={office:'',kiosk:'',field:''},paths={office:'/api',kiosk:'/attendance/api',field:'/001/api'};
  async function request(scope,action,data={},options={}){
-  const origin=options.origin||hosts[0],headers={'Content-Type':'application/json',Origin:origin,Cookie:options.cookie??cookies[scope],'CF-Connecting-IP':'192.0.2.9'};
+  const origin=options.origin||hosts[0],headers={'Content-Type':'application/json',Origin:origin,Cookie:options.cookie??cookies[scope],...operationHeaders(options.cookie??cookies[scope]),'CF-Connecting-IP':'192.0.2.9'};
   const response=await entry.fetch(new Request(origin+paths[scope],{method:'POST',headers,body:JSON.stringify({action,client_req_id:crypto.randomUUID(),...data})}),env);
   const body=await response.json();if(action==='sop_login'&&response.ok)cookies[scope]=response.headers.get('Set-Cookie')?.split(';')[0]||'';
-  return {response,body};
+  rememberOperation(body,cookies[scope]);return {response,body};
  }
  const login=(scope,code,options)=>request(scope,'sop_login',{sop_key:code},options);
  await login('office',oldCode);await request('office','sop_attendance_config');
@@ -38,6 +39,7 @@ test('configured password works for office and kiosk on both exact staging domai
   assert.equal((await f.request(scope,'sop_identity',{}, {origin})).response.status,200);
  }
  const list=await f.request('office','sop_access_list');assert.equal(list.response.status,200);assert.equal(list.body.ok,true);
+ await f.request('office','sop_identity');await f.request('office','sop_operator_confirm',{name:'虚拟密码操作员'});
  const need=await f.request('office','sop_need_create',{department:'bulk',title:'虚拟密码路径验证',customer:'虚拟客户',instructions:'隔离测试',owner:'管理员'});assert.equal(need.body.ok,true,need.body.error);
  assert.equal((await f.request('kiosk','sop_access_list')).response.status,403,'kiosk must not acquire office privileges');
 });

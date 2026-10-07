@@ -10,6 +10,7 @@ import {ensureInboundDocuments,inboundDocumentStates,inboundDocumentStateRead,do
 import {adoptLegacyLoad} from './legacy-load.js';
 import {uploadBatchMaterial} from './batch-work-materials.js';
 import {accessEnabled,accessGuard,accessAdminAction,accessFileAllowed} from './access-control.js';
+import {officeOperationContext,confirmOfficeOperator,officeOperationGuard,planAuditStatements,planOperationAudit} from './office-operator.js';
 import {uploadUnloadPhoto,unloadPhotos,inboundAttachmentRead} from './unload-photos.js';
 import {handleFeedbackLink,feedbackLinkDetail,feedbackLinkRead} from './feedback-link.js';
 import {validateNativeMutation, nativePeople, finishNativePick, finishNativeOutbound} from './native-lifecycle.js';
@@ -158,10 +159,10 @@ function buildOutboundDiff(oldRow, newValues, editableFields) {
 }
 
 // 写入一条出库修改日志（在事务外调用即可，调用方负责升 revision）
-async function insertOutboundChangeLog(env, params) {
+function outboundChangeLogStatement(env, params) {
   const { order_id, revision_no, change_type, changed_by, diff, summary, t } = params;
   const log_id = uid();
-  await env.DB.prepare(`
+  return env.DB.prepare(`
     INSERT INTO v2_outbound_order_change_logs(
       id, order_id, revision_no, change_type, changed_by, changed_at,
       diff_json, summary_text, warehouse_ack_required, warehouse_ack_by, warehouse_ack_at, ack_source, created_at
@@ -171,9 +172,9 @@ async function insertOutboundChangeLog(env, params) {
     changed_by || '', t,
     JSON.stringify(diff || {}), summary || '',
     t
-  ).run();
-  return log_id;
+  );
 }
+async function insertOutboundChangeLog(env,params){await outboundChangeLogStatement(env,params).run();}
 
 // KST 日期 → UTC 范围 [startUtc, endUtc)
 // 输入 "2026-04-27" → { startUtc: "2026-04-26T15:00:00.000Z", endUtc: "2026-04-27T15:00:00.000Z" }
@@ -2834,7 +2835,7 @@ route("v2_outbound_order_create", async (body, env) => {
     }
 
     creationStatements.push(...await outboundNeedStatements(env,body,id,display_no,t));
-    await env.DB.batch(creationStatements);
+    await env.DB.batch([...creationStatements,...planAuditStatements(env,'outbound',id,'create',t)]);
     return { ok: true, id, display_no };
   });
 });
@@ -2953,6 +2954,7 @@ route("v2_outbound_order_detail", async (body, env) => {
   return json({
     ok: true,
     order: row,
+    operation_audit: await planOperationAudit(env,'outbound',id),
     sop_needs: await linkedNeeds(env,id,needs),
     lines: lines.results || [],
     jobs: (jobs.results||[]).map(j=>{const own=loadHistory.find(x=>x.job_id===j.id)?.result;return own?{...j,shared_result_json:JSON.stringify({box_count:own.box_count,pallet_count:own.pallet_count,remark:JSON.parse(j.shared_result_json||'{}').remark||'',order_id:id})}:j;}),
@@ -3117,22 +3119,9 @@ route("v2_outbound_order_update_ship_plan", async (body, env) => {
       sets.push("warehouse_ack_at=''");
     }
     binds.push(id);
-    await env.DB.prepare(
-      "UPDATE v2_outbound_orders SET " + sets.join(", ") + " WHERE id=?"
-    ).bind(...binds).run();
-
-    if (diffResult.changedFields.length > 0) {
-      const newRevision = Number(order.revision_no || 0) + 1;
-      await insertOutboundChangeLog(env, {
-        order_id: id,
-        revision_no: newRevision,
-        change_type: 'ship_plan',
-        changed_by: by,
-        diff: diffResult.diff,
-        summary: diffResult.summary,
-        t
-      });
-    }
+    const statements=[env.DB.prepare("UPDATE v2_outbound_orders SET " + sets.join(", ") + " WHERE id=?").bind(...binds)];
+    if(diffResult.changedFields.length){statements.push(...planAuditStatements(env,'outbound',id,'update',t),outboundChangeLogStatement(env,{order_id:id,revision_no:Number(order.revision_no||0)+1,change_type:'ship_plan',changed_by:by,diff:diffResult.diff,summary:diffResult.summary,t}));}
+    await env.DB.batch(statements);
 
     return { ok: true, status: nextStatus, no_change: diffResult.changedFields.length === 0 };
   });
@@ -3212,12 +3201,9 @@ route("v2_outbound_order_update", async (body, env) => {
     }
     sets.push("updated_at=?"); binds.push(t);
     binds.push(id);
-    await env.DB.prepare(
+    await env.DB.batch([env.DB.prepare(
       "UPDATE v2_outbound_orders SET " + sets.join(", ") + " WHERE id=?"
-    ).bind(...binds).run();
-
-    // 写入修改明细日志（仅当有变化时）
-    await insertOutboundChangeLog(env, {
+    ).bind(...binds),...planAuditStatements(env,'outbound',id,'update',t),outboundChangeLogStatement(env, {
       order_id: id,
       revision_no: newRevision,
       change_type: pickupTouched && diffResult.changedFields.every(f => f.indexOf('pickup_') === 0)
@@ -3227,7 +3213,7 @@ route("v2_outbound_order_update", async (body, env) => {
       diff: diffResult.diff,
       summary: diffResult.summary,
       t
-    });
+    })]);
 
     return { ok: true, id, revision_no: newRevision, summary_text: diffResult.summary };
   });
@@ -3833,7 +3819,7 @@ route("v2_inbound_plan_create", async (body, env) => {
       if(env.SOP_UPGRADE_ENABLED!=='true'||env.SOP_ACCEPT_NEW==='false')throw Error('作业需求功能未开启');
       workBundle=await workPlanStatements(env,body.work_requests,{type:'inbound',id,customer},env.SOP_REQUEST_USER||{id:'service',name:created_by},t);
     }
-    await env.DB.batch([...inboundStatements,...workBundle.statements]);
+    await env.DB.batch([...inboundStatements,...workBundle.statements,...planAuditStatements(env,'inbound',id,'create',t)]);
     if(lines.some(x=>x.unit_type==='courier'))await syncCourierArrival(env,id,recalcInboundPlanCompletion);
     return { ok: true, id, display_no, outbound_id, outbound_display_no, needs:workBundle.needs.map(n=>({id:n.id,title:n.title})), outbounds:workBundle.outbounds };
   });
@@ -4383,6 +4369,7 @@ route("v2_inbound_plan_detail", async (body, env) => {
   return json({
     ok: true,
     plan: { ...row, biz_classes, ...(inboundFlowEnabled(env)?{external_inbound_nos:inboundCodes(row.external_inbound_no),inbound_progress,courier_progress,external_reference_history:finalReads[1]?.results||[],issue_state:documentAfter}:{}) },
+    operation_audit: await planOperationAudit(env,'inbound',id),
     biz_tasks,
     biz_classes,
     completed_biz_classes,
@@ -4635,9 +4622,10 @@ route("v2_inbound_plan_update_status", async (body, env) => {
   if (status === 'cancelled') return err("请使用 v2_inbound_plan_cancel 取消入库计划");
   // 禁止通过此接口直接设 completed —— 必须走 v2_inbound_mark_completed（含 biz_task 校验）
   if (status === 'completed') return err("请使用 v2_inbound_mark_completed 完成入库计划（需所有业务类型已完成）");
-  await env.DB.prepare(
+  const t=now();
+  await env.DB.batch([env.DB.prepare(
     "UPDATE v2_inbound_plans SET status=?, updated_at=? WHERE id=?"
-  ).bind(status, now(), id).run();
+  ).bind(status,t,id),...planAuditStatements(env,'inbound',id,'update',t)]);
   return json({ ok: true });
 });
 
@@ -4684,7 +4672,7 @@ route("v2_inbound_plan_update", async (body, env) => {
       String(body.purpose != null ? body.purpose : (plan.purpose || "")),
       String(body.remark != null ? body.remark : (plan.remark || "")),
       externalNo, bulkExternalNo, t, id
-    )]);
+    ),...planAuditStatements(env,'inbound',id,'update',t)]);
 
     // biz_tasks 同步：pending 可增删；completed 不允许删
     const existing = await env.DB.prepare(
@@ -12803,6 +12791,9 @@ export default {
       if(doc==='ops_job'&&!await nativeOwner({job_id:id},env))return err('仅本任务派审员可上传附件',403);
     }
     const accessBlock=accessGuard(body,env,request);if(accessBlock)return accessBlock;
+    await officeOperationContext(request,env);
+    const operatorResponse=await confirmOfficeOperator(body,env,request);if(operatorResponse)return operatorResponse;
+    const operationBlock=officeOperationGuard(body,env,request);if(operationBlock)return operationBlock;
     await ensureDocumentNumbers(env);
     await ensureLoadSchema(env);
     const authResponse = await sessionAction(body, env,request);
@@ -12894,7 +12885,7 @@ async function handleMultipartUpload(formData, env) {
     const related_doc_type = v003Text(formData.get("related_doc_type"), 80);
     const related_doc_id = v003Text(formData.get("related_doc_id"), 120);
     const attachment_category = v003Text(formData.get("attachment_category"), 80);
-    const uploaded_by = related_doc_type==='sop_task'||attachment_category==='location_photo' ? env.SOP_REQUEST_USER?.name||'' : v003Text(formData.get("uploaded_by"), 120);
+    const uploaded_by = env.SOP_OPERATION_CONTEXT?.operator_name || (related_doc_type==='sop_task'||attachment_category==='location_photo' ? env.SOP_REQUEST_USER?.name||'' : v003Text(formData.get("uploaded_by"), 120));
     const fieldBody = {
       k,
       operator_id: v003Text(formData.get("operator_id"), 80),

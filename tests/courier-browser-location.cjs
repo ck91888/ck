@@ -12,7 +12,7 @@ const dir='/tmp/ck-courier-ui-correction';fs.mkdirSync(dir,{recursive:true});
    const c=await browser.newContext({ignoreHTTPSErrors:true,viewport:{width,height}});
    await c.route('**/*',r=>new URL(r.request().url()).origin===origin?r.continue():r.abort());
    const p=await c.newPage();p.on('pageerror',e=>errors.push(e.message));
-   await p.goto(origin+'/');await p.locator('#ck-login-code').fill('local-browser-fixture-only');await p.locator('.ck-login-submit').click();
+   await p.goto(origin+'/');await p.locator('#ck-login-code').fill('local-browser-fixture-only');await p.locator('.ck-login-submit').click();await p.locator('#ck-operator-name').waitFor();await p.locator('#ck-operator-name').fill('隔离浏览器测试员');await p.locator('[data-operator-confirm]').click();
    await p.locator('.ck-home-grid').waitFor();
    assert.deepEqual(await p.locator('.ck-home-grid a').evaluateAll(a=>a.map(x=>x.getAttribute('href'))),['/001/','/attendance/','/002/','/003/','/shuju/']);
    assert.equal(await p.locator('.courier-field,input[name=tracking]').count(),0);

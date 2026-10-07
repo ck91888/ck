@@ -1,3 +1,4 @@
+import {operationHeaders,rememberOperation,confirmOperation} from './office-operator-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import worker from '../worker-v2/index.js';
@@ -8,9 +9,9 @@ import {handleSop} from '../worker-v2/sop.js';
 import {FIELD_ACTIONS} from '../worker-v2/access-control.js';
 function setup(){
  const DB=database(),objects=new Map(),env={DB,SOP_ENVIRONMENT:'staging',SOP_UPGRADE_ENABLED:'true',SOP_WORK_CHAIN_ENABLED:'true',SOP_ACCESS_CONTROL:'true',SOP_ACCEPT_NEW:'true',SOP_USERS_JSON:JSON.stringify([{id:'M',name:'Fixture manager',role:'manager',key:'work-chain-fixture-only'}]),R2_BUCKET:{async put(key,body,meta){objects.set(key,{body:await new Response(body).arrayBuffer(),httpMetadata:meta.httpMetadata});},async get(key){return objects.get(key);},async delete(key){objects.delete(key);}}};let cookie='';
- async function raw(body){const multipart=body instanceof FormData;const r=await worker.fetch(new Request('https://test.local/api',{method:'POST',headers:{Cookie:cookie,...(!multipart?{'Content-Type':'application/json'}:{})},body:multipart?body:JSON.stringify(body)}),env);if(r.headers.has('set-cookie'))cookie=r.headers.get('set-cookie').split(';')[0];return r.json();}
+ async function raw(body){const multipart=body instanceof FormData;const r=await worker.fetch(new Request('https://test.local/api',{method:'POST',headers:{Cookie:cookie,...operationHeaders(cookie),...(!multipart?{'Content-Type':'application/json'}:{})},body:multipart?body:JSON.stringify(body)}),env);if(r.headers.has('set-cookie'))cookie=r.headers.get('set-cookie').split(';')[0];return rememberOperation(await r.json(),cookie);}
  const call=(action,data={})=>raw({action,client_req_id:crypto.randomUUID(),...data});
- const login=()=>call('sop_login',{sop_key:'work-chain-fixture-only'});
+ const login=async()=>{const r=await call('sop_login',{sop_key:'work-chain-fixture-only'});await confirmOperation(call,'Fixture manager');return r;};
  const get=async id=>(await call('sop_get',{id})).record;
  const change=async(action,id,fields={})=>call(action,{id,revision:(await get(id)).revision,...fields});
  async function need(fields={}){const r=await call('sop_need_create',{title:'Fixture work',customer:'Fixture customer',source_type:'inventory',supply_chain_no:'STOCK-FIXTURE',instructions:'Check ten cartons',planned_quantity:10,planned_unit:'箱',department:'bulk',owner:'Fixture service',...fields});assert.equal(r.ok,true,r.error);return get(r.id);}

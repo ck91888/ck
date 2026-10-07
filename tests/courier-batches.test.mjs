@@ -1,11 +1,12 @@
+import {operationHeaders,rememberOperation,confirmOperation} from './office-operator-fixture.mjs';
 import test from 'node:test';import assert from 'node:assert/strict';
 import worker from '../worker-v2/index.js';import {database} from './d1-adapter.mjs';
 import {handleCourier} from '../worker-v2/courier.js';import {digest} from '../worker-v2/access-control.js';
 async function fixture(){
  const DB=database(),env={DB,SOP_ENVIRONMENT:'staging',SOP_UPGRADE_ENABLED:'true',SOP_ATTENDANCE_ENABLED:'true',SOP_ACCESS_CONTROL:'true',SOP_ADMIN_CODE_SHA256:await digest('local-courier-fixture-only')};let office='',field='';
- const request=async(action,b={},scope='office')=>{const res=await worker.fetch(new Request('https://fixture.local/'+(scope==='field'?'001/':'')+'api',{method:'POST',headers:{'Content-Type':'application/json',Origin:'https://fixture.local',Cookie:scope==='office'?office:field},body:JSON.stringify({action,client_req_id:crypto.randomUUID(),...b})}),env);const r=await res.json();if(action==='sop_login'&&r.ok){if(scope==='office')office=res.headers.get('set-cookie').split(';')[0];else field=res.headers.get('set-cookie').split(';')[0];}return r;};
+ const request=async(action,b={},scope='office')=>{const res=await worker.fetch(new Request('https://fixture.local/'+(scope==='field'?'001/':'')+'api',{method:'POST',headers:{'Content-Type':'application/json',Origin:'https://fixture.local',Cookie:scope==='office'?office:field,...operationHeaders(scope==='office'?office:field)},body:JSON.stringify({action,client_req_id:crypto.randomUUID(),...b})}),env);const r=await res.json();if(action==='sop_login'&&r.ok){if(scope==='office')office=res.headers.get('set-cookie').split(';')[0];else field=res.headers.get('set-cookie').split(';')[0];}return rememberOperation(r,scope==='office'?office:field);};
  const ok=async(a,b={},scope)=>{const r=await request(a,b,scope);assert.equal(r.ok,true,r.error);return r;};
- await ok('sop_login',{sop_key:'local-courier-fixture-only'});const people=[];
+ await ok('sop_login',{sop_key:'local-courier-fixture-only'});await confirmOperation(request,'隔离计划测试员');const people=[];
  for(let i=0;i<4;i++){const p=(await ok('sop_attendance_employee_register',{name:'隔离人员 '+i,employeeNo:'COURIER-'+i,department:'direct_ship'})).person;await ok('sop_attendance_checkin',{badge:p.badgeId});people.push({id:p.badgeId,name:p.name,person_id:p.id});}
  const staff=people.map(({id,name})=>({id,name}));await ok('sop_login',{badge:staff[0].id},'field');
  const start=(indices=[0,1],extra={},scope='field')=>ok('sop_courier_receive',{operation:'start',workers:indices.map(i=>staff[i]),lead_id:staff[indices[0]].id,...extra},scope);
