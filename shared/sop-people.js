@@ -20,7 +20,7 @@
   };
  }
  window.CKPeopleSelection=selection;
- window.CKPeopleFields=function(){return '<label>扫描工牌 / 명찰<input data-staff-badge placeholder="TEST-A|测试操作员甲" autocomplete="off"></label><div class="toolbar"><button type="button" data-staff-add>添加工牌</button><button type="button" data-staff-camera>相机扫码 / 카메라</button></div><div data-staff-scanner></div><p data-staff-count></p><p data-staff-status role="status" aria-live="polite"></p><div data-staff-people></div><label>主操作员 / 주 작업자<select name="lead_id" data-staff-lead required></select></label>';};
+ window.CKPeopleFields=function(){return '<label>扫描工牌 / 명찰<input data-staff-badge placeholder="工号|姓名 / 사번|이름" autocomplete="off"></label><div class="toolbar"><button type="button" data-staff-add>添加工牌 / 명찰 추가</button><button type="button" data-staff-camera>相机扫码 / 카메라</button></div><div data-staff-scanner></div><p data-staff-count></p><p data-staff-status role="status" aria-live="polite"></p><div data-staff-people></div><label>主操作员 / 주 작업자<select name="lead_id" data-staff-lead required></select></label>';};
  let scannerSequence=0;
  window.CKPeoplePicker=function(root,{workers=[],leadId='',error,allowEmpty=false,borrowContext=null}={}){
   const find=s=>root.querySelector('[data-staff-'+s+']'),input=find('badge'),lead=find('lead'),status=find('status'),camera=find('camera'),model=selection(workers,leadId);

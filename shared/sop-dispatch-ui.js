@@ -55,14 +55,21 @@
    }catch(e){if(e.businessError&&!e.message.includes('任务已建立'))retries.delete(fingerprint);return {ok:false,error:e.message};}
   };
  };
- function chooseStaff(department,departments,payload){return new Promise(resolve=>{
-  const dialog=document.createElement('dialog');dialog.className='ck-workflow';dialog.style.cssText='width:min(620px,94vw);max-height:90vh;overflow:auto;padding:20px;border:1px solid #ccd6e0;border-radius:8px';
-  dialog.innerHTML='<form><h2>负责人分配本次作业人员</h2><p>扫描实际操作人员工牌；确认后按原业务流程开始计时。</p><label>本次用工部门 / 작업 부서<select name="labor_department" required><option value="">请选择 / 선택하세요</option>'+Object.entries(departments).map(([k,v])=>'<option value="'+k+'" '+(k===department?'selected':'')+'>'+v+'</option>').join('')+'</select></label>'+CKPeopleFields()+'<label>预计操作分钟<input name="minutes" type="number" min="1" step="1" value="30" required></label><p role="alert"></p><button type="submit">确认人员并开始</button> <button type="button" data-cancel>取消</button></form>';
-  document.body.append(dialog);const form=dialog.querySelector('form'),error=dialog.querySelector('[role=alert]');dialog.showModal();
+ // Native job dispatch and courier dispatch share this actual dialog and picker.
+ window.CKNativePeopleDialog=function(options){
+  let resolve;const promise=new Promise(r=>resolve=r),dialog=document.createElement('dialog');dialog.className='ck-workflow'+(options.className?' '+options.className:'');
+  dialog.innerHTML='<form><h2>'+options.title+'</h2><p>'+options.description+'</p>'+(options.beforeFields||'')+CKPeopleFields()+(options.afterFields||'')+'<p role="alert"></p><div class="ck-buttons"><button type="submit">'+options.submitLabel+'</button><button type="button" data-cancel'+(options.cancelLight?' class="light"':'')+'>'+ (options.cancelLabel||'取消')+'</button></div></form>';
+  document.body.append(dialog);const form=dialog.querySelector('form'),error=dialog.querySelector('[role=alert]'),button=form.querySelector('[type=submit]'),cancel=dialog.querySelector('[data-cancel]');dialog.showModal();
+  const picker=CKPeoplePicker(form,{workers:options.workers||[],leadId:options.leadId||'',allowEmpty:options.allowEmpty||false,error,borrowContext:options.borrowContext||null});let done=false,busy=false;
+  const update=()=>{if(done)return;let valid=true;if(options.disableUntilValid)try{picker.read();}catch{valid=false;}button.disabled=busy||!valid;cancel.disabled=busy;};
+  const observer=new MutationObserver(update);observer.observe(form,{subtree:true,childList:true,characterData:true});form.addEventListener('change',update);update();
+  const close=async value=>{if(done)return;done=true;observer.disconnect();await picker.destroy();dialog.close();dialog.remove();resolve(value);};
+  cancel.onclick=()=>close(null);dialog.oncancel=e=>{e.preventDefault();if(!busy)close(null);};
+  form.onsubmit=async e=>{e.preventDefault();if(button.disabled||done)return;busy=true;update();try{await picker.ready();if(done)return;const result=await options.onSubmit(picker.read(),form);await close(result);}catch(e){if(!done)error.textContent=e.message;}finally{busy=false;update();}};
+  return {dialog,form,picker,promise,close};
+ };
+ function chooseStaff(department,departments,payload){
   const borrowable=['v2_unload_job_start','v2_unplanned_unload_start','v2_outbound_load_start'].includes(payload?.action)||payload?.action==='v2_ops_job_start'&&payload.job_type==='load_outbound';
-  const picker=CKPeoplePicker(form,{error,borrowContext:borrowable?{payload}:null});let done=false;
-  const finish=async value=>{if(done)return;done=true;await picker.destroy();dialog.close();dialog.remove();resolve(value);};
-  dialog.querySelector('[data-cancel]').onclick=()=>finish(null);dialog.oncancel=e=>{e.preventDefault();finish(null);};
-  form.onsubmit=async e=>{e.preventDefault();const button=form.querySelector('[type=submit]');if(button.disabled)return;button.disabled=true;try{await picker.ready();if(done)return;const staff=picker.read();finish({...staff,labor_department:form.elements.labor_department.value,estimated_minutes:Number(form.elements.minutes.value)});}catch(e){error.textContent=e.message;button.disabled=false;}};
- });}
+  return CKNativePeopleDialog({title:'负责人分配本次作业人员',description:'扫描实际操作人员工牌；确认后按原业务流程开始计时。',beforeFields:'<label>本次用工部门 / 작업 부서<select name="labor_department" required><option value="">请选择 / 선택하세요</option>'+Object.entries(departments).map(([k,v])=>'<option value="'+k+'" '+(k===department?'selected':'')+'>'+v+'</option>').join('')+'</select></label>',afterFields:'<label>预计操作分钟<input name="minutes" type="number" min="1" step="1" value="30" required></label>',submitLabel:'确认人员并开始',borrowContext:borrowable?{payload}:null,onSubmit:(staff,form)=>({...staff,labor_department:form.elements.labor_department.value,estimated_minutes:Number(form.elements.minutes.value)})}).promise;
+ }
 })();
