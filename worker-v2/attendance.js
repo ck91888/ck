@@ -22,7 +22,7 @@ export const ATTENDANCE_SCHEMA=[
  BEGIN SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM ck_attendance_days d WHERE d.worker_id=NEW.worker_id AND d.day=date(NEW.joined_at,'+9 hours') AND d.signed_out='' AND d.signed_in<=NEW.joined_at AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at='')) THEN RAISE(ABORT,'Attendance required: signed out, resting, or not signed in') END; END`
 ];
 export const attendanceEnabled=env=>env.SOP_ENVIRONMENT==='staging'&&env.SOP_ATTENDANCE_ENABLED==='true';
-const agencies=['가온','포레인','동인천'],roles=['manager','dispatcher','reviewer','viewer','kiosk'];
+const agencies=['가온','포레인','동인천','直招','CKIK'],roles=['manager','dispatcher','reviewer','viewer','kiosk'];
 const q=(env,sql,...args)=>env.DB.prepare(sql).bind(...args);
 const rows=async(env,sql,...args)=>(await q(env,sql,...args).all()).results||[];
 const uid=p=>p+'-'+crypto.randomUUID();
