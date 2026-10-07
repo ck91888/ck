@@ -31,7 +31,7 @@ for(const app of apps){
  }
 }
 let home=await readFile(resolve(root,'shared/ck-home.html'),'utf8');
-home=home.replace('<body>','<body class="ck-stage-home">').replace('</head>',head+'</head>').replace('</body>','<script src="/shared/attendance-ui.js"></script><script src="/shared/employee-attendance.js"></script><script src="/shared/field-work.js"></script><script src="/shared/inbound-flow-ui.js"></script><script src="/shared/sop-entry.js"></script></body>');
+home=home.replace('<body>','<body class="ck-stage-home">').replace('</head>',head+'</head>').replace('</body>','<script src="/shared/attendance-ui.js"></script><script src="/shared/employee-attendance.js"></script><script src="/shared/field-work.js"></script><script src="/shared/inbound-flow-ui.js"></script><script src="/shared/courier-ui.js"></script><script src="/shared/sop-entry.js"></script></body>');
 home=home.replace('</head>','<link rel="stylesheet" href="/shared/test-data-reset.css"></head>').replace('</body>','<script src="/shared/test-data-reset.js"></script></body>');
 await writeFile(resolve(out,'index.html'),home);
 await mkdir(resolve(out,'office-login'),{recursive:true});
@@ -39,7 +39,7 @@ await writeFile(resolve(out,'office-login/index.html'),'<!doctype html><html lan
 await copyFile(resolve(root,'docs/sop-acceptance.html'),resolve(out,'验收说明.html'));
 await writeFile(resolve(out,'_redirects'),'/sop/ / 302\n/sop / 302\n');
 await writeFile(resolve(out,'_headers'),'/*\n  Cache-Control: no-store\n  X-Content-Type-Options: nosniff\n  Referrer-Policy: same-origin\n');
-await writeFile(resolve(out,'release.json'),JSON.stringify({release:'20261007-labor-agencies',builtAt:new Date().toISOString(),modules:apps}));
+await writeFile(resolve(out,'release.json'),JSON.stringify({release:'20261007-courier-batches',builtAt:new Date().toISOString(),modules:apps}));
 // Content-addressed script/style URLs permit browser reuse without stale deployments.
 for(const html of ['index.html','office-login/index.html',...apps.map(a=>a+'/index.html')]){
  const filename=resolve(out,html),content=await readFile(filename,'utf8');

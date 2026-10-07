@@ -4,7 +4,7 @@
   const b=document.createElement('button');b.type='button';b.className='btn btn-outline ck-native-task';
   const title=document.createElement('strong'),info=document.createElement('span'),crew=document.createElement('small');
   title.textContent=job.business_no||job.display_no||'未关联单据 / 연결 문서 없음';
-  info.textContent=[job.title||window.JOB_TYPE_LABEL?.[job.job_type]||job.job_type,job.customer].filter(Boolean).join(' · ');
+  info.textContent=[job.title||(job.job_type==='courier_receiving'?'快递收货 / 택배 수령':'')||window.JOB_TYPE_LABEL?.[job.job_type]||job.job_type,job.customer].filter(Boolean).join(' · ');
   crew.textContent='作业人员 / 작업자: '+(job.workers.map(w=>w.name).join('、')||(job.status==='assigned'?'待开始 / 시작 대기':'暂无人员 / 인원 없음'));
   b.append(title,info,crew);b.onclick=async()=>{b.disabled=true;try{await CKOpenNativeJob(job);}finally{b.disabled=false;}};return b;
  };
@@ -16,6 +16,7 @@
   window.CKSetNativeLead=function(person){if(person){lead=person;sessionStorage.setItem('ck_test_active_lead',JSON.stringify(lead));}};
   window.CKOpenNativeJob=async function(job){
    try{
+    if(job.job_type==='courier_receiving')return window.CKOpenCourierBatch(job.id);
     if(job.task_kind==='task'){window.CKClearNativeJob();goPage('bulk_op',{task:job.id,external:false});return;}
      if(job.task_kind==='legacy')await CKSession.request('sop_native_adopt',{job_id:job.id,client_req_id:crypto.randomUUID()});
      const r=await api({action:'v2_ops_job_detail',job_id:job.id});

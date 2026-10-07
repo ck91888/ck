@@ -3,10 +3,11 @@ import worker from '../worker-v2/index.js';import {database} from './d1-adapter.
 import {handleCourier} from '../worker-v2/courier.js';import {courierOwners,trackingNumber,trackingNumbers} from '../shared/courier-rules.js';
 import {TABLES} from '../worker-v2/test-data-reset.js';
 const C1='301000000101',C2='50000000000102';
-function setup(){const DB=database(),env={DB,SOP_ENVIRONMENT:'staging',SOP_UPGRADE_ENABLED:'true',SOP_PUBLIC_TEST_ACCESS:'true'};
+function setup(){const DB=database(),env={DB,SOP_ENVIRONMENT:'staging',SOP_UPGRADE_ENABLED:'true',SOP_PUBLIC_TEST_ACCESS:'true',SOP_ATTENDANCE_ENABLED:'true'};
  const call=async(action,data={},ok=true)=>{const res=await worker.fetch(new Request('https://test.local/api',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,client_req_id:crypto.randomUUID(),...data})}),env);const r=await res.json();if(ok)assert.equal(r.ok,true,r.message||r.error);return r;};
  const plan=(biz=['bulk'],codes=[C1,C2],extra={})=>call('v2_inbound_plan_create',{customer:'虚拟快递验收',biz_classes:biz,lines:[{unit_type:'courier',planned_qty:codes.length,tracking_nos:codes}],...extra});
- const scan=(code=C1,owner='8-1',extra={})=>call('sop_courier_receive',{owner,tracking_no:code,...extra});const detail=p=>call('v2_inbound_plan_detail',{id:p.id});return {DB,env,call,plan,scan,detail};}
+ let batch;const initialize=async()=>{if(!batch){const person=(await call('sop_attendance_checkin',{name:'测试负责人',agency:'가온'})).record;batch=await call('sop_courier_receive',{operation:'start',workers:[{id:person.badgeId,name:person.name}],lead_id:person.badgeId});batch.scanner_badge=person.badgeId;}return batch;};
+ const scan=async(code=C1,owner='8-1',extra={})=>{const b=await initialize();return call('sop_courier_receive',{owner,tracking_no:code,batch_id:b.batch.id,scanner_badge:b.scanner_badge,...extra});};const detail=p=>call('v2_inbound_plan_detail',{id:p.id});return {DB,env,call,plan,scan,detail};}
 test('owners match all eight workbook columns; full-string formats reject QR URLs, remarks and product codes',()=>{
  assert.deepEqual(courierOwners.map(x=>x[0]),['8-1','8-2','8-3','8-4','tent','supplies','purchase','unknown']);
  for(const c of ['45100000101',C1,'6080000000101',C2,'LP100000001CN','EZ100000002CN','JJD014600000000000101'])assert.equal(trackingNumber(c),c);
@@ -22,9 +23,9 @@ test('scan is idempotent and preserves first actor/time/owner; correction and ha
  const h=await call('sop_courier_update',{id:a.item.id,version:2,status:'handed_over',handed_to:'虚拟接收员',note:'按外包装交接'});assert.equal(h.item.status,'handed_over');assert.equal(h.item.received_at,a.item.received_at);
  const d=await call('sop_courier_detail',{id:a.item.id});assert.equal(d.events.length,3);const correction=d.events.find(e=>e.kind==='update'&&JSON.parse(e.detail).after.status==='received');assert.equal(correction.actor_name,'测试负责人');assert.ok(correction.created_at);assert.equal(JSON.parse(correction.detail).note,'');assert.equal(JSON.parse(correction.detail).before.owner,'8-1');assert.equal(JSON.parse(correction.detail).after.owner,'8-4');assert.equal(DB.raw.prepare('SELECT COUNT(*) n FROM ck_courier_receipts').get().n,1);
 });
-test('three non-putaway classes complete only after all planned courier numbers are received, without artificial jobs',async()=>{
+test('three non-putaway classes complete only after all planned courier numbers are received, with one real receiving dispatch',async()=>{
  for(const biz of ['bulk','return','change_order']){const {plan,scan,detail,DB}=setup(),p=await plan([biz]);const first=await scan();assert.equal(first.plan.progress.received,1);assert.equal((await detail(p)).plan.status,'pending');
- await scan(C2);const d=await detail(p);assert.equal(d.plan.status,'completed');assert.equal(d.plan.courier_progress.received,2);assert.equal(d.lines[0].actual_qty,2);assert.equal(DB.raw.prepare('SELECT COUNT(*) n FROM v2_ops_jobs').get().n,0);}
+ await scan(C2);const d=await detail(p);assert.equal(d.plan.status,'completed');assert.equal(d.plan.courier_progress.received,2);assert.equal(d.lines[0].actual_qty,2);assert.equal(DB.raw.prepare('SELECT COUNT(*) n FROM v2_ops_jobs').get().n,1);}
 });
 test('courier receiving is distinct from WMS references; A1 and A2 must still complete separately',async()=>{
  const {plan,scan,detail,call}=setup(),p=await plan(['direct_ship'],[C1,C2],{external_inbound_nos:['WMS-A1','WMS-A2']});

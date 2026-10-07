@@ -5,6 +5,7 @@ export const STAGING_HOST = 'ck-v2-api-sop-staging.ck91888.workers.dev';
 export const STAGING_HOSTS = Object.freeze([STAGING_HOST, 'sop-test.ck91888.cn']);
 export const STAGING_DATABASE = 'ba1eba33-bcdd-4de2-8927-d37dc3788396';
 export const TABLES = [
+ 'ck_courier_batch_items','ck_courier_batch_requests','ck_courier_batches',
  'ck_crew_borrows','ck_crew_requests',
  'ck_load_order_claims','ck_load_order_links','ck_load_trips',
  'ck_field_access','ck_access_events','ck_feedback_plan_links','ck_unload_plan_links','ck_unload_trips','ck_courier_events','ck_courier_plan_items','ck_courier_receipts',
