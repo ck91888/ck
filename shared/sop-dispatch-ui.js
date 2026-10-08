@@ -23,7 +23,11 @@
     if(!r?.ok||!r.can_manage_dispatch)throw Error(r?.error||'你已不在此任务中，请联系派工人 / 배정 담당자에게 문의하세요');
     if(!['pending','working','awaiting_close'].includes(r.job.status))throw Error('任务已结束，请刷新列表 / 작업 종료, 목록을 새로고침하세요');
     const state=JSON.parse(r.dispatch.state),crew=r.workers.filter(w=>!w.left_at).map(w=>({id:w.worker_id,name:w.worker_name}));
-    lead=crew.find(w=>w.id===state.lead_id)||crew[0]||state.last_lead;
+    // Viewing a resting crew must not create a work segment or widen access.
+    // The server authorization above still decides who may open this job.
+    const assigned=Array.isArray(state.workers)?state.workers:[];
+    const previous=r.workers.find(w=>w.worker_id===state.lead_id)||r.workers[0];
+    lead=crew.find(w=>w.id===state.lead_id)||crew[0]||state.last_lead||assigned.find(w=>w.id===state.lead_id)||(previous?{id:previous.worker_id,name:previous.worker_name}:null);
     if(!lead)throw Error('任务人员信息缺失，请联系管理员 / 작업자 정보를 확인하세요');
     sessionStorage.setItem('ck_test_active_lead',JSON.stringify(lead));
     if(r.job.job_type==='unload'&&r.job.related_doc_type==='field_feedback')localStorage.setItem('v2_unplanned_fb_id',r.job.related_doc_id);

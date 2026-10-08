@@ -25,3 +25,22 @@ test('a stale card cannot resume a finished job or one the dispatcher no longer 
   assert.equal(p.navigated,0);assert.equal(p.opened.length,0);assert.equal(p.errors.length,1);
  }
 });
+
+test('single-person and whole-crew rests remain viewable without reopening clocks or starting a new job',async()=>{
+ for(const size of [1,3]){
+  const d=live();const staff=Array.from({length:size},(_,i)=>({id:'REST-'+i,name:'Rest '+i}));
+  d.dispatch.state=JSON.stringify({lead_id:staff[0].id,workers:staff});
+  d.workers=staff.map(w=>({worker_id:w.id,worker_name:w.name,left_at:'2026-10-08T03:00:00Z',leave_reason:'attendance:rest'}));
+  const p=preview(d);for(let click=0;click<2;click++)await p.context.CKOpenNativeJob({id:d.job.id});
+  assert.equal(p.navigated,2);assert.equal(p.context.getWorkerId(),'REST-0');assert.deepEqual(p.errors,[]);
+  assert.deepEqual(p.calls.map(c=>c.action),['v2_ops_job_detail','v2_ops_job_detail']);
+  const reloaded=preview(d);await reloaded.context.CKOpenNativeJob({id:d.job.id});assert.equal(reloaded.navigated,1);
+ }
+});
+test('old dispatch with no crew snapshot can use its actual historical segment only after authorization',async()=>{
+ const d=live();d.dispatch.state=JSON.stringify({lead_id:'EMP-A'});d.workers=d.workers.filter(w=>w.left_at);
+ const p=preview(d);await p.context.CKOpenNativeJob({id:d.job.id});assert.equal(p.context.getWorkerId(),'EMP-A');assert.equal(p.navigated,1);
+ for(const changed of [{can_manage_dispatch:false},{job:{...d.job,status:'completed'}},{job:{...d.job,status:'cancelled'}}]){
+  const blocked=preview({...d,...changed});await blocked.context.CKOpenNativeJob({id:d.job.id});assert.equal(blocked.navigated,0);assert.equal(blocked.opened.length,0);
+ }
+});
