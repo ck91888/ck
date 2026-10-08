@@ -4599,12 +4599,8 @@ async function loadOrderOpsList() {
     var typeText = orderOpsJobTypeText(j.job_type);
 
     // Trip/work order column
-    var tripHtml = '--';
-    if (j.display_no) {
-      tripHtml = '<span class="trip-tag">' + esc(j.trip_no || j.display_no) + '</span>';
-    } else if (j.related_doc_id) {
-      tripHtml = '<span class="doc-tag">' + esc(j.business_no || '单号待补充') + '</span>';
-    }
+    var tripHtml = '<span class="trip-tag">' + esc(window.CKDocumentLabels.jobLabel(j)) + '</span>'
+      + '<div class="muted">派审员 / 배정·검수 담당자: ' + esc(window.CKDocumentLabels.jobDispatcher(j)) + '</div>';
 
     // Doc nos column (pick docs or --)
     var docHtml = '<span class="muted">--</span>';
@@ -4613,7 +4609,7 @@ async function loadOrderOpsList() {
         return '<span class="doc-tag">' + esc(d) + '</span>';
       }).join('') + '</div>';
     } else if (j.related_doc_id && j.display_no) {
-      docHtml = '<span class="doc-tag">' + esc(j.business_no || '单号待补充') + '</span>';
+      docHtml = '<span class="doc-tag">' + esc(window.CKDocumentLabels.jobLabel(j)) + '</span>';
     }
 
     var stText = orderOpsStatusText(j.status);
@@ -4664,18 +4660,15 @@ async function loadOrderOpsDetail(id) {
   var flowLabel = orderOpsFlowText(j.flow_stage);
   var html = '<div class="card">';
   html += '<div class="card-title">' + esc(typeText);
-  if (j.display_no) html += ' · <span style="font-family:monospace;color:#2f54eb;">' + esc(j.display_no) + '</span>';
+  html += ' · <span style="color:#2f54eb;">' + esc(window.CKDocumentLabels.jobLabel(j)) + '</span>';
   html += '</div>';
   html += '<div class="detail-grid">';
   html += '<div class="detail-field"><b>' + L("order_ops_field_status") + ':</b> <span class="st st-' + esc(j.status) + '">' + esc(stText) + '</span></div>';
   html += '<div class="detail-field"><b>' + L("order_ops_field_biz_class") + ':</b> ' + esc(bizLabel(j.biz_class)) + '</div>';
-  if (j.display_no) {
-    var tripLabel = j.trip_no ? L("order_ops_field_trip_no") : L("order_ops_field_work_order");
-    html += '<div class="detail-field"><b>' + tripLabel + ':</b> <span class="trip-tag">' + esc(j.trip_no || j.display_no) + '</span></div>';
-  }
+  html += '<div class="detail-field"><b>派审员 / 배정·검수 담당자:</b> ' + esc(window.CKDocumentLabels.jobDispatcher(j)) + '</div>';
   html += '<div class="detail-field"><b>' + L("order_ops_field_job_type") + ':</b> ' + esc(flowLabel) + '</div>';
   if (j.related_doc_id) {
-    html += '<div class="detail-field"><b>' + L("related_doc_no") + ':</b> <span class="doc-tag">' + esc(j.business_no || '单号待补充') + '</span></div>';
+    html += '<div class="detail-field"><b>' + L("related_doc_no") + ':</b> <span class="doc-tag">' + esc(window.CKDocumentLabels.jobLabel(j)) + '</span></div>';
   }
   html += '<div class="detail-field"><b>' + L("order_ops_field_creator") + ':</b> ' + esc(j.created_by || "--") + '</div>';
   html += '<div class="detail-field"><b>' + L("order_ops_field_started_at") + ':</b> ' + esc(fmtTime(j.created_at)) + '</div>';

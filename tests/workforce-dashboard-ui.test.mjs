@@ -4,6 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
+const labelsSource=readFileSync(new URL('../shared/document-labels.js',import.meta.url),'utf8');
 const laborSource=readFileSync(new URL('../shared/attendance-ui.js',import.meta.url),'utf8');
 const employeeSource=readFileSync(new URL('../shared/employee-attendance.js',import.meta.url),'utf8');
 const importSource=readFileSync(new URL('../shared/employee-import.js',import.meta.url),'utf8');
@@ -15,7 +16,7 @@ const report=(items,date=DAY,deletedItems=[])=>({date,asOf:date+'T10:00:00+09:00
 const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return {promise,resolve,reject};};
 const tick=()=>new Promise(r=>setTimeout(r,0));
 async function until(fn){for(let n=0;n<100;n++){if(fn())return;await tick();}throw Error('Timed out waiting for fixture condition');}
-function context(){const w={};w.window=w;vm.runInNewContext(laborSource,w);return w;}
+function context(){const w={};w.window=w;vm.runInNewContext(labelsSource,w);vm.runInNewContext(laborSource,w);return w;}
 test('shared current status uses live status, escapes task identifiers, and never infers from historic totals',()=>{
  const w=context(),x=item('A','working');x.currentJobs[0].no='<img src=x onerror=alert(1)>';x.totals.unassigned=500;
  const html=w.CKAttendance.statusMarkup(x);assert.match(html,/作业中 \/ 작업 중/);assert.match(html,/进口 \/ 수입/);assert.match(html,/&lt;img/);assert.doesNotMatch(html,/<img|未分配作业/);
@@ -31,7 +32,7 @@ async function fixture(t,{role='manager',kind='labor',field=false,initial=report
  w.HTMLDialogElement.prototype.close=function(){if(!this.open)return;this.open=false;this.dispatchEvent(new w.Event('close'));};
  let current=initial;
  w.CKSession={ready:Promise.resolve(),user:{role},request:async(action,data={})=>{calls.push({action,data});const custom=handler?.(action,data,{get current(){return current;},set current(v){current=v;},calls});if(custom!==undefined)return await custom;if(action==='sop_attendance_config')return {day:DAY,agencies:['가온','포레인'],user:{role,id:'QA',name:'Fixture manager'}};if(action==='sop_attendance_summary')return structuredClone(current);if(action==='sop_attendance_employee_people'||action==='sop_attendance_people')return {items:[]};return {ok:true};}};
- w.eval(laborSource.replace("import('/shared/labor-department.js')",'Promise.resolve({jobDefinitions:{}})'));w.eval(employeeSource);
+ w.eval(labelsSource);w.eval(laborSource.replace("import('/shared/labor-department.js')",'Promise.resolve({jobDefinitions:{}})'));w.eval(employeeSource);
  const mount=()=>kind==='employee'?w.CKEmployee.dashboard(root):w.CKLabor(root,{field});
  const controller=await mount();
  const $=s=>root.querySelector(s),all=s=>[...root.querySelectorAll(s)],change=(s,value)=>{const node=$(s);node.value=value;node.dispatchEvent(new w.Event(node.tagName==='INPUT'&&node.type!=='date'?'input':'change',{bubbles:true}));};
@@ -106,4 +107,22 @@ test('late failed save after remount cannot place an error into the new dashboar
 });
 test('employee correction locks duplicate submits and cannot reopen after dismissal while saving',domOptions,async t=>{
  const pending=deferred();const p=await fixture(t,{kind:'employee',handler:action=>action==='sop_attendance_correct'?pending.promise:undefined});p.$('[data-correct="A"]').click();p.change('dialog textarea','Fixture correction');const form=p.$('dialog form');form.dispatchEvent(new p.w.Event('submit',{cancelable:true}));form.dispatchEvent(new p.w.Event('submit',{cancelable:true}));assert.equal(p.calls.filter(x=>x.action==='sop_attendance_correct').length,1);p.$('[data-cancel]').click();pending.resolve({ok:true});await tick();await tick();assert.equal(p.$('dialog').open,false);assert.deepEqual(p.errors,[]);
+});
+test('business and dispatcher searches, timeline, and exports use the same safe job identity',domOptions,async t=>{
+ const raw='JOB-01234567-89ab-4cde-8123-456789abcdef',other='JOB-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+ const a=item('A','working'),b=item('B','working');
+ a.currentJobs=[{id:raw,no:raw,business_no:'EXT-7301',display_business_no:'EXT-7301',has_business_reference:true,dispatcher_name:'实际派审员 <甲>',job_type:'bulk_op',department:'bulk'}];
+ a.segments=[{jobId:other,jobNo:other,business_no:'',display_business_no:'',has_business_reference:false,job_type:'inventory',job_title:'盘点',job_department:'bulk',job_started_at:DAY+'T07:30:00+09:00',dispatcher_name:'',start:DAY+'T08:00:00+09:00',end:DAY+'T08:30:00+09:00',reason:'job_completed',department:'bulk'}];
+ b.currentJobs=[{id:'JOB-b',business_no:'EXT-7302',dispatcher_name:'另一位派审员',department:'import'}];
+ const p=await fixture(t,{initial:report([a,b])});
+ assert.match(p.$('[data-rows]').textContent,/EXT-7301.*派审员.*实际派审员 <甲>/s);assert.ok(!p.$('[data-rows]').textContent.includes(raw));assert.equal(p.$('[data-rows]').querySelector('甲'),null);
+ p.change('[data-search]','实际派审员');assert.equal(p.all('[data-rows] [data-person]').length,1);assert.match(p.$('[data-rows]').textContent,/Fixture A/);
+ p.$('[data-person="A"]').click();const timeline=p.$('.ck-timeline');assert.match(timeline.textContent,/盘点/);assert.equal((timeline.textContent.match(/盘点/g)||[]).length,1);assert.equal((timeline.textContent.match(/大货/g)||[]).length,1);assert.match(timeline.textContent,/2026-10-08 07:30 KST/);assert.match(timeline.textContent,/派审员：未记录 \/ 미기록/);assert.match(timeline.textContent,/作业已完成/);assert.ok(!timeline.textContent.includes(other));assert.ok(!timeline.textContent.includes('job_completed'));
+ p.$('[data-close-detail]').click();p.change('[data-search]','EXT-7302');assert.equal(p.all('[data-rows] [data-person]').length,1);assert.match(p.$('[data-rows]').textContent,/Fixture B/);
+ p.change('[data-search]','EXT-7301');let exported;p.w.URL.createObjectURL=blob=>{exported=blob;return 'blob:fixture';};p.w.URL.revokeObjectURL=()=>{};p.w.HTMLAnchorElement.prototype.click=function(){};p.$('[data-export]').click();const csv=await new Promise(resolve=>{const r=new p.w.FileReader();r.onload=()=>resolve(r.result);r.readAsText(exported);});assert.match(csv,/派审员 \/ 배정·검수 담당자/);assert.match(csv,/EXT-7301/);assert.match(csv,/实际派审员 <甲>/);assert.ok(!csv.includes(raw));assert.ok(!csv.includes('Fixture manager'));
+});
+test('employee attendance searches and CSV use business numbers and the saved dispatcher',domOptions,async t=>{
+ const x=item('A','working');x.record.personType='employee';x.record.employeeNo='EMP-1';x.currentJobs=[{id:'JOB-employee',no:'JOB-employee',business_no:'EMP-WORK-900',department:'direct_ship',dispatcher_name:'保存的派审员'}];
+ const p=await fixture(t,{kind:'employee',initial:report([x])});p.change('[data-search]','EMP-WORK-900');assert.match(p.$('[data-table]').textContent,/Fixture A/);p.change('[data-search]','保存的派审员');assert.match(p.$('[data-table]').textContent,/Fixture A/);
+ let exported;p.w.URL.createObjectURL=blob=>{exported=blob;return 'blob:fixture';};p.w.URL.revokeObjectURL=()=>{};p.w.HTMLAnchorElement.prototype.click=function(){};p.$('[data-export]').click();const csv=await new Promise(resolve=>{const r=new p.w.FileReader();r.onload=()=>resolve(r.result);r.readAsText(exported);});assert.match(csv,/EMP-WORK-900/);assert.match(csv,/保存的派审员/);assert.ok(!csv.includes('JOB-employee'));
 });

@@ -39,7 +39,7 @@
     report('正在核对人员当前任务 / 현재 작업 확인 중');
     const a=await CKSession.request('sop_crew_availability',{...borrowContext,worker_id:parts[0]});if(closed)return;
     if(a.can_borrow){if(a.worker_name!==parts[1])throw Error('工号对应姓名不同，请重新核对工牌');await stop();
-     const accepted=confirm(parts[1]+'（'+parts[0]+'）正在 '+a.source.business_no+' · '+(window.JOB_TYPE_LABEL?.[a.source.job_type]||a.source.job_type)+'。\n确认借调至本次装卸？开工时暂停此人的原计时，其他人继续；装卸结束后按状态归还。\n현재 작업 중입니다. 상하차 지원을 확인하시겠습니까?');
+     const accepted=confirm(parts[1]+'（'+parts[0]+'）正在 '+window.CKDocumentLabels.jobSummary(a.source)+' · '+window.CKDocumentLabels.jobType(a.source)+'。\n确认借调至本次装卸？开工时暂停此人的原计时，其他人继续；装卸结束后按状态归还。\n현재 작업 중입니다. 상하차 지원을 확인하시겠습니까?');
      if(!accepted){report('已取消借调，原计时继续 / 지원 취소·기존 작업 유지');return;}
      confirmations.set(parts[0],{worker_id:parts[0],source_job_id:a.source.job_id,source_segment_id:a.source.segment_id,source_revision:a.source.revision});
     }else if(!a.available&&!a.already_here)throw Error(a.reason||'该人当前不能借调');

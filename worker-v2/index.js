@@ -1,4 +1,4 @@
-import {ensureDocumentNumbers,jobNumbers,JOB_NUMBER_SQL} from './document-numbers.js';
+import {ensureDocumentNumbers,jobNumbers,jobNumberSQL,jobDisplayMetadata,decorateJobNumber,businessReference,jobBusinessFilter} from './document-numbers.js';
 import {documentCodeError} from '../shared/document-code.js';
 import {effectiveResults} from './effective-results.js';
 import {dashboardRange,segmentMinutes,reportWorkerId} from './dashboard-time.js';
@@ -2957,7 +2957,7 @@ route("v2_outbound_order_detail", async (body, env) => {
     operation_audit: await planOperationAudit(env,'outbound',id),
     sop_needs: await linkedNeeds(env,id,needs),
     lines: lines.results || [],
-    jobs: (jobs.results||[]).map(j=>{const own=loadHistory.find(x=>x.job_id===j.id)?.result;return own?{...j,shared_result_json:JSON.stringify({box_count:own.box_count,pallet_count:own.pallet_count,remark:JSON.parse(j.shared_result_json||'{}').remark||'',order_id:id})}:j;}),
+    jobs: (await jobNumbers(env,jobs.results||[])).map(j=>{const own=loadHistory.find(x=>x.job_id===j.id)?.result;return own?{...j,shared_result_json:JSON.stringify({box_count:own.box_count,pallet_count:own.pallet_count,remark:JSON.parse(j.shared_result_json||'{}').remark||'',order_id:id})}:j;}),
     load_history: loadHistory,
     attachments: allAtts,
     change_logs,
@@ -4272,11 +4272,12 @@ route("v2_inbound_plan_detail", async (body, env) => {
       env.DB.prepare('SELECT job_id,result_json FROM ck_unload_plan_links WHERE plan_id=?').bind(id),
       env.DB.prepare('SELECT id, display_no, status, customer, biz_class, outbound_mode, expected_ship_at, planned_box_count, planned_pallet_count, order_date, uses_stock_operation FROM v2_outbound_orders WHERE source_inbound_plan_id=? ORDER BY created_at ASC').bind(id),
       inboundFlowEnabled(env)?courierProgressRead(env,id):env.DB.prepare('SELECT 1 WHERE 0'),
-      inboundFlowEnabled(env)?feedbackLinkRead(env,id):env.DB.prepare('SELECT 1 WHERE 0')
+      inboundFlowEnabled(env)?feedbackLinkRead(env,id):env.DB.prepare('SELECT 1 WHERE 0'),
+      env.SOP_UPGRADE_ENABLED==='true'?env.DB.prepare(jobNumberSQL(env)+' WHERE j.id IN ('+inPlan+')').bind(id):env.DB.prepare('SELECT 1 WHERE 0')
     ]),
     linkedNeeds(env,id)
   ]);
-  const [taskRows, planLines, jobs, atts, workers, results, unloadLinks, linkedObRs,courierRows,feedbackRows] = reads;
+  const [taskRows, planLines, jobs, atts, workers, results, unloadLinks, linkedObRs,courierRows,feedbackRows,jobNumberRows] = reads;
   const courier_progress=inboundFlowEnabled(env)?courierProgressRows(courierRows.results||[]):null,existing_feedback_link=feedbackRows.results?.[0]||null;
   let biz_tasks = taskRows.results || [];
   const biz_classes = extractPlanBizClasses(row);
@@ -4379,7 +4380,7 @@ route("v2_inbound_plan_detail", async (body, env) => {
     arrival_photos,
     existing_feedback_link,
     lines: planLines.results || [],
-    jobs: enrichedJobs,
+    jobs: env.SOP_UPGRADE_ENABLED==='true'?enrichedJobs.map(j=>decorateJobNumber(j,jobNumberRows.results.find(n=>n.id===j.id))):enrichedJobs,
     attachments: allInboundAttachments,
     inbound_materials: allInboundAttachments.filter(a => a.attachment_category === 'inbound_material'),
     sop_needs,
@@ -5259,7 +5260,7 @@ route("v2_unplanned_unload_active_list", async (body, env) => {
       parent_job_id: fb.parent_job_id || ''
     });
   }
-  return json({ ok: true, items });
+  return json({ ok: true, items:await jobNumbers(env,items,'job_id') });
 });
 
 // Join an existing unplanned unload task
@@ -6891,11 +6892,11 @@ route("v2_ops_job_detail", async (body, env) => {
     env.DB.prepare("SELECT * FROM v2_attachments WHERE related_doc_type='ops_job' AND related_doc_id=? ORDER BY created_at DESC").bind(job_id)
   ];
   if(inboundFlowEnabled(env))queries.push(env.DB.prepare("SELECT revision,state FROM sop_records WHERE id=? AND kind='dispatch'").bind(job_id));
-  if(env.SOP_UPGRADE_ENABLED==='true')queries.push(env.DB.prepare(JOB_NUMBER_SQL+' WHERE j.id=?').bind(job_id));
+  if(env.SOP_UPGRADE_ENABLED==='true')queries.push(env.DB.prepare(jobNumberSQL(env)+' WHERE j.id=?').bind(job_id));
   const [detail,canManage]=await Promise.all([env.DB.batch(queries),nativeOwner(body,env)]);
   const [jobRows,workers,results,atts,dispatchRows]=detail,job=jobRows.results[0];
   if (!job) return err("not found", 404);
-  if(env.SOP_UPGRADE_ENABLED==='true'){const n=detail.at(-1).results[0];if(n)Object.assign(job,{...n,display_no:n.business_no||job.display_no||''});}
+  if(env.SOP_UPGRADE_ENABLED==='true'){const n=detail.at(-1).results[0];if(n)Object.assign(job,decorateJobNumber(job,n));}
   job.active_worker_count=new Set(workers.results.filter(w=>!w.left_at).map(w=>w.worker_id)).size;
   return json({
     ok: true, dispatch: inboundFlowEnabled(env)?dispatchRows?.results[0]||null:null, job, can_manage_dispatch: canManage, unload_plans: job.job_type==='unload'?await tripPlans(env,job_id):[],
@@ -6985,12 +6986,15 @@ route("v2_ops_my_active_job", async (body, env) => {
     }
   }
 
-  if (!seg) return json({ ok: true, active: false, stale_segments, auto_cleaned_segments });
+  const relatedDisplays=await jobNumbers(env,[...stale_segments,...auto_cleaned_segments],'job_id');
+  const jobDisplays=new Map(relatedDisplays.map(j=>[j.job_id,j]));
+  const labeledStale=stale_segments.map(j=>jobDisplays.get(j.job_id)||j),labeledCleaned=auto_cleaned_segments.map(j=>jobDisplays.get(j.job_id)||j);
+  if (!seg) return json({ ok: true, active: false, stale_segments:labeledStale, auto_cleaned_segments:labeledCleaned });
 
   const t = now();
   await recalcActiveCount(env, seg.job_id, t);
   const job = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(seg.job_id).first();
-  return json({ ok: true, active: true, segment: seg, job, stale_segments, auto_cleaned_segments });
+  return json({ ok: true, active: true, segment: seg, job:(await jobNumbers(env,[job]))[0], stale_segments:labeledStale, auto_cleaned_segments:labeledCleaned });
 });
 
 // Resume parent job after interrupt
@@ -7514,8 +7518,8 @@ route("v2_pick_job_start", async (body, env) => {
       ).bind(docNo).first();
       if (conflict) {
         return { ok: false, error: "doc_conflict",
-          message: "拣货单 " + docNo + " 已在活跃趟次 " + (conflict.display_no || conflict.id) + " 中",
-          conflict_doc_no: docNo, conflict_trip: conflict.display_no || conflict.id };
+          message: "拣货单 " + docNo + " 已在活跃趟次 " + (businessReference(conflict.display_no) || ('拣货单 '+docNo)) + " 中",
+          conflict_doc_no: docNo, conflict_trip: businessReference(conflict.display_no) || ('拣货单 '+docNo), conflict_job_id:conflict.id };
       }
     }
 
@@ -7623,7 +7627,7 @@ route("v2_pick_job_start_by_docs", async (body, env) => {
     // 跨趟次拒绝：所有扫描单必须属于同一个趟次
     const jobIds = Array.from(new Set(docs.map(d => d.j_id)));
     if (jobIds.length > 1) {
-      const tripNos = Array.from(new Set(docs.map(d => d.j_display_no || d.j_id)));
+      const tripNos = Array.from(new Set(docs.map(d => businessReference(d.j_display_no) || ('拣货单 '+d.pick_doc_no))));
       return { ok: false, error: "cross_trip_not_allowed",
         message: "不能跨趟次同时拣货（涉及趟次：" + tripNos.join(", ") + "），请确认拣货单号",
         trips: tripNos };
@@ -7727,6 +7731,7 @@ route("v2_pick_doc_lookup", async (body, env) => {
     pick_finished_at: row.pick_finished_at || '',
     job_id: row.j_id,
     job_display_no: row.j_display_no || '',
+    ...jobDisplayMetadata((await jobNumbers(env,[{id:row.j_id}]))[0]),
     job_status: row.j_status || '',
     job_interrupted: !!row.j_interrupt,
     job_created_by: row.j_created_by || '',
@@ -7830,6 +7835,7 @@ route("v2_pick_job_breakdown", async (body, env) => {
   return json({
     ok: true,
     job_id,
+    ...jobDisplayMetadata((await jobNumbers(env,[{id:job_id}]))[0]),
     docs_view: Object.values(byDoc),
     workers_view: Object.values(byWorker),
     segments: segs,
@@ -7893,8 +7899,8 @@ route("v2_pick_job_add_docs", async (body, env) => {
       ).bind(docNo, job_id).first();
       if (conflict) {
         return { ok: false, error: "doc_conflict",
-          message: "拣货单 " + docNo + " 已在趟次 " + (conflict.display_no || conflict.id) + " 中",
-          conflict_doc_no: docNo, conflict_trip: conflict.display_no || conflict.id };
+          message: "拣货单 " + docNo + " 已在趟次 " + (businessReference(conflict.display_no) || ('拣货单 '+docNo)) + " 中",
+          conflict_doc_no: docNo, conflict_trip: businessReference(conflict.display_no) || ('拣货单 '+docNo), conflict_job_id:conflict.id };
       }
     }
 
@@ -8199,7 +8205,7 @@ route("v2_pick_job_active_list", async (body, env) => {
       workers: (workers.results || []).map(w => ({ id: w.worker_id, name: w.worker_name }))
     });
   }
-  return json({ ok: true, items });
+  return json({ ok: true, items:await jobNumbers(env,items) });
 });
 
 // =====================================================
@@ -8897,7 +8903,7 @@ route("v2_ops_realtime_board", async (body, env) => {
     active_worker_count: active_workers.length,
     off_worker_count: offWorkers.length,
     active_workers: await jobNumbers(env,active_workers,'job_id'),
-    off_workers: (await jobNumbers(env,offWorkers,'job_id')).map(w=>({...w,last_display_no:w.business_no??w.last_display_no}))
+    off_workers: (await jobNumbers(env,offWorkers,'job_id')).map(w=>({...w,last_display_no:w.display_business_no||w.job_label||w.last_display_no}))
   });
 });
 
@@ -10500,9 +10506,7 @@ route("v2_dashboard_order_list", async (body, env) => {
   if (job_type)   { where += " AND j.job_type=?"; binds.push(job_type); }
   if (status)     { where += " AND j.status=?"; binds.push(status); }
   if (doc_no) {
-    where += " AND (j.display_no LIKE ? OR j.related_doc_id LIKE ? OR j.linked_outbound_order_id LIKE ?"+(env.SOP_UPGRADE_ENABLED==='true'?" OR  EXISTS (SELECT 1 FROM sop_document_numbers dn LEFT JOIN sop_records sr ON sr.id=j.id AND sr.kind='task' WHERE (dn.record_id=j.id OR dn.record_id=json_extract(sr.state,'$.need_id') OR dn.record_id=j.related_doc_id) AND dn.display_no LIKE ?) OR EXISTS(SELECT 1 FROM v2_inbound_plans ip WHERE ip.id=j.related_doc_id AND ip.display_no LIKE ?) OR EXISTS(SELECT 1 FROM v2_outbound_orders op WHERE (op.id=j.related_doc_id OR op.id=j.linked_outbound_order_id) AND op.display_no LIKE ?)":"")+")";
-    const pat = "%" + doc_no + "%";
-    binds.push(pat, pat, pat);if(env.SOP_UPGRADE_ENABLED==='true')binds.push(pat,pat,pat);
+    const filter=jobBusinessFilter(env,'%'+doc_no+'%');where+=' AND '+filter.sql;binds.push(...filter.args);
   }
   if (worker_name) {
     where += " AND EXISTS (SELECT 1 FROM v2_ops_job_workers w WHERE w.job_id=j.id AND w.worker_name LIKE ?)";
@@ -10651,9 +10655,7 @@ route("v2_dashboard_order_export", async (body, env) => {
   if (job_type)   { where += " AND j.job_type=?"; binds.push(job_type); }
   if (status)     { where += " AND j.status=?"; binds.push(status); }
   if (doc_no) {
-    where += " AND (j.display_no LIKE ? OR j.related_doc_id LIKE ? OR j.linked_outbound_order_id LIKE ?"+(env.SOP_UPGRADE_ENABLED==='true'?" OR  EXISTS (SELECT 1 FROM sop_document_numbers dn LEFT JOIN sop_records sr ON sr.id=j.id AND sr.kind='task' WHERE (dn.record_id=j.id OR dn.record_id=json_extract(sr.state,'$.need_id') OR dn.record_id=j.related_doc_id) AND dn.display_no LIKE ?) OR EXISTS(SELECT 1 FROM v2_inbound_plans ip WHERE ip.id=j.related_doc_id AND ip.display_no LIKE ?) OR EXISTS(SELECT 1 FROM v2_outbound_orders op WHERE (op.id=j.related_doc_id OR op.id=j.linked_outbound_order_id) AND op.display_no LIKE ?)":"")+")";
-    const pat = "%" + doc_no + "%";
-    binds.push(pat, pat, pat);if(env.SOP_UPGRADE_ENABLED==='true')binds.push(pat,pat,pat);
+    const filter=jobBusinessFilter(env,'%'+doc_no+'%');where+=' AND '+filter.sql;binds.push(...filter.args);
   }
   if (worker_name) {
     where += " AND EXISTS (SELECT 1 FROM v2_ops_job_workers w WHERE w.job_id=j.id AND w.worker_name LIKE ?)";
@@ -10834,7 +10836,10 @@ route("v2_dashboard_order_export", async (body, env) => {
     return {
       job_id: j.id,
       日期: (j.created_at || '').slice(0, 10),
-      单号: j.business_no || j.display_no || '单号待补充',
+      单号: j.display_business_no || j.job_label || '作业信息未记录',
+      作业: j.job_label || '',
+      派审员: j.dispatcher_name || '未记录',
+      ...jobDisplayMetadata(j),
       work_plan_no:j.work_plan_no||'',
       display_no: j.display_no || '',
       related_doc_id: j.related_doc_id || '',
@@ -10968,7 +10973,7 @@ route("v2_dashboard_workhour_summary", async (body, env) => {
       minutes, raw_minutes:rawMinutes,
       leave_reason: r.leave_reason || '',
       active: closed ? 0 : 1,
-      job_id: r.job_id, display_no: r.display_no,
+      job_id: r.job_id, display_no: r.display_no, ...jobDisplayMetadata(r),
       flow_stage: r.flow_stage, biz_class: r.biz_class,
       job_type: r.job_type, status: r.status,
       anomaly, anomaly_reason, long_segment

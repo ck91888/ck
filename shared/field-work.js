@@ -2,6 +2,7 @@
 (function(){
  'use strict';
  const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+ const jobLabel=x=>window.CKDocumentLabels.jobLabel(x),jobDispatcher=x=>window.CKDocumentLabels.jobDispatcher(x),jobText=(value,context)=>window.CKDocumentLabels.jobHistoryText(String(value??''),context);
  const states={pending:'待派工 / 배정 대기',assigned:'已安排 / 배정 완료',working:'作业中 / 작업 중',paused:'已暂停 / 일시 중지',rework:'待整改 / 재작업',awaiting_close:'已暂停 · 待收尾 / 일시 중지·마감 대기',awaiting_review:'待审核 / 검수 대기',completed:'已完成 / 완료',waiting_customer:'等待客户安排',linked:'成果已关联出库',cancelled:'已取消'};
  const counts=[['packed_sku_count','品数 / 품목수'],['packed_count','打包箱数 / 포장박스'],['used_carton_large_count','大纸箱 / 대형박스'],['used_carton_small_count','小纸箱 / 소형박스'],['repaired_box_count','修补箱数 / 수리박스'],['reboxed_count','换箱数 / 교체박스'],['label_count','标签数 / 라벨수'],['operated_box_count','操作总箱数 / 총 박스'],['pallet_count','打托数 / 팔레트'],['forklift_location_count','叉车货位数 / 지게차 위치']];
  window.CKFieldWork=function(root,initial='',options={}){
@@ -20,12 +21,12 @@
   }
   function nativeState(r){
    if(!r.can_manage_dispatch||!r.dispatch||r.job?.job_type!=='bulk_op')throw Error('无法操作此任务，请联系原派审员 / 담당자에게 문의하세요');
-   const j=r.job,d=JSON.parse(r.dispatch.state),live=r.workers.filter(w=>!w.left_at),saved=r.results[0];
+   const d=JSON.parse(r.dispatch.state),j={...r.job,no:r.job.no||(r.job.related_doc_type==='work_order'?r.job.related_doc_id:'')},live=r.workers.filter(w=>!w.left_at),saved=r.results[0];
    let result=saved?JSON.parse(saved.result_json||'{}'):null;
    if(result)result={...result,packed_count:result.packed_box_count,operated_box_count:result.total_operated_box_count,description:result.description||saved.remark||''};
-   return {external:true,native:r,need:{display_no:j.business_no||j.display_no||j.related_doc_id,title:'外部作业 / 외부 작업',customer:j.customer||'',instructions:'按纸质作业单核对本次操作要求。 / 인쇄된 작업서를 확인하세요.'},
+   return {external:true,native:r,need:{display_no:jobLabel(j),title:'外部作业 / 외부 작업',customer:j.customer||'',instructions:'按纸质作业单核对本次操作要求。 / 인쇄된 작업서를 확인하세요.'},
     source:j.outbound_plan_no?{number:j.outbound_plan_no}:null,segments:r.workers,
-    task:{id:j.id,revision:r.dispatch.revision,status:j.status,lead_id:d.lead_id,workers:live.map(w=>({id:w.worker_id,name:w.worker_name})),borrowed_out:r.borrowed_out||[],owner:d.owner,started_at:j.created_at,result,location:''},last_lead:d.last_lead||d.workers.find(w=>w.id===d.lead_id)};
+    task:{...j,id:j.id,kind:'dispatch',dispatcher_name:Object.hasOwn(j,'dispatcher_name')?j.dispatcher_name:d.dispatcher_name||d.owner||'',revision:r.dispatch.revision,status:j.status,lead_id:d.lead_id,workers:live.map(w=>({id:w.worker_id,name:w.worker_name})),borrowed_out:r.borrowed_out||[],owner:d.owner,started_at:j.started_at||j.created_at,result,location:''},last_lead:d.last_lead||(d.workers||[]).find(w=>w.id===d.lead_id)};
   }
   async function resolve(code,detail){
    if(closed)return;
@@ -61,16 +62,16 @@
    const sequence=loadSequence,host=$('tasks');if(!host)return;
    try{
     let items=[];
-    if(external){const r=await api('sop_dispatch_list');items=r.items.filter(t=>t.task_kind==='dispatch'&&t.job_type==='bulk_op').map(t=>({...t,display_no:t.business_no,title:t.title||'外部作业 / 외부 작업'}));}
+    if(external){const r=await api('sop_dispatch_list');items=r.items.filter(t=>t.task_kind==='dispatch'&&t.job_type==='bulk_op').map(t=>({...t,title:t.title||'外部作业 / 외부 작업'}));}
     else{let offset=0,more=true;while(more){const r=await api('sop_list',{kind:'task',offset});items.push(...r.items);more=r.more;offset+=50;if(offset>=1000)break;}items=items.filter(t=>t.department==='bulk'&&!['completed','cancelled'].includes(t.status));}
     if(closed||sequence!==loadSequence||$('tasks')!==host)return;
-    host.innerHTML=items.map(t=>`<button class="ck-task-link" data-task="${esc(t.id)}"><b class="ck-task-number">${esc(t.work_plan_no||t.display_no||'单号待补充')}</b><span class="ck-task-customer">客户 / 고객：${esc(t.customer||'—')}</span><span class="ck-task-title">${esc(t.title)}</span><small>${states[t.status]||esc(t.status)} · ${esc((t.workers||[]).map(w=>w.name).join('、'))}</small></button>`).join('')||'<p class="ck-muted">暂无进行中的作业 / 진행 중인 작업 없음</p>';
+    host.innerHTML=items.map(t=>`<button class="ck-task-link" data-task="${esc(t.id)}"><b class="ck-task-number">${esc(jobLabel({...t,business_no:t.work_plan_no||t.business_no}))}</b><span class="ck-task-dispatcher">派审员 / 배정·검수 담당자：${esc(jobDispatcher(t))}</span><span class="ck-task-customer">客户 / 고객：${esc(t.customer||'—')}</span><span class="ck-task-title">${esc(jobText(t.title,t))}</span><small>${states[t.status]||esc(t.status)} · ${esc((t.workers||[]).map(w=>w.name).join('、'))}</small></button>`).join('')||'<p class="ck-muted">暂无进行中的作业 / 진행 중인 작업 없음</p>';
     host.querySelectorAll('[data-task]').forEach(b=>b.onclick=()=>resolve(b.dataset.task).catch(error));
    }catch(x){if(!closed&&sequence===loadSequence&&$('tasks')===host)host.textContent=x.message;}
   }
   function draw(){
    const {need:n,task:t,source,segments,changed}=current,title=n?.title||t?.title||'',state=t?.status||n?.status||'pending',live=segments.filter(s=>!s.left_at);
-   root.innerHTML=`<div class="ck-actions"><button data-back class="ck-small">← 扫描其他作业单 / 다른 작업</button><button data-refresh class="ck-small">刷新 / 새로고침</button><button data-home class="ck-small">返回首页，任务继续 / 작업 유지·홈으로</button></div><section class="ck-work-sheet"><span class="ck-state">${states[state]||esc(state)}</span><p class="ck-work-number">作业单号 / 작업 번호：<b>${esc(n?.display_no||t?.work_plan_no||t?.display_no||'单号待补充')}</b></p><h2>${esc(title)}</h2><div class="ck-work-meta"><div>客户 / 고객<b>${esc(n?.customer||source?.customer||'—')}</b></div><div>货物来源 / 화물 출처<b>${esc(source?.number||(external?'外部作业单 / 외부 작업서':window.CKDocumentLabels.source(n)))}</b></div><div>货物范围 / 화물 범위<b>${esc(n?.scope_text||'见作业要求')}</b></div><div>作业位置 / 작업 위치<b>${esc(t?.location||n?.location||'待确认')}</b></div></div><div class="ck-instructions">${esc(n?.instructions||title)}</div>${changed?'<p class="ck-warning">纸单版本已更新，请按本页最新要求核对后派工。</p>':''}</section><div data-content></div><p data-error class="ck-error" role="alert" hidden></p>`;
+   root.innerHTML=`<div class="ck-actions"><button data-back class="ck-small">← 扫描其他作业单 / 다른 작업</button><button data-refresh class="ck-small">刷新 / 새로고침</button><button data-home class="ck-small">返回首页，任务继续 / 작업 유지·홈으로</button></div><section class="ck-work-sheet"><span class="ck-state">${states[state]||esc(state)}</span><p class="ck-work-number">作业单号 / 작업 번호：<b>${esc(t?jobLabel({...t,business_no:n?.display_no||t.work_plan_no||t.business_no}):n?.display_no||'单号待补充')}</b></p>${t?`<p class="ck-work-dispatcher">派审员 / 배정·검수 담당자：${esc(jobDispatcher(t))}</p>`:''}<h2>${esc(jobText(title,t))}</h2><div class="ck-work-meta"><div>客户 / 고객<b>${esc(n?.customer||source?.customer||'—')}</b></div><div>货物来源 / 화물 출처<b>${esc(source?.number||(external?'外部作业单 / 외부 작업서':window.CKDocumentLabels.source(n)))}</b></div><div>货物范围 / 화물 범위<b>${esc(n?.scope_text||'见作业要求')}</b></div><div>作业位置 / 작업 위치<b>${esc(t?.location||n?.location||'待确认')}</b></div></div><div class="ck-instructions">${esc(n?.instructions||title)}</div>${changed?'<p class="ck-warning">纸单版本已更新，请按本页最新要求核对后派工。</p>':''}</section><div data-content></div><p data-error class="ck-error" role="alert" hidden></p>`;
    $('back').onclick=()=>home().catch(error);$('refresh').onclick=()=>resolve(t?.id||n.id||n.display_no).catch(error);$('home').onclick=()=>window.goPage('home');
    if(external&&!t){
     people('派工并开始 / 배정 및 시작',[],async staff=>{
@@ -84,7 +85,7 @@
    }
    if(!t&&n?.status==='pending'){people('派工并开始 / 배정 및 시작',[],async staff=>{const r=await write('sop_task_dispatch',{department:n.department,title:n.title,need_id:n.id,job_type:'bulk_op',estimated_minutes:30,location:n.location||'',...staff});await resolve(r.id);});return;}
    if(!t){$('content').innerHTML='<p class="ck-muted">此作业已完成或暂不能派工，请联系订单处理组核对。</p>';return;}
-   $('content').innerHTML=`<section class="ck-work-sheet"><span class="ck-step">02 / PEOPLE & EXECUTION</span><h3>参与人员 / 참여 인원</h3><p>${live.length?live.map(w=>esc(w.worker_name)).join(' · '):'当前无人计时 / 현재 작업 인원 없음'}</p><p class="ck-muted">${t.started_at?'开始 '+CKAttendance.at(t.started_at):'人员到位后开始记录工时'} · 负责人 ${esc(t.owner)}</p><div class="ck-actions" data-actions></div><div data-editor></div></section>`;
+   $('content').innerHTML=`<section class="ck-work-sheet"><span class="ck-step">02 / PEOPLE & EXECUTION</span><h3>参与人员 / 참여 인원</h3><p>${live.length?live.map(w=>esc(w.worker_name)).join(' · '):'当前无人计时 / 현재 작업 인원 없음'}</p><p class="ck-muted">${t.started_at?'开始 '+CKAttendance.at(t.started_at):'人员到位后开始记录工时'} · 派审员 / 배정·검수 담당자：${esc(jobDispatcher(t))}</p><div class="ck-actions" data-actions></div><div data-editor></div></section>`;
    const action=(label,fn)=>{const b=document.createElement('button');b.className='ck-small';b.textContent=label;b.onclick=async()=>{b.disabled=true;try{await fn();}catch(x){error(x);}finally{b.disabled=false;}};$('actions').append(b);};
    if(external&&['pending','working','awaiting_close'].includes(t.status)){
     action(live.length?'调整人员 / 인원 변경':'核对人员并开始 / 인원 확인·시작',()=>people('保存人员 / 인원 저장',t.workers,async staff=>{await write('sop_native_people',{job_id:t.id,revision:t.revision,...staff,reason:$('reason').value});await resolve(t.id);},true));

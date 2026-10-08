@@ -22,7 +22,7 @@ for(const app of apps){
   if(f==='config.js')content=content.replace(/var V2_API\s*=\s*"[^"]+";/,"var V2_API=window.SOP_API;").replace(/var OPS_KEY\s*=\s*"[^"]+";/,"var OPS_KEY='';");
   if(f==='index.html'){
    if(app==='001')content=content.replace(/<div class="home-btn" onclick="(?:window.open[^"]*|goPage\('realtime_board'\))">[\s\S]*?<\/div>\s*<\/div>/g,'');
-   content=content.replace(/<script src="\.\.\/shared\/sop-(entry|rollout)\.js[^\"]*"><\/script>/g,'');
+   content=content.replace(/<script src="\.\.\/shared\/(?:sop-(?:entry|rollout)|document-labels)\.js[^\"]*"><\/script>/g,'');
    const libraries=['html5-qrcode.min.js','xlsx.full.min.js','qrcode.min.js'].filter(name=>!content.includes(name)).map(name=>'<script src="/shared/'+name+'"></script>').join('');
    content=content.replace('<body>','<body class="ck-system" data-app="'+app+'">');
    content=content.replace('</head>',head+'</head>').replace('</body>',libraries+'<script src="/shared/work-plan-language.js"></script><script src="/shared/work-history-ui.js"></script><script src="/shared/work-chain-ui.js"></script><script src="/shared/sop-planning-ui.js"></script><script src="/shared/sop-people.js"></script><script src="/shared/sop-native.js"></script><script src="/shared/sop-dispatch-ui.js"></script><script src="/shared/attendance-ui.js"></script><script src="/shared/employee-import.js"></script><script src="/shared/employee-attendance.js"></script><script src="/shared/work-result-ui.js"></script><script src="/shared/field-work.js"></script><script src="/shared/inbound-flow-ui.js"></script><script src="/shared/courier-ui.js"></script><script src="/shared/unload-photos.js"></script><script src="/shared/unload-trip-ui.js"></script><script src="/shared/native-lifecycle-ui.js"></script><script src="/shared/crew-borrow-ui.js"></script><script src="/shared/outbound-load-trip-ui.js"></script><script src="/shared/feedback-link-ui.js"></script><script src="/shared/sop-entry.js"></script></body>');
@@ -39,7 +39,7 @@ await writeFile(resolve(out,'office-login/index.html'),'<!doctype html><html lan
 await copyFile(resolve(root,'docs/sop-acceptance.html'),resolve(out,'验收说明.html'));
 await writeFile(resolve(out,'_redirects'),'/sop/ / 302\n/sop / 302\n');
 await writeFile(resolve(out,'_headers'),'/*\n  Cache-Control: no-store\n  X-Content-Type-Options: nosniff\n  Referrer-Policy: same-origin\n');
-await writeFile(resolve(out,'release.json'),JSON.stringify({release:'20261008-workforce-dashboard',builtAt:new Date().toISOString(),modules:apps}));
+await writeFile(resolve(out,'release.json'),JSON.stringify({release:'20261008-job-business-labels',builtAt:new Date().toISOString(),modules:apps}));
 // Content-addressed script/style URLs permit browser reuse without stale deployments.
 for(const html of ['index.html','office-login/index.html',...apps.map(a=>a+'/index.html')]){
  const filename=resolve(out,html),content=await readFile(filename,'utf8');

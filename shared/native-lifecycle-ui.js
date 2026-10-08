@@ -4,13 +4,14 @@
   const $=id=>document.getElementById(id),leaveNames=['unloadLeave','inboundLeave','inboundReturnLeave','leaveImportDelivery','handleIssueLeave','bulkLeave','leaveGenericJob','leaveVerifyScan'];
   let current=null,editing=false;
   const bar=document.createElement('section');bar.className='ck-dispatch-controls';bar.hidden=true;
-  bar.innerHTML='<div><b>派审员管理 / 담당자 관리</b><p data-crew></p></div><div class="ck-buttons"><button type="button" data-people>调整人员 / 인원 변경</button><button type="button" data-rest>人员与休息 / 인원·휴식</button><button type="button" data-home>返回首页，任务继续 / 작업 유지·홈으로</button></div>';
+  bar.innerHTML='<div><b>派审员管理 / 담당자 관리</b><p data-job></p><p data-crew></p></div><div class="ck-buttons"><button type="button" data-people>调整人员 / 인원 변경</button><button type="button" data-rest>人员与休息 / 인원·휴식</button><button type="button" data-home>返回首页，任务继续 / 작업 유지·홈으로</button></div>';
   bar.querySelector('[data-people]').onclick=()=>editPeople();bar.querySelector('[data-rest]').onclick=()=>CKOpenFieldLabor();bar.querySelector('[data-home]').onclick=()=>goPage('home');
   function accept(r){
    if(!r?.can_manage_dispatch||r.job?.id!==window._activeJobId)return;
    current=r;const page=$('page-'+window._currentPage);if(!page||!['pending','working','awaiting_close'].includes(r.job.status))return;
    const state=JSON.parse(r.dispatch?.state||'{}');window.CKSetNativeLead?.(state.workers?.find(w=>w.id===state.lead_id)||state.last_lead);
    if(bar.parentElement!==page){const top=page.querySelector('.topbar');if(top)top.after(bar);else page.prepend(bar);}bar.hidden=false;
+   bar.querySelector('[data-job]').textContent=window.CKDocumentLabels.jobSummary(r);
    bar.querySelector('[data-crew]').textContent='正在作业 / 작업 중: '+(r.workers.filter(w=>!w.left_at).map(w=>w.worker_name).join('、')||'暂无人员 / 없음')+((r.borrowed_out||[]).length?' · 借出 / 지원 중: '+r.borrowed_out.map(b=>b.worker_name).join('、'):'');
    const pick=$('pickWorkingPicker');if(r.job.job_type==='pick_direct'&&pick)pick.textContent=r.workers.filter(w=>!w.left_at).map(w=>w.worker_name).join('、')||'—';
   }
@@ -97,8 +98,8 @@
     for(const item of all.items||[]){
      const job=mine.items.find(j=>j.job_type==='unload'&&j.source_type==='field_feedback'&&j.source_id===item.feedback_id);
      const row=document.createElement('section');row.className='ck-unplanned-resume';
-     const title=document.createElement('b');title.textContent=item.display_no||item.feedback_id;
-     const info=document.createElement('p');info.textContent='派工 / 배정: '+(job?.owner||item.submitted_by||'—')+' · '+(item.cargo_summary||'')+' · '+(item.worker_names||[]).join('、');
+     const title=document.createElement('b');title.textContent=window.CKDocumentLabels.jobLabel({...item,...(job||{}),job_type:'unplanned_unload'});
+     const info=document.createElement('p');info.textContent='派审员 / 배정·검수 담당자：'+window.CKDocumentLabels.jobDispatcher(job||item)+' · '+(item.cargo_summary||'')+' · '+(item.worker_names||[]).join('、');
      row.append(title,info);
      if(job){const button=document.createElement('button');button.type='button';button.className='btn btn-outline';button.textContent='继续作业 / 작업 계속';button.onclick=()=>joinUnplannedUnload(item.feedback_id,button);row.append(button);}
      else{const note=document.createElement('small');note.textContent='由原派工人管理；加入人员请联系派工人 / 인원 추가는 배정 담당자에게 요청하세요';row.append(note);}

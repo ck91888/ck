@@ -5,7 +5,8 @@ let agencies=[];
 const at=t=>t?new Date(t).toLocaleTimeString('en-GB',{timeZone:'Asia/Seoul',hour:'2-digit',minute:'2-digit'}):'—',hours=n=>{const m=Math.round(n||0);return Math.floor(m/60)+':'+String(m%60).padStart(2,'0');},company=a=>a==='동인천'?'동인천（东仁川）':a==='直招'?'直招（직접채용）':a,dept=d=>({bulk:'大货',direct_ship:'代发',import:'进口'}[d]||'其他');
 const api=(action,data={})=>CKSession.request('sop_attendance_'+action,data);
 const loadConfig=async()=>{const config=await api('config');agencies=config.agencies;return config;};
-let jobDefinitions={};const jobLabel=t=>jobDefinitions[t]?.[0]||t||'作业';
+const jobSummary=x=>window.CKDocumentLabels.jobSummary(x);
+const jobContext=(x,includeType=false)=>[x.has_business_reference===false?'':jobDepartment(x.department),includeType&&x.has_business_reference!==false?window.CKDocumentLabels.jobType(x):'',jobSummary(x)].filter(Boolean).join(' · ');
 function radios(current=''){return '<div class="agencies">'+agencies.map(a=>`<label class="agency"><input type="radio" name="agency" value="${e(a)}" ${a===current?'checked':''} required><span>${e(a)}</span><small>${a==='동인천'?'东仁川':a==='直招'?'직접채용':'인력회사 / 人力公司'}</small></label>`).join('')+'</div>';}
 function badge(r){qrcode.stringToBytes=qrcode.stringToBytesFuncs['UTF-8'];const qr=qrcode(0,'M');qr.addData(r.badgeId+'|'+r.name);qr.make();return `<div class="ck-label"><div class="badge-qr">${qr.createSvgTag({cellSize:4,margin:16,scalable:true})}</div><div class="badge-info"><div class="badge-heading"><b>CK</b><span>명찰 / 工牌</span></div><div class="badge-name ${r.name.length>22?'very-long':r.name.length>9?'long':''}">${e(r.name)}</div>${r.badgeType==='permanent'?'':`<div class="badge-agency">${e(company(r.agency))}</div>`}<div class="badge-date">${r.personType==='employee'?'职员 / 직원':r.badgeType==='permanent'?'长期 / 고정':e(r.day)}</div><div class="badge-date">${e(r.employeeNo||r.badgeId.split('-').pop())}</div></div></div>`;}
 async function print(r){if(r.inAt&&r.id){const x=await api('print',{id:r.id,client_req_id:crypto.randomUUID()});r=x.record;}let root=document.getElementById('print-root');if(!root){root=document.createElement('div');root.id='print-root';document.body.append(root);}root.innerHTML=badge(r);const style=document.createElement('style');style.textContent='@page{size:70mm 30mm;margin:0}';document.head.append(style);document.body.classList.add('ck-print-badge');try{window.print();}finally{document.body.classList.remove('ck-print-badge');style.remove();}return r;}
@@ -15,8 +16,80 @@ const managementLabels={'':'未标记 / 미지정',bulk:'大货 / 대량',direct
 const managementLabel=value=>managementLabels[value]||managementLabels[''];
 const jobDepartment=value=>({bulk:'大货 / 대량',direct_ship:'代发 / 직배송',import:'进口 / 수입'}[value]||'其他 / 기타');
 const statusLabels={unassigned:'未分配作业 / 배정 대기',working:'作业中 / 작업 중',rest:'休息中 / 휴식 중',out:'已下班 / 퇴근'};
-function statusMarkup(item){const state=Object.hasOwn(statusLabels,item?.status)?item.status:'unknown',label=statusLabels[state]||'状态待核实 / 상태 확인 필요';return `<div class="ck-current-status"><span class="ck-work-status" data-status="${state}">${e(label)}</span>${state==='working'?(item.currentJobs||[]).map(j=>`<small class="ck-current-job">${e(jobDepartment(j.department))} · ${e(j.no||j.id||'')}</small>`).join(''):''}</div>`;}
-window.CKAttendance={api,badge,print,at,hours,statusMarkup,statusLabels};
+function statusMarkup(item){const state=Object.hasOwn(statusLabels,item?.status)?item.status:'unknown',label=statusLabels[state]||'状态待核实 / 상태 확인 필요';return `<div class="ck-current-status"><span class="ck-work-status" data-status="${state}">${e(label)}</span>${state==='working'?(item.currentJobs||[]).map(j=>`<small class="ck-current-job">${e(jobContext(j))}</small>`).join(''):''}</div>`;}
+// A dashboard's clock is not evidence that its report has been read again.
+// Only an applied, successful summary response advances this timestamp.
+function reportRefresh({root,config,alive,visible,date,paused,refresh,active=()=>true}){
+ const interval=15000,staleAfter=30000,serverTime=Date.parse(config.asOf),offset=Number.isFinite(serverTime)?serverTime-Date.now():0;
+ const node=root.querySelector('[data-report-freshness]');
+ let timer=null,disposed=false,suspended=false,listening=false,inFlight=0,nextRead=Date.now()+interval,due=false,lastAsOf='',failed=false;
+ const today=()=>new Date(Date.now()+offset+32400000).toISOString().slice(0,10);
+ const current=()=>active()&&date()===today();
+ const usable=()=>!disposed&&!suspended&&alive()&&visible()&&!document.hidden;
+ const canApply=()=>usable()&&current()&&!paused();
+ const canRead=()=>canApply()&&!inFlight;
+ function paint(){
+  if(disposed||!alive()||!node)return;
+  const stamp=Date.parse(lastAsOf),known=Number.isFinite(stamp),old=failed||(known&&current()&&Date.now()+offset-stamp>=staleAfter);
+  const time=known?new Date(stamp+32400000).toISOString().replace('T',' ').replace('Z',' KST'):'';
+  let text=time?`作业状态更新于 ${time} / 작업 상태 갱신`:'尚未成功读取作业状态 / 작업 상태를 아직 불러오지 못했습니다';
+  if(failed)text+=' · 刷新失败，'+(known?'保留上次数据，状态可能已过时':'请重试')+' / 갱신 실패 · '+(known?'이전 데이터, 상태가 오래되었을 수 있습니다':'다시 시도하세요');
+  else if(old)text+=' · 状态可能已过时 / 오래된 상태일 수 있습니다';
+  if(current()&&paused())text+=' · 查看或编辑中，自动更新已暂停 / 확인·수정 중 자동 갱신 일시 중지';
+  else if(!current())text+=' · 历史日期不自动更新 / 과거 날짜는 자동 갱신하지 않습니다';
+  if(node.textContent!==text)node.textContent=text;
+  const state=failed?'failed':old?'stale':known?'current':'loading';
+  if(node.dataset.freshness!==state)node.dataset.freshness=state;
+  const cls=old?'ck-warning':'ck-muted';if(node.className!==cls)node.className=cls;
+  if(node.hidden===active())node.hidden=!active();
+ }
+ function check(force=false){
+  if(disposed)return;
+  if(!alive()){destroy();return;}
+  if(force)due=true;
+  paint();
+  if((due||Date.now()>=nextRead)&&canRead())void refresh({background:true});
+ }
+ const returned=()=>{if(!document.hidden)check(true);};
+ function start(){
+  if(disposed||listening)return;suspended=false;listening=true;
+  window.addEventListener('focus',returned);document.addEventListener('visibilitychange',returned);
+  timer=setInterval(()=>check(true),interval);
+ }
+ function suspend(){
+  suspended=true;due=true;clearInterval(timer);timer=null;listening=false;
+  window.removeEventListener('focus',returned);document.removeEventListener('visibilitychange',returned);
+ }
+ const restored=()=>{if(suspended){start();check(true);}};
+ function destroy(){if(disposed)return;disposed=true;suspend();observer.disconnect();window.removeEventListener('pagehide',suspend);window.removeEventListener('pageshow',restored);}
+ // Open/close and import-panel visibility changes are observed without replacing
+ // the dialog or its contents. A due read resumes once the last review is closed.
+ const observer=new MutationObserver(()=>check());
+ root.querySelectorAll('dialog,[data-import-panel]').forEach(el=>observer.observe(el,{attributes:true,attributeFilter:['open','hidden']}));
+ window.addEventListener('pagehide',suspend);window.addEventListener('pageshow',restored);start();paint();
+ return {today,canRead,canApply,check,destroy,
+  begin(){inFlight++;due=false;nextRead=Date.now()+interval;paint();},
+  success(asOf){lastAsOf=asOf||'';failed=false;due=false;nextRead=Date.now()+interval;paint();},
+  failure(){failed=true;due=false;paint();},
+  defer(){due=true;paint();},
+  end(){inFlight=Math.max(0,inFlight-1);paint();if(due&&canRead())check();},
+  reset(){lastAsOf='';failed=false;due=false;paint();}
+ };
+}
+function preserveReportView(root,render){
+ const focused=document.activeElement,inside=focused&&root.contains(focused),attrs=inside?[...focused.attributes].filter(a=>a.name.startsWith('data-')).map(a=>[a.name,a.value]):[];
+ const card=inside&&!!focused.closest('.ck-person-cards'),x=window.scrollX,y=window.scrollY,rootX=root.scrollLeft,rootY=root.scrollTop;
+ const tables=[...root.querySelectorAll('.ck-table-wrap')].map(el=>[el.scrollLeft,el.scrollTop]);
+ render();
+ if(inside&&!focused.isConnected){
+  const replacement=attrs.length?[...root.querySelectorAll(focused.tagName)].find(el=>attrs.every(([k,v])=>el.getAttribute(k)===v)&&!!el.closest('.ck-person-cards')===card):null;
+  (replacement&&!replacement.disabled?replacement:root.querySelector('[data-refresh]'))?.focus({preventScroll:true});
+ }
+ root.scrollLeft=rootX;root.scrollTop=rootY;
+ [...root.querySelectorAll('.ck-table-wrap')].forEach((el,i)=>{if(tables[i]){el.scrollLeft=tables[i][0];el.scrollTop=tables[i][1];}});
+ if(window.scrollX!==x||window.scrollY!==y)window.scrollTo(x,y);
+}
+window.CKAttendance={api,badge,print,at,hours,statusMarkup,statusLabels,reportRefresh,preserveReportView};
 window.CKAttendanceKiosk=async function(){
  await CKSession.ready;const config=await loadConfig(),root=document.getElementById('terminal-content');let mode='in',selected=null,timer=null;const el=id=>document.getElementById(id);
  const error='<p class="error" role="alert" hidden></p>',back='<button type="button" class="text-button" data-back>返回 / 돌아가기</button>';
@@ -54,28 +127,29 @@ window.CKLabor=async function(root,{field=false}={}){
  // A tab can be opened again while its previous config/refresh is still in flight.
  root.__ckLabor?.destroy();
  let disposed=false,report=null,selectedId='',readVersion=0,editorVersion=0,mutating=false;
- let detailOrigin=null,editorOrigin=null,detailScroll=null;
- const retries=new Map(),lifecycle={destroy(){disposed=true;readVersion++;editorVersion++;observer?.disconnect();window.removeEventListener('pagehide',leave);root.querySelectorAll('dialog[open]').forEach(d=>d.close());}};
+ let detailOrigin=null,editorOrigin=null,detailScroll=null,freshness;
+ const retries=new Map(),lifecycle={destroy(){disposed=true;readVersion++;editorVersion++;observer?.disconnect();freshness?.destroy();window.removeEventListener('pagehide',leave);root.querySelectorAll('dialog[open]').forEach(d=>d.close());}};
  let observer;root.__ckLabor=lifecycle;
  const alive=()=>!disposed&&root.__ckLabor===lifecycle&&root.isConnected;
  const visible=()=>{if(!alive())return false;for(let n=root;n&&n.nodeType===1;n=n.parentElement)if(n.hidden||n.style.display==='none'||n.classList.contains('hidden'))return false;return true;};
- await CKSession.ready;jobDefinitions=(await import('/shared/labor-department.js')).jobDefinitions;
+ await CKSession.ready;
  const config=await loadConfig();if(!alive())return lifecycle;
  const manager=config.user.role==='manager',canEdit=['manager','dispatcher'].includes(config.user.role),manageDaily=!field&&canEdit,removeDaily=!field&&manager;
  root.classList.add('ck-labor');root.classList.toggle('ck-labor-field',field);
  const uid='ck-labor-'+crypto.randomUUID(),departmentOptions=(value='')=>Object.entries(managementLabels).map(([k,v])=>`<option value="${k}" ${k===value?'selected':''}>${v}</option>`).join('');
  root.innerHTML=`<div class="ck-section-heading"><div><p class="ck-eyebrow">PEOPLE & TIME</p><h2>${field?'现场人员与休息 / 인원·휴식':'日当人力 / 일용직 인력'}</h2><p>当天签到、实际休息与部门作业时长</p></div><div class="ck-actions">${!field?'<a href="/attendance/" target="_blank">打开签到点 ↗</a><button data-permanent>长期工牌管理</button><button data-samename>同名人员核实</button><button data-register>登记长期工牌</button><button data-export>导出 CSV</button>':''}</div></div>
- <div class="ck-filters"><label>日期 / 날짜<input type="date" data-date value="${config.day}"></label><label>人力公司 / 인력회사<select data-company><option value="">全部 / 전체</option>${agencies.map(a=>`<option value="${e(a)}">${e(company(a))}</option>`).join('')}</select></label><label>管理部门 / 관리 부서<select data-department-filter><option value="all" selected>全部 / 전체</option>${departmentOptions('all')}</select></label><label>当前作业 / 현재 작업<select data-status-filter><option value="">全部 / 전체</option>${Object.entries(statusLabels).map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}</select></label><label>姓名或工牌 / 이름·명찰<input data-search placeholder="搜索 / 검색"></label><button data-refresh>刷新 / 새로고침</button></div>
- <p data-error class="ck-error" role="alert" hidden></p><p data-feedback class="ck-muted" role="status" aria-live="polite"></p><div data-summary class="ck-metrics ck-workforce-metrics"></div><div data-peoplecards class="ck-person-cards"></div>
+ <div class="ck-filters"><label>日期 / 날짜<input type="date" data-date value="${config.day}"></label><label>人力公司 / 인력회사<select data-company><option value="">全部 / 전체</option>${agencies.map(a=>`<option value="${e(a)}">${e(company(a))}</option>`).join('')}</select></label><label>管理部门 / 관리 부서<select data-department-filter><option value="all" selected>全部 / 전체</option>${departmentOptions('all')}</select></label><label>当前作业 / 현재 작업<select data-status-filter><option value="">全部 / 전체</option>${Object.entries(statusLabels).map(([k,v])=>`<option value="${k}">${v}</option>`).join('')}</select></label><label>姓名、工牌、单号或派审员 / 이름·명찰·작업번호·담당자<input data-search placeholder="搜索 / 검색"></label><button data-refresh>刷新 / 새로고침</button></div>
+ <p data-error class="ck-error" role="alert" hidden></p><p data-report-freshness class="ck-muted" role="status" aria-live="polite"></p><p data-feedback class="ck-muted" role="status" aria-live="polite"></p><div data-summary class="ck-metrics ck-workforce-metrics"></div><div data-peoplecards class="ck-person-cards"></div>
  <div class="ck-table-wrap" tabindex="0" aria-label="日当签到记录 / 일용직 출근 기록"><table class="ck-table ck-workforce-table"><thead><tr><th>姓名 / 이름</th><th>公司</th><th>管理部门 / 관리 부서</th><th>上下班 / 当前作业</th><th>在岗</th><th>大货</th><th>代发</th><th>进口</th><th>休息</th><th>未归属</th><th>其他 / 冲突</th><th>操作</th></tr></thead><tbody data-rows></tbody></table></div>
  <p class="ck-muted">管理部门为当天安排标记，不改变实际作业或工时。当前未分配仅指已签到、未签退且不在作业或休息中的人员。<br>관리 부서는 당일 표시이며 실제 작업·근무시간은 바뀌지 않습니다. 배정 대기는 출근 중 작업·휴식이 없는 인원입니다.<br>单位：小时:分钟；个人时间不除以人数。仅扣除明确登记的休息。未归属不等于休息或当前空闲。未签退记录计算至本次刷新时间。</p>
  ${removeDaily?'<label class="ck-deleted-toggle"><input type="checkbox" data-show-deleted> 显示已删除签到 / 삭제된 출근 보기 <span data-deleted-count></span></label><section data-deleted hidden aria-label="已删除签到 / 삭제된 출근"></section>':''}<div data-agencies class="ck-agency-totals"></div><div data-stale></div>
  <dialog data-detail-dialog class="ck-attendance-detail" aria-labelledby="${uid}-detail-title"><div data-detail></div></dialog>
  <dialog data-editor class="ck-editor" aria-labelledby="${uid}-editor-title"><form><h2 id="${uid}-editor-title"></h2><div data-fields></div><p role="alert" class="ck-error" hidden></p><p data-pending role="status" class="ck-muted" hidden>正在保存；关闭窗口不会撤销已提交的操作。 / 저장 중입니다. 창을 닫아도 제출된 작업은 취소되지 않습니다.</p><div class="ck-actions"><button type="button" data-cancel>取消 / 취소</button><button type="submit">保存 / 저장</button></div></form></dialog>`;
  const $=s=>root.querySelector('[data-'+s+']'),editor=$('editor'),detailDialog=$('detail-dialog');
+ freshness=reportRefresh({root,config,alive,visible,date:()=>$('date').value,paused:()=>mutating||editor.open||detailDialog.open,refresh});
  const showError=x=>{if(alive()){$('error').hidden=false;$('error').textContent=x.message;}};
  const isDaily=r=>r.personType!=='employee'&&!String(r.badgeId||'').startsWith('EMP-');
- const matches=x=>{const r=x.record;return (!$('company').value||r.agency===$('company').value)&&(!$('search').value||(r.name+' '+r.badgeId).toLowerCase().includes($('search').value.toLowerCase()))&&($('department-filter').value==='all'||(r.managementDepartment||'')===$('department-filter').value);};
+ const matches=x=>{const r=x.record;return (!$('company').value||r.agency===$('company').value)&&(!$('search').value||(r.name+' '+r.badgeId+' '+[...(x.currentJobs||[]),...(x.segments||[])].map(jobSummary).join(' ')).toLowerCase().includes($('search').value.toLowerCase()))&&($('department-filter').value==='all'||(r.managementDepartment||'')===$('department-filter').value);};
  const filtered=()=>report?report.items.filter(x=>!x.record.voided&&matches(x)&&(!$('status-filter').value||x.status===$('status-filter').value)):[];
  const deleted=()=>removeDaily&&report?(report.deletedItems||[]).filter(matches):[];
  const find=id=>[...(report?.items||[]),...(removeDaily?report?.deletedItems||[]:[])].find(x=>x.record.id===id);
@@ -89,16 +163,20 @@ window.CKLabor=async function(root,{field=false}={}){
  detailDialog.addEventListener('close',()=>{if(detailDialog.open)return;const id=detailDialog.dataset.recordId;selectedId='';focusBack(detailOrigin,rowOrigin(id)||$('refresh'));if(visible()&&detailScroll){window.scrollTo(detailScroll.x,detailScroll.y);const table=root.querySelector('.ck-table-wrap');if(table)table.scrollLeft=detailScroll.table;}detailScroll=null;});
  function leave(){closeEditor();closeDetail();}
  window.addEventListener('pagehide',leave);
- observer=new MutationObserver(()=>{if(!alive()){lifecycle.destroy();return;}if(!visible())leave();});
+ let wasVisible=visible();observer=new MutationObserver(()=>{if(!alive()){lifecycle.destroy();return;}const shown=visible(),returned=shown&&!wasVisible;wasVisible=shown;if(!shown)leave();freshness.check(returned);});
  for(let n=root;n&&n.nodeType===1;n=n.parentElement)observer.observe(n,{attributes:true,attributeFilter:['hidden','style','class'],childList:true});
  function lockActions(){root.querySelectorAll('[data-mutation]').forEach(b=>{b.disabled=mutating||b.dataset.blocked==='true';});}
- async function refresh(){
+ async function refresh({background=false}={}){
+  if(!alive()||(background&&!freshness.canRead()))return false;
   const version=++readVersion,date=$('date').value;if(!date)return false;
-  $('refresh').disabled=true;root.setAttribute('aria-busy','true');
+  freshness.begin();if(!background)$('refresh').disabled=true;root.setAttribute('aria-busy','true');
   try{const next=await api('summary',{date,scope:field?'all':'daily'});if(!alive()||version!==readVersion||date!==$('date').value)return false;
-   report=next;$('error').hidden=true;draw();if(selectedId&&detailDialog.open){if(find(selectedId))renderDetail(selectedId);else closeDetail();}return true;
-  }catch(x){if(alive()&&version===readVersion)showError(x);return false;}
-  finally{if(alive()&&version===readVersion){$('refresh').disabled=false;root.removeAttribute('aria-busy');}}
+   if(background&&!freshness.canApply()){freshness.defer();return false;}
+   if(!next||!Array.isArray(next.items))throw Error('作业状态读取失败，请重试 / 작업 상태를 다시 불러오세요');
+   report=next;$('error').hidden=true;if(background)preserveReportView(root,draw);else draw();freshness.success(next.asOf);
+   if(!background&&selectedId&&detailDialog.open){if(find(selectedId))renderDetail(selectedId);else closeDetail();}return true;
+  }catch(x){if(alive()&&version===readVersion){freshness.failure();showError(x);}return false;}
+  finally{freshness.end();if(alive()&&version===readVersion){$('refresh').disabled=false;root.removeAttribute('aria-busy');}}
  }
  function draw(){
   if(!alive())return;const items=filtered(),sum=k=>items.reduce((n,x)=>n+(x.totals[k]||0),0);
@@ -126,7 +204,7 @@ window.CKLabor=async function(root,{field=false}={}){
     if(alive()){const updated=await refresh();if(updated)$('feedback').textContent=action==='void'?'已删除误签到，可在已删除记录中恢复。 / 삭제되었습니다. 삭제된 기록에서 복구할 수 있습니다.':action==='restore'?'已恢复原签到记录。 / 기존 출근 기록을 복구했습니다.':'已保存 / 저장되었습니다';}
     if(current&&visible()&&!editor.open){focusBack(editorOrigin,detailDialog.open?$('close-detail'):rowOrigin(body.id)||$('refresh'));if(done)await done(result);}
    }catch(x){if(x.businessError)retries.delete(signature);if(alive()&&token===editorVersion&&editor.open){err.hidden=false;err.textContent=x.message;}else showError(x);}
-   finally{pending=false;mutating=false;if(alive()){lockActions();if(token===editorVersion&&editor.open){$('pending').hidden=true;controls.forEach(([x,disabled])=>x.disabled=disabled);}}}
+   finally{pending=false;mutating=false;freshness.check();if(alive()){lockActions();if(token===editorVersion&&editor.open){$('pending').hidden=true;controls.forEach(([x,disabled])=>x.disabled=disabled);}}}
   };
   $('cancel').onclick=closeEditor;editor.showModal();
  }
@@ -134,8 +212,8 @@ window.CKLabor=async function(root,{field=false}={}){
  function removeEditor(x,restore){if(!x||!removeDaily||!isDaily(x.record)||(!restore&&x.canVoid!==true))return;const r=x.record;dialog(restore?'恢复签到 / 출근 복구':'删除误签到 / 잘못된 출근 삭제',`<p><strong>${e(r.name)}</strong> · ${e(r.day)} · ${e(r.badgeId)}</p><p class="${restore?'ck-muted':'ck-warning'}">${restore?'恢复原签到时间与工牌，重新计入当天人数和工时。不会新建签到，也不会恢复作业任务。<br>기존 출근 시간과 명찰을 복구하고 인원·근무시간에 다시 포함합니다. 작업은 재개하지 않습니다.':'仅用于误签到或重复签到。删除后不计入当天人数、工时和导出，可从已删除记录恢复。不会关闭任何作业；有作业、休息或借调记录的签到不能删除。<br>잘못되거나 중복된 출근만 삭제하세요. 인원·근무시간·내보내기에서 제외되며 복구할 수 있습니다. 작업을 종료하지 않으며 작업·휴식·지원 기록이 있으면 삭제할 수 없습니다.'}</p><label>${restore?'恢复原因 / 복구 사유':'删除原因 / 삭제 사유'}<textarea name="reason" required maxlength="500"></textarea></label>`,restore?'restore':'void',{id:r.id,version:r.version},null,null,restore?'确认恢复 / 복구 확인':'确认删除 / 삭제 확인');}
  function openDetail(id,origin){if(!find(id)||!visible())return;selectedId=id;detailOrigin=origin||document.activeElement;detailScroll={x:window.scrollX,y:window.scrollY,table:root.querySelector('.ck-table-wrap')?.scrollLeft||0};renderDetail(id);if(!detailDialog.open)detailDialog.showModal();$('close-detail').focus({preventScroll:true});}
  function renderDetail(id){
-  const x=find(id);if(!x)return;const r=x.record,today=r.day===config.day,scroll=detailDialog.scrollTop,focused=document.activeElement?.dataset;
-  const events=[...(x.segments||[]).map(s=>({start:s.start,end:s.end,label:dept(s.department)+' · '+jobLabel(s.jobType)+' · '+s.jobNo+(s.reason?' · '+(s.reason==='finished'?'已结束 / 완료':s.reason):'')})),...(x.breaks||[]).map(b=>({...b,label:'实际休息 / 휴식'}))].sort((a,b)=>a.start.localeCompare(b.start));
+  const x=find(id);if(!x)return;const r=x.record,today=r.day===freshness.today(),scroll=detailDialog.scrollTop,focused=document.activeElement?.dataset;
+  const events=[...(x.segments||[]).map(s=>({start:s.start,end:s.end,label:jobContext(s,true)+(s.reason?' · '+window.CKDocumentLabels.jobLeaveReason(s.reason):'')})),...(x.breaks||[]).map(b=>({...b,label:'实际休息 / 휴식'}))].sort((a,b)=>a.start.localeCompare(b.start));
   detailDialog.dataset.recordId=id;
   $('detail').innerHTML=`<div class="ck-detail-heading"><div><h2 id="${uid}-detail-title">${e(r.name)} · 当日明细 / 일별 상세</h2><p class="ck-muted">${e(r.day)} · ${e(r.badgeId)} · ${e(company(r.agency))}</p></div><button type="button" data-close-detail class="ck-small" aria-label="关闭明细 / 상세 닫기">关闭 / 닫기</button></div>
   ${r.voided?`<p class="ck-warning">已删除，不计入统计 / 삭제됨 · 집계 제외<br>${e(r.voidReason)} · ${at(r.voidedAt)}</p>`:statusMarkup(x)}
@@ -152,7 +230,7 @@ window.CKLabor=async function(root,{field=false}={}){
   $('close-detail').onclick=closeDetail;bindRows($('detail'));lockActions();detailDialog.scrollTop=scroll;
   if(focused&&detailDialog.open&&!editor.open){for(const key of ['rest','correct','reprint','closeDetail','department','void','restore'])if(key in focused){const button=$('detail').querySelector('[data-'+key.replace(/[A-Z]/g,c=>'-'+c.toLowerCase())+']');(button&&!button.disabled?button:$('close-detail'))?.focus({preventScroll:true});break;}}
   if($('rest'))$('rest').onclick=()=>dialog(x.status==='rest'?'结束休息 / 휴식 종료':'开始休息 / 휴식 시작',`<p>${e(r.name)}：${x.status==='rest'?'恢复仍在进行的原任务；若原任务已结束，则回到未分配状态。 / 진행 중인 기존 작업만 재개합니다. 종료된 작업이면 배정 대기로 돌아갑니다.':'现在停止个人作业计时，并开始记录休息。 / 개인 작업 시간을 멈추고 휴식을 기록합니다.'}</p>`,x.status==='rest'?'break_end':'break_start',{id:r.id});
-  if($('reprint'))$('reprint').onclick=async()=>{if(mutating)return;mutating=true;lockActions();try{await print(r);await refresh();}catch(x){showError(x);}finally{mutating=false;if(alive())lockActions();}};
+  if($('reprint'))$('reprint').onclick=async()=>{if(mutating)return;mutating=true;lockActions();try{await print(r);await refresh();}catch(x){showError(x);}finally{mutating=false;freshness.check();if(alive())lockActions();}};
   if($('correct'))$('correct').onclick=()=>{const local=t=>t?new Date(Date.parse(t)+9*3600000).toISOString().slice(0,16):'';dialog('核实上下班时间 / 출퇴근 정정',`<label>上班（韩国时间） / 출근 (한국 시간)<input name="inAt" type="datetime-local" value="${local(r.inAt)}" required></label><label>下班（留空表示未签退） / 퇴근 (미퇴근 시 비워 두세요)<input name="outAt" type="datetime-local" value="${local(r.outAt)}"></label><label>核实原因 / 정정 사유<textarea name="reason" required maxlength="500"></textarea></label>`,'correct',{},null,fd=>({id:r.id,version:r.version,reason:fd.get('reason'),inAt:fd.get('inAt')+':00+09:00',outAt:fd.get('outAt')?fd.get('outAt')+':00+09:00':''}));};
  }
  if($('samename'))$('samename').onclick=()=>dialog('同名不同人 · 核实后另建签到',`<p>确认是不同的两个人后才使用此入口。新工牌不会覆盖已有签到。</p><label>姓名<input name="name" required maxlength="40"></label><label>人力公司<select name="agency" required><option value="">请选择</option>${agencies.map(a=>`<option value="${e(a)}">${e(company(a))}</option>`).join('')}</select></label><label>核实说明<textarea name="reason" required></textarea></label>`,'checkin',{confirm_distinct_person:true},async r=>{await print(r.record);});
@@ -161,12 +239,12 @@ window.CKLabor=async function(root,{field=false}={}){
   try{const result=await api('people');if(!visible()||version!==editorVersion)return;
    dialog('长期工牌 / 고정 명찰',result.items.map(p=>`<p><strong>${e(p.name)}</strong> · ${e(p.badgeId)} <button type="button" data-print-person="${e(p.id)}">补打 / 재출력</button></p>`).join('')||'<p>暂无长期工牌，请先登记。</p>','');
    editor.querySelector('[type=submit]').hidden=true;editor.querySelector('form').onsubmit=ev=>ev.preventDefault();$('cancel').textContent='关闭 / 닫기';
-   editor.querySelectorAll('[data-print-person]').forEach(b=>b.onclick=async()=>{if(mutating)return;mutating=true;b.disabled=true;try{closeEditor();await print(result.items.find(p=>p.id===b.dataset.printPerson));}catch(x){showError(x);}finally{mutating=false;if(alive())lockActions();}});
+   editor.querySelectorAll('[data-print-person]').forEach(b=>b.onclick=async()=>{if(mutating)return;mutating=true;b.disabled=true;try{closeEditor();await print(result.items.find(p=>p.id===b.dataset.printPerson));}catch(x){showError(x);}finally{mutating=false;freshness.check();if(alive())lockActions();}});
   }catch(x){if(version===editorVersion)showError(x);}finally{if(alive())button.disabled=false;}
  };
  if($('register'))$('register').onclick=()=>dialog('登记长期工牌 / 고정 명찰 등록',`<label>姓名 / 이름<input name="name" maxlength="40" required></label><label>人力公司<select name="agency" required><option value="">请选择 / 선택</option>${agencies.map(a=>`<option value="${e(a)}">${e(company(a))}</option>`).join('')}</select></label><label>已有固定工号（可留空自动生成）<input name="badge" placeholder="DAF-..."></label>`,'register',{},async r=>{await print(r.person);});
- if($('export'))$('export').onclick=()=>{if(!report)return;const cell=v=>{let s=String(v??'');if(/^[\s]*[=+\-@]/.test(s))s="'"+s;return '"'+s.replaceAll('"','""')+'"';};const data=[['日期','姓名','工牌','公司','上班','下班','在岗分钟','大货分钟','代发分钟','进口分钟','休息分钟','未归属分钟','其他分钟','冲突分钟','异常','截至时间','管理部门','当前作业状态','当前作业'],...filtered().map(({record:r,totals:v,...x})=>[r.day,r.name,r.badgeId,r.agency,r.inAt,r.outAt,...['presence','bulk','direct_ship','import','rest','unassigned','other','conflict'].map(k=>Math.round(v[k]*100)/100),v.flags.join('；'),report.asOf,managementLabel(r.managementDepartment),statusLabels[x.status]||'',(x.currentJobs||[]).map(j=>jobDepartment(j.department)+' · '+(j.no||j.id)).join('；')])];const url=URL.createObjectURL(new Blob(['\ufeff'+data.map(row=>row.map(cell).join(',')).join('\r\n')],{type:'text/csv;charset=utf-8'}));const a=document.createElement('a');a.href=url;a.download='CK_日当人力_'+report.date+'.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
- $('date').onchange=()=>{closeEditor();closeDetail();report=null;$('feedback').textContent='';draw();refresh();};$('refresh').onclick=refresh;['company','department-filter','status-filter'].forEach(s=>$(s).onchange=draw);$('search').oninput=draw;if(removeDaily)$('show-deleted').onchange=draw;
+ if($('export'))$('export').onclick=()=>{if(!report)return;const cell=v=>{let s=String(v??'');if(/^[\s]*[=+\-@]/.test(s))s="'"+s;return '"'+s.replaceAll('"','""')+'"';};const data=[['日期','姓名','工牌','公司','上班','下班','在岗分钟','大货分钟','代发分钟','进口分钟','休息分钟','未归属分钟','其他分钟','冲突分钟','异常','截至时间','管理部门','当前作业状态','当前作业','派审员 / 배정·검수 담당자'],...filtered().map(({record:r,totals:v,...x})=>[r.day,r.name,r.badgeId,r.agency,r.inAt,r.outAt,...['presence','bulk','direct_ship','import','rest','unassigned','other','conflict'].map(k=>Math.round(v[k]*100)/100),v.flags.join('；'),report.asOf,managementLabel(r.managementDepartment),statusLabels[x.status]||'',(x.currentJobs||[]).map(j=>(j.has_business_reference===false?'':jobDepartment(j.department)+' · ')+window.CKDocumentLabels.jobLabel(j)).join('；'),(x.currentJobs||[]).map(j=>window.CKDocumentLabels.jobDispatcher(j)).join('；')])];const url=URL.createObjectURL(new Blob(['\ufeff'+data.map(row=>row.map(cell).join(',')).join('\r\n')],{type:'text/csv;charset=utf-8'}));const a=document.createElement('a');a.href=url;a.download='CK_日当人力_'+report.date+'.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
+ $('date').onchange=()=>{closeEditor();closeDetail();report=null;freshness.reset();$('feedback').textContent='';draw();refresh();};$('refresh').onclick=refresh;['company','department-filter','status-filter'].forEach(s=>$(s).onchange=draw);$('search').oninput=draw;if(removeDaily)$('show-deleted').onchange=draw;
  draw();await refresh();return {...lifecycle,refresh};
 };
 })();

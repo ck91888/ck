@@ -452,9 +452,8 @@ function resumeActiveOrHome() {
 function notifyStaleSegmentsOnLogin(staleSegments, res) {
   if (!staleSegments || staleSegments.length === 0) return;
   var lines = staleSegments.map(function(s) {
-    var jt = s.job_type ? (JOB_TYPE_LABEL[s.job_type] || s.job_type) : '';
     var when = s.joined_at ? String(s.joined_at).replace('T', ' ').slice(0, 16) : '--';
-    return '· ' + (jt || s.job_id) + ' · 开始 ' + when + ' · ' + (s.stale_reason || '未退出');
+    return '· ' + window.CKDocumentLabels.jobSummary(s) + ' · 开始 ' + when + ' · ' + (s.stale_reason || '未退出');
   }).join('\n');
   // 是否仍能"返回原任务处理"：当前 active job 命中其中之一时可以继续
   var canResume = !!(res && res.active && res.job && res.segment);
@@ -741,8 +740,7 @@ async function checkMyActiveJob() {
   if (res && res.ok && res.active && res.job) {
     bar.classList.remove("hidden");
     var job = res.job;
-    var typeLabel = JOB_TYPE_LABEL[job.job_type] || job.job_type;
-    label.textContent = typeLabel;
+    label.textContent = window.CKDocumentLabels.jobSummary(job);
     meta.textContent = "状态/상태: " + (STATUS_LABEL[job.status] || job.status) + " | " + (job.active_worker_count || 0) + "人/명 参与中";
     saveActiveJob(job.id, res.segment ? res.segment.id : null);
   } else {
@@ -2055,7 +2053,7 @@ async function initInboundReturn() {
 function renderInboundReturnSession(job) {
   var el = document.getElementById("inboundReturnSessionInfo");
   if (!el) return;
-  var html = '<div><b>任务号/작업번호:</b> ' + esc(job.id) + '</div>';
+  var html = '<div><b>任务 / 작업:</b> ' + esc(window.CKDocumentLabels.jobLabel(job)) + '</div><div><b>派审员 / 배정·검수 담당자:</b> ' + esc(window.CKDocumentLabels.jobDispatcher(job)) + '</div>';
   el.innerHTML = html;
 }
 
@@ -2172,7 +2170,7 @@ async function initImportDelivery() {
 function renderImportDeliverySession(job) {
   var el = document.getElementById("idSessionInfo");
   if (!el) return;
-  var html = '<div><b>任务号/작업번호:</b> ' + esc(job.id) + '</div>';
+  var html = '<div><b>任务 / 작업:</b> ' + esc(window.CKDocumentLabels.jobLabel(job)) + '</div><div><b>派审员 / 배정·검수 담당자:</b> ' + esc(window.CKDocumentLabels.jobDispatcher(job)) + '</div>';
   el.innerHTML = html;
 }
 
@@ -3379,7 +3377,7 @@ async function submitCreatePickTrip(btnEl) {
       worker_name: getWorkerName()
     });
     if (res && res.ok) {
-      var trip = res.trip_no || res.display_no || res.job_id;
+      var trip = window.CKDocumentLabels.jobSummary(Object.assign({ job_type: 'pick_direct' }, res));
       alert("趟次已创建：" + trip + "\n趟次已创建，不记录你的拣货工时。请把拣货单交给实际拣货人扫码开始。\n\n차수 생성됨: " + trip + "\n차수가 생성되었습니다. 작업시간은 기록되지 않으며, 피킹번호를 실제 작업자에게 전달해 스캔하여 시작하세요.");
       _pickCreateDocNos = [];
       renderPickDocList("pickCreateDocList", _pickCreateDocNos, "_pickCreateDocNos", "pickCreateDocList");
@@ -3565,7 +3563,7 @@ function enterPickWorkingSection(startRes) {
   api({ action: "v2_ops_job_detail", job_id: _activeJobId }).then(function(res) {
     if (res && res.ok && res.job) {
       var t = document.getElementById("pickWorkingTitle");
-      if (t) t.textContent = "趟次/차수: " + (res.job.display_no || _activeJobId);
+      if (t) t.textContent = "趟次/차수: " + window.CKDocumentLabels.jobSummary(res.job);
       // 找当前 worker 自己的 open segment 作为开始时间
       var mySeg = (res.workers || []).find(function(w) {
         return w.worker_id === getWorkerId() && !w.left_at;
@@ -3723,8 +3721,9 @@ async function loadPickActiveList() {
     var canFinalize = (t.status !== 'completed') && noWorkerActive && isCreator;
 
     html += '<div class="trip-card">';
-    html += '<div class="trip-card-header"><span class="trip-tag">' + esc(t.display_no || t.id) + '</span>';
+    html += '<div class="trip-card-header"><span class="trip-tag">' + esc(window.CKDocumentLabels.jobLabel(t)) + '</span>';
     html += '<span class="st st-' + esc(stCls) + '">' + esc(stLabel) + '</span></div>';
+    html += '<div class="trip-card-meta">派审员 / 배정·검수 담당자: ' + esc(window.CKDocumentLabels.jobDispatcher(t)) + '</div>';
     html += '<div class="trip-card-meta">拣货单 / 피킹번호 (' + esc(summary) + '):</div>' + docsHtml;
     html += '<div class="trip-card-meta" style="margin-top:6px;">在岗拣货人 / 작업중:</div><div style="margin-top:2px;">' + wHtml + '</div>';
     html += '<div class="trip-card-meta" style="margin-top:6px;color:#999;font-size:11px;">趟次创建人 / 생성자: ' + esc(t.created_by || "--") + '</div>';
@@ -4334,7 +4333,7 @@ function _gjStopElapsedTimer() {
 function _gjEnterWorkingState(jobDetail) {
   _gjSwitchState("working");
   var titleEl = document.getElementById("gjActiveTitle");
-  if (titleEl) titleEl.textContent = _genericJobCtx.title || "--";
+  if (titleEl) titleEl.textContent = window.CKDocumentLabels.jobSummary(jobDetail || _genericJobCtx);
   var realStart = null;
   if (jobDetail && jobDetail.created_at) {
     realStart = new Date(jobDetail.created_at);
@@ -5162,11 +5161,10 @@ async function loadRealtimeBoard(btnEl) {
       actHtml = '<div class="muted">当前无在岗人员 / 근무중 없음</div>';
     } else {
       actList.forEach(function(w) {
-        var jobLbl = JOB_TYPE_LABEL[w.job_type] || w.job_type || '--';
+        var jobLbl = window.CKDocumentLabels.jobSummary(w);
         var dur = _rtbDuration(w.joined_at);
         actHtml += '<div style="border-bottom:1px solid #f0f0f0;padding:6px 0;font-size:13px;">';
         actHtml += '<div><b>' + esc(w.worker_name || w.worker_id || '--') + '</b> · <span style="color:#1565c0;">' + esc(jobLbl) + '</span>';
-        if (w.display_no) actHtml += ' · <span class="muted">' + esc(w.display_no) + '</span>';
         actHtml += '</div>';
         actHtml += '<div class="muted" style="font-size:11px;">开始 / 시작: ' + _rtbFmt(w.joined_at) + (dur ? ' · 已 ' + dur : '') + '</div>';
         actHtml += '</div>';
@@ -5180,10 +5178,9 @@ async function loadRealtimeBoard(btnEl) {
       offHtml = '<div class="muted">今日无人离岗 / 퇴근 없음</div>';
     } else {
       offList.forEach(function(w) {
-        var jobLbl = JOB_TYPE_LABEL[w.last_job_type] || w.last_job_type || '--';
+        var jobLbl = window.CKDocumentLabels.jobSummary(Object.assign({}, w, { job_type: w.last_job_type || w.job_type, display_no: w.last_display_no || w.display_no, started_at: w.last_joined_at || w.started_at }));
         offHtml += '<div style="border-bottom:1px solid #f0f0f0;padding:6px 0;font-size:13px;">';
         offHtml += '<div><b>' + esc(w.worker_name || w.worker_id || '--') + '</b> · <span class="muted">' + esc(jobLbl) + '</span>';
-        if (w.last_display_no) offHtml += ' · <span class="muted">' + esc(w.last_display_no) + '</span>';
         offHtml += '</div>';
         offHtml += '<div class="muted" style="font-size:11px;">最后离岗 / 마지막 퇴근: ' + _rtbFmt(w.last_left_at) + '</div>';
         offHtml += '</div>';

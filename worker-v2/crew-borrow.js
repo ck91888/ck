@@ -4,7 +4,7 @@ import {ensureSchema} from './schema-ready.js';
 import {activeAttendanceSQL} from './attendance-management.js';
 import {kstDay} from './attendance-time.js';
 import {dispatchAccess} from './dispatch-access.js';
-import {jobNumbers} from './document-numbers.js';
+import {jobNumbers,jobDisplayMetadata} from './document-numbers.js';
 const q=(e,s,...a)=>e.DB.prepare(s).bind(...a),rows=async(e,s,...a)=>(await q(e,s,...a).all()).results||[];
 const parse=s=>JSON.parse(s||'{}'),fail=m=>{throw Error(m);},active=['working','awaiting_close'],pending="('borrowed','return_pending')";
 export const crewBorrowEnabled=e=>e.SOP_ENVIRONMENT==='staging'&&e.SOP_UPGRADE_ENABLED==='true';
@@ -66,7 +66,7 @@ export async function crewAvailability(e,b){
  }
  if(record?.kind==='task'&&parse(record.state).status!=='working')return {ok:true,worker_id:id,can_borrow:false,reason:'原作业计划当前不能借调'};
  const [display]=await jobNumbers(e,[{id:s.job_id}]);
- return {ok:true,worker_id:id,worker_name:s.worker_name,can_borrow:true,source:{job_id:s.job_id,segment_id:s.id,revision:record?.revision||0,kind:record?.kind||'legacy',business_no:display.business_no||s.job_id,job_type:s.job_type,department:record?.department||'',owner:record?parse(record.state).owner||'':''}};
+ return {ok:true,worker_id:id,worker_name:s.worker_name,can_borrow:true,source:{job_id:s.job_id,segment_id:s.id,revision:record?.revision||0,kind:record?.kind||'legacy',...jobDisplayMetadata(display),job_type:s.job_type,department:record?.department||'',owner:record?parse(record.state).owner||'':''}};
 }
 const signature=b=>JSON.stringify({action:b.action,payload:b.payload||null,job_id:b.job_id||'',workers:[...(b.workers||[])].map(w=>({id:w.id,name:w.name})).sort((a,b)=>a.id.localeCompare(b.id)),lead_id:b.lead_id||'',department:b.labor_department||'',minutes:b.estimated_minutes||0,revision:b.revision||0,confirmations:[...(b.borrow_confirmations||[])].sort((a,b)=>a.worker_id.localeCompare(b.worker_id))});
 export async function prepareCrewBorrow(e,b){
@@ -86,7 +86,7 @@ export async function prepareCrewBorrow(e,b){
  }
  return {request,signature:signature(b),plans,replay:false};
 }
-export async function borrowedOut(e,id){if(!crewBorrowEnabled(e)||!await hasLoanTable(e))return [];return rows(e,`SELECT * FROM ck_crew_borrows WHERE source_job_id=? AND status IN ${pending}`,id);}
+export async function borrowedOut(e,id){if(!crewBorrowEnabled(e)||!await hasLoanTable(e))return [];return crewDisplayRows(e,await rows(e,`SELECT * FROM ck_crew_borrows WHERE source_job_id=? AND status IN ${pending}`,id));}
 export async function personHasPendingReturn(e,id){if(!crewBorrowEnabled(e)||!await hasLoanTable(e))return false;return !!await q(e,"SELECT id FROM ck_crew_borrows WHERE worker_id=? AND status='return_pending'",id).first();}
 export async function sourceActiveWorkers(e,id,workers){const out=await borrowedOut(e,id);return workers.filter(w=>!out.some(b=>b.worker_id===w.id));}
 export function crewBorrowStatements(e,prepared,destinationId,t){
@@ -144,8 +144,16 @@ export async function reconcileCrewReturns(e,id){
   sql.push(q(e,"UPDATE ck_crew_borrows SET status='returned',blocked_reason='',returned_at=?,return_segment_id=? WHERE id=? AND status='return_pending'",t,seg,b.id));
   try{await e.DB.batch(sql);out.push({id:b.id,worker_id:b.worker_id,worker_name:b.worker_name,status:'returned'});}catch(error){const now=await q(e,'SELECT status FROM ck_crew_borrows WHERE id=?',b.id).first();if(now?.status==='returned')out.push({id:b.id,worker_id:b.worker_id,status:'returned'});else{await mark(e,b,'return_pending','归还时状态变化，可重新核对后重试',t);out.push({id:b.id,worker_id:b.worker_id,worker_name:b.worker_name,status:'return_pending',reason:'归还时状态变化，可重试'});}}
  }
- return out.map(x=>({...x,destination_job_id:id}));
+ return crewDisplayRows(e,out.map(x=>({...x,source_job_id:loans.find(b=>b.id===x.id)?.source_job_id||'',destination_job_id:id})));
 }
-export async function crewStatus(e,b){await ensureCrewBorrow(e);await destination(e,b);return {ok:true,items:await rows(e,'SELECT * FROM ck_crew_borrows WHERE destination_job_id=? ORDER BY borrowed_at',b.job_id)};}
+export async function crewStatus(e,b){await ensureCrewBorrow(e);await destination(e,b);return {ok:true,items:await crewDisplayRows(e,await rows(e,'SELECT * FROM ck_crew_borrows WHERE destination_job_id=? ORDER BY borrowed_at',b.job_id))};}
 export async function crewRetry(e,b){await ensureCrewBorrow(e);await destination(e,b);const returns=await reconcileCrewReturns(e,b.job_id);return {ok:true,returns,crew_returns:returns};}
 export async function reconcilePersonReturns(e,workerId){if(!workerId||!crewBorrowEnabled(e))return [];await ensureCrewBorrow(e);const items=await rows(e,`SELECT DISTINCT destination_job_id FROM ck_crew_borrows WHERE worker_id=? AND status IN ${pending}`,workerId),out=[];for(const b of items)out.push(...await reconcileCrewReturns(e,b.destination_job_id));return out;}
+
+// Attach source/destination display evidence in one lookup without changing loan
+// IDs, original owners, revisions or any return/reconciliation decisions.
+async function crewDisplayRows(e,items){
+ const ids=[...new Set(items.flatMap(x=>[x.source_job_id,x.destination_job_id]).filter(Boolean))];
+ const jobs=await jobNumbers(e,ids.map(id=>({id}))),byId=new Map(jobs.map(j=>[j.id,j]));
+ return items.map(x=>{const fields={};for(const prefix of ['source','destination']){const job=byId.get(x[prefix+'_job_id']);for(const name of ['job_label','business_no','display_business_no','has_business_reference','dispatcher_name','dispatcher_id','job_type','job_title','job_department','job_started_at'])fields[prefix+'_'+name]=job?.[name]??'';}return {...x,...fields};});
+}

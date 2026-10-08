@@ -1,4 +1,4 @@
-import {ensureDocumentNumbers,recordNumbers,resolveRecordId,jobNumbers} from './document-numbers.js';
+import {ensureDocumentNumbers,recordNumbers,resolveRecordId,jobNumbers,jobDisplayMetadata} from './document-numbers.js';
 import {loadTripEnabled} from './outbound-load-trip.js';
 import {readBatchMaterials,changeBatchMaterial} from './batch-work-materials.js';
 import {completionDate} from './completion-date.js';
@@ -172,12 +172,10 @@ export async function handleSop(b,env) {
      AND ((s.kind='dispatch' AND ${access.sql}) OR (s.kind='task' AND s.department='bulk' AND (?='manager' OR s.department IN (SELECT value FROM json_each(?)))) OR (s.id IS NULL AND j.job_type='load_outbound' AND j.related_doc_type='outbound_order' AND (?='manager' OR j.biz_class IN (SELECT value FROM json_each(?)))))
     AND (?='' OR (s.kind='dispatch' AND j.job_type='bulk_op' AND (j.id=? OR j.related_doc_id=? OR j.display_no=? OR ob.display_no=? OR ob.wms_work_order_no=?)))
      ORDER BY j.updated_at DESC LIMIT 200`,...access.args,u.role,JSON.stringify(u.departments||[]),u.role,JSON.stringify(u.departments||[]),...Array(6).fill(externalCode));
-   return {ok:true,items:rows.map(r=>{
+   return {ok:true,items:(await jobNumbers(env,rows)).map(r=>{
     const d=JSON.parse(r.state),plans=JSON.parse(r.unload_plans||'[]'),loads=JSON.parse(r.load_orders||'[]'),picks=JSON.parse(r.pick_numbers||'[]');
-    const numbers=loads.length?loads.map(o=>o.number):r.job_type==='pick_direct'?picks:plans.length?plans.map(p=>p.number):[r.inbound_external_no||r.inbound_no||(r.related_doc_type==='work_order'?r.related_doc_id:'')||r.outbound_external_no||r.outbound_no||r.feedback_no||r.display_no];
-    const business_no=r.task_kind==='task'?r.work_plan_no||'作业单号待补充':[...new Set(numbers.filter(Boolean))].join('、');
     const customer=[...new Set(loads.length?loads.map(o=>o.customer).filter(Boolean):plans.length?plans.map(p=>p.customer).filter(Boolean):[r.customer||r.inbound_customer||r.outbound_customer].filter(Boolean))].join('、');
-    return {id:r.id,task_kind:r.task_kind,job_type:r.job_type,title:r.task_kind==='task'?JSON.parse(r.need_state||'{}').title||d.title:loads.length?'本车装货 · '+loads.length+' 单':'',status:r.task_kind==='task'?d.status:r.status,source_type:r.related_doc_type,source_id:r.related_doc_id,lead_id:d.lead_id,last_lead:d.last_lead,display_no:r.display_no,business_no,customer,workers:JSON.parse(r.active_crew||'[]'),owner:d.owner,estimated_minutes:d.estimated_minutes};
+    return {id:r.id,...jobDisplayMetadata(r),task_no:r.task_no||'',task_kind:r.task_kind,job_type:r.job_type,title:r.task_kind==='task'?JSON.parse(r.need_state||'{}').title||d.title:loads.length?'本车装货 · '+loads.length+' 单':'',status:r.task_kind==='task'?d.status:r.status,source_type:r.related_doc_type,source_id:r.related_doc_id,lead_id:d.lead_id,last_lead:d.last_lead,display_no:r.display_no,business_no:r.business_no,customer,workers:JSON.parse(r.active_crew||'[]'),owner:d.owner,estimated_minutes:d.estimated_minutes};
    })};
   }
   if(b.action==='sop_dashboard') return await dashboard(env,u,b);
@@ -571,9 +569,9 @@ async function dashboard(env,u,b){
  return {ok:true,date:days,scope:'整单完成后更新产量；多人按该任务实际参与人数均分（分配产量，不是个人扫描实测）。按业务、作业、指标及单位分别排名。已登记人员无任务不等于空闲；外部系统Excel尚未导入的成果不包含在内。',roster:numberedRoster,rankings:ranked,reported_outputs:[...reported.values()],
   working:tasks.filter(r=>r.status==='working').length+nativeJobs.filter(x=>x.status==='working').length,
   active_people:new Set(segments.filter(s=>!s.left_at).map(s=>s.worker_id)).size,
-  live:segments.filter(s=>!s.left_at).map(s=>({worker_id:s.worker_id,worker_name:s.worker_name,job_id:s.job_id,joined_at:s.joined_at})),completed:completed.length,person_hours:Math.round(minutes/6)/10,outputs,
+  live:await jobNumbers(env,segments.filter(s=>!s.left_at).map(s=>({worker_id:s.worker_id,worker_name:s.worker_name,job_id:s.job_id,joined_at:s.joined_at})),'job_id'),completed:completed.length,person_hours:Math.round(minutes/6)/10,outputs,
   alerts:await recordNumbers(env,alerts.map(r=>({id:r.id,kind:r.kind,title:r.title,status:r.status,department:r.department,owner:r.owner||'',updated_at:r.updated_at,revision:r.revision}))),
-  data_quality:tasks.filter(r=>r.status==='awaiting_review'||(r.status==='working'&&Date.parse(now())-Date.parse(r.started_at)>12*3600000)).map(r=>({id:r.id,title:r.title,reason:r.status==='awaiting_review'?'待审核':'计时超过12小时，请核实'}))};
+  data_quality:await jobNumbers(env,tasks.filter(r=>r.status==='awaiting_review'||(r.status==='working'&&Date.parse(now())-Date.parse(r.started_at)>12*3600000)).map(r=>({id:r.id,title:r.title,reason:r.status==='awaiting_review'?'待审核':'计时超过12小时，请核实'})))};
 }
 // Defense in depth: legacy clients may finish old tasks but cannot alter SOP-owned tasks.
 export async function linkedCheck(env,id){

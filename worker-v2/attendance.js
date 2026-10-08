@@ -1,4 +1,5 @@
 import {ensureSchema} from './schema-ready.js';
+import {jobNumbers,jobDisplayMetadata} from './document-numbers.js';
 import {ensureAttendanceManagement,ensureAttendanceLoanGuard,attendanceDaySelect,activeAttendanceSQL,attendanceVoidBlockers,attendanceManagementStatement} from './attendance-management.js';
 // Attendance is enabled only in the isolated staging rollout. Production routes stay unchanged.
 import { attendanceReport, kstDay } from './attendance-time.js';
@@ -67,14 +68,14 @@ async function overview(env,date,t,scope='daily'){
  const filter=scope==='employee'?" AND d.worker_id LIKE 'EMP-%'":scope==='all'?'':" AND d.worker_id NOT LIKE 'EMP-%'";
  const start=new Date(date+'T00:00:00+09:00').toISOString(),end=new Date(Date.parse(start)+86400000).toISOString();
  const days=await rows(env,attendanceDaySelect+' WHERE d.day=?'+filter+' ORDER BY d.signed_in,d.name,d.id',date);
- const segments=await rows(env,`SELECT w.*,j.biz_class,j.job_type,j.status AS job_status,j.display_no,s.kind AS assignment_kind,s.department AS assigned_department,s.state AS assignment_state FROM v2_ops_job_workers w JOIN v2_ops_jobs j ON j.id=w.job_id LEFT JOIN sop_records s ON s.id=j.id AND s.kind IN ('task','dispatch') WHERE w.joined_at<? AND (w.left_at='' OR w.left_at>?)`,end,start);
+ const segments=await jobNumbers(env,await rows(env,`SELECT w.*,j.biz_class,j.job_type,j.status AS job_status,j.display_no,s.kind AS assignment_kind,s.department AS assigned_department,s.state AS assignment_state FROM v2_ops_job_workers w JOIN v2_ops_jobs j ON j.id=w.job_id LEFT JOIN sop_records s ON s.id=j.id AND s.kind IN ('task','dispatch') WHERE w.joined_at<? AND (w.left_at='' OR w.left_at>?)`,end,start),'job_id');
  for(const s of segments){let assignment={};try{assignment=JSON.parse(s.assignment_state||'{}');}catch{}s.labor_department=assignment.labor_department||'';}
  const breaks=await rows(env,'SELECT b.* FROM ck_attendance_breaks b JOIN ck_attendance_days d ON d.id=b.attendance_id WHERE d.day=?',date);
  const history=await rows(env,'SELECT e.* FROM ck_attendance_events e JOIN ck_attendance_days d ON d.id=e.record_id WHERE d.day=? ORDER BY e.version',date);
  const output=[],deletedItems=[],blockers=await attendanceVoidBlockers(env,date);
  for(const d of days){
   const record=publicDay(d),br=breaks.filter(x=>x.attendance_id===d.id);record.breaks=br.map(x=>({id:x.id,start:x.started_at,end:x.ended_at}));
-  const own=segments.filter(x=>x.worker_id===d.worker_id).map(x=>({id:x.id,jobId:x.job_id,jobNo:x.display_no||x.job_id,jobType:x.job_type,jobStatus:x.job_status,badgeId:x.worker_id,department:laborDepartment(x),start:x.joined_at,end:x.left_at,reason:x.leave_reason}));
+  const own=segments.filter(x=>x.worker_id===d.worker_id).map(x=>({id:x.id,jobId:x.job_id,jobNo:x.display_business_no||x.job_label,...jobDisplayMetadata(x),jobType:x.job_type,jobStatus:x.job_status,badgeId:x.worker_id,department:laborDepartment(x),start:x.joined_at,end:x.left_at,reason:x.leave_reason}));
   const verifiedWindow=own.filter(s=>!(s.start<record.inAt&&!s.end));
   const totals=attendanceReport(record,verifiedWindow,t,date);
   if(own.some(s=>s.department==='other'))totals.flags.push('有作业尚未确认用工部门');
@@ -83,7 +84,7 @@ async function overview(env,date,t,scope='daily'){
   const live=own.filter(s=>!s.end&&s.start>=record.inAt&&['working','pending','awaiting_close'].includes(s.jobStatus));
   const resting=br.some(x=>!x.ended_at),status=record.outAt?'out':resting?'rest':live.length?'working':'unassigned';
   const events=history.filter(e=>e.record_id===d.id);
-  (record.voided?deletedItems:output).push({record,totals,segments:own,breaks:record.breaks,status:record.voided?'voided':status,canVoid:!record.voided&&!isEmployee(d.worker_id)&&!blockers.has(d.id),voidBlockedReason:blockers.get(d.id)||'',currentJobs:live.map(s=>({id:s.jobId,no:s.jobNo,department:s.department})),events:events.map(e=>({action:e.action,actor:e.actor,actorName:JSON.parse(e.after_json).audit_actor_name||e.actor,at:e.at,before:JSON.parse(e.before_json),after:JSON.parse(e.after_json)}))});
+  (record.voided?deletedItems:output).push({record,totals,segments:own,breaks:record.breaks,status:record.voided?'voided':status,canVoid:!record.voided&&!isEmployee(d.worker_id)&&!blockers.has(d.id),voidBlockedReason:blockers.get(d.id)||'',currentJobs:live.map(s=>({id:s.jobId,no:s.display_business_no||s.job_label,...jobDisplayMetadata({...s,job_type:s.jobType,job_department:s.department}),department:s.department})),events:events.map(e=>({action:e.action,actor:e.actor,actorName:JSON.parse(e.after_json).audit_actor_name||e.actor,at:e.at,before:JSON.parse(e.before_json),after:JSON.parse(e.after_json)}))});
  }
  const stale=await rows(env,"SELECT d.id,d.worker_id,d.name,d.agency,d.day,d.signed_in FROM ck_attendance_days d WHERE d.day<? AND d.signed_out='' AND "+activeAttendanceSQL('d')+filter+" ORDER BY d.day DESC LIMIT 100",date);
  return {ok:true,date,asOf:t,agencies,items:output,deletedItems:env.SOP_REQUEST_USER?.role==='manager'?deletedItems:[],stale,publicTest:!!env.SOP_REQUEST_USER?.public_test};

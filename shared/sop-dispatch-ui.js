@@ -3,10 +3,10 @@
  window.CKNativeTaskButton=function(job){
   const b=document.createElement('button');b.type='button';b.className='btn btn-outline ck-native-task';
   const title=document.createElement('strong'),info=document.createElement('span'),crew=document.createElement('small');
-  title.textContent=job.business_no||job.display_no||'未关联单据 / 연결 문서 없음';
-  info.textContent=[job.title||(job.job_type==='courier_receiving'?'快递收货 / 택배 수령':'')||window.JOB_TYPE_LABEL?.[job.job_type]||job.job_type,job.customer].filter(Boolean).join(' · ');
-  crew.textContent='作业人员 / 작업자: '+(job.workers.map(w=>w.name).join('、')||(job.status==='assigned'?'待开始 / 시작 대기':'暂无人员 / 인원 없음'));
-  b.append(title,info,crew);b.onclick=async()=>{b.disabled=true;try{await CKOpenNativeJob(job);}finally{b.disabled=false;}};return b;
+  title.textContent=window.CKDocumentLabels.jobLabel(job);
+  info.textContent=[window.CKDocumentLabels.jobHistoryText(job.title,job)||window.CKDocumentLabels.jobType(job),job.customer].filter(Boolean).join(' · ');
+  crew.textContent='作业人员 / 작업자: '+((job.workers||[]).map(w=>w.name).join('、')||(job.status==='assigned'?'待开始 / 시작 대기':'暂无人员 / 인원 없음'));
+  const dispatcher=document.createElement('small');dispatcher.className='ck-task-dispatcher';dispatcher.textContent='派审员 / 배정·검수 담당자：'+window.CKDocumentLabels.jobDispatcher(job);b.append(title,info,dispatcher,crew);b.onclick=async()=>{b.disabled=true;try{await CKOpenNativeJob(job);}finally{b.disabled=false;}};return b;
  };
  const startActions=new Set(['v2_unload_job_start','v2_unplanned_unload_start','v2_inbound_job_start','v2_import_delivery_job_start','v2_outbound_load_start','v2_outbound_stock_op_start','v2_issue_handle_start','v2_pick_job_start','v2_pick_job_start_by_docs','v2_bulk_op_job_start','v2_ops_job_start','v2_verify_job_start']);
  window.CKInstallDispatch=function(){

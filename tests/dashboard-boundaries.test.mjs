@@ -98,7 +98,9 @@ const app=fs.readFileSync(new URL('shuju/app.js',root),'utf8');
 const exportSource=app.slice(app.indexOf('function exportWorkhoursSegments()'),app.indexOf('// =====================================================',app.indexOf('function exportWorkhoursSegments()')));
 function csvContext(segments,fields={whFilterStart:'2026-09-30',whFilterEnd:'2026-09-30'}){
  let output=null;const ctx={_whQuery:{start_date:fields.whFilterStart,end_date:fields.whFilterEnd},_whSummary:{segments},document:{getElementById:id=>({value:fields[id]||''})},alert:()=>{},jobTypeLabel:x=>x,fmtTime:x=>x||'',round1:x=>x,statusLabel:x=>x,exportCsv:(name,rows)=>output={name,rows}};
- vm.createContext(ctx);vm.runInContext(app.slice(app.indexOf("function workhourKstDate("),app.indexOf("function whFilterParams()"))+exportSource,ctx);return{ctx,get output(){return output;}};
+ ctx.window=ctx;vm.createContext(ctx);
+ vm.runInContext(fs.readFileSync(new URL("shared/document-labels.js",root),"utf8"),ctx);
+ vm.runInContext(app.slice(app.indexOf("function workhourKstDate("),app.indexOf("function whFilterParams()"))+exportSource,ctx);return{ctx,get output(){return output;}};
 }
 test('CSV preserves badge and Korean date while including the requested date range in filename',()=>{
  const s=csvContext([{worker_id:'QA-A',worker_name:'QA',joined_at:'2026-09-30T15:30:00.000Z',left_at:'2026-09-30T16:00:00.000Z',minutes:30}],{whFilterStart:'2026-10-01',whFilterEnd:'2026-10-01'});
