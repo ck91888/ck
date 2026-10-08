@@ -1,4 +1,5 @@
 import {ensureSchema} from './schema-ready.js';
+import {activeAttendanceSQL} from './attendance-management.js';
 import {ensureAttendance,guardAttendance} from './attendance.js';
 import {ensureDispatchStartGuard} from './atomic-native-start.js';
 import {staffedDispatchStatements} from './crew-borrow.js';
@@ -44,7 +45,7 @@ async function staff(e,b,allowEmpty=false){
  if(!Array.isArray(b.workers)||b.workers.length>50||(!allowEmpty&&!b.workers.length)||new Set(b.workers.map(w=>w.id)).size!==b.workers.length)fail('请扫描操作人员工牌 / 작업자 명찰을 스캔하세요');
  await ensureAttendance(e);
  const t=new Date().toISOString(),day=new Date(Date.parse(t)+9*3600000).toISOString().slice(0,10),out=[];
- const names=await rows(e,`SELECT d.worker_id,d.name FROM ck_attendance_days d JOIN ck_attendance_people p ON p.id=d.person_id WHERE d.worker_id IN (SELECT value FROM json_each(?)) AND p.enabled=1 AND d.signed_out='' AND d.signed_in<=? AND (d.day=? OR EXISTS(SELECT 1 FROM v2_ops_job_workers s WHERE s.job_id=? AND s.worker_id=d.worker_id AND s.left_at='' AND date(s.joined_at,'+9 hours')=d.day)) AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks r WHERE r.attendance_id=d.id AND r.ended_at='') ORDER BY d.day DESC`,JSON.stringify(b.workers.map(w=>w.id)),t,day,b.batch_id||'');
+ const names=await rows(e,`SELECT d.worker_id,d.name FROM ck_attendance_days d JOIN ck_attendance_people p ON p.id=d.person_id WHERE d.worker_id IN (SELECT value FROM json_each(?)) AND p.enabled=1 AND d.signed_out='' AND ${activeAttendanceSQL('d')} AND d.signed_in<=? AND (d.day=? OR EXISTS(SELECT 1 FROM v2_ops_job_workers s WHERE s.job_id=? AND s.worker_id=d.worker_id AND s.left_at='' AND date(s.joined_at,'+9 hours')=d.day)) AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks r WHERE r.attendance_id=d.id AND r.ended_at='') ORDER BY d.day DESC`,JSON.stringify(b.workers.map(w=>w.id)),t,day,b.batch_id||'');
  for(const w of b.workers){const person=names.find(x=>x.worker_id===w.id);if(!person||person.name!==w.name)fail('工牌无效、未签到、已签退或休息中 / 명찰·출근 상태를 확인하세요');out.push({id:w.id,name:person.name});}
  if(out.length&&!out.some(w=>w.id===b.lead_id))fail('请选择主操作员 / 주 작업자를 선택하세요');
  return out;
@@ -93,6 +94,6 @@ export async function courierBatchOperation(e,b){
 }
 // This expression is used in the INSERT, so completion, checkout and crew changes
 // racing with a scan are evaluated at commit, not at an earlier read.
-export const courierScanGuard=`EXISTS(SELECT 1 FROM ck_courier_batches b JOIN v2_ops_jobs j ON j.id=b.id JOIN v2_ops_job_workers w ON w.job_id=j.id JOIN ck_attendance_days d ON d.worker_id=w.worker_id AND d.day=date(w.joined_at,'+9 hours') JOIN ck_attendance_people p ON p.id=d.person_id WHERE b.id=? AND j.status='working' AND w.worker_id=? AND w.left_at='' AND d.signed_out='' AND p.enabled=1 AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks br WHERE br.attendance_id=d.id AND br.ended_at=''))`;
+export const courierScanGuard=`EXISTS(SELECT 1 FROM ck_courier_batches b JOIN v2_ops_jobs j ON j.id=b.id JOIN v2_ops_job_workers w ON w.job_id=j.id JOIN ck_attendance_days d ON d.worker_id=w.worker_id AND d.day=date(w.joined_at,'+9 hours') JOIN ck_attendance_people p ON p.id=d.person_id WHERE b.id=? AND j.status='working' AND w.worker_id=? AND w.left_at='' AND d.signed_out='' AND ${activeAttendanceSQL('d')} AND p.enabled=1 AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks br WHERE br.attendance_id=d.id AND br.ended_at=''))`;
 
 export function courierCommitAccess(e,id){const a=dispatchAccess(e.SOP_REQUEST_USER);return {sql:`EXISTS(SELECT 1 FROM sop_records s WHERE s.id=? AND s.kind='dispatch' AND ${a.sql})`,args:[id,...a.args]};}

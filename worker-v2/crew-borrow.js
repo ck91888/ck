@@ -1,6 +1,7 @@
 // Staging-only personal loans. The destination dispatcher authorizes a loan;
 // source task ownership and every other person's clock remain unchanged.
 import {ensureSchema} from './schema-ready.js';
+import {activeAttendanceSQL} from './attendance-management.js';
 import {kstDay} from './attendance-time.js';
 import {dispatchAccess} from './dispatch-access.js';
 import {jobNumbers} from './document-numbers.js';
@@ -25,14 +26,14 @@ export const CREW_BORROW_SCHEMA=[
 ];
 const CREW_ATTENDANCE_SCHEMA=[
  `CREATE TRIGGER IF NOT EXISTS ck_crew_source_attendance BEFORE INSERT ON ck_crew_borrows WHEN NEW.worker_id GLOB 'DA-*' OR NEW.worker_id GLOB 'DAF-*' OR NEW.worker_id GLOB 'EMP-*' BEGIN
- SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM ck_attendance_days d JOIN ck_attendance_people p ON p.id=d.person_id JOIN v2_ops_job_workers w ON w.id=NEW.source_segment_id WHERE d.worker_id=NEW.worker_id AND d.day=NEW.source_day AND p.enabled=1 AND d.signed_out='' AND d.signed_in<=w.joined_at AND date(w.joined_at,'+9 hours')=NEW.source_day AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks r WHERE r.attendance_id=d.id AND r.ended_at='')) THEN RAISE(ABORT,'borrow_source_attendance_changed') END; END`,
+ SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM ck_attendance_days d JOIN ck_attendance_people p ON p.id=d.person_id JOIN v2_ops_job_workers w ON w.id=NEW.source_segment_id WHERE d.worker_id=NEW.worker_id AND d.day=NEW.source_day AND p.enabled=1 AND d.signed_out='' AND ${activeAttendanceSQL('d')} AND d.signed_in<=w.joined_at AND date(w.joined_at,'+9 hours')=NEW.source_day AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks r WHERE r.attendance_id=d.id AND r.ended_at='')) THEN RAISE(ABORT,'borrow_source_attendance_changed') END; END`,
  `CREATE TRIGGER IF NOT EXISTS ck_crew_return_attendance BEFORE INSERT ON v2_ops_job_workers WHEN NEW.id LIKE 'WS-RETURN-%' AND (NEW.worker_id GLOB 'DA-*' OR NEW.worker_id GLOB 'DAF-*' OR NEW.worker_id GLOB 'EMP-*') BEGIN
- SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM ck_attendance_days d JOIN ck_attendance_people p ON p.id=d.person_id WHERE d.worker_id=NEW.worker_id AND d.day=date(NEW.joined_at,'+9 hours') AND p.enabled=1 AND d.signed_out='' AND d.signed_in<=NEW.joined_at AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks r WHERE r.attendance_id=d.id AND r.ended_at='')) THEN RAISE(ABORT,'borrow_return_attendance_changed') END; END`
+ SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM ck_attendance_days d JOIN ck_attendance_people p ON p.id=d.person_id WHERE d.worker_id=NEW.worker_id AND d.day=date(NEW.joined_at,'+9 hours') AND p.enabled=1 AND d.signed_out='' AND ${activeAttendanceSQL('d')} AND d.signed_in<=NEW.joined_at AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks r WHERE r.attendance_id=d.id AND r.ended_at='')) THEN RAISE(ABORT,'borrow_return_attendance_changed') END; END`
 ];
 export async function ensureCrewBorrow(e){
  if(!crewBorrowEnabled(e))return;
  await ensureSchema(e.DB,'crew-borrow-v1',()=>e.DB.batch(CREW_BORROW_SCHEMA.map(s=>e.DB.prepare(s))));
- if(e.SOP_ATTENDANCE_ENABLED==='true')await ensureSchema(e.DB,'crew-borrow-attendance-v1',()=>e.DB.batch(CREW_ATTENDANCE_SCHEMA.map(s=>e.DB.prepare(s))));
+ if(e.SOP_ATTENDANCE_ENABLED==='true')await ensureSchema(e.DB,'crew-borrow-attendance-v2',()=>e.DB.batch(['DROP TRIGGER IF EXISTS ck_crew_source_attendance','DROP TRIGGER IF EXISTS ck_crew_return_attendance',...CREW_ATTENDANCE_SCHEMA].map(s=>e.DB.prepare(s))));
 }
 const hasLoanTable=async e=>!!await q(e,"SELECT name FROM sqlite_master WHERE type='table' AND name='ck_crew_borrows'").first();
 export function borrowablePayload(p={}){return ['v2_unload_job_start','v2_unplanned_unload_start','v2_outbound_load_start'].includes(p.action)||p.action==='v2_ops_job_start'&&p.job_type==='load_outbound'&&!p.related_doc_id;}
@@ -45,7 +46,7 @@ export async function canCrewDestination(e,b){try{await destination(e,b);return 
 async function eligibility(e,id,t){
  if(!/^(?:DA(?:F)?|EMP)-/.test(id))return '';
  if(e.SOP_ATTENDANCE_ENABLED!=='true')return '须先启用当天考勤核验';
- const d=await q(e,'SELECT d.*,p.enabled FROM ck_attendance_days d JOIN ck_attendance_people p ON p.id=d.person_id WHERE d.worker_id=? AND d.day=?',id,kstDay(t)).first();
+ const d=await q(e,'SELECT d.*,p.enabled FROM ck_attendance_days d JOIN ck_attendance_people p ON p.id=d.person_id WHERE d.worker_id=? AND d.day=? AND '+activeAttendanceSQL('d'),id,kstDay(t)).first();
  if(!d||!d.enabled)return '人员已停用或没有韩国当天签到';if(d.signed_out)return '人员已签退';
  if(await q(e,"SELECT id FROM ck_attendance_breaks WHERE attendance_id=? AND ended_at=''",d.id).first())return '人员正在休息';return '';
 }

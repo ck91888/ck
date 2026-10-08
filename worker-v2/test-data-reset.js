@@ -9,7 +9,7 @@ export const TABLES = [
  'ck_crew_borrows','ck_crew_requests',
  'ck_load_order_claims','ck_load_order_links','ck_load_trips',
  'ck_field_access','ck_access_events','ck_feedback_plan_links','ck_unload_plan_links','ck_unload_trips','ck_courier_events','ck_courier_plan_items','ck_courier_receipts',
- 'ck_employee_profiles','ck_attendance_prints','ck_attendance_events','ck_attendance_breaks','ck_attendance_days','ck_attendance_people',
+ 'ck_employee_profiles','ck_attendance_management','ck_attendance_prints','ck_attendance_events','ck_attendance_breaks','ck_attendance_days','ck_attendance_people',
  'sop_document_numbers','sop_events','sop_records','v2_verify_scan_logs','v2_verify_batch_items','v2_verify_batches','v2_scan_batch_items','v2_scan_batches',
  'v2_issue_rework_requests','v2_issue_handle_runs','v2_issue_tickets','v2_pick_worker_docs','v2_ops_job_pick_docs','v2_ops_job_results','v2_ops_job_workers','v2_ops_jobs',
  'v2_outbound_order_change_logs','v2_outbound_order_lines','v2_outbound_orders','ck_outbound_display_sequences','v2_inbound_plan_biz_tasks','v2_inbound_plan_lines','v2_inbound_plans','v2_field_feedbacks','v2_attachments',
