@@ -1,3 +1,4 @@
+import {cargoReferencesFile} from './cargo-allocation.js';
 import {chainNeed,chainEvent,notifyMaterialChange,workChainEnabled} from './work-chain.js';
 import {batchStateEnabled,ensureBatchMaterialState} from './batch-material-state.js';
 const q=(env,sql,...args)=>env.DB.prepare(sql).bind(...args);
@@ -33,6 +34,7 @@ export async function changeBatchMaterial(body,env,user){
  if(file.removed===removed)return {ok:true,id:attachment,removed:!!removed,material_revision:expected,already_applied:true};
  const t=new Date().toISOString(),result={ok:true,id:attachment,removed:!!removed,material_revision:expected+1};
  const rows=(await q(env,"SELECT * FROM sop_records WHERE kind='need' AND json_extract(state,'$.source_type')='inbound' AND json_extract(state,'$.source_id')=?",plan.id).all()).results;
+ if(removed&&rows.some(row=>cargoReferencesFile(JSON.parse(row.state),attachment)))throw Error('资料仍被资料组或已确认成果引用，请保留历史文件版本');
  const statements=[q(env,'INSERT INTO ck_batch_material_events VALUES(?,?,?,?,?,?,?,?,?,?,?)',request,attachment,plan.id,body.id,expected,expected+1,removed,user.id,user.name,t,JSON.stringify(result)),
   q(env,`INSERT INTO ck_batch_material_state VALUES(?,?,?,?,?,?,?) ON CONFLICT(attachment_id) DO UPDATE SET removed=excluded.removed,revision=excluded.revision,actor_id=excluded.actor_id,actor_name=excluded.actor_name,changed_at=excluded.changed_at`,attachment,plan.id,removed,expected+1,user.id,user.name,t)];
  const notified=new Set();

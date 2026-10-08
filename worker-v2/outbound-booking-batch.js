@@ -13,7 +13,7 @@ export async function createOutboundBookingBatch(body,env){
  const previous=async()=>{const event=await q(env,'SELECT actor_id,record_id,action,result_json FROM sop_events WHERE request_id=?',request).first();if(!event)return null;const result=JSON.parse(event.result_json);if(event.actor_id!==user.id||event.record_id!==row.id||event.action!=='v2_outbound_order_batch_create'||result.request_fingerprint!==fingerprint)throw Error('出库请求编号已用于其他内容');return result;};
  const prior=await previous();if(prior)return prior;
  if(row.revision!==revision)throw Error('作业需求已更新，请刷新后安排出库');
- const d=row.data;if(['cancelled','closed'].includes(d.status)||d.needs_clarification)throw Error('作业需求已关闭或要求不完整');
+ const d=row.data;if(d.cargo_groups)throw Error('此计划须选择资料组及已审核成果安排出库');if(['cancelled','closed'].includes(d.status)||d.needs_clarification)throw Error('作业需求已关闭或要求不完整');
  const a=await chainAllocation(env,d),total=orders.reduce((sum,o)=>sum+o.quantity,0);
  if(!a.quantity||!a.unit)throw Error('请先填写作业数量和单位');
  if(!Number.isSafeInteger(total)||a.used+total>a.quantity)throw Error('本批出库合计超过剩余可安排数量');

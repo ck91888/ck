@@ -1,3 +1,4 @@
+import {cargoReady,cargoFiles,cargoAvailability} from './cargo-allocation.js';
 import {recordNumbers} from './document-numbers.js';
 import {legacyLoadClaim} from './legacy-load.js';
 import {batchVisibleSql,ensureBatchMaterialState} from './batch-material-state.js';
@@ -21,6 +22,7 @@ export async function chainAllocation(env, data, knownOrders) {
  const links = data.links || [], ids = [...new Set(links.map(l => l.outbound_id))];
  const orders = knownOrders || (ids.length ? (await q(env, `SELECT id,status,display_no,expected_ship_at FROM v2_outbound_orders WHERE id IN (SELECT value FROM json_each(?))`, JSON.stringify(ids)).all()).results : []);
  const current = links.filter(l => orders.some(o => o.id === l.outbound_id && o.status !== 'cancelled'));
+ if(data.cargo_groups){const a=await cargoAvailability(env,data),approved=a.groups.filter(g=>g.output?.status==='approved');return {quantity:approved.length,unit:'组',used:approved.filter(g=>!g.available).length,links:current,orders};}
  // Input cargo and packed output need not have the same unit (cartons -> pallets).
  const basis = data.result || data.shipping_basis;
  const quantity = Number(basis?.quantity ?? data.planned_quantity) || 0, unit = basis?.unit || data.planned_unit || '';
@@ -37,6 +39,7 @@ export function assertShippingResult(result, links) {
  if (total > Number(result.quantity)) throw Error(`实际成果不足：本次填写 ${result.quantity} ${result.unit}，已预约出库 ${total} ${result.unit}，相差 ${total-Number(result.quantity)} ${result.unit}。请核实实际成果或调整出库预约。 / 완료 수량이 출고 예약보다 적습니다.`);
 }
 export async function shippingBasisStatements(env, row, data, body, user, t) {
+ if(data.cargo_groups)throw Error('分组计划请按已审核组的成果单位安排出库');
  if (!workChainEnabled(env) || data.result || ['closed','cancelled'].includes(data.status)) throw Error('只能调整尚未完成的出库预约');
  if (!['manager','service'].includes(user.role)) throw Error('请由办公室调整出库数量与单位');
  if (data.operation_kind === 'direct_forward') throw Error('直接转发未加工，请按原货物单位安排出库');
@@ -67,6 +70,7 @@ export function chainEvent(env, row, data, user, request, action, t, result = {}
 export async function chainOutboundStatements(env, body, id, t) {
  const user = env.SOP_REQUEST_USER;
  const row = await chainNeed(env, body.sop_existing_need_id, user, true), d = row.data;
+ if(d.cargo_groups)throw Error('此计划须选择资料组及已审核成果安排出库');
  if (Number(body.sop_need_revision) !== row.revision) throw Error('作业需求已更新，请重新选择后安排出库');
  if (['cancelled','closed'].includes(d.status) || d.needs_clarification) throw Error('作业需求已关闭或要求不完整');
  chainDate(body.expected_ship_at);
@@ -93,7 +97,7 @@ export async function guardWorkChain(body, env) {
  if (!id) return null;
  const needs = await chainLinked(env,id);
  if (!needs.length && (load || body.status === 'issued') && !(body.action==='v2_outbound_load_finish'&&await legacyLoadClaim(env,body.job_id))) return '此出库计划缺少作业需求，请先关联作业需求';
- if (load && needs.some(n => !n.data.result || ['cancelled'].includes(n.data.status))) return '关联作业尚未完成审核；直接转发须先确认收货和可发货数量';
+ if (load && needs.some(n => !cargoReady(n.data,id))) return '关联作业尚未完成审核；直接转发须先确认收货和可发货数量';
  if (load) {const order=await q(env,'SELECT status,warehouse_ack_required FROM v2_outbound_orders WHERE id=?',id).first();if(!order||frozen.includes(order.status))return '出库计划已取消或已完成';if(Number(order.warehouse_ack_required))return '作业要求或资料已更新，请先确认最新变更再装货';}
  if (body.action === 'v2_outbound_order_update' && needs.length) {
   const old = await q(env,'SELECT * FROM v2_outbound_orders WHERE id=?',id).first();
@@ -103,7 +107,8 @@ export async function guardWorkChain(body, env) {
 }
 // Old source attachments remain retrievable and are labelled as historical.
 // No copying of blobs: all consumers receive the same attachment ID/file key.
-export async function workMaterials(env, rows) {
+export async function workMaterials(env, rows, outboundId=null) {
+  if(outboundId){const grouped=rows.filter(r=>r.data?.cargo_groups),legacy=rows.filter(r=>!r.data?.cargo_groups);if(grouped.length)return [...await workMaterials(env,legacy),...grouped.flatMap(r=>cargoFiles(r.data,outboundId))];}
   if (!rows.length) return [];
   await ensureBatchMaterialState(env);
  const files=(await q(env,`SELECT DISTINCT a.* FROM v2_attachments a JOIN sop_records n ON n.kind='need' AND n.id IN (SELECT value FROM json_each(?))
@@ -128,6 +133,7 @@ export async function workMaterialRead(body,env,user) {
  return {ok:true,items:await recordNumbers(env,items),more:rows.length>30,offset};
 }
 export function notifyMaterialChange(env,row,user,t,summary,change={}) {
+ if(row.data.cargo_groups)return []; // Library uploads do not change frozen group/order file selections.
  const ids=[...new Set([...(row.data.links||[]).map(l=>l.outbound_id),...(row.data.source_type==='outbound'?[row.data.source_id]:[])])],out=[];
  for(const id of ids){
   out.push(q(env,`UPDATE v2_outbound_orders SET revision_no=COALESCE(revision_no,0)+1,warehouse_ack_required=1,warehouse_ack_by='',warehouse_ack_at='',last_modified_by=?,last_modified_at=?,updated_at=? WHERE id=? AND status NOT IN ('shipped','completed','cancelled')`,user.name,t,t,id));
@@ -166,8 +172,8 @@ export const workMaterialCountSql = `(SELECT COUNT(DISTINCT a.id) FROM v2_attach
  (a.related_doc_type='outbound_order' AND a.related_doc_id=v2_outbound_orders.id AND a.attachment_category='outbound_material') OR
  EXISTS(SELECT 1 FROM sop_records n WHERE n.kind='need' AND
  (json_extract(n.state,'$.source_id')=v2_outbound_orders.id OR EXISTS(SELECT 1 FROM json_each(n.state,'$.links') l WHERE json_extract(l.value,'$.outbound_id')=v2_outbound_orders.id))
- AND NOT EXISTS(SELECT 1 FROM json_each(n.state,'$.removed_material_ids') r WHERE r.value=a.id)
+ AND ((json_type(n.state,'$.cargo_groups') IS NOT NULL AND EXISTS(SELECT 1 FROM json_each(n.state,'$.links') gl, json_each(gl.value,'$.cargo_allocations') ga WHERE json_extract(gl.value,'$.outbound_id')=v2_outbound_orders.id AND (EXISTS(SELECT 1 FROM json_each(ga.value,'$.documents') gf WHERE json_extract(gf.value,'$.id')=a.id) OR EXISTS(SELECT 1 FROM json_each(ga.value,'$.public_documents') gf WHERE json_extract(gf.value,'$.id')=a.id)))) OR (json_type(n.state,'$.cargo_groups') IS NULL AND NOT EXISTS(SELECT 1 FROM json_each(n.state,'$.removed_material_ids') r WHERE r.value=a.id)
  AND ((a.related_doc_type='sop_need' AND a.related_doc_id=n.id) OR
  (a.related_doc_type='inbound_plan' AND a.attachment_category IN ('inbound_material','batch_work_material') AND json_extract(n.state,'$.source_type')='inbound' AND a.related_doc_id=json_extract(n.state,'$.source_id')) OR
-  (a.related_doc_type='outbound_order' AND a.attachment_category='outbound_material' AND (a.related_doc_id=json_extract(n.state,'$.source_id') OR EXISTS(SELECT 1 FROM json_each(n.state,'$.links') l WHERE json_extract(l.value,'$.outbound_id')=a.related_doc_id))))))`;
+  (a.related_doc_type='outbound_order' AND a.attachment_category='outbound_material' AND (a.related_doc_id=json_extract(n.state,'$.source_id') OR EXISTS(SELECT 1 FROM json_each(n.state,'$.links') l WHERE json_extract(l.value,'$.outbound_id')=a.related_doc_id))))))))`;
 export const workMaterialCountFor=env=>batchVisibleSql(env)?workMaterialCountSql.replace(' WHERE\n',' WHERE 1'+batchVisibleSql(env)+' AND (\n').slice(0,-1)+'))':workMaterialCountSql;

@@ -145,6 +145,7 @@ async function detail(id,individual=!!window.CK_SOP_ROLLOUT?.workChain){const r=
     action('仓库反馈','sop_issue_feedback',area('message','处理结果'));
    }
  } else if(x.kind==='check')renderCheck(x,a,action);
+ if(!officeFiles&&x.kind==='need'&&window.CKCargoGroups){const groups=document.createElement('section');$('detailBody').append(groups);await CKCargoGroups.field(groups,x,{onChange:()=>detail(x.id,true)});}
  if(officeFiles&&x.kind==='need'&&window.CKWorkChain?.enabled()){const host=document.createElement('section');$('detailBody').append(host);await CKWorkChain.mountNeed(host,x,{onChange:()=>detail(x.id,true)});}
  const history=document.createElement('details');history.className='card';history.innerHTML=`<summary>操作历史（最近100次，含修改前后）</summary>${r.events.map(e=>`<p><b>${esc(e.actor_name)}</b> · ${esc(e.created_at)} · ${esc(jobText(e.action,x))}</p><details><summary>查看修改前后</summary><pre>${esc(jobText(e.before_json,x))}\n→\n${esc(jobText(e.after_json,x))}</pre></details>`).join('')}`;if((x.kind==='need'||isJob(x))&&window.CKWorkHistory)CKWorkHistory(history,r.events,x);c.append(history);
 }

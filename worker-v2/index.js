@@ -2930,7 +2930,7 @@ route("v2_outbound_order_detail", async (body, env) => {
   ]);
   const [lines,jobs,orderAtts,changeLogRs]=reads;
   let allAtts=orderAtts.results||[];
-  if(workChainEnabled(env)){const files=await workMaterials(env,needs);const byId=new Map(allAtts.map(f=>[f.id,f]));for(const f of files)byId.set(f.id,{...f,attachment_category:'outbound_material',canonical_material:true});allAtts=[...byId.values()];}
+  if(workChainEnabled(env)){const files=await workMaterials(env,needs,id);const byId=new Map(allAtts.map(f=>[f.id,f]));for(const f of files)byId.set(f.id,{...f,attachment_category:'outbound_material',canonical_material:true});allAtts=[...byId.values()];}
   row.material_count=allAtts.filter(a=>a.attachment_category==='outbound_material').length;
   const change_logs = (changeLogRs.results || []).map(r => {
     let diff = {};
@@ -7133,7 +7133,7 @@ route("v2_attachment_list", async (body, env) => {
   const doc_type = String(body.related_doc_type || "").trim();
   const doc_id = String(body.related_doc_id || "").trim();
   if (!doc_type || !doc_id) return err("missing related_doc_type or related_doc_id");
-  if(workChainEnabled(env)&&doc_type==='outbound_order'){const base=(await env.DB.prepare('SELECT * FROM v2_attachments WHERE related_doc_type=? AND related_doc_id=?').bind(doc_type,doc_id).all()).results||[];const files=await workMaterials(env,await chainLinked(env,doc_id));const items=new Map(base.map(f=>[f.id,f]));for(const f of files)items.set(f.id,{...f,attachment_category:'outbound_material',canonical_material:true});return json({ok:true,items:[...items.values()]});}
+  if(workChainEnabled(env)&&doc_type==='outbound_order'){const base=(await env.DB.prepare('SELECT * FROM v2_attachments WHERE related_doc_type=? AND related_doc_id=?').bind(doc_type,doc_id).all()).results||[];const files=await workMaterials(env,await chainLinked(env,doc_id),doc_id);const items=new Map(base.map(f=>[f.id,f]));for(const f of files)items.set(f.id,{...f,attachment_category:'outbound_material',canonical_material:true});return json({ok:true,items:[...items.values()]});}
   const rs = await env.DB.prepare(
     "SELECT a.* FROM v2_attachments a WHERE a.related_doc_type=? AND a.related_doc_id=?"+batchVisibleSql(env)+" ORDER BY a.created_at DESC"
   ).bind(doc_type, doc_id).all();

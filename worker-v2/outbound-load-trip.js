@@ -1,3 +1,4 @@
+import {cargoReady} from './cargo-allocation.js';
 // Staging only: a truck owns one labor job; each order owns its own loading result.
 import {ensureSchema} from './schema-ready.js';
 import {workChainEnabled} from './work-chain.js';
@@ -39,7 +40,7 @@ async function checked(e,orders,own=''){
   if(!loadable.includes(order.status))reason=order.status==='pending_issue'?'尚未下发，请先打印下发':order.status==='shipped'?'已出库，不得重复装货':order.status==='cancelled'?'已取消':'当前状态不允许装货：'+order.status;
    else if(workChainEnabled(e)&&!needs.length&&!continuingLegacy)reason='缺少关联作业计划';
    else if(continuingLegacy&&Number(order.uses_stock_operation)===1&&order.stock_operation_status!=='completed')reason='原工单库内作业尚未完成，不得装货';
-  else if(needs.some(n=>{const d=parse(n.state);return workChainEnabled(e)?!d.result||d.status==='cancelled':!(d.result&&(d.links||[]).some(l=>l.outbound_id===order.id))&&!['linked','closed'].includes(d.status);}))reason='关联作业尚未审核完成；直接转发须先确认收货和可发货数量';
+  else if(needs.some(n=>{const d=parse(n.state);return workChainEnabled(e)?!cargoReady(d,order.id):!(d.result&&(d.links||[]).some(l=>l.outbound_id===order.id))&&!['linked','closed'].includes(d.status);}))reason='关联作业尚未审核完成；直接转发须先确认收货和可发货数量';
   else if(Number(order.warehouse_ack_required))reason='出库要求或资料已更新，请先查看并确认最新变更';
   else if(Number(order.pickup_confirm_required))reason='提货安排已更新，请先查看并确认提货信息';
   else if(busy)reason='已有进行中的装货任务，请继续原任务';

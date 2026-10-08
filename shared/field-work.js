@@ -8,8 +8,8 @@
  window.CKFieldWork=function(root,initial='',options={}){
   root.className='ck-bulk';
   const external=!!options.external,api=(action,data={})=>CKSession.request(action,data),$=name=>root.querySelector('[data-'+name+']');
-  let picker=null,scan=null,current=null,closed=false,loadSequence=0,requestId='',requestSignature='';
-  async function cleanup(){if(picker){await picker.destroy();picker=null;}if(scan){const old=scan;scan=null;await old.stop().catch(()=>{});}}
+  let picker=null,scan=null,cargoDispatch=null,current=null,closed=false,loadSequence=0,requestId='',requestSignature='';
+  async function cleanup(){if(cargoDispatch){await cargoDispatch.destroy();cargoDispatch=null;}if(picker){await picker.destroy();picker=null;}if(scan){const old=scan;scan=null;await old.stop().catch(()=>{});}}
   function error(x){if(!closed&&$('error')){$('error').textContent=x.message;$('error').hidden=false;}}
   function complete(){if(closed)return;current=null;options.onChange?.(null);if(options.onComplete)options.onComplete();else window.goPage('home');}
   async function write(action,data){
@@ -72,7 +72,9 @@
   function draw(){
    const {need:n,task:t,source,segments,changed}=current,title=n?.title||t?.title||'',state=t?.status||n?.status||'pending',live=segments.filter(s=>!s.left_at);
    root.innerHTML=`<div class="ck-actions"><button data-back class="ck-small">← 扫描其他作业单 / 다른 작업</button><button data-refresh class="ck-small">刷新 / 새로고침</button><button data-home class="ck-small">返回首页，任务继续 / 작업 유지·홈으로</button></div><section class="ck-work-sheet"><span class="ck-state">${states[state]||esc(state)}</span><p class="ck-work-number">作业单号 / 작업 번호：<b>${esc(t?jobLabel({...t,business_no:n?.display_no||t.work_plan_no||t.business_no}):n?.display_no||'单号待补充')}</b></p>${t?`<p class="ck-work-dispatcher">派审员 / 배정·검수 담당자：${esc(jobDispatcher(t))}</p>`:''}<h2>${esc(jobText(title,t))}</h2><div class="ck-work-meta"><div>客户 / 고객<b>${esc(n?.customer||source?.customer||'—')}</b></div><div>货物来源 / 화물 출처<b>${esc(source?.number||(external?'外部作业单 / 외부 작업서':window.CKDocumentLabels.source(n)))}</b></div><div>货物范围 / 화물 범위<b>${esc(n?.scope_text||'见作业要求')}</b></div><div>作业位置 / 작업 위치<b>${esc(t?.location||n?.location||'待确认')}</b></div></div><div class="ck-instructions">${esc(n?.instructions||title)}</div>${changed?'<p class="ck-warning">纸单版本已更新，请按本页最新要求核对后派工。</p>':''}</section><div data-content></div><p data-error class="ck-error" role="alert" hidden></p>`;
+   if(!external&&n?.id&&window.CKCargoGroups){const materials=document.createElement('section');materials.className='ck-work-sheet';$('content').before(materials);CKCargoGroups.field(materials,n,{taskId:t?.id||'',onChange:()=>resolve(t?.id||n.id)}).catch(error);}
    $('back').onclick=()=>home().catch(error);$('refresh').onclick=()=>resolve(t?.id||n.id||n.display_no).catch(error);$('home').onclick=()=>window.goPage('home');
+   if(!external&&n?.cargo_groups&&window.CKCargoGroups.dispatch){const tasks=document.createElement('section');tasks.className='ck-work-sheet';root.querySelector('.cargo-field')?.before(tasks);if(!tasks.isConnected)$('content').before(tasks);cargoDispatch=CKCargoGroups.dispatch(tasks,n,{tasks:current.tasks||[],currentTask:t?.id,onOpen:id=>resolve(id),onStarted:id=>resolve(id)});if(!t)return;}
    if(external&&!t){
     people('派工并开始 / 배정 및 시작',[],async staff=>{
      const r=await write('sop_native_start',{payload:{action:'v2_bulk_op_job_start',work_order_no:n.display_no,customer:$('people').elements.customer.value.trim()},...staff,labor_department:'bulk',estimated_minutes:Number($('people').elements.minutes.value)});
@@ -98,7 +100,7 @@
    if(['assigned','paused','rework'].includes(t.status))action('核对人员并开始 / 인원 확인·시작',()=>people('开始作业 / 작업 시작',t.workers,async staff=>{let revision=t.revision;if(JSON.stringify(staff.workers)!==JSON.stringify(t.workers)||staff.lead_id!==t.lead_id){const r=await write('sop_task_people',{id:t.id,revision,...staff,reason:'开工前核对到位人员'});revision=r.revision;}await write('sop_task_start',{id:t.id,revision});await resolve(t.id);}));
    if(t.status==='working'){
      action('调整人员 / 인원 변경',()=>people('保存人员 / 인원 저장',live.map(w=>({id:w.worker_id,name:w.worker_name})),async staff=>{await write('sop_task_people',{id:t.id,revision:t.revision,...staff,reason:$('reason').value});await resolve(t.id);},true));
-    action('个人休息／恢复 / 개인 휴식·복귀',()=>window.CKOpenFieldLabor?.());action('暂停作业 / 작업 중지',()=>pause(t));action('填写产出并审核结束 / 산출·검수 완료',()=>finish(t));
+    action('个人休息／恢复 / 개인 휴식·복귀',()=>window.CKOpenFieldLabor?.());action('暂停作业 / 작업 중지',()=>pause(t));if(!n?.cargo_groups)action('填写产出并审核结束 / 산출·검수 완료',()=>finish(t));
    }else if(t.status==='awaiting_review')action('审核原有产出 / 검수',()=>{
     $('editor').innerHTML=`${CKResultSummary(t.result)}${t.result?.location?`<p>${esc(t.result.location)}</p>`:''}${CKResultPhotos(t.result)}<form data-review><label>审核结论<select name="decision"><option value="pass">通过 / 통과</option><option value="return">退回整改 / 재작업</option></select></label><label>审核说明<textarea name="reason" required></textarea></label><button class="ck-primary">保存审核 / 검수 저장</button></form>`;
     $('review').onsubmit=async ev=>{ev.preventDefault();const submit=ev.submitter||ev.target.querySelector('button[type=submit],button:not([type])');if(submit.disabled)return;submit.disabled=true;try{const review=Object.fromEntries(new FormData(ev.target));await write('sop_task_review',{id:t.id,revision:t.revision,...review});if(review.decision==='pass')complete();else await resolve(t.id);}catch(x){error(x);submit.disabled=false;}};
