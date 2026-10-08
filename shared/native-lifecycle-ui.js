@@ -16,7 +16,7 @@
  };
  window.CKInstallNativeLifecycle=function(){
   const $=id=>document.getElementById(id),leaveNames=['unloadLeave','inboundLeave','inboundReturnLeave','leaveImportDelivery','handleIssueLeave','bulkLeave','leaveGenericJob','leaveVerifyScan'];
-  let current=null,editing=false;
+  let current=null,editing=false,finishedJob=null;
   const bar=document.createElement('section');bar.className='ck-dispatch-controls';bar.hidden=true;
   bar.innerHTML='<div><b>派审员管理 / 담당자 관리</b><p data-job></p><p data-crew></p></div><div class="ck-buttons"><button type="button" data-people>调整人员 / 인원 변경</button><button type="button" data-rest>个人休息／恢复 / 개인 휴식·복귀</button><button type="button" data-pause>暂停整个任务 / 전체 작업 중지</button><button type="button" data-home>返回首页，任务继续 / 작업 유지·홈으로</button></div>';
   bar.querySelector('[data-pause]').onclick=async()=>{try{await CKToggleNativePause(await detail(),()=>detail());}catch(e){alert(e.message);}};bar.querySelector('[data-people]').onclick=()=>editPeople();bar.querySelector('[data-rest]').onclick=()=>CKOpenFieldLabor();bar.querySelector('[data-home]').onclick=()=>goPage('home');
@@ -28,10 +28,26 @@
    if(bar.parentElement!==page){const top=page.querySelector('.topbar');if(top)top.after(bar);else page.prepend(bar);}bar.hidden=false;
    bar.querySelector('[data-job]').textContent=window.CKDocumentLabels.jobSummary(r)+(r.job.status==='paused'?' · 已暂停 / 중지: '+(state.pause_reason||''):'');
    bar.querySelector('[data-crew]').textContent='正在作业 / 작업 중: '+(r.workers.filter(w=>!w.left_at).map(w=>w.worker_name).join('、')||'暂无人员 / 없음')+((r.borrowed_out||[]).length?' · 借出 / 지원 중: '+r.borrowed_out.map(b=>b.worker_name).join('、'):'');
+   // The same response updates both the shared controls and original operation panels.
+   for(const id of ['unloadWorkers','inboundWorkers','inboundReturnWorkers','idWorkers','loadWorkers','osoWorkers','pickWorkers','bulkWorkers','gjWorkers','gjIdleWorkers','vsWorkers'])if($(id))renderWorkers(id,r.workers);
+   if($('gjWorkerCount'))$('gjWorkerCount').textContent=r.job.active_worker_count+' 人/명';
+   if(window._currentPage==='generic_job'){
+    const card=$('gjActiveTitle')?.closest('.card'),status=card?.querySelector('div[style*="flex-wrap"]>span>span');
+    if(status)status.textContent=r.job.status==='paused'?'已暂停 / 중지':r.job.active_worker_count?'作业中 / 작업 중':'当前无人计时 / 현재 작업 인원 없음';
+    if(card?.lastElementChild)card.lastElementChild.textContent='仅实际在岗人员累计有效工时；休息和整任务暂停不计入。 / 실제 작업 구간만 합산합니다.';
+    for(const id of ['gjFinishBtn','gjLeaveBtn'])if($(id))$(id).disabled=r.job.status==='paused';
+   }
    const pick=$('pickWorkingPicker');if(r.job.job_type==='pick_direct'&&pick)pick.textContent=r.workers.filter(w=>!w.left_at).map(w=>w.worker_name).join('、')||'—';
   }
-  const originalApi=window.api;window.api=async function(body){const r=await originalApi(body);if(body.action==='v2_ops_job_detail'&&r?.ok)accept(r);return r;};
-  const originalPage=window.showPage;window.showPage=function(...args){bar.hidden=true;current=null;if(['home','labor','issue_list'].includes(args[0])||String(args[0]).endsWith('_menu'))CKClearNativeJob();return originalPage(...args);};
+  const originalApi=window.api;window.api=async function(body){const managed=current?.job?.id===body.job_id&&current.can_manage_dispatch;const r=await originalApi(body);if(body.action==='v2_ops_job_detail'&&r?.ok)accept(r);
+   if(managed&&r?.ok&&!body.leave_only&&/_(finish|finalize)$/.test(body.action)){
+    const end=await originalApi({action:'v2_ops_job_detail',job_id:body.job_id});
+    if(end?.job?.status==='completed'){finishedJob=body.job_id;setTimeout(()=>{if(finishedJob)window.showPage('home');},0);}
+   }return r;};
+  const originalPage=window.showPage;window.showPage=function(...args){if(finishedJob){finishedJob=null;args=['home'];window._navStack=[];window._pageParams={};CKClearNativeJob();}bar.hidden=true;current=null;if(['home','labor','issue_list'].includes(args[0])||String(args[0]).endsWith('_menu'))CKClearNativeJob();const result=originalPage(...args),id=window._activeJobId;
+   if(id)setTimeout(()=>{if(window._activeJobId===id&&!current)detail().catch(()=>{});},0);return result;};
+  const originalElapsed=window._gjStartElapsedTimer;
+  if(originalElapsed)window._gjStartElapsedTimer=function(){window._gjStopElapsedTimer();const tick=()=>{if(!current||current.job.id!==window._activeJobId)return;const el=$('gjElapsed');if(!el)return;el.previousElementSibling.textContent='有效人分钟 / 작업 인분:';el.textContent=current.workers.reduce((sum,w)=>sum+(w.left_at?Number(w.minutes_worked)||0:Math.max(0,(Date.now()-Date.parse(w.joined_at))/60000)),0).toFixed(1);};tick();window._gjElapsedTimer=setInterval(tick,1000);};
   async function detail(){const id=window._activeJobId;if(!id)throw Error('请先打开正在进行的任务 / 진행 중인 작업을 여세요');const r=await api({action:'v2_ops_job_detail',job_id:id});if(!r?.ok||!r.can_manage_dispatch)throw Error(r?.error||'无法调整该任务 / 인원 변경 불가');return r;}
   async function editPeople(destination=''){
    if(destination){window.CKClearNativeJob();goPage(destination);return;}

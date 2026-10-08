@@ -29,9 +29,10 @@ try{
   await call('sop_attendance_break_end',{id:j.d.id});assert.equal(active(j.job_id),0);
   await page.reload();await page.waitForFunction(()=>window.CKOpenNativeJob&&window.CKSession?.user);await page.locator('.ck-native-task').filter({has:page.locator('strong',{hasText:label})}).first().click();
   await page.getByRole('button',{name:/恢复整个任务/}).first().click();const form=page.locator('dialog[open] form');await form.locator('[data-staff-badge]').fill(j.staff.id+'|'+j.staff.name);await form.locator('[data-staff-add]').click();await form.locator('button[type=submit]').click();await waitStatus(j.job_id,'working');assert.equal(active(j.job_id),1);
+  if(i===0){await page.waitForFunction(()=>document.getElementById('gjWorkerCount').textContent.startsWith('1'));assert.match(await page.locator('#gjWorkers').innerText(),/虚构浏览器人员0/);}
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
   await page.screenshot({path:'/tmp/ck-pause-browser/job-'+i+'-mobile.png',fullPage:true});
-  await page.evaluate(()=>goPage('home'));
+  if(i===0){await page.locator('#gjFinishBtn').click();await page.locator('#page-home.active').waitFor();assert.equal(active(j.job_id),0);assert.equal(await page.evaluate(()=>!!_activeJobId),false);}else if(i===1){await page.locator('[onclick="finishPickJob(this)"]').click();await page.locator('#page-home.active').waitFor();assert.equal(active(j.job_id),0);}else await page.evaluate(()=>goPage('home'));
  }
  await page.evaluate(id=>CKOpenNativeJob({id,job_type:'courier_receiving'}),courier.id);await page.getByRole('button',{name:/取消/}).last().click().catch(()=>{});
  await page.locator('.courier-field [data-pause]').click();await page.locator('dialog[open] textarea[name=reason]').fill('虚构快递暂停');await page.locator('dialog[open] button[type=submit]').click();await waitStatus(courier.id,'paused');assert.equal(active(courier.id),0);

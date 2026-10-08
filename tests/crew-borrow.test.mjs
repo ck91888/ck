@@ -186,3 +186,20 @@ test('existing staging maintenance archives synthetic loan tables with task tabl
  const user={id:'SYNTHETIC-MAINTENANCE',role:'manager'},start=await resetAction('start',{confirmation:'CLEAR_TEST_DATA',requestId:crypto.randomUUID()},f.env,user);let run=start.run;for(let i=0;i<30&&!run.completedAt;i++)run=(await resetAction('step',{runId:run.id},f.env,user)).run;assert.ok(run.completedAt);assert.equal(f.loans().length,0);assert.equal(f.DB.raw.prepare('SELECT COUNT(*) n FROM ck_crew_requests').get().n,0);
  assert.equal(f.DB.raw.prepare('SELECT COUNT(*) n FROM ck_backup_'+run.id+'_ck_crew_borrows').get().n,1);
 });
+
+test('native paused source retains borrowed assignment; destination completion waits, resume and return count once',async()=>{
+ const f=await fixture(),s=await f.source(),j=await f.ok('sop_native_start',await f.request());
+ await f.ok('sop_native_pause',{job_id:s.job_id,revision:f.record(s.job_id).revision,reason:'原任务暂停'});assert.equal(f.live(s.job_id).length,0);
+ await f.finish(j);assert.equal(f.loans()[0].status,'return_pending');assert.equal(f.live(s.job_id).length,0);
+ await f.ok('sop_native_resume',{job_id:s.job_id,revision:f.record(s.job_id).revision,workers:[f.staff[1]],lead_id:f.staff[1].id});
+ await f.ok('sop_crew_return',{job_id:j.job_id});assert.equal(f.live(s.job_id).length,2);assert.equal(f.loans()[0].status,'returned');
+ await f.ok('sop_crew_return',{job_id:j.job_id});assert.equal(f.live(s.job_id).length,2);assert.equal(f.segments(s.job_id).filter(w=>w.worker_id===f.staff[0].id).length,2);
+});
+test('rest on a paused borrowed destination does not revive it, and signed-out borrower never returns',async()=>{
+ const f=await fixture(),s=await f.source(),j=await f.ok('sop_native_start',await f.request());
+ await f.ok('sop_native_pause',{job_id:j.job_id,revision:f.record(j.job_id).revision,reason:'借调任务暂停'});
+ await f.ok('sop_attendance_break_start',{id:f.days[0].id});assert.equal(f.loans()[0].status,'return_pending');
+ await f.ok('sop_attendance_checkout',{id:f.days[0].id});assert.equal((await f.call('sop_attendance_break_end',{id:f.days[0].id})).ok,false);
+ assert.equal(f.live(j.job_id).length,0);assert.equal(f.live(s.job_id).length,1);
+ assert.equal((await f.call('sop_native_resume',{job_id:j.job_id,revision:f.record(j.job_id).revision,workers:[f.staff[0]],lead_id:f.staff[0].id})).ok,false);
+});

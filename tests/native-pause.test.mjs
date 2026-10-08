@@ -48,12 +48,41 @@ test('pause and resume transaction guards reject state races without partially r
   const f=setup(),a=await f.person('QA race '+mode),j=await f.start([a.w]);let rev=1;
   if(mode==='resume'){await f.ok('sop_native_pause',{job_id:j.job_id,revision:1,reason:'test'});rev=2;}
   const batch=f.DB.batch;let once=true;
-  f.DB.batch=async ss=>{if(once&&ss.some(s=>s.args?.includes('sop_native_'+mode))){once=false;f.DB.raw.prepare("UPDATE v2_ops_jobs SET status='completed' WHERE id=?").run(j.job_id);}return batch(ss);};
-  const r=await f.call('sop_native_'+mode,{job_id:j.job_id,revision:rev,reason:'test',workers:[a.w],lead_id:a.w.id});assert.equal(r.ok,false);assert.equal(f.status(j.job_id),'completed');assert.equal(f.DB.raw.prepare('SELECT revision FROM sop_records WHERE id=?').get(j.job_id).revision,rev);
+  f.DB.batch=async ss=>{if(once&&ss.some(s=>s.args?.includes('sop_native_'+mode))){once=false;f.DB.raw.prepare('UPDATE v2_ops_jobs SET status=? WHERE id=?').run(mode==='resume'?'cancelled':'completed',j.job_id);}return batch(ss);};
+  const r=await f.call('sop_native_'+mode,{job_id:j.job_id,revision:rev,reason:'test',workers:[a.w],lead_id:a.w.id});assert.equal(r.ok,false);assert.equal(f.status(j.job_id),mode==='resume'?'cancelled':'completed');assert.equal(f.DB.raw.prepare('SELECT revision FROM sop_records WHERE id=?').get(j.job_id).revision,rev);
  }
 });
 test('rest return detects concurrent removal inside its transaction and leaves rest open for safe retry',async()=>{
  const f=setup(),a=await f.person('QA rest race'),j=await f.start([a.w]);await f.ok('sop_attendance_break_start',{id:a.d.id});
  const batch=f.DB.batch;let once=true;f.DB.batch=async ss=>{if(once&&ss.some(s=>s.args?.includes('sop_attendance_break_end'))){once=false;f.DB.raw.prepare("UPDATE sop_records SET state=json_set(state,'$.workers',json('[]')) WHERE id=?").run(j.job_id);}return batch(ss);};
  assert.equal((await f.call('sop_attendance_break_end',{id:a.d.id})).ok,false);assert.equal(f.active(j.job_id).length,0);assert.equal(f.DB.raw.prepare("SELECT COUNT(*) n FROM ck_attendance_breaks WHERE ended_at=''").get().n,1);
+});
+
+test('paused pick and external documents retain exclusive claims rather than creating replacement tasks',async()=>{
+ const f=setup(),a=await f.person('QA claims A'),b=await f.person('QA claims B');
+ for(const [action,extra] of [['v2_pick_job_start',{pick_doc_nos:['QA-PAUSED-CLAIM']}],['v2_bulk_op_job_start',{work_order_no:'QA-PAUSED-EXTERNAL'}]]){
+  const j=await f.start([a.w],action,extra);await f.ok('sop_native_pause',{job_id:j.job_id,revision:1,reason:'暂停保留占用'});
+  const duplicate=await f.call('sop_native_start',{payload:{action,client_req_id:crypto.randomUUID(),...extra},workers:[b.w],lead_id:b.w.id,estimated_minutes:10,labor_department:'bulk'});assert.equal(duplicate.ok,false);assert.equal(f.status(j.job_id),'paused');
+ }
+});
+test('paused loading preserves order reservation and rejects cancellation, quantity changes and racing completion',async()=>{
+ const f=setup(),a=await f.person('QA loading A'),b=await f.person('QA loading B'),o=await f.ok('v2_outbound_order_create',{customer:'虚构暂停装货',biz_class:'bulk',outbound_mode:'customer_pickup',planned_box_count:5});
+ f.DB.raw.prepare("UPDATE v2_outbound_orders SET status='ready_to_ship' WHERE id=?").run(o.id);
+ const j=await f.start([a.w],'v2_outbound_load_start',{order_id:o.id});await f.ok('sop_native_pause',{job_id:j.job_id,revision:1,reason:'暂停装货'});
+ assert.equal((await f.call('sop_native_start',{payload:{action:'v2_outbound_load_start',order_id:o.id,client_req_id:crypto.randomUUID()},workers:[b.w],lead_id:b.w.id,estimated_minutes:10,labor_department:'bulk'})).ok,false);
+ assert.throws(()=>f.DB.raw.prepare("UPDATE v2_outbound_orders SET status='cancelled' WHERE id=?").run(o.id),/paused/);
+ assert.throws(()=>f.DB.raw.prepare('UPDATE v2_outbound_orders SET planned_box_count=6 WHERE id=?').run(o.id),/paused/);
+ assert.throws(()=>f.DB.raw.prepare("UPDATE v2_ops_jobs SET status='completed' WHERE id=?").run(j.job_id),/resume/);
+ assert.equal(f.DB.raw.prepare('SELECT job_id FROM ck_load_order_claims WHERE order_id=?').get(o.id).job_id,j.job_id);
+});
+
+test('all 20 historical native job types preserve identity through pause and confirmed resume',async()=>{
+ const types=['unload','inbound_direct','inbound_bulk','inbound_return','inbound_change_order','pick_direct','bulk_op','pack_direct','change_order','load_outbound','outbound_stock_op','inventory','disposal','qc','issue_handle','other_internal','scan_pallet','load_import','pickup_delivery_import','verify_scan'];
+ const f=setup();for(const [i,type] of types.entries()){
+  // Canonical dispatch fixture, including historical types with no new-start entry.
+  const a=await f.person('QA 20类型 '+i),j=await f.start([a.w],'v2_ops_job_start',{job_type:type,flow_stage:'internal'});
+  await f.ok('sop_native_pause',{job_id:j.job_id,revision:1,reason:'QA '+type});assert.equal(f.active(j.job_id).length,0,type);
+  const detail=await f.ok('v2_ops_job_detail',{job_id:j.job_id});assert.equal(detail.can_manage_dispatch,true);assert.equal(detail.job.status,'paused');
+  await f.ok('sop_native_resume',{job_id:j.job_id,revision:2,workers:[a.w],lead_id:a.w.id});assert.equal(f.active(j.job_id).length,1,type);
+ }
 });

@@ -100,5 +100,5 @@ async function existingDispatch(env,p){
  }else if(p.action==='v2_verify_job_start'&&p.batch_id){where="j.related_doc_id=? AND j.job_type='verify_scan'";args=[p.batch_id];
  }else if(p.action==='v2_ops_job_start'&&p.related_doc_id){where='j.related_doc_id=? AND j.related_doc_type=? AND j.job_type=?';args=[p.related_doc_id,p.related_doc_type,p.job_type];}
  if(!where)return null;
- return env.DB.prepare("SELECT j.id FROM v2_ops_jobs j JOIN sop_records r ON r.id=j.id AND r.kind='dispatch' WHERE j.status IN ('pending','working','awaiting_close') AND "+where+' LIMIT 1').bind(...args).first();
+ return env.DB.prepare("SELECT j.id FROM v2_ops_jobs j JOIN sop_records r ON r.id=j.id AND r.kind='dispatch' WHERE j.status IN ('pending','working','awaiting_close','paused') AND "+where+' LIMIT 1').bind(...args).first();
 }
