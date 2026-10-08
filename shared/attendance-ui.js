@@ -11,7 +11,11 @@ function radios(current=''){return '<div class="agencies">'+agencies.map(a=>`<la
 function badge(r){qrcode.stringToBytes=qrcode.stringToBytesFuncs['UTF-8'];const qr=qrcode(0,'M');qr.addData(r.badgeId+'|'+r.name);qr.make();return `<div class="ck-label"><div class="badge-qr">${qr.createSvgTag({cellSize:4,margin:16,scalable:true})}</div><div class="badge-info"><div class="badge-heading"><b>CK</b><span>명찰 / 工牌</span></div><div class="badge-name ${r.name.length>22?'very-long':r.name.length>9?'long':''}">${e(r.name)}</div>${r.badgeType==='permanent'?'':`<div class="badge-agency">${e(company(r.agency))}</div>`}<div class="badge-date">${r.personType==='employee'?'职员 / 직원':r.badgeType==='permanent'?'长期 / 고정':e(r.day)}</div><div class="badge-date">${e(r.employeeNo||r.badgeId.split('-').pop())}</div></div></div>`;}
 async function print(r){if(r.inAt&&r.id){const x=await api('print',{id:r.id,client_req_id:crypto.randomUUID()});r=x.record;}let root=document.getElementById('print-root');if(!root){root=document.createElement('div');root.id='print-root';document.body.append(root);}root.innerHTML=badge(r);const style=document.createElement('style');style.textContent='@page{size:70mm 30mm;margin:0}';document.head.append(style);document.body.classList.add('ck-print-badge');try{window.print();}finally{document.body.classList.remove('ck-print-badge');style.remove();}return r;}
 // Keep the same request id for a retry after a network error. A business rejection can be corrected.
-function bind(form,action,values,done){let requestId='',signature='';form.onsubmit=async ev=>{ev.preventDefault();const buttons=[...form.querySelectorAll('button')],err=form.querySelector('[role=alert]');try{const data=values(),sig=JSON.stringify(data);if(sig!==signature||!requestId){signature=sig;requestId=crypto.randomUUID();}buttons.forEach(b=>b.disabled=true);if(err){err.hidden=true;err.textContent='';}const r=await api(action,{...data,client_req_id:requestId});await done(r);}catch(x){if(x.businessError)requestId='';if(err){err.hidden=false;err.textContent=x.message;}}finally{buttons.forEach(b=>b.disabled=false);}};}
+function bind(form,action,values,done){let requestId='',signature='',busy=false,version=0;
+ const visible=()=>{if(!form.isConnected)return false;for(let n=form;n&&n.nodeType===1;n=n.parentElement)if(n.hidden||n.style.display==='none')return false;return true;};
+ const observer=new MutationObserver(()=>{if(!visible())version++;if(!form.isConnected)observer.disconnect();});for(let n=form;n&&n.nodeType===1;n=n.parentElement)observer.observe(n,{attributes:true,attributeFilter:['hidden','style'],childList:true});
+ form.onsubmit=async ev=>{ev.preventDefault();if(busy||!visible())return;busy=true;const token=++version,buttons=[...form.querySelectorAll('button,input,select,textarea')],err=form.querySelector('[role=alert]');try{const data=values(),sig=JSON.stringify(data);if(sig!==signature||!requestId){signature=sig;requestId=crypto.randomUUID();}buttons.forEach(b=>b.disabled=true);if(err){err.hidden=true;err.textContent='';}const r=await api(action,{...data,client_req_id:requestId});if(token===version&&visible())await done(r);}catch(x){if(x.businessError)requestId='';if(token===version&&visible()&&err){err.hidden=false;err.textContent=x.message;}}finally{busy=false;buttons.forEach(b=>b.disabled=false);}};
+}
 const managementLabels={'':'未标记 / 미지정',bulk:'大货 / 대량',direct_ship:'代发 / 직배송',import:'进口 / 수입'};
 const managementLabel=value=>managementLabels[value]||managementLabels[''];
 const jobDepartment=value=>({bulk:'大货 / 대량',direct_ship:'代发 / 직배송',import:'进口 / 수입'}[value]||'其他 / 기타');
@@ -89,7 +93,43 @@ function preserveReportView(root,render){
  [...root.querySelectorAll('.ck-table-wrap')].forEach((el,i)=>{if(tables[i]){el.scrollLeft=tables[i][0];el.scrollTop=tables[i][1];}});
  if(window.scrollX!==x||window.scrollY!==y)window.scrollTo(x,y);
 }
-window.CKAttendance={api,badge,print,at,hours,statusMarkup,statusLabels,reportRefresh,preserveReportView};
+let activeBadgeCamera=null,badgeCameraSerial=0;
+function badgeCamera(form,input,{employee=false}={}){
+ const controls=document.createElement('div');controls.className='ck-badge-camera';controls.innerHTML='<button type="button" class="secondary" data-camera-start>手机相机扫码 / 휴대폰 카메라 스캔</button><div data-camera-panel hidden><div data-camera-reader></div><button type="button" class="secondary" data-camera-close>关闭相机 / 카메라 닫기</button></div><p class="soft-note" data-camera-status role="status" aria-live="polite"></p>';input.after(controls);
+ const startButton=controls.querySelector('[data-camera-start]'),panel=controls.querySelector('[data-camera-panel]'),reader=controls.querySelector('[data-camera-reader]'),status=controls.querySelector('[data-camera-status]');reader.id='ck-badge-camera-'+(++badgeCameraSerial);
+ let generation=0,scanner=null,opening=null,closing=null,disposed=false,reading=false,starting=false;
+ const visible=()=>{if(disposed||!form.isConnected||!input.isConnected||document.hidden)return false;for(let node=form;node&&node.nodeType===1;node=node.parentElement)if(node.hidden||node.style.display==='none'||node.classList.contains('hidden'))return false;return true;};
+ async function release(current){if(!current)return;try{await current.stop();}catch{}try{current.clear();}catch{}}
+ async function stop(){generation++;reading=false;if(closing)return closing;const current=scanner,pending=opening;scanner=null;opening=null;panel.hidden=true;startButton.disabled=true;closing=(async()=>{if(pending)await pending.catch(()=>{});await release(current);})();try{await closing;}finally{closing=null;startButton.disabled=input.disabled;if(activeBadgeCamera===controller)activeBadgeCamera=null;}}
+ const controller={stop,destroy(){if(disposed)return;disposed=true;observer.disconnect();window.removeEventListener('pagehide',leave);document.removeEventListener('visibilitychange',leave);form.removeEventListener('submit',submitted);void stop();}};
+ const leave=event=>{if(event?.type==='pagehide'||document.hidden||!visible())void stop();},submitted=()=>void stop();
+ const observer=new MutationObserver(()=>{if(!form.isConnected){controller.destroy();return;}if(!visible())void stop();});for(let node=form;node&&node.nodeType===1;node=node.parentElement)observer.observe(node,{attributes:true,attributeFilter:['hidden','style','class'],childList:true});
+ window.addEventListener('pagehide',leave);document.addEventListener('visibilitychange',leave);form.addEventListener('submit',submitted);
+ controls.querySelector('[data-camera-close]').onclick=()=>{void stop();status.textContent='相机已关闭，可输入工牌或使用扫码枪 / 카메라를 닫았습니다. 명찰 번호 입력 또는 스캐너를 이용하세요.';input.focus();};
+ startButton.onclick=async()=>{
+  if(starting||opening||closing||scanner||!visible()||input.disabled)return;
+  if(!window.isSecureContext||!navigator.mediaDevices?.getUserMedia||!window.Html5Qrcode){status.textContent='当前浏览器不支持相机扫码，请输入工牌或使用扫码枪 / 카메라 스캔을 지원하지 않습니다. 번호 입력 또는 스캐너를 이용하세요.';return;}
+  starting=true;startButton.disabled=true;if(activeBadgeCamera&&activeBadgeCamera!==controller)await activeBadgeCamera.stop();if(!visible()){starting=false;startButton.disabled=false;return;}
+  activeBadgeCamera=controller;const token=++generation;startButton.disabled=true;panel.hidden=false;status.textContent='请允许相机权限，并将工牌二维码对准镜头 / 카메라 권한을 허용하고 명찰 QR 코드를 비추세요.';
+  let current;
+  try{
+   current=new Html5Qrcode(reader.id);scanner=current;
+   opening=current.start({facingMode:'environment'},{fps:8,qrbox:{width:220,height:220}},async raw=>{
+    if(reading||token!==generation||scanner!==current||!visible()||input.disabled)return;
+    const code=String(raw||'').trim().split('|')[0].trim();
+    if(!(employee?/^EMP-[A-Za-z0-9_-]{1,60}$/:/^(?:DA|DAF)-[A-Za-z0-9_-]{1,60}$/).test(code)){status.textContent=employee?'请扫描职员工牌（EMP），也可手动输入 / 직원 명찰(EMP)을 스캔하거나 번호를 입력하세요.':'请扫描日当工牌（DA / DAF），也可手动输入 / 일용직 명찰(DA / DAF)을 스캔하거나 번호를 입력하세요.';return;}
+    reading=true;await stop();if(!visible()||token+1!==generation||input.disabled)return;
+    input.value=code;input.dispatchEvent(new Event('input',{bubbles:true}));status.textContent='已识别工牌，请核对后点击确认按钮；尚未打卡 / 명찰을 인식했습니다. 확인 버튼을 눌러 등록하세요. 아직 출퇴근 기록은 변경되지 않았습니다.';input.focus();
+   },()=>{});
+   await opening;if(token!==generation||!visible()){await release(current);return;}opening=null;
+  }catch(error){if(token!==generation)return;await stop();if(!visible()||token+1!==generation)return;const message=String(error?.name||'')+' '+String(error?.message||error);
+   status.textContent=/NotAllowed|Permission|denied|permission/i.test(message)?'相机权限被拒绝，请在浏览器设置中允许，或输入工牌 / 카메라 권한이 거부되었습니다. 설정에서 허용하거나 번호를 입력하세요.':/NotFound|DevicesNotFound|no camera|not found/i.test(message)?'未找到可用相机，请输入工牌或使用扫码枪 / 카메라를 찾을 수 없습니다. 번호 입력 또는 스캐너를 이용하세요.':'相机无法启动或正被占用，请关闭其他相机后重试，或输入工牌 / 카메라를 사용할 수 없습니다. 다른 카메라를 닫고 재시도하거나 번호를 입력하세요.';
+  }finally{starting=false;}
+ };
+ return controller;
+}
+
+window.CKAttendance={api,badge,print,at,hours,statusMarkup,statusLabels,reportRefresh,preserveReportView,badgeCamera};
 window.CKAttendanceKiosk=async function(){
  await CKSession.ready;const config=await loadConfig(),root=document.getElementById('terminal-content');let mode='in',selected=null,timer=null;const el=id=>document.getElementById(id);
  const error='<p class="error" role="alert" hidden></p>',back='<button type="button" class="text-button" data-back>返回 / 돌아가기</button>';
@@ -114,7 +154,7 @@ window.CKAttendanceKiosk=async function(){
   el('confirm-reprint').onclick=async()=>{const b=el('confirm-reprint'),err=root.querySelector('[role=alert]');b.disabled=true;err.hidden=true;try{selected=await print(selected);el('reprint-note').textContent='已打开打印，请确认实际出纸。没有新增签到。 / 출력 창이 열렸습니다. 실제 출력을 확인하세요. 출근 기록은 추가되지 않았습니다.';}catch(x){err.textContent=x.message;err.hidden=false;}finally{b.disabled=false;}};
  }
  function lookup(purpose){const out=purpose==='checkout',title=out?'请扫描工牌下班 / 퇴근 명찰 스캔':purpose==='fixed'?'长期日当 · 扫码签到 / 고정 명찰 출근':'扫描工牌 / 명찰 스캔';page(`<form class="form-body"><div class="checkout-intro"><h1>${title}</h1><p>将工牌对准扫码器 / 명찰을 스캐너에 대세요</p></div><label class="field-label" for="code">工牌 <span>명찰</span></label><input id="code" class="text-input" required autocomplete="off" placeholder="扫描后回车 / 스캔 후 Enter">${error}<button class="primary">${out?'确认下班 / 퇴근 등록':'确认 / 확인'}</button>${back}</form>`);
-  bind(root.querySelector('form'),out?'checkout':'lookup',()=>({badge:el('code').value}),r=>{if(out){selected=r.record;success('out',r.existing,r.needsReview);return;}if(purpose==='fixed'){if(r.person.badgeType!=='permanent')throw Error('请使用长期工牌 / 고정 명찰을 사용하세요');if(r.record){selected=r.record;success(r.record.outAt?'out':'in',true);}else fixed(r.person);return;}if(!r.record)throw Error('没有当天签到记录 / 오늘 출근 기록이 없습니다');selected=r.record;purpose==='company'?editCompany():success(selected.outAt?'out':'in',true);});el('code').focus();
+  bind(root.querySelector('form'),out?'checkout':'lookup',()=>({badge:el('code').value}),r=>{if(out){selected=r.record;success('out',r.existing,r.needsReview);return;}if(purpose==='fixed'){if(r.person.badgeType!=='permanent')throw Error('请使用长期工牌 / 고정 명찰을 사용하세요');if(r.record){selected=r.record;success(r.record.outAt?'out':'in',true);}else fixed(r.person);return;}if(!r.record)throw Error('没有当天签到记录 / 오늘 출근 기록이 없습니다');selected=r.record;purpose==='company'?editCompany():success(selected.outAt?'out':'in',true);});if(out)badgeCamera(root.querySelector('form'),el('code'));el('code').focus();
  }
  function fixed(p){page(`<form class="form-body"><h1>${e(p.name)}</h1><p>确认今天的人力公司 / 오늘의 인력회사를 확인하세요</p>${radios(p.agency)}${error}<button class="primary">签到 / 출근 등록</button>${back}</form>`);bind(root.querySelector('form'),'checkin',()=>({badge:p.badgeId,agency:root.querySelector('input:checked').value}),r=>{selected=r.record;success(selected.outAt?'out':'in',r.existing);});}
  function editCompany(){page(`<form class="form-body"><h1 class="find-title">${e(selected.name)} · 修改公司</h1><p>인력회사를 변경하세요.</p>${radios(selected.agency)}<p class="soft-note">更正当天公司，保留工牌和签到时间。<br>당일 회사만 변경됩니다. 출근 시간은 유지됩니다.</p>${error}<button class="primary">保存 / 저장</button>${back}</form>`);bind(root.querySelector('form'),'company',()=>({id:selected.id,version:selected.version,agency:root.querySelector('input:checked').value}),r=>{selected=r.record;success(selected.outAt?'out':'in',true);});}
