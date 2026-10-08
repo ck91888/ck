@@ -39,7 +39,7 @@
    }
    const pick=$('pickWorkingPicker');if(r.job.job_type==='pick_direct'&&pick)pick.textContent=r.workers.filter(w=>!w.left_at).map(w=>w.worker_name).join('、')||'—';
   }
-  const originalApi=window.api;window.api=async function(body){const managed=current?.job?.id===body.job_id&&current.can_manage_dispatch;const r=await originalApi(body);if(body.action==='v2_ops_job_detail'&&r?.ok)accept(r);
+  const originalApi=window.api;window.api=async function(body){const managed=!!current?.can_manage_dispatch&&current.job.id===body.job_id;const r=await originalApi(body);if(body.action==='v2_ops_job_detail'&&r?.ok)accept(r);
    if(managed&&r?.ok&&!body.leave_only&&/_(finish|finalize)$/.test(body.action)){
     const end=await originalApi({action:'v2_ops_job_detail',job_id:body.job_id});
     if(end?.job?.status==='completed'){finishedJob=body.job_id;setTimeout(()=>{if(finishedJob)window.showPage('home');},0);}

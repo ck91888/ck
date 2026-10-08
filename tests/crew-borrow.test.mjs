@@ -191,6 +191,7 @@ test('native paused source retains borrowed assignment; destination completion w
  const f=await fixture(),s=await f.source(),j=await f.ok('sop_native_start',await f.request());
  await f.ok('sop_native_pause',{job_id:s.job_id,revision:f.record(s.job_id).revision,reason:'原任务暂停'});assert.equal(f.live(s.job_id).length,0);
  await f.finish(j);assert.equal(f.loans()[0].status,'return_pending');assert.equal(f.live(s.job_id).length,0);
+ assert.equal((await f.call('sop_native_resume',{job_id:s.job_id,revision:f.record(s.job_id).revision,workers:[f.staff[0]],lead_id:f.staff[0].id})).ok,false);
  await f.ok('sop_native_resume',{job_id:s.job_id,revision:f.record(s.job_id).revision,workers:[f.staff[1]],lead_id:f.staff[1].id});
  await f.ok('sop_crew_return',{job_id:j.job_id});assert.equal(f.live(s.job_id).length,2);assert.equal(f.loans()[0].status,'returned');
  await f.ok('sop_crew_return',{job_id:j.job_id});assert.equal(f.live(s.job_id).length,2);assert.equal(f.segments(s.job_id).filter(w=>w.worker_id===f.staff[0].id).length,2);

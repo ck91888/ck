@@ -8,6 +8,15 @@ const jobs=[];for(const [i,action,extra] of [[0,'v2_ops_job_start',{job_type:'pa
  const d=(await call('sop_attendance_checkin',{name:'虚构浏览器人员'+i,agency:'가온'})).record,staff={id:d.badgeId,name:d.name};
  const j=await call('sop_native_start',{payload:{action,client_req_id:crypto.randomUUID(),...extra},workers:[staff],lead_id:staff.id,estimated_minutes:10,labor_department:'bulk'});jobs.push({...j,d,staff});
 }
+async function addJob(action,extra,label){const d=(await call('sop_attendance_checkin',{name:'虚构入口 '+label,agency:'가온'})).record,staff={id:d.badgeId,name:d.name};const j=await call('sop_native_start',{payload:{action,client_req_id:crypto.randomUUID(),...extra},workers:[staff],lead_id:staff.id,estimated_minutes:10,labor_department:'bulk'});jobs.push({...j,d,staff});}
+for(const job_type of ['change_order','inventory','disposal','qc','other_internal','scan_pallet','load_import'])await addJob('v2_ops_job_start',{job_type,flow_stage:'internal'},job_type);
+await addJob('v2_inbound_job_start',{job_type:'inbound_return',biz_class:'return'},'return');await addJob('v2_import_delivery_job_start',{},'delivery');
+for(const [type,biz,classes]of [['inbound_direct','direct_ship',['direct_ship']],['inbound_bulk','bulk',['bulk_putaway']]]){const code='QA-BROWSER-'+type,p=await call('v2_inbound_plan_create',{customer:'虚构入口客户',biz_classes:classes,external_inbound_no:code});DB.raw.prepare("UPDATE v2_inbound_plans SET status='arrived_pending_putaway' WHERE id=?").run(p.id);await addJob('v2_inbound_job_start',{job_type:type,biz_class:biz,plan_id:p.id,external_inbound_no:code},type);}
+const ob=await call('v2_outbound_order_create',{customer:'虚构库内客户',biz_class:'bulk',uses_stock_operation:1,outbound_mode:'customer_pickup'});await addJob('v2_outbound_stock_op_start',{outbound_order_id:ob.id},'stock');
+const ship=await call('v2_outbound_order_create',{customer:'虚构装货客户',biz_class:'bulk',outbound_mode:'customer_pickup',planned_box_count:5});DB.raw.prepare("UPDATE v2_outbound_orders SET status='ready_to_ship' WHERE id=?").run(ship.id);await addJob('v2_outbound_load_start',{order_id:ship.id},'load');
+const demo=await call('sop_demo_prepare');await addJob('v2_verify_job_start',{batch_id:demo.batch_id},'verify');await addJob('v2_issue_handle_start',{issue_id:demo.issue_id},'issue');
+// No new entry exists for historical inbound_change_order; verify its existing card only.
+await addJob('v2_ops_job_start',{job_type:'inbound_change_order',flow_stage:'inbound',biz_class:'change_order'},'historical-change-order');
 const courierDay=(await call('sop_attendance_checkin',{name:'虚构快递人员',agency:'가온'})).record;
 await call('sop_courier_config');const courier=(await call('sop_courier_receive',{operation:'start',workers:[{id:courierDay.badgeId,name:courierDay.name}],lead_id:courierDay.badgeId})).batch;
 const server=http.createServer(async(req,res)=>{try{const u=new URL(req.url,'http://127.0.0.1');if(u.pathname.endsWith('/api')){let b='';for await(const c of req)b+=c;const r=await worker.fetch(new Request('http://127.0.0.1'+u.pathname,{method:'POST',headers:{'Content-Type':'application/json'},body:b}),env);res.writeHead(r.status,{'Content-Type':'application/json'});res.end(await r.text());return;}let f=path.resolve(root,'.'+decodeURIComponent(u.pathname));if(!f.startsWith(root+path.sep))throw Error('path denied');if(fs.statSync(f).isDirectory())f=path.join(f,'index.html');res.setHeader('Content-Type',({'.js':'text/javascript','.html':'text/html','.css':'text/css'})[path.extname(f)]||'application/octet-stream');res.end(fs.readFileSync(f));}catch(e){res.writeHead(500);res.end(e.message);}});
@@ -21,13 +30,13 @@ try{
  await page.goto(origin+'/001/');await page.waitForFunction(()=>window.CKSession?.user&&window.CKOpenNativeJob);
  for(const [i,j] of jobs.entries()){
   // Exercise actual home-card click after one-person rest, with no saved lead.
-  await call('sop_attendance_break_start',{id:j.d.id});await page.reload();await page.waitForFunction(()=>window.CKOpenNativeJob&&window.CKSession?.user);
+  await call('sop_attendance_break_start',{id:j.d.id});await page.reload();await page.waitForFunction(()=>window.CKOpenNativeJob&&window.CKSession?.user);await page.evaluate(()=>goPage('home'));
   const detail=await call('v2_ops_job_detail',{job_id:j.job_id});const label=await page.evaluate(d=>window.CKDocumentLabels.jobLabel(d.job),detail);
   const card=page.locator('.ck-native-task').filter({has:page.locator('strong',{hasText:label})}).first();await card.waitFor();await card.click();
-  await page.getByRole('button',{name:/暂停整个任务/}).first().waitFor();assert.equal(active(j.job_id),0);
+  await page.getByRole('button',{name:/暂停整个任务/}).first().waitFor();console.log('Entry opened:',detail.job.job_type);assert.equal(active(j.job_id),0);
   await page.getByRole('button',{name:/暂停整个任务/}).first().click();await page.locator('dialog[open] textarea[name=reason]').fill('虚构午间暂停');await page.locator('dialog[open] button[type=submit]').click();await waitStatus(j.job_id,'paused');
   await call('sop_attendance_break_end',{id:j.d.id});assert.equal(active(j.job_id),0);
-  await page.reload();await page.waitForFunction(()=>window.CKOpenNativeJob&&window.CKSession?.user);await page.locator('.ck-native-task').filter({has:page.locator('strong',{hasText:label})}).first().click();
+  await page.reload();await page.waitForFunction(()=>window.CKOpenNativeJob&&window.CKSession?.user);await page.evaluate(()=>goPage('home'));await page.locator('.ck-native-task').filter({has:page.locator('strong',{hasText:label})}).first().click();
   await page.getByRole('button',{name:/恢复整个任务/}).first().click();const form=page.locator('dialog[open] form');await form.locator('[data-staff-badge]').fill(j.staff.id+'|'+j.staff.name);await form.locator('[data-staff-add]').click();await form.locator('button[type=submit]').click();await waitStatus(j.job_id,'working');assert.equal(active(j.job_id),1);
   if(i===0){await page.waitForFunction(()=>document.getElementById('gjWorkerCount').textContent.startsWith('1'));assert.match(await page.locator('#gjWorkers').innerText(),/虚构浏览器人员0/);}
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);

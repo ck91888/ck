@@ -62,6 +62,7 @@ export async function nativePeople(body,env,{resume=false}={}){
  if(resume)next.workers=[...(prior.workers||[]).filter(w=>!workers.some(n=>n.id===w.id)),...workers];
  const active=await rows(env,"SELECT * FROM v2_ops_job_workers WHERE job_id=? AND left_at=''",job.id);
  const out=await borrowedOut(env,job.id),away=new Set(out.map(b=>b.worker_id));
+ if(resume&&!workers.some(w=>!away.has(w.id)))fail('所选人员仍在借调中，请确认实际到位人员 / 지원 중인 인원은 먼저 복귀를 확인하세요');
  const result={ok:true,job_id:job.id,revision:row.revision+1,lead:next.last_lead,...(env.SOP_CREW_BORROW?{has_crew_borrows:true}:{})};
  const sql=[q(env,'INSERT INTO sop_events VALUES(?,?,?,?,?,?,?,?,?,?)',request,job.id,row.revision,action,env.SOP_REQUEST_USER.id,env.SOP_REQUEST_USER.name,row.state,JSON.stringify(next),JSON.stringify(result),t),q(env,'UPDATE sop_records SET state=?,revision=revision+1,updated_at=? WHERE id=?',JSON.stringify(next),t,job.id)];
  if(resume)sql.push(q(env,"UPDATE v2_ops_jobs SET status='working',resumed_at=?,updated_at=? WHERE id=? AND status='paused'",t,t,job.id));
