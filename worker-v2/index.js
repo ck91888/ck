@@ -1,3 +1,5 @@
+import {restingDispatch} from './dispatch-access.js';
+import {pauseNative} from './native-lifecycle.js';
 import {ensureDocumentNumbers,jobNumbers,jobNumberSQL,jobDisplayMetadata,decorateJobNumber,businessReference,jobBusinessFilter} from './document-numbers.js';
 import {documentCodeError} from '../shared/document-code.js';
 import {effectiveResults} from './effective-results.js';
@@ -6899,7 +6901,7 @@ route("v2_ops_job_detail", async (body, env) => {
   if(env.SOP_UPGRADE_ENABLED==='true'){const n=detail.at(-1).results[0];if(n)Object.assign(job,decorateJobNumber(job,n));}
   job.active_worker_count=new Set(workers.results.filter(w=>!w.left_at).map(w=>w.worker_id)).size;
   return json({
-    ok: true, dispatch: inboundFlowEnabled(env)?dispatchRows?.results[0]||null:null, job, can_manage_dispatch: canManage, unload_plans: job.job_type==='unload'?await tripPlans(env,job_id):[],
+    ok: true, dispatch: inboundFlowEnabled(env)?dispatchRows?.results[0]||null:null, job, can_manage_dispatch: canManage, can_view_resting: await restingDispatch(env,job_id), unload_plans: job.job_type==='unload'?await tripPlans(env,job_id):[],
     load_orders: await loadOrdersForJob(env,job),
     load_trip: loadTripEnabled(env)&&job.job_type==='load_outbound'?await env.DB.prepare('SELECT vehicle_no,driver_name,finished_at FROM ck_load_trips WHERE job_id=?').bind(job.id).first():null,
     workers: workers.results || [],
@@ -12812,6 +12814,14 @@ export default {
       if(!['sop_courier_config','sop_courier_list','sop_courier_detail'].includes(action)&&(request.method!=='POST'||request.headers.get('Origin')&&request.headers.get('Origin')!==url.origin))return err('Invalid request origin',403);
       try{return json(await handleCourier(body,env,recalcInboundPlanCompletion));}catch(e){return json({ok:false,error:e.message},400);}
     }
+    if(action==='sop_native_rest_return'){
+      try{const user=env.SOP_REQUEST_USER;if(user?.scope!=='field'||!user.attendance_id)return err('请以本人现场身份操作',403);
+       const prior=await env.DB.prepare('SELECT * FROM ck_attendance_events WHERE request_id=?').bind(String(body.client_req_id||'')).first();
+       const replay=prior&&prior.actor===user.id&&prior.record_id===user.attendance_id&&prior.action==='sop_attendance_break_end'&&JSON.parse(prior.fingerprint).rest_job_id===body.job_id;
+       if(!replay&&!await restingDispatch(env,body.job_id))return json({ok:false,error:'本人休息或任务分配已变化，请刷新 / 휴식·배정 정보를 확인하세요'},403);
+       return json(await handleAttendance({action:'sop_attendance_break_end',id:user.attendance_id,rest_job_id:body.job_id,client_req_id:body.client_req_id},env));
+      }catch(e){return json({ok:false,error:e.message},409);}
+    }
     if(action.startsWith('sop_attendance_')){
       try{const result=await handleAttendance(body,env);if(result.ok&&crewBorrowEnabled(env)&&['sop_attendance_checkout','sop_attendance_break_start','sop_attendance_break_end'].includes(action)){try{result.crew_returns=await reconcilePersonReturns(env,result.record?.badgeId);}catch{result.crew_return_error='借调归还暂未完成，请在原装卸任务重试归还';}}return json(result);}catch(e){return json({ok:false,error:e.message},400);}
     }
@@ -12824,9 +12834,12 @@ export default {
         env.SOP_CREW_BORROW=await prepareCrewBorrow(env,body);
       }catch(e){return json({ok:false,error:e.message},409);}
     }
+    if(action==='v2_issue_handle_finish'&&body.run_id){const run=await env.DB.prepare('SELECT job_id FROM v2_issue_handle_runs WHERE id=?').bind(body.run_id).first();if(run?.job_id){if(body.job_id&&body.job_id!==run.job_id)return err('任务与处理轮次不一致',409);body.job_id=run.job_id;}}
     if(action==='v2_ops_job_resume'&&body.parent_job_id)body.job_id=body.parent_job_id;
     try{const attendanceBlock=await guardAttendance(body,env);if(attendanceBlock)return json({ok:false,error:attendanceBlock},409);}catch(e){return json({ok:false,error:e.message},400);}
     if(action==='sop_native_adopt'){try{return json(await adoptLegacyLoad(body,env));}catch(e){return json({ok:false,error:e.message},409);}}
+    if(action==='sop_native_pause'){try{return json(await pauseNative(body,env));}catch(e){return json({ok:false,error:e.message},409);}}
+    if(action==='sop_native_resume'){try{return json(await nativePeople(body,env,{resume:true}));}catch(e){return json({ok:false,error:e.message},409);}}
     if(action==='sop_native_people'){try{const allowed=await canCrewDestination(env,body),result=await nativePeople(body,env);if(allowed){try{result.crew_returns=await reconcileCrewReturns(env,body.job_id);}catch{result.crew_return_error='人员已调整，归还暂未完成，请重试归还';}}return json(result);}catch(e){return json({ok:false,error:e.message},409);}}
     if(action==='sop_native_start'){
       try{const result=await startNative(body,env,async input=>(await HANDLERS[input.action](input,env)).json(),guardLegacy,{feedbackNumber:()=>nextFeedbackDisplayNo(env,kstToday(),'XCXH'),inboundNumber:()=>nextDisplayNo(env,kstToday()),pickNumber:()=>nextPickTripNo(env),findOutbound:no=>findOutboundByWorkOrder(env,no),linkedNeeds:id=>linkedNeeds(env,id)});if(result.ok&&env.SOP_CREW_BORROW)result.has_crew_borrows=true;return json(result);}

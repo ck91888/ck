@@ -383,9 +383,9 @@ test('external scanner creates a crew once, resumes by external number and pause
   assert.equal(segments().length,1);const joined=segments()[0].joined_at;
   p.d.querySelector('#page-bulk_op [data-back]').click();await until(()=>p.d.querySelector('#page-bulk_op [data-code]'),p.errors);await scan('NEW-EXTERNAL');await until(()=>p.d.querySelector('#page-bulk_op [data-actions]'),p.errors);
   assert.equal(segments().length,1);assert.equal(segments()[0].joined_at,joined);assert.equal(segments()[0].left_at,'');
-  [...p.d.querySelectorAll('#page-bulk_op [data-actions] button')].find(b=>b.textContent.startsWith('暂停')).click();const pause=p.d.querySelector('#page-bulk_op [data-pause]');pause.elements.reason.value='人员换班';pause.requestSubmit();
-  await until(()=>p.d.querySelector('#page-bulk_op .ck-state')?.textContent.includes('待收尾'),p.errors);assert.ok(segments()[0].left_at);
-  [...p.d.querySelectorAll('#page-bulk_op [data-actions] button')].find(b=>b.textContent.startsWith('核对人员')).click();const people=p.d.querySelector('#page-bulk_op [data-people]');people.querySelector('[data-staff-badge]').value='NEW-W|新员工';people.querySelector('[data-staff-add]').click();people.querySelector('[data-reason]').value='继续作业';people.requestSubmit();
+  [...p.d.querySelectorAll('#page-bulk_op [data-actions] button')].find(b=>b.textContent.startsWith('暂停')).click();const pause=p.d.querySelector('dialog form');pause.elements.reason.value='人员换班';pause.requestSubmit();
+  await until(()=>p.d.querySelector('#page-bulk_op .ck-state')?.textContent.includes('已暂停'),p.errors);assert.ok(segments()[0].left_at);
+  [...p.d.querySelectorAll('#page-bulk_op [data-actions] button')].find(b=>b.textContent.startsWith('恢复整个任务')).click();const people=p.d.querySelector('dialog form');people.requestSubmit();
   await until(()=>p.d.querySelector('#page-bulk_op .ck-state')?.textContent.startsWith('作业中'),p.errors);assert.equal(segments().length,2);assert.equal(segments()[0].joined_at,joined);assert.equal(segments()[1].left_at,'');assert.deepEqual(p.errors,[]);
  }finally{p.w.close();}
 });

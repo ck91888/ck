@@ -1,3 +1,4 @@
+import {restingDispatchAccess} from './dispatch-access.js';
 import {ensureDocumentNumbers,recordNumbers,resolveRecordId,jobNumbers,jobDisplayMetadata} from './document-numbers.js';
 import {loadTripEnabled} from './outbound-load-trip.js';
 import {readBatchMaterials,changeBatchMaterial} from './batch-work-materials.js';
@@ -153,7 +154,7 @@ export async function handleSop(b,env) {
   }
   if(b.action==='sop_dispatch_list'){
    if(!['manager','dispatcher'].includes(u.role))fail('仅派审员可查看现场派工');
-   const access=dispatchAccess(u),externalCode=text(b.external_code);
+   const access=dispatchAccess(u),rest=restingDispatchAccess(u),externalCode=text(b.external_code);
     const rows=await all(env,`SELECT COALESCE(s.kind,'legacy') AS task_kind,COALESCE(s.state,'{}') AS state,j.*,wn.display_no AS work_plan_no,n.state AS need_state,
     ib.display_no AS inbound_no,ib.customer AS inbound_customer,
     ob.display_no AS outbound_no,ob.wms_work_order_no AS outbound_external_no,ob.customer AS outbound_customer,
@@ -169,9 +170,9 @@ export async function handleSop(b,env) {
     LEFT JOIN v2_outbound_orders ob ON ob.id=CASE WHEN j.linked_outbound_order_id!='' THEN j.linked_outbound_order_id WHEN j.related_doc_type='outbound_order' THEN j.related_doc_id END
     LEFT JOIN v2_field_feedbacks fb ON j.related_doc_type='field_feedback' AND fb.id=j.related_doc_id
      WHERE j.status NOT IN ('completed','cancelled')
-     AND ((s.kind='dispatch' AND ${access.sql}) OR (s.kind='task' AND s.department='bulk' AND (?='manager' OR s.department IN (SELECT value FROM json_each(?)))) OR (s.id IS NULL AND j.job_type='load_outbound' AND j.related_doc_type='outbound_order' AND (?='manager' OR j.biz_class IN (SELECT value FROM json_each(?)))))
+     AND ((s.kind='dispatch' AND (${access.sql} OR ${rest.sql})) OR (s.kind='task' AND s.department='bulk' AND (?='manager' OR s.department IN (SELECT value FROM json_each(?)))) OR (s.id IS NULL AND j.job_type='load_outbound' AND j.related_doc_type='outbound_order' AND (?='manager' OR j.biz_class IN (SELECT value FROM json_each(?)))))
     AND (?='' OR (s.kind='dispatch' AND j.job_type='bulk_op' AND (j.id=? OR j.related_doc_id=? OR j.display_no=? OR ob.display_no=? OR ob.wms_work_order_no=?)))
-     ORDER BY j.updated_at DESC LIMIT 200`,...access.args,u.role,JSON.stringify(u.departments||[]),u.role,JSON.stringify(u.departments||[]),...Array(6).fill(externalCode));
+     ORDER BY j.updated_at DESC LIMIT 200`,...access.args,...rest.args,u.role,JSON.stringify(u.departments||[]),u.role,JSON.stringify(u.departments||[]),...Array(6).fill(externalCode));
    return {ok:true,items:(await jobNumbers(env,rows)).map(r=>{
     const d=JSON.parse(r.state),plans=JSON.parse(r.unload_plans||'[]'),loads=JSON.parse(r.load_orders||'[]'),picks=JSON.parse(r.pick_numbers||'[]');
     const customer=[...new Set(loads.length?loads.map(o=>o.customer).filter(Boolean):plans.length?plans.map(p=>p.customer).filter(Boolean):[r.customer||r.inbound_customer||r.outbound_customer].filter(Boolean))].join('、');

@@ -1,3 +1,4 @@
+import {ensureSchema} from './schema-ready.js';
 // Staging dispatch ownership and validation shared by the original operation routes.
 import {nativeOwner} from './sop-dispatch.js';
 import {borrowedOut,crewBorrowStatements} from './crew-borrow.js';
@@ -16,6 +17,7 @@ export async function validateNativeMutation(body,env){
  if(body.action==='v2_ops_job_finish'&&Object.values(types).flat().includes(job.job_type))fail('请从原任务填写产出并结束 / 원래 작업에서 산출을 입력하고 종료하세요');
  if(body.action==='v2_unplanned_unload_finish'&&job.related_doc_type!=='field_feedback')fail('请从原卸货任务完成 / 원래 하차 작업에서 완료하세요');
  if(body.action==='v2_unload_job_finish'&&job.related_doc_type==='field_feedback')fail('临时卸货请从原任务完成 / 임시 하차 작업에서 완료하세요');
+  if(job.status==='paused')fail('任务已暂停，请先核对人员并恢复 / 작업을 먼저 재개하세요');
   if(body.leave_only||body.action.endsWith('_leave')||body.action.endsWith('_resume')||job.status==='completed')return;
   if(body.action==='v2_import_delivery_job_finish'){
    if(!String(body.destination_note||'').trim())fail('请填写去向 / 목적지를 입력하세요');
@@ -42,23 +44,27 @@ export function pickTeamStatements(env,jobId,t){
   WHERE w.job_id=? AND w.left_at='' AND d.pick_status!='completed'`,crypto.randomUUID(),t,jobId),
  q(env,"UPDATE v2_ops_job_pick_docs SET pick_status='working',pick_started_at=COALESCE(NULLIF(pick_started_at,''),?) WHERE job_id=? AND pick_status='pending'",t,jobId)];
 }
-export async function nativePeople(body,env){
+export async function nativePeople(body,env,{resume=false}={}){
+ const action=resume?'sop_native_resume':'sop_native_people',resumeSignature=JSON.stringify({job_id:body.job_id,revision:body.revision,workers:body.workers,lead_id:body.lead_id});
  if(env.SOP_ENVIRONMENT!=='staging'||!await nativeOwner({job_id:body.job_id},env))fail('请由本任务派审员调整人员 / 담당자가 인원을 변경하세요');
  const request=String(body.client_req_id||'');if(!request||request.length>100)fail('缺少请求编号');
- const old=await q(env,'SELECT action,actor_id,result_json FROM sop_events WHERE request_id=?',request).first();
- if(old){if(old.action!=='sop_native_people'||old.actor_id!==env.SOP_REQUEST_USER.id)fail('请求已被使用');return JSON.parse(old.result_json);}
+ const old=await q(env,'SELECT action,actor_id,record_id,after_json,result_json FROM sop_events WHERE request_id=?',request).first();
+ if(old){if(old.action!==action||old.actor_id!==env.SOP_REQUEST_USER.id||old.record_id!==body.job_id||resume&&JSON.parse(old.after_json)._resume_signature!==resumeSignature)fail('请求已被使用');return JSON.parse(old.result_json);}
  const row=await q(env,"SELECT * FROM sop_records WHERE id=? AND kind='dispatch'",body.job_id).first();
  const job=await q(env,'SELECT * FROM v2_ops_jobs WHERE id=?',body.job_id).first();
- if(!row||!job||!['pending','working','awaiting_close'].includes(job.status))fail('任务已结束，请刷新 / 작업이 종료되었습니다');
+ if(!row||!job||!(resume?['paused']:['pending','working','awaiting_close']).includes(job.status))fail('任务已结束，请刷新 / 작업이 종료되었습니다');
  if(Number(body.revision)!==row.revision)fail('人员已被其他操作更新，请重新打开 / 인원 정보가 변경되었습니다');
  const workers=body.workers;
+ if(resume&&(!Array.isArray(workers)||!workers.length))fail('请确认实际恢复作业的人员 / 재개할 인원을 확인하세요');
  if(!Array.isArray(workers)||workers.length>50||workers.some(w=>!w.id||!w.name||String(w.id).length>100||String(w.name).length>100)||new Set(workers.map(w=>w.id)).size!==workers.length)fail('工牌无效或重复 / 명찰을 확인하세요');
  if(workers.length&&!workers.some(w=>w.id===body.lead_id))fail('请选择本次主操作员 / 주 작업자를 선택하세요');
- const t=new Date().toISOString(),prior=JSON.parse(row.state),next={...prior,workers,lead_id:workers.length?body.lead_id:prior.lead_id,last_lead:workers.find(w=>w.id===body.lead_id)||prior.workers.find(w=>w.id===prior.lead_id)||prior.last_lead,last_adjustment:String(body.reason||'')};
+ const t=new Date().toISOString(),prior=JSON.parse(row.state),next={...prior,workers,lead_id:workers.length?body.lead_id:prior.lead_id,last_lead:workers.find(w=>w.id===body.lead_id)||prior.workers.find(w=>w.id===prior.lead_id)||prior.last_lead,last_adjustment:String(body.reason||''),...(resume?{status:'working',pause_reason:'',paused_workers:[],_resume_signature:resumeSignature}:{} )};
+ if(resume)next.workers=[...(prior.workers||[]).filter(w=>!workers.some(n=>n.id===w.id)),...workers];
  const active=await rows(env,"SELECT * FROM v2_ops_job_workers WHERE job_id=? AND left_at=''",job.id);
  const out=await borrowedOut(env,job.id),away=new Set(out.map(b=>b.worker_id));
  const result={ok:true,job_id:job.id,revision:row.revision+1,lead:next.last_lead,...(env.SOP_CREW_BORROW?{has_crew_borrows:true}:{})};
- const sql=[q(env,'INSERT INTO sop_events VALUES(?,?,?,?,?,?,?,?,?,?)',request,job.id,row.revision,'sop_native_people',env.SOP_REQUEST_USER.id,env.SOP_REQUEST_USER.name,row.state,JSON.stringify(next),JSON.stringify(result),t),q(env,'UPDATE sop_records SET state=?,revision=revision+1,updated_at=? WHERE id=?',JSON.stringify(next),t,job.id)];
+ const sql=[q(env,'INSERT INTO sop_events VALUES(?,?,?,?,?,?,?,?,?,?)',request,job.id,row.revision,action,env.SOP_REQUEST_USER.id,env.SOP_REQUEST_USER.name,row.state,JSON.stringify(next),JSON.stringify(result),t),q(env,'UPDATE sop_records SET state=?,revision=revision+1,updated_at=? WHERE id=?',JSON.stringify(next),t,job.id)];
+ if(resume)sql.push(q(env,"UPDATE v2_ops_jobs SET status='working',resumed_at=?,updated_at=? WHERE id=? AND status='paused'",t,t,job.id));
  for(const s of active.filter(s=>!workers.some(w=>w.id===s.worker_id))){
   const minutes=Math.max(0,Math.round((Date.parse(t)-Date.parse(s.joined_at))/6000)/10);
   sql.push(q(env,"UPDATE v2_ops_job_workers SET left_at=?,minutes_worked=?,leave_reason='dispatcher_change' WHERE id=? AND left_at=''",t,minutes,s.id));
@@ -70,6 +76,7 @@ export async function nativePeople(body,env){
  sql.push(q(env,"UPDATE v2_ops_jobs SET active_worker_count=(SELECT COUNT(DISTINCT worker_id) FROM v2_ops_job_workers WHERE job_id=? AND left_at=''),status=CASE WHEN EXISTS(SELECT 1 FROM v2_ops_job_workers WHERE job_id=? AND left_at='') THEN 'working' ELSE 'awaiting_close' END,updated_at=? WHERE id=?",job.id,job.id,t,job.id));
  // Install after the SOP schema exists (legacy migrations run before SOP tables).
  await env.DB.prepare("CREATE TRIGGER IF NOT EXISTS ck_native_people_active BEFORE INSERT ON sop_events WHEN NEW.action='sop_native_people' AND NOT EXISTS(SELECT 1 FROM v2_ops_jobs WHERE id=NEW.record_id AND status IN ('pending','working','awaiting_close')) BEGIN SELECT RAISE(ABORT,'job_already_finished'); END").run();
+ await ensureNativePauseGuards(env);
  await env.DB.batch(sql);return result;
 }
 
@@ -114,4 +121,32 @@ export async function finishNativeOutbound(body,env,{legacy=false}={}){
  }
  try{await env.DB.batch(sql);}catch(e){if((await q(env,'SELECT status FROM v2_ops_jobs WHERE id=?',id).first())?.status==='completed')return {ok:true,already_completed:true};throw e;}
   if(!await q(env,'SELECT id FROM v2_ops_job_results WHERE id=?',resultId).first())throw Error('人员或任务状态已变化，请先核实人员完成状态');return {ok:true,result_id:resultId,status:'completed'};
+}
+
+// Native pause preserves assignment; an empty crew edit is not a task pause.
+export async function ensureNativePauseGuards(env){
+ await ensureSchema(env.DB,'native-pause-v1',()=>env.DB.batch([
+ q(env,`CREATE TRIGGER IF NOT EXISTS ck_native_pause_event BEFORE INSERT ON sop_events WHEN NEW.action IN ('sop_native_pause','sop_native_resume') BEGIN SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM v2_ops_jobs WHERE id=NEW.record_id AND ((NEW.action='sop_native_pause' AND status IN ('working','awaiting_close')) OR (NEW.action='sop_native_resume' AND status='paused'))) THEN RAISE(ABORT,'pause_state_changed') END; END`),
+ q(env,`CREATE TRIGGER IF NOT EXISTS ck_native_paused_clock BEFORE INSERT ON v2_ops_job_workers WHEN NEW.left_at='' AND EXISTS(SELECT 1 FROM v2_ops_jobs j JOIN sop_records s ON s.id=j.id WHERE j.id=NEW.job_id AND s.kind='dispatch' AND j.status IN ('paused','completed','cancelled')) BEGIN SELECT RAISE(ABORT,'task_not_running'); END`)
+ ]));
+}
+export async function pauseNative(body,env){
+ if(env.SOP_ENVIRONMENT!=='staging'||env.SOP_UPGRADE_ENABLED!=='true'||!await nativeOwner(body,env))fail('请由本任务派审员暂停 / 담당자가 작업을 중지하세요');
+ const request=String(body.client_req_id||''),reason=String(body.reason||'').trim();
+ if(!request||request.length>100||!reason||reason.length>500)fail('请填写暂停原因 / 중지 사유를 입력하세요');
+ const old=await q(env,'SELECT * FROM sop_events WHERE request_id=?',request).first();
+ if(old){if(old.action!=='sop_native_pause'||old.record_id!==body.job_id||old.actor_id!==env.SOP_REQUEST_USER.id||JSON.parse(old.after_json).pause_reason!==reason)fail('请求已被使用');return JSON.parse(old.result_json);}
+ const row=await q(env,"SELECT * FROM sop_records WHERE id=? AND kind='dispatch'",body.job_id).first(),job=await q(env,'SELECT * FROM v2_ops_jobs WHERE id=?',body.job_id).first();
+ if(!row||!job||!['working','awaiting_close'].includes(job.status)||row.revision!==Number(body.revision))fail('任务或人员已变化，请刷新 / 작업 상태가 변경되었습니다');
+ const t=new Date().toISOString(),before=JSON.parse(row.state),active=await rows(env,"SELECT worker_id AS id,worker_name AS name FROM v2_ops_job_workers WHERE job_id=? AND left_at=''",job.id);
+ const after={...before,status:'paused',pause_reason:reason,paused_at:t,pause_actor_id:env.SOP_REQUEST_USER.id,paused_workers:active,last_lead:before.last_lead||(before.workers||[]).find(w=>w.id===before.lead_id)};
+ const result={ok:true,job_id:job.id,revision:row.revision+1,status:'paused'};
+ await ensureNativePauseGuards(env);
+ await env.DB.batch([
+ q(env,'INSERT INTO sop_events VALUES(?,?,?,?,?,?,?,?,?,?)',request,job.id,row.revision,'sop_native_pause',env.SOP_REQUEST_USER.id,env.SOP_REQUEST_USER.name,row.state,JSON.stringify(after),JSON.stringify(result),t),
+ q(env,'UPDATE sop_records SET state=?,revision=revision+1,updated_at=? WHERE id=?',JSON.stringify(after),t,job.id),
+ q(env,"UPDATE v2_ops_job_workers SET left_at=?,minutes_worked=MAX(0,ROUND((julianday(?)-julianday(joined_at))*14400)/10.0),leave_reason='task_pause' WHERE job_id=? AND left_at=''",t,t,job.id),
+ q(env,"UPDATE v2_pick_worker_docs SET status='completed',finished_at=?,minutes_worked=COALESCE((SELECT minutes_worked FROM v2_ops_job_workers WHERE id=segment_id),minutes_worked) WHERE job_id=? AND status='working'",t,job.id),
+ q(env,"UPDATE v2_ops_jobs SET status='paused',paused_at=?,active_worker_count=0,updated_at=? WHERE id=?",t,t,job.id)
+ ]);return result;
 }

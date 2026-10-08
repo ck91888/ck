@@ -29,7 +29,7 @@ export async function courierBatchDetail(e,id){
 }
 export async function courierBatchList(e,b={}){
  const args=[],where=['1=1'];
- if(b.active){const a=dispatchAccess(e.SOP_REQUEST_USER);where.push("j.status IN ('working','awaiting_close') AND "+a.sql);args.push(...a.args);}
+ if(b.active){const a=dispatchAccess(e.SOP_REQUEST_USER);where.push("j.status IN ('working','awaiting_close','paused') AND "+a.sql);args.push(...a.args);}
  if(b.from){where.push('b.day>=?');args.push(b.from);}if(b.to){where.push('b.day<=?');args.push(b.to);}
  const keyword=String(b.keyword||'').trim().toUpperCase().replace(/[ -]/g,'');
  const itemFilters=[],itemArgs=[];

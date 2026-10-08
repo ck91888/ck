@@ -1,17 +1,32 @@
 (function(){
  'use strict';
+ window.CKToggleNativePause=async function(detail,onSaved){
+  if(!detail?.can_manage_dispatch)throw Error('请由本任务派审员操作 / 담당자가 처리하세요');
+  const state=JSON.parse(detail.dispatch.state),paused=detail.job.status==='paused',id=detail.job.id;
+  let request=null;
+  if(paused){
+   const workers=state.paused_workers||[];
+   return CKNativePeopleDialog({title:'恢复整个任务 / 전체 작업 재개',description:'只选择现在实际到位的人员；休息未结束、已签退或在其他任务的人不能恢复计时。 / 실제 복귀 인원만 선택하세요.',workers,leadId:workers.some(w=>w.id===state.lead_id)?state.lead_id:workers[0]?.id||'',submitLabel:'确认人员并恢复 / 인원 확인·재개',onSubmit:async staff=>{const key=JSON.stringify(staff);if(request?.key!==key)request={key,body:{job_id:id,revision:detail.dispatch.revision,client_req_id:crypto.randomUUID(),...staff}};const r=await CKSession.request('sop_native_resume',request.body);await onSaved?.(r);return r;}}).promise;
+  }
+  const dialog=document.createElement('dialog');dialog.className='ck-workflow';dialog.innerHTML='<form><h2>暂停整个任务 / 전체 작업 중지</h2><p>停止本任务所有人的有效作业计时，保留原任务与人员分配。个人休息或借调请使用人员入口。 / 전체 인원 작업시간 중지. 개인 휴식·지원은 인원 메뉴를 이용하세요.</p><label>暂停原因 / 중지 사유<textarea name="reason" required maxlength="500"></textarea></label><p role="alert"></p><div class="ck-buttons"><button type="submit">确认暂停 / 중지 확인</button><button type="button" data-cancel>取消 / 취소</button></div></form>';
+  document.body.append(dialog);dialog.showModal();let busy=false;
+  const close=()=>{if(!busy){dialog.close();dialog.remove();}};dialog.querySelector('[data-cancel]').onclick=close;dialog.oncancel=e=>{e.preventDefault();close();};
+  dialog.querySelector('form').onsubmit=async e=>{e.preventDefault();if(busy)return;busy=true;const button=dialog.querySelector('[type=submit]');button.disabled=true;
+   try{const reason=dialog.querySelector('textarea').value.trim();if(request?.reason!==reason)request={job_id:id,revision:detail.dispatch.revision,client_req_id:crypto.randomUUID(),reason};const r=await CKSession.request('sop_native_pause',request);await onSaved?.(r);busy=false;close();}catch(x){dialog.querySelector('[role=alert]').textContent=x.message;}finally{busy=false;button.disabled=false;}};
+ };
  window.CKInstallNativeLifecycle=function(){
   const $=id=>document.getElementById(id),leaveNames=['unloadLeave','inboundLeave','inboundReturnLeave','leaveImportDelivery','handleIssueLeave','bulkLeave','leaveGenericJob','leaveVerifyScan'];
   let current=null,editing=false;
   const bar=document.createElement('section');bar.className='ck-dispatch-controls';bar.hidden=true;
-  bar.innerHTML='<div><b>派审员管理 / 담당자 관리</b><p data-job></p><p data-crew></p></div><div class="ck-buttons"><button type="button" data-people>调整人员 / 인원 변경</button><button type="button" data-rest>人员与休息 / 인원·휴식</button><button type="button" data-home>返回首页，任务继续 / 작업 유지·홈으로</button></div>';
-  bar.querySelector('[data-people]').onclick=()=>editPeople();bar.querySelector('[data-rest]').onclick=()=>CKOpenFieldLabor();bar.querySelector('[data-home]').onclick=()=>goPage('home');
+  bar.innerHTML='<div><b>派审员管理 / 담당자 관리</b><p data-job></p><p data-crew></p></div><div class="ck-buttons"><button type="button" data-people>调整人员 / 인원 변경</button><button type="button" data-rest>个人休息／恢复 / 개인 휴식·복귀</button><button type="button" data-pause>暂停整个任务 / 전체 작업 중지</button><button type="button" data-home>返回首页，任务继续 / 작업 유지·홈으로</button></div>';
+  bar.querySelector('[data-pause]').onclick=async()=>{try{await CKToggleNativePause(await detail(),()=>detail());}catch(e){alert(e.message);}};bar.querySelector('[data-people]').onclick=()=>editPeople();bar.querySelector('[data-rest]').onclick=()=>CKOpenFieldLabor();bar.querySelector('[data-home]').onclick=()=>goPage('home');
   function accept(r){
    if(!r?.can_manage_dispatch||r.job?.id!==window._activeJobId)return;
-   current=r;const page=$('page-'+window._currentPage);if(!page||!['pending','working','awaiting_close'].includes(r.job.status))return;
-   const state=JSON.parse(r.dispatch?.state||'{}');window.CKSetNativeLead?.(state.workers?.find(w=>w.id===state.lead_id)||state.last_lead);
+   current=r;const page=$('page-'+window._currentPage);if(!page||!['pending','working','awaiting_close','paused'].includes(r.job.status))return;
+   const state=JSON.parse(r.dispatch?.state||'{}');
+   bar.querySelector('[data-pause]').textContent=r.job.status==='paused'?'恢复整个任务 / 전체 작업 재개':'暂停整个任务 / 전체 작업 중지';bar.querySelector('[data-people]').disabled=r.job.status==='paused';window.CKSetNativeLead?.(state.workers?.find(w=>w.id===state.lead_id)||state.last_lead);
    if(bar.parentElement!==page){const top=page.querySelector('.topbar');if(top)top.after(bar);else page.prepend(bar);}bar.hidden=false;
-   bar.querySelector('[data-job]').textContent=window.CKDocumentLabels.jobSummary(r);
+   bar.querySelector('[data-job]').textContent=window.CKDocumentLabels.jobSummary(r)+(r.job.status==='paused'?' · 已暂停 / 중지: '+(state.pause_reason||''):'');
    bar.querySelector('[data-crew]').textContent='正在作业 / 작업 중: '+(r.workers.filter(w=>!w.left_at).map(w=>w.worker_name).join('、')||'暂无人员 / 없음')+((r.borrowed_out||[]).length?' · 借出 / 지원 중: '+r.borrowed_out.map(b=>b.worker_name).join('、'):'');
    const pick=$('pickWorkingPicker');if(r.job.job_type==='pick_direct'&&pick)pick.textContent=r.workers.filter(w=>!w.left_at).map(w=>w.worker_name).join('、')||'—';
   }

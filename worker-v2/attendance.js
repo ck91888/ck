@@ -62,6 +62,7 @@ async function closePerson(env,r,t,reason){
  // Do not invent a historical finish time for a stale shift. Current segments stop now;
  // older-day remnants are cut off at this day's arrival and remain explicitly disputed.
  const sql=[q(env,"UPDATE v2_ops_job_workers SET left_at=CASE WHEN joined_at<? THEN joined_at ELSE ? END,minutes_worked=CASE WHEN joined_at<? THEN 0 ELSE MAX(0,ROUND((julianday(?)-julianday(joined_at))*1440,1)) END,leave_reason=CASE WHEN joined_at<? THEN ? ELSE ? END WHERE worker_id=? AND left_at=''",r.signed_in,t,r.signed_in,t,r.signed_in,'attendance_stale:'+reason,'attendance:'+reason,r.worker_id),q(env,"UPDATE v2_ops_jobs SET active_worker_count=(SELECT COUNT(*) FROM v2_ops_job_workers w WHERE w.job_id=v2_ops_jobs.id AND w.left_at=''),updated_at=? WHERE id IN (SELECT job_id FROM v2_ops_job_workers WHERE worker_id=?)",t,r.worker_id)];
+ sql.push(q(env,"UPDATE v2_pick_worker_docs SET status='completed',finished_at=?,minutes_worked=COALESCE((SELECT minutes_worked FROM v2_ops_job_workers WHERE id=segment_id),minutes_worked) WHERE segment_id IN (SELECT value FROM json_each(?)) AND status='working'",t,JSON.stringify(open.map(s=>s.id))));
  const ids=[...new Set(open.map(s=>s.job_id))];return {sql,open,ids};
 }
 async function overview(env,date,t,scope='daily'){
@@ -190,10 +191,13 @@ export async function handleAttendance(b,env){
   access(env,['manager','dispatcher']);currentDay(before,t);if(before.signed_out)fail('已签退，不能恢复作业');
   const open=await q(env,"SELECT * FROM ck_attendance_breaks WHERE attendance_id=? AND ended_at=''",before.id).first();if(!open)fail('没有进行中的休息');
   const busy=await q(env,"SELECT id FROM v2_ops_job_workers WHERE worker_id=? AND left_at='' LIMIT 1",before.worker_id).first();
-  const eligible=[];if(!busy)for(const id of JSON.parse(open.job_ids_json)){const j=await q(env,"SELECT * FROM v2_ops_jobs WHERE id=? AND status IN ('working','awaiting_close')",id).first();if(j)eligible.push(j);}
+  const eligible=[];if(!busy)for(const id of JSON.parse(open.job_ids_json)){const j=await q(env,"SELECT * FROM v2_ops_jobs WHERE id=? AND status IN ('working','awaiting_close')",id).first();if(j){const record=await q(env,"SELECT state FROM sop_records WHERE id=? AND kind IN ('dispatch','task')",id).first();const data=record?JSON.parse(record.state):null;if(!data||(data.status!=='paused'&&(data.workers||[]).some(w=>w.id===before.worker_id)))eligible.push(j);}}
+  await q(env,`CREATE TRIGGER IF NOT EXISTS ck_rest_resume_guard BEFORE INSERT ON v2_ops_job_workers WHEN NEW.id LIKE 'WS-REST-%' BEGIN SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM v2_ops_jobs j WHERE j.id=NEW.job_id AND j.status IN ('working','awaiting_close')) OR EXISTS(SELECT 1 FROM sop_records s WHERE s.id=NEW.job_id AND s.kind IN ('task','dispatch') AND (json_extract(s.state,'$.status')='paused' OR NOT EXISTS(SELECT 1 FROM json_each(s.state,'$.workers') w WHERE json_extract(w.value,'$.id')=NEW.worker_id))) THEN RAISE(ABORT,'rest_assignment_changed') END; END`).run();
   // Never restore multiple disputed concurrent jobs. A dispatcher must select one.
   const resume=eligible.length===1&&!await personHasPendingReturn(env,before.worker_id)?eligible:[],statements=[updateDay(env,before,after),q(env,"UPDATE ck_attendance_breaks SET ended_at=? WHERE id=? AND ended_at=''",t,open.id)];
-  for(const j of resume)statements.push(q(env,"INSERT INTO v2_ops_job_workers(id,job_id,worker_id,worker_name,joined_at) VALUES(?,?,?,?,?)",uid('WS'),j.id,before.worker_id,before.name,t));
+  for(const j of resume){const seg=uid('WS-REST');statements.push(q(env,"INSERT INTO v2_ops_job_workers(id,job_id,worker_id,worker_name,joined_at) VALUES(?,?,?,?,?)",seg,j.id,before.worker_id,before.name,t));
+   if(j.job_type==='pick_direct')statements.push(q(env,`INSERT INTO v2_pick_worker_docs(id,job_id,segment_id,worker_id,worker_name,pick_doc_no,started_at,status,created_at) SELECT ?||'-'||id,?,?,?,?,pick_doc_no,?,'working',? FROM v2_ops_job_pick_docs WHERE job_id=? AND pick_status!='completed'`,seg,j.id,seg,before.worker_id,before.name,t,t,j.id));
+  }
   statements.push(...countJobs(env,resume.map(j=>j.id),t));return commit(env,b,u,before,after,statements,{ok:true,record:publicDay(after),resumedJobs:resume.map(j=>j.id)});
  }
  if(action==='sop_attendance_correct'){
@@ -214,7 +218,7 @@ export async function handleAttendance(b,env){
 export async function guardAttendance(body,env){
  if(!attendanceEnabled(env))return null;
  const action=body.action||'',native=action==='sop_native_start',source=native?body.payload||{}:body;
- if(!(native||['sop_task_start','sop_task_people','sop_task_dispatch','sop_native_people'].includes(action)||/^v2_.*_(start|resume|join)$/.test(action)||action==='v2_pick_job_start_by_docs'))return null;
+ if(!(native||['sop_task_start','sop_task_people','sop_task_dispatch','sop_native_people','sop_native_resume'].includes(action)||/^v2_.*_(start|resume|join)$/.test(action)||action==='v2_pick_job_start_by_docs'))return null;
  // A committed retry must reach the original action's idempotent response.
  if(body.client_req_id){const done=await q(env,'SELECT action,actor_id FROM sop_events WHERE request_id=?',body.client_req_id).first();if(done&&done.action===action&&done.actor_id===env.SOP_REQUEST_USER?.id)return null;}
  let workers=body.workers||[],jobId=body.job_id||body.id||source.job_id;
@@ -222,7 +226,7 @@ export async function guardAttendance(body,env){
  if(action==='sop_task_people'){const row=await q(env,"SELECT state FROM sop_records WHERE id=? AND kind='task'",body.id).first();if(row&&JSON.parse(row.state).status!=='working')return null;}
 
  if(action==='sop_task_start'){const row=await q(env,"SELECT state FROM sop_records WHERE id=? AND kind='task'",body.id).first();workers=row?JSON.parse(row.state).workers||[]:[];}
- if(['sop_task_start','sop_task_people','sop_native_people'].includes(action)&&jobId)workers=await sourceActiveWorkers(env,jobId,workers);
+ if(['sop_task_start','sop_task_people','sop_native_people','sop_native_resume'].includes(action)&&jobId)workers=await sourceActiveWorkers(env,jobId,workers);
  if(!workers.length&&(source.worker_id||source.handler_id))workers=[{id:source.worker_id||source.handler_id}];
  const daily=workers.filter(w=>/^(?:DA(?:F)?|EMP)-/.test(w.id||''));if(!daily.length)return null;
  await ensureAttendance(env);const day=kstDay(new Date().toISOString()),ids=JSON.stringify([...new Set(daily.map(w=>w.id))]);

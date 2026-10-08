@@ -15,21 +15,21 @@ test('external field cards and headers show canonical dispatcher and business co
  const {w,root}=fixture(),calls=[],changed=[];
  const job={id,job_type:'bulk_op',business_no:'EXT-20261008-004',display_no:id,related_doc_type:'work_order',related_doc_id:'EXT-20261008-004',status:'working',created_at:'2026-10-07T16:00:00Z',dispatcher_name:'实际派审员 <甲>',customer:'Fixture customer'};
  const detail={can_manage_dispatch:true,job,dispatch:{revision:7,state:JSON.stringify({owner:'旧派审员',lead_id:'EMP-1',workers:[{id:'EMP-1',name:'操作员'}]})},workers:[{worker_id:'EMP-1',worker_name:'操作员',left_at:''}],results:[]};
- w.CKSession={request:async(action,data)=>{calls.push({action,data});if(action==='sop_dispatch_list')return{items:[{...job,task_kind:'dispatch',workers:[{id:'EMP-1',name:'操作员'}]}]};if(action==='v2_ops_job_detail')return detail;if(action==='sop_native_people')return{};throw Error('Unexpected request '+action);}};
- w.eval(source('field-work.js'));const controller=w.CKFieldWork(root,'',{external:true,onChange:t=>changed.push(t)});
+ w.CKSession={request:async(action,data)=>{calls.push({action,data});if(action==='sop_dispatch_list')return{items:[{...job,task_kind:'dispatch',workers:[{id:'EMP-1',name:'操作员'}]}]};if(action==='v2_ops_job_detail')return detail;if(action==='sop_native_pause')return{};throw Error('Unexpected request '+action);}};
+ w.eval(source('native-lifecycle-ui.js'));w.eval(source('field-work.js'));const controller=w.CKFieldWork(root,'',{external:true,onChange:t=>changed.push(t)});
  try{
   await until(()=>root.querySelector('[data-task]'));const card=root.querySelector('[data-task]');assert.equal(card.dataset.task,id);assert.match(card.textContent,/EXT-20261008-004/);assert.match(card.textContent,/派审员.*实际派审员 <甲>/);assert.ok(!card.textContent.includes(id));assert.equal(card.querySelector('甲'),null);
   card.click();await until(()=>root.querySelector('.ck-work-dispatcher'));assert.match(root.textContent,/EXT-20261008-004/);assert.match(root.querySelector('.ck-work-dispatcher').textContent,/实际派审员 <甲>/);assert.ok(!root.textContent.includes(id));
   const current=changed.at(-1);assert.equal(current.id,id);assert.equal(current.job_type,'bulk_op');assert.equal(current.business_no,job.business_no);assert.equal(current.dispatcher_name,job.dispatcher_name);
-  [...root.querySelectorAll('button')].find(b=>b.textContent==='暂停作业 / 작업 중지').click();await until(()=>root.querySelector('[data-pause]'));const pause=root.querySelector('[data-pause]');pause.elements.reason.value='检查设备';pause.requestSubmit();await until(()=>calls.some(c=>c.action==='sop_native_people'));
-  const mutation=calls.find(c=>c.action==='sop_native_people');assert.equal(mutation.data.job_id,id);assert.equal(mutation.data.revision,7);assert.equal(mutation.data.reason,'检查设备');assert.deepEqual(Array.from(mutation.data.workers),[]);
+  [...root.querySelectorAll('button')].find(b=>b.textContent==='暂停整个任务 / 전체 작업 중지').click();await until(()=>w.document.querySelector('dialog form'));const pause=w.document.querySelector('dialog form');pause.elements.reason.value='检查设备';pause.requestSubmit();await until(()=>calls.some(c=>c.action==='sop_native_pause'));
+  const mutation=calls.find(c=>c.action==='sop_native_pause');assert.equal(mutation.data.job_id,id);assert.equal(mutation.data.revision,7);assert.equal(mutation.data.reason,'检查设备');assert.equal(mutation.data.workers,undefined);
   job.dispatcher_name='';await controller.open(id,detail);assert.match(root.querySelector('.ck-work-dispatcher').textContent,/未记录/);assert.ok(!root.querySelector('.ck-work-dispatcher').textContent.includes('旧派审员'));
  }finally{controller.destroy();w.close();}
 });
 test('work-plan field number remains its plan number and does not mistake an operator for dispatcher',opts,async()=>{
  const {w,root}=fixture('ko'),task={id,kind:'task',job_type:'bulk_op',status:'completed',display_no:id,work_plan_no:'ZY-20261008-003',worker_name:'작업자',created_by:'작성자',workers:[],lead_id:''};
  w.CKSession={request:async()=>({need:{id:'NEED-fixture',display_no:'ZY-20261008-003',title:'작업 계획',source_type:'inventory'},task,source:null,segments:[]})};w.CKResultSummary=()=>'';w.CKResultPhotos=()=>'';
- w.eval(source('field-work.js'));const controller=w.CKFieldWork(root,id);
+ w.eval(source('native-lifecycle-ui.js'));w.eval(source('field-work.js'));const controller=w.CKFieldWork(root,id);
  try{await until(()=>root.querySelector('.ck-work-dispatcher'));assert.match(root.querySelector('.ck-work-number').textContent,/ZY-20261008-003/);assert.match(root.querySelector('.ck-work-dispatcher').textContent,/미기록/);assert.ok(!root.querySelector('.ck-work-dispatcher').textContent.includes('작업자'));assert.ok(!root.textContent.includes(id));}finally{controller.destroy();w.close();}
 });
 test('job audit handles unknown events and nested references without leaking internal IDs or changing source events',opts,()=>{

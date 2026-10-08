@@ -175,3 +175,23 @@ test('field role can dispatch and review a requirement and cannot change office 
  await ok('field','sop_task_complete_review',{id:task.id,revision:1,decision:'pass',reason:'虚拟审核',result:{quantity:2,unit:'托',pallet_count:2,operated_box_count:20}});
  assert.equal((await ok('field','sop_field_resolve',{code:n.id})).task.status,'completed');
 });
+
+test('resting non-owner can only view its assigned job and return its own break; no crew management or stale access',async()=>{
+ const f=await setup(),p=await f.employee('REST-MEMBER'),day=await f.checkin(p);
+ const j=await f.ok('office','sop_native_start',{payload:{action:'v2_ops_job_start',job_type:'pack_direct',client_req_id:crypto.randomUUID()},workers:[{id:p.badgeId,name:p.name}],lead_id:p.badgeId,estimated_minutes:15,labor_department:'direct_ship'});
+ await f.login(p);assert.equal((await f.ok('field','v2_ops_job_detail',{job_id:j.job_id})).can_manage_dispatch,true);
+ await f.ok('office','sop_attendance_break_start',{id:day.id});
+ assert.ok((await f.ok('field','sop_dispatch_list')).items.some(x=>x.id===j.job_id));const detail=await f.ok('field','v2_ops_job_detail',{job_id:j.job_id});assert.equal(detail.can_manage_dispatch,false);assert.equal(detail.can_view_resting,true);
+ for(const action of ['sop_native_pause','sop_native_resume','sop_native_people','v2_ops_job_finish'])assert.equal((await f.call('field',action,{job_id:j.job_id,revision:1,reason:'forged',workers:[{id:p.badgeId,name:p.name}],lead_id:p.badgeId})).ok,false,action);
+ assert.equal((await f.call('field','sop_native_rest_return',{job_id:'OTHER'})).ok,false);
+ await f.ok('field','sop_native_rest_return',{job_id:j.job_id});assert.equal((await f.ok('field','v2_ops_job_detail',{job_id:j.job_id})).can_manage_dispatch,true);
+ await f.ok('office','sop_attendance_break_start',{id:day.id});await f.ok('office','sop_native_people',{job_id:j.job_id,revision:1,workers:[],lead_id:''});
+ assert.equal((await f.ok('field','sop_dispatch_list')).items.some(x=>x.id===j.job_id),false);assert.equal((await f.ok('field','v2_ops_job_detail',{job_id:j.job_id})).can_view_resting,false);assert.equal((await f.call('field','sop_native_rest_return',{job_id:j.job_id})).ok,false);
+});
+test('authorized working member that pauses can resume that same pause but an unrelated field identity cannot',async()=>{
+ const f=await setup(),p=await f.employee('PAUSE-MEMBER');await f.checkin(p);
+ const j=await f.ok('office','sop_native_start',{payload:{action:'v2_ops_job_start',job_type:'pack_direct',client_req_id:crypto.randomUUID()},workers:[{id:p.badgeId,name:p.name}],lead_id:p.badgeId,estimated_minutes:15,labor_department:'direct_ship'});
+ await f.login(p);await f.ok('field','sop_native_pause',{job_id:j.job_id,revision:1,reason:'QA pause'});assert.equal((await f.ok('field','v2_ops_job_detail',{job_id:j.job_id})).can_manage_dispatch,true);
+ const other=await f.employee('OTHER-PAUSE');await f.checkin(other);await f.login(other);assert.equal((await f.ok('field','v2_ops_job_detail',{job_id:j.job_id})).can_manage_dispatch,false);assert.equal((await f.call('field','sop_native_resume',{job_id:j.job_id,revision:2,workers:[{id:p.badgeId,name:p.name}],lead_id:p.badgeId})).ok,false);
+ await f.login(p);await f.ok('field','sop_native_resume',{job_id:j.job_id,revision:2,workers:[{id:p.badgeId,name:p.name}],lead_id:p.badgeId});
+});

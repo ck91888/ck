@@ -9,6 +9,12 @@
   const dispatcher=document.createElement('small');dispatcher.className='ck-task-dispatcher';dispatcher.textContent='派审员 / 배정·검수 담당자：'+window.CKDocumentLabels.jobDispatcher(job);b.append(title,info,dispatcher,crew);b.onclick=async()=>{b.disabled=true;try{await CKOpenNativeJob(job);}finally{b.disabled=false;}};return b;
  };
  const startActions=new Set(['v2_unload_job_start','v2_unplanned_unload_start','v2_inbound_job_start','v2_import_delivery_job_start','v2_outbound_load_start','v2_outbound_stock_op_start','v2_issue_handle_start','v2_pick_job_start','v2_pick_job_start_by_docs','v2_bulk_op_job_start','v2_ops_job_start','v2_verify_job_start']);
+ window.CKViewRestingJob=function(detail){
+  const dialog=document.createElement('dialog');dialog.className='ck-workflow';dialog.innerHTML='<h2>本人休息中的任务 / 휴식 중인 내 작업</h2><p data-summary></p><p>查看不会恢复计时。结束本人休息后，仅在原任务仍允许且仍属本任务人员时恢复。整个任务暂停时仍须派审员恢复任务。 / 조회만으로 작업시간이 재개되지 않습니다.</p><p role="alert"></p><div class="ck-buttons"><button data-return>结束本人休息 / 내 휴식 종료</button><button data-close>关闭 / 닫기</button></div>';
+  dialog.querySelector('[data-summary]').textContent=window.CKDocumentLabels.jobSummary(detail);document.body.append(dialog);dialog.showModal();
+  const close=()=>{dialog.close();dialog.remove();};dialog.querySelector('[data-close]').onclick=close;dialog.oncancel=e=>{e.preventDefault();close();};
+  const request={job_id:detail.job.id,client_req_id:crypto.randomUUID()},button=dialog.querySelector('[data-return]');button.onclick=async()=>{if(button.disabled)return;button.disabled=true;try{await CKSession.request('sop_native_rest_return',request);close();await window.loadDispatchTasks?.();goPage('home');}catch(e){dialog.querySelector('[role=alert]').textContent=e.message;button.disabled=false;}};
+ };
  window.CKInstallDispatch=function(){
   window.CKChooseNativeStaff=async payload=>{const {startDepartment,departments}=await import('/shared/labor-department.js');return chooseStaff(startDepartment(payload),departments,payload);};
   let lead=null;try{lead=JSON.parse(sessionStorage.getItem('ck_test_active_lead')||'null');}catch{}
@@ -16,12 +22,14 @@
   window.CKSetNativeLead=function(person){if(person){lead=person;sessionStorage.setItem('ck_test_active_lead',JSON.stringify(lead));}};
   window.CKOpenNativeJob=async function(job){
    try{
-    if(job.job_type==='courier_receiving')return window.CKOpenCourierBatch(job.id);
+
     if(job.task_kind==='task'){window.CKClearNativeJob();goPage('bulk_op',{task:job.id,external:false});return;}
      if(job.task_kind==='legacy')await CKSession.request('sop_native_adopt',{job_id:job.id,client_req_id:crypto.randomUUID()});
      const r=await api({action:'v2_ops_job_detail',job_id:job.id});
+    if(r?.ok&&r.can_view_resting&&!r.can_manage_dispatch){window.CKViewRestingJob(r);return;}
     if(!r?.ok||!r.can_manage_dispatch)throw Error(r?.error||'你已不在此任务中，请联系派工人 / 배정 담당자에게 문의하세요');
-    if(!['pending','working','awaiting_close'].includes(r.job.status))throw Error('任务已结束，请刷新列表 / 작업 종료, 목록을 새로고침하세요');
+    if(!['pending','working','awaiting_close','paused'].includes(r.job.status))throw Error('任务已结束，请刷新列表 / 작업 종료, 목록을 새로고침하세요');
+    if(job.job_type==='courier_receiving')return window.CKOpenCourierBatch(job.id);
     const state=JSON.parse(r.dispatch.state),crew=r.workers.filter(w=>!w.left_at).map(w=>({id:w.worker_id,name:w.worker_name}));
     // Viewing a resting crew must not create a work segment or widen access.
     // The server authorization above still decides who may open this job.

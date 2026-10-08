@@ -87,16 +87,18 @@
    if(!t){$('content').innerHTML='<p class="ck-muted">此作业已完成或暂不能派工，请联系订单处理组核对。</p>';return;}
    $('content').innerHTML=`<section class="ck-work-sheet"><span class="ck-step">02 / PEOPLE & EXECUTION</span><h3>参与人员 / 참여 인원</h3><p>${live.length?live.map(w=>esc(w.worker_name)).join(' · '):'当前无人计时 / 현재 작업 인원 없음'}</p><p class="ck-muted">${t.started_at?'开始 '+CKAttendance.at(t.started_at):'人员到位后开始记录工时'} · 派审员 / 배정·검수 담당자：${esc(jobDispatcher(t))}</p><div class="ck-actions" data-actions></div><div data-editor></div></section>`;
    const action=(label,fn)=>{const b=document.createElement('button');b.className='ck-small';b.textContent=label;b.onclick=async()=>{b.disabled=true;try{await fn();}catch(x){error(x);}finally{b.disabled=false;}};$('actions').append(b);};
-   if(external&&['pending','working','awaiting_close'].includes(t.status)){
+   if(external&&['pending','working','awaiting_close','paused'].includes(t.status)){
+    action(t.status==='paused'?'恢复整个任务 / 전체 작업 재개':'暂停整个任务 / 전체 작업 중지',async()=>CKToggleNativePause(current.native,()=>resolve(t.id)));
+    if(t.status==='paused'){action('个人休息／恢复 / 개인 휴식·복귀',()=>window.CKOpenFieldLabor?.());return;}
     action(live.length?'调整人员 / 인원 변경':'核对人员并开始 / 인원 확인·시작',()=>people('保存人员 / 인원 저장',t.workers,async staff=>{await write('sop_native_people',{job_id:t.id,revision:t.revision,...staff,reason:$('reason').value});await resolve(t.id);},true));
-    action('登记休息 / 휴식 등록',()=>window.CKOpenFieldLabor?.());
-    if(live.length)action('暂停作业 / 작업 중지',()=>pause(t));
+    action('个人休息／恢复 / 개인 휴식·복귀',()=>window.CKOpenFieldLabor?.());
+
     action('填写产出并审核结束 / 산출·검수 완료',()=>finish(t));return;
    }
    if(['assigned','paused','rework'].includes(t.status))action('核对人员并开始 / 인원 확인·시작',()=>people('开始作业 / 작업 시작',t.workers,async staff=>{let revision=t.revision;if(JSON.stringify(staff.workers)!==JSON.stringify(t.workers)||staff.lead_id!==t.lead_id){const r=await write('sop_task_people',{id:t.id,revision,...staff,reason:'开工前核对到位人员'});revision=r.revision;}await write('sop_task_start',{id:t.id,revision});await resolve(t.id);}));
    if(t.status==='working'){
      action('调整人员 / 인원 변경',()=>people('保存人员 / 인원 저장',live.map(w=>({id:w.worker_id,name:w.worker_name})),async staff=>{await write('sop_task_people',{id:t.id,revision:t.revision,...staff,reason:$('reason').value});await resolve(t.id);},true));
-    action('登记休息 / 휴식 등록',()=>window.CKOpenFieldLabor?.());action('暂停作业 / 작업 중지',()=>pause(t));action('填写产出并审核结束 / 산출·검수 완료',()=>finish(t));
+    action('个人休息／恢复 / 개인 휴식·복귀',()=>window.CKOpenFieldLabor?.());action('暂停作业 / 작업 중지',()=>pause(t));action('填写产出并审核结束 / 산출·검수 완료',()=>finish(t));
    }else if(t.status==='awaiting_review')action('审核原有产出 / 검수',()=>{
     $('editor').innerHTML=`${CKResultSummary(t.result)}${t.result?.location?`<p>${esc(t.result.location)}</p>`:''}${CKResultPhotos(t.result)}<form data-review><label>审核结论<select name="decision"><option value="pass">通过 / 통과</option><option value="return">退回整改 / 재작업</option></select></label><label>审核说明<textarea name="reason" required></textarea></label><button class="ck-primary">保存审核 / 검수 저장</button></form>`;
     $('review').onsubmit=async ev=>{ev.preventDefault();const submit=ev.submitter||ev.target.querySelector('button[type=submit],button:not([type])');if(submit.disabled)return;submit.disabled=true;try{const review=Object.fromEntries(new FormData(ev.target));await write('sop_task_review',{id:t.id,revision:t.revision,...review});if(review.decision==='pass')complete();else await resolve(t.id);}catch(x){error(x);submit.disabled=false;}};
