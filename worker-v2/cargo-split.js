@@ -13,7 +13,7 @@ export async function cargoSplit(b,env,u){
  if(Number(b.revision)!==row.revision)throw Error('资料组已更新，请刷新核对');
  if(['closed','cancelled'].includes(data.status)||!text(b.reason))throw Error('请核对计划状态并填写拆组原因');
  const parent=cargo.groups.find(g=>g.id===b.group_id);if(!parent)throw Error('资料组不属于此计划');
- const available=await cargoAvailability(env,data);if(available.groups.find(g=>g.id===parent.id).allocated>0)throw Error('已预约或已发货组不能拆分；未发货请先取消原预约');
+ const available=await cargoAvailability(env,data);if(available.groups.find(g=>g.id===parent.id).allocated>0||available.groups.find(g=>g.id===parent.id).reserved)throw Error('已预约或已发货组不能拆分；未发货请先取消原预约');
  if(parent.processes?.some(p=>p.status==='awaiting_review'))throw Error('待审核工序须先退回或审核，再拆组');
  const output=parent.outputs?.find(o=>o.id===parent.current_output_id);if(output?.status==='awaiting_review')throw Error('待审核成果请先退回核对，再拆分');
  if(!Array.isArray(b.children)||b.children.length<2||b.children.length>50)throw Error('请填写2至50个可识别的实际货物范围');

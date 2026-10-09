@@ -3823,7 +3823,7 @@ route("v2_inbound_plan_create", async (body, env) => {
       workBundle=await workPlanStatements(env,body.work_requests,{type:'inbound',id,customer},env.SOP_REQUEST_USER||{id:'service',name:created_by},t);
     }
     const result={ ok: true, id, display_no, outbound_id, outbound_display_no, needs:workBundle.needs.map(n=>({id:n.id,title:n.title})), outbounds:workBundle.outbounds };
-    const grouped=body.work_requests?.some(n=>n.cargo_groups),claim=[];if(grouped){if(!body.client_req_id)throw Error('缺少创建请求编号');claim.push(env.DB.prepare('INSERT INTO v2_idempotency_keys(idem_key,action,response_json,created_at) VALUES(?,?,?,?)').bind(body.client_req_id,'v2_inbound_plan_create',JSON.stringify(result),t));}
+    const grouped=body.work_requests?.some(n=>n.cargo_groups||n.plan_materials),claim=[];if(grouped){if(!body.client_req_id)throw Error('缺少创建请求编号');claim.push(env.DB.prepare('INSERT INTO v2_idempotency_keys(idem_key,action,response_json,created_at) VALUES(?,?,?,?)').bind(body.client_req_id,'v2_inbound_plan_create',JSON.stringify(result),t));}
     try{await env.DB.batch([...claim,...inboundStatements,...workBundle.statements,...planAuditStatements(env,'inbound',id,'create',t)]);}catch(error){if(grouped){const old=await env.DB.prepare('SELECT response_json FROM v2_idempotency_keys WHERE idem_key=? AND action=?').bind(body.client_req_id,'v2_inbound_plan_create').first();if(old)return JSON.parse(old.response_json);}throw error;}
     if(lines.some(x=>x.unit_type==='courier'))await syncCourierArrival(env,id,recalcInboundPlanCompletion);
     return result;

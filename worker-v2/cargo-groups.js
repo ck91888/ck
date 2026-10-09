@@ -1,3 +1,5 @@
+import {cargoAvailability} from './cargo-allocation.js';
+import {syncGroupReservations} from './cargo-reservations.js';
 import {processNames} from './cargo-processes.js';
 import {cargoTask} from './cargo-execution.js';
 import {chainNeed,chainEvent,workMaterials,workChainEnabled} from './work-chain.js';
@@ -46,7 +48,7 @@ export async function cargoGroups(b,env,u){
  if(!['sop_cargo_groups','sop_cargo_groups_preview','sop_cargo_groups_save'].includes(b.action))return null;
  if(!workChainEnabled(env))throw Error('资料分组未启用');
  const row=await chainNeed(env,b.id,u),current=row.data.cargo_groups||null;
- if(b.action==='sop_cargo_groups'){const access=await cargoTask(env,row,u,b.task_id);return {ok:true,id:row.id,revision:row.revision,cargo_groups:current,can_edit:canEdit(u),can_complete:access.can_complete,can_review:access.can_review,task_status:access.task?.data.status||'',task_id:access.task?.id||'',task:access.task?{id:access.task.id,...access.task.data}:null,files:await workMaterials(env,[row])};}
+ if(b.action==='sop_cargo_groups'){const access=await cargoTask(env,row,u,b.task_id);return {ok:true,id:row.id,revision:row.revision,cargo_groups:current,reserved_group_ids:current?(await cargoAvailability(env,row.data)).groups.filter(g=>g.reserved).map(g=>g.id):[],can_edit:canEdit(u),can_complete:access.can_complete,can_review:access.can_review,task_status:access.task?.data.status||'',task_id:access.task?.id||'',task:access.task?{id:access.task.id,...access.task.data}:null,files:await workMaterials(env,[row])};}
  if(row.data.operation_kind==='direct_forward')throw Error('直接转发沿用原出库流程；资料分组用于实际作业计划');
  if(!canEdit(u))throw Error('资料范围请由办公室客服维护 / 사무실 담당자만 수정할 수 있습니다');
  const request=text(b.client_req_id),fingerprint=JSON.stringify({id:row.id,revision:b.revision,groups:b.groups,total_range:b.total_range||'',public_attachment_ids:b.public_attachment_ids||[],reason:b.reason||''});
@@ -82,6 +84,7 @@ export async function cargoGroups(b,env,u){
  if(started&&changed){if(!text(b.reason))throw Error('开工后变更请填写原因，并由现场确认');const {task}=await cargoTask(env,row,u);if(!task)throw Error('关联任务不存在，请核对');task.data.cargo_pending_change_at=t;extra.push(...chainEvent(env,task,task.data,u,request+'-task',b.action,t));normalized.change_reason=text(b.reason).slice(0,4000);}
  if(current?.archived_groups)normalized.archived_groups=current.archived_groups;
  normalized.version=(current?.version||0)+1;normalized.by=u.name;normalized.actor_id=u.id;normalized.at=t;data.cargo_groups=normalized;
+ extra.push(...await syncGroupReservations(env,data,t,u,{needId:row.id}));
  const result={cargo_version:normalized.version,fingerprint};
  try{await env.DB.batch([...chainEvent(env,row,data,u,request,b.action,t,result),...extra]);}catch(error){const prior=await q(env,'SELECT * FROM sop_events WHERE request_id=?',request).first();if(prior&&prior.actor_id===u.id&&prior.action===b.action&&JSON.parse(prior.result_json).fingerprint===fingerprint)return JSON.parse(prior.result_json);throw error;}
  return {ok:true,id:row.id,revision:row.revision+1,...result};

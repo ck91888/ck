@@ -1,3 +1,4 @@
+import {syncGroupReservations} from './cargo-reservations.js';
 import {taskGroups,taskProcess,allProcessesApproved} from './cargo-processes.js';
 import {chainNeed,chainEvent,workChainEnabled} from './work-chain.js';
 const q=(env,sql,...args)=>env.DB.prepare(sql).bind(...args),text=v=>String(v??'').trim();
@@ -58,6 +59,7 @@ export async function cargoExecution(b,env,u){
   extra.push(q(env,"UPDATE v2_ops_jobs SET status='completed',active_worker_count=0,finished_at=?,updated_at=?,shared_result_json=?,result_summary=? WHERE id=?",t,t,JSON.stringify(result),JSON.stringify(result),task.id));
   extra.push(q(env,'INSERT INTO v2_ops_job_results(id,job_id,box_count,pallet_count,remark,result_json,created_by,created_at) VALUES(?,?,?,?,?,?,?,?)','RES-'+crypto.randomUUID(),task.id,finalOutputs.filter(o=>o.unit==='箱').reduce((n,o)=>n+o.quantity,0),finalOutputs.filter(o=>o.unit==='托').reduce((n,o)=>n+o.quantity,0),result.description,JSON.stringify({...result,job_type:task.data.job_type}),u.name,t));
  }
+ if(b.action==='sop_cargo_group_review')extra.push(...await syncGroupReservations(env,data,t,u,{needId:row.id}));
  // Both plan and task revisions are claimed in the same batch, including pause races.
  task.data.cargo_last_action={action:b.action,group_id:group?.id||'',by:u.name,at:t};
  const result={ok:true,id:row.id,revision:row.revision+1,fingerprint};

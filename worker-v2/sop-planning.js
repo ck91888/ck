@@ -31,6 +31,7 @@ export async function workPlanStatements(env,rows,source,actor,t){
   }
   if(data.links.reduce((n,x)=>n+x.quantity,0)>(data.planned_quantity||0))throw Error('出库分配数量超过本作业计划数量');
   statements.push(...await cargoCreateStatements(env,item,data,id,actor,t));
+  for(const link of data.links.filter(l=>l.cargo_reservation))outbounds.push({id:link.outbound_id,display_no:link.display_no,need_id:id});
   const state=JSON.stringify(data);
   statements.push(sql('INSERT INTO sop_events VALUES(?,?,?,?,?,?,?,?,?,?)','CREATE-'+id,id,0,'sop_need_create',actor.id,actor.name,'{}',state,JSON.stringify({ok:true,id,revision:1}),t));
   statements.push(sql('INSERT INTO sop_records VALUES(?,?,?,?,?,?)',id,'need',1,department,state,t));needs.push({id,...data});
