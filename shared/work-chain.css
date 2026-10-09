@@ -52,3 +52,30 @@
 [data-cargo-dispatch] [data-process-groups] label{display:flex;align-items:center;gap:10px;padding:8px 0;overflow-wrap:anywhere}[data-cargo-dispatch] [data-process-group]{width:18px;min-width:18px;height:18px;margin:0;flex:none}
 
 .cargo-groups input[type=checkbox],.cargo-field input[type=checkbox],.cargo-shipping input[type=checkbox]{width:18px;min-width:18px;height:18px;margin:0 8px 0 0;vertical-align:middle}
+
+/* Group editors must not inherit the parent work-card's two-column fieldset grid. */
+.cargo-groups{container-type:inline-size}
+.cargo-groups fieldset.cargo-group-editor{display:block;padding:18px;min-width:0}
+.cargo-group-editor .cargo-identity,.cargo-group-editor .cargo-operation-fields{display:grid;grid-template-columns:minmax(150px,1fr) minmax(0,2fr);gap:16px 24px;align-items:start}
+.cargo-group-editor .cargo-identity>*,.cargo-group-editor .cargo-operation-fields>*,.cargo-group-editor .cargo-document-fields{min-width:0}
+.cargo-groups .cargo-group-editor label{margin:0;font-weight:600}
+.cargo-groups .cargo-group-editor input:not([type=checkbox]),.cargo-groups .cargo-group-editor textarea{display:block;margin-top:6px;font:inherit;font-weight:400;min-width:0;max-width:100%}
+.cargo-groups .cargo-group-editor textarea[data-range]{min-height:76px;resize:vertical}
+.cargo-groups .cargo-group-editor textarea[data-instructions]{min-height:100px;resize:vertical}
+.cargo-group-editor .cargo-operation-fields,.cargo-group-editor .cargo-document-fields{margin-top:20px;padding-top:20px;border-top:1px solid #dce5df}
+.cargo-groups .cargo-group-editor .cargo-checkbox-note{display:flex;align-items:flex-start;gap:8px;margin-top:10px;font-size:13px;font-weight:400;line-height:1.5}
+.cargo-groups .cargo-checkbox-note input[type=checkbox]{flex:none;margin:2px 0 0}
+.cargo-group-editor .cargo-help{display:block;margin-top:6px;color:#586b61;font-weight:400;font-size:13px;line-height:1.5}
+.cargo-group-editor .cargo-document-fields details{margin:0}
+.cargo-group-editor .cargo-document-fields summary{font-weight:600;cursor:pointer;padding:4px 0}
+.cargo-group-editor .cargo-selected-files{margin:8px 0 16px;font-size:13px;line-height:1.6;overflow-wrap:anywhere}
+.cargo-groups .cargo-file span{min-width:0;overflow-wrap:anywhere}
+.cargo-groups .cargo-file input[type=checkbox]{flex:none}
+.cargo-group-editor .cargo-group-footer{display:flex;justify-content:flex-end;margin-top:18px;padding-top:12px;border-top:1px solid #dce5df}
+.cargo-groups .cargo-group-editor button.cargo-remove-group{width:auto;min-width:0;margin:0;padding:8px 16px;background:#fff;color:#9c3835;border:1px solid #dcb8b5;box-shadow:none;flex:none}
+@container(max-width:560px){.cargo-groups fieldset.cargo-group-editor{padding:12px}.cargo-group-editor .cargo-identity,.cargo-group-editor .cargo-operation-fields{grid-template-columns:minmax(0,1fr);gap:16px}.cargo-group-editor .cargo-operation-fields,.cargo-group-editor .cargo-document-fields{margin-top:16px;padding-top:16px}}
+@media(max-width:600px){.ck-work-plans [data-work-row]{padding:10px}.ck-work-plans [data-work-row]>.cargo-groups{padding:8px}.cargo-groups .chain-upload>*{min-width:0}.cargo-groups input[type=file]{max-width:100%}}
+@media(max-width:380px){#view-inbound_create #ibcLinesTable{table-layout:fixed;width:100%}#view-inbound_create #ibcLinesTable th,#view-inbound_create #ibcLinesTable td{padding:6px 3px;overflow-wrap:anywhere}#view-inbound_create #ibcLinesTable input,#view-inbound_create #ibcLinesTable select{width:100%!important;min-width:0;box-sizing:border-box}}
+#view-need .cargo-groups .cargo-group-editor button.cargo-remove-group{color:#9c3835;border-color:#dcb8b5;min-height:44px;background:#fff}
+#view-need .cargo-groups .cargo-group-editor input:not([type=checkbox]){min-height:44px}
+@media(max-width:600px){#view-inbound_create .ck-inline-heading.ck-work-plans{margin:12px 0!important;padding:0!important}}
