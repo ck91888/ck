@@ -31,9 +31,9 @@ export function normalizeCargoGroups(input){
   if(one&&box_count!==marks.length)throw Error('已确认一唛一箱，箱数须与范围数量一致：'+(i+1));
   if(identifier.length>120)throw Error('区分标记过长');
   for(const mark of marks){const previous=all.get(mark)||[];if(previous.some(p=>one||p.one||!identifier||!p.identifier||p.identifier===identifier))throw Error('箱唛范围交叉，请拆分或明确不同实物标记：'+mark);previous.push({identifier,one});all.set(mark,previous);}
-  const instructions=text(g.instructions),name=text(g.name)||'组 '+(i+1);if(!instructions||instructions.length>4000||name.length>120)throw Error('请填写组名与处理要求（要求最多4000字）');
+  const instructions=text(g.instructions),name=text(g.name)||'组 '+(i+1);if(instructions.length>4000)throw Error('第'+(i+1)+'组备注最多4000字');if(name.length>120)throw Error('第'+(i+1)+'组的其他设置：组名最多120字');
   const attachment_ids=[...new Set((g.attachment_ids||[]).map(text))];if(attachment_ids.length>200)throw Error('每组最多200份资料');
-  count+=box_count;return {id,name,process_names:processNames(g.process_names),range:text(g.range),marks,identifier,one_mark_one_box:one,box_count,instructions,attachment_ids,no_documents_reason:(text(g.no_documents_reason)||(!attachment_ids.length&&!(input.public_attachment_ids||[]).length?instructions:'')).slice(0,400)};
+  count+=box_count;return {id,name,process_names:processNames(Array.isArray(g.process_names)&&!g.process_names.length?undefined:g.process_names),range:text(g.range),marks,identifier,one_mark_one_box:one,box_count,instructions,attachment_ids,no_documents_reason:text(g.no_documents_reason).slice(0,400)};
  });
  if(!Number.isSafeInteger(count))throw Error('合计箱数过大');
  const total_range=text(input.total_range),total=total_range?expandMarks(total_range):null;
@@ -63,7 +63,7 @@ export async function cargoGroups(b,env,u){
  const files=await workMaterials(env,[row]),byId=new Map(files.map(f=>[f.id,f]));
  const snapshot=id=>{const f=byId.get(id);if(!f)throw Error('资料不存在、已撤下或不属于此计划');return {id:f.id,file_key:f.file_key,file_name:f.file_name,created_at:f.created_at,uploaded_by:f.uploaded_by};};
  normalized.public_documents=normalized.public_attachment_ids.map(snapshot);
- for(const g of normalized.groups){g.documents=g.attachment_ids.map(snapshot);if(!g.documents.length&&!normalized.public_documents.length&&!g.no_documents_reason)throw Error('请选择组资料或明确无需资料的原因：'+g.name);}
+ for(const g of normalized.groups){g.documents=g.attachment_ids.map(snapshot);}
  if(b.action==='sop_cargo_groups_preview')return {ok:true,cargo_groups:normalized};
  const t=new Date().toISOString(),data=structuredClone(row.data),extra=[];
  const started=!!row.data.task_id;
