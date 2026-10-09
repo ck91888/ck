@@ -22,7 +22,7 @@ function value(key,v,context){
  if(key==='leave_reason')return window.CKDocumentLabels?.jobLeaveReason?.(v)||visible(v,context);
  if(key==='deadline')return day(v)||text('未填写','미입력');
  if(key==='status')return states[v]?text(...states[v]):text('未识别状态','미확인 상태');
- if(key==='operation_kind')return v==='direct_forward'?text('直接转发，无加工','작업 없이 전달'):v==='operation'?text('需操作／加工','작업·가공 필요'):text('未识别类型','미확인 종류');
+ if(key==='operation_kind')return v==='direct_forward'?text('直接转发，无加工','작업 없이 전달'):v==='operation'?text('需操作/加工/贴资料','작업·가공 필요'):text('未识别类型','미확인 종류');
  if(key==='planned_unit')return unit(v);
  if(key==='forwarded')return v?text('已转发','전달 완료'):text('未转发','미전달');
  if(key==='last_material_change'){const a={upload:['上传','업로드'],remove:['移除','제거'],restore:['恢复','복원'],batch_upload:['上传总明细','전체 명세 업로드'],batch_remove:['移除总明细','전체 명세 제거'],batch_restore:['恢复总明细','전체 명세 복원']}[v.action];return (a?text(...a):text('更新资料','자료 변경'))+' · '+String(v.file_name||text('文件名未记录','파일명 미기록'));}
