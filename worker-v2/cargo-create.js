@@ -1,3 +1,4 @@
+import {validateCargoCapacity} from './cargo-capacity.js';
 import {createGroupReservation} from './cargo-reservations.js';
 import {normalizeCargoGroups} from './cargo-groups.js';
 import {chainEvent,workChainEnabled} from './work-chain.js';
@@ -23,5 +24,5 @@ export async function cargoCreateStatements(env,item,data,id,actor,t){
  const ids=[...new Set([...cargo.public_attachment_ids,...cargo.groups.flatMap(g=>g.attachment_ids)])],files=new Map(),statements=[];
  for(const fileId of ids){const row=await q(env,"SELECT * FROM sop_records WHERE id=? AND kind='cargo_file'",fileId).first(),f=row&&JSON.parse(row.state);if(!f||f.actor_id!==actor.id||f.draft!==source.draft_id||f.status!=='draft')throw Error('资料草稿不存在、已使用或不属于当前作业');files.set(fileId,{id:fileId,file_key:f.file_key,file_name:f.file_name,created_at:f.created_at,uploaded_by:f.uploaded_by});statements.push(...chainEvent(env,row,{...f,status:'attached',need_id:id},actor,'ATTACH-'+fileId,'sop_cargo_draft_attach',t),q(env,'INSERT INTO v2_attachments(id,related_doc_type,related_doc_id,attachment_category,file_name,file_key,file_size,content_type,uploaded_by,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)',fileId,'sop_need',id,f.material_kind,f.file_name,f.file_key,f.file_size,f.content_type,actor.name,f.created_at));}
  cargo.public_documents=cargo.public_attachment_ids.map(id=>files.get(id));for(const g of cargo.groups){g.documents=g.attachment_ids.map(id=>files.get(id));g.public_documents=cargo.public_documents;g.mapping_version=1;}
- if(item.cargo_groups){Object.assign(cargo,{version:1,by:actor.name,actor_id:actor.id,at:t});data.cargo_groups=cargo;for(const [i,g] of cargo.groups.entries())if(source.groups[i].reservation)statements.push(await createGroupReservation(env,data,item.department||'bulk',g,source.groups[i].reservation,actor,t));}return statements;
+ if(item.cargo_groups){Object.assign(cargo,{version:1,by:actor.name,actor_id:actor.id,at:t});data.cargo_groups=cargo;for(const [i,g] of cargo.groups.entries()){const input=source.groups[i],reservations=input.reservations??(input.reservation?[input.reservation]:[]);if(!Array.isArray(reservations)||reservations.length>50)throw Error('每组最多50条出库预约');for(const value of reservations)statements.push(await createGroupReservation(env,data,item.department||'bulk',g,value,actor,t));}validateCargoCapacity(data);}return statements;
 }

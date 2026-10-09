@@ -1,3 +1,4 @@
+import {cargoLedger} from './cargo-capacity.js';
 import {allProcessesApproved} from './cargo-processes.js';
 // Read immutable allocation snapshots. Capacity is keyed by cargo group, never reset by a new output version.
 export function cargoReady(data,orderId){
@@ -5,7 +6,7 @@ export function cargoReady(data,orderId){
  const link=(data.links||[]).find(l=>l.outbound_id===orderId),allocations=link?.cargo_allocations;
  return data.status!=='cancelled'&&Array.isArray(allocations)&&allocations.length>0&&allocations.every(a=>{
   const group=data.cargo_groups.groups.find(g=>g.id===a.group_id),output=group?.outputs?.find(o=>o.id===a.output_id&&o.version===a.output_version);
-  return allProcessesApproved(group||{})&&output?.status==='approved'&&output.quantity===a.quantity&&output.unit===a.unit&&output.mapping_version===a.mapping_version;
+  return allProcessesApproved(group||{})&&output?.status==='approved'&&(a.allocation_schema===2?Number.isSafeInteger(a.quantity)&&a.quantity>0&&a.quantity<=output.quantity&&a.output_quantity===output.quantity:output.quantity===a.quantity)&&output.unit===a.unit&&output.mapping_version===a.mapping_version;
  });
 }
 export function cargoFiles(data,orderId){
@@ -16,8 +17,9 @@ export async function cargoAvailability(env,data){
  const byId=new Map(orders.map(o=>[o.id,o])),used=new Map();
  // Missing order is not permission to reuse its allocation. Shipped allocations remain consumed.
  for(const link of data.links||[])if(byId.get(link.outbound_id)?.status!=='cancelled')for(const a of link.cargo_allocations||[])used.set(a.group_id,(used.get(a.group_id)||0)+Number(a.quantity));
+ const ledger=cargoLedger(data,orders);
  const reserved=new Set((data.links||[]).filter(l=>l.cargo_reservation&&byId.get(l.outbound_id)?.status!=='cancelled').flatMap(l=>l.cargo_reservation.groups.map(g=>g.group_id)));
- return {orders,reservations:(data.links||[]).filter(l=>l.cargo_reservation).map(l=>({outbound_id:l.outbound_id,...l.cargo_reservation,...(byId.get(l.outbound_id)?Object.fromEntries(['expected_ship_at','outbound_mode','destination','po_no','outbound_requirement'].map(k=>[k,byId.get(l.outbound_id)[k]])):{}),order:byId.get(l.outbound_id)})),groups:data.cargo_groups.groups.map(g=>{const o=g.outputs?.find(x=>x.id===g.current_output_id);return {...g,output:o||null,allocated:used.get(g.id)||0,reserved:reserved.has(g.id),available:!reserved.has(g.id)&&allProcessesApproved(g)&&o?.status==='approved'&&!(used.get(g.id)>0)};})};
+ return {orders,reservations:(data.links||[]).filter(l=>l.cargo_reservation).map(l=>({outbound_id:l.outbound_id,...l.cargo_reservation,...(byId.get(l.outbound_id)?Object.fromEntries(['expected_ship_at','outbound_mode','destination','po_no','outbound_requirement'].map(k=>[k,byId.get(l.outbound_id)[k]])):{}),order:byId.get(l.outbound_id)})),groups:data.cargo_groups.groups.map(g=>{const o=g.outputs?.find(x=>x.id===g.current_output_id);return {...g,...ledger.find(c=>c.group_id===g.id),output:o||null,allocated:used.get(g.id)||0,reserved:reserved.has(g.id),available:!reserved.has(g.id)&&allProcessesApproved(g)&&o?.status==='approved'&&!(used.get(g.id)>0)};})};
 }
 
 export function cargoReferencesFile(data,id){
