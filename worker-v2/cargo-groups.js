@@ -33,7 +33,7 @@ export function normalizeCargoGroups(input){
   for(const mark of marks){const previous=all.get(mark)||[];if(previous.some(p=>one||p.one||!identifier||!p.identifier||p.identifier===identifier))throw Error('箱唛范围交叉，请拆分或明确不同实物标记：'+mark);previous.push({identifier,one});all.set(mark,previous);}
   const instructions=text(g.instructions),name=text(g.name)||'组 '+(i+1);if(!instructions||instructions.length>4000||name.length>120)throw Error('请填写组名与处理要求（要求最多4000字）');
   const attachment_ids=[...new Set((g.attachment_ids||[]).map(text))];if(attachment_ids.length>200)throw Error('每组最多200份资料');
-  count+=box_count;return {id,name,process_names:processNames(g.process_names),range:text(g.range),marks,identifier,one_mark_one_box:one,box_count,instructions,attachment_ids,no_documents_reason:text(g.no_documents_reason).slice(0,400)};
+  count+=box_count;return {id,name,process_names:processNames(g.process_names),range:text(g.range),marks,identifier,one_mark_one_box:one,box_count,instructions,attachment_ids,no_documents_reason:(text(g.no_documents_reason)||(!attachment_ids.length&&!(input.public_attachment_ids||[]).length?instructions:'')).slice(0,400)};
  });
  if(!Number.isSafeInteger(count))throw Error('合计箱数过大');
  const total_range=text(input.total_range),total=total_range?expandMarks(total_range):null;
