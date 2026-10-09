@@ -55,6 +55,7 @@ const pairs=[
   , ['移除','제거'],['恢复','복구'],['已移除资料（可恢复）','제거한 자료（복구 가능）']
   , ['核对上次提交结果','이전 제출 결과 확인']
  ];
+pairs.push(['作废问题','문제 무효 처리'],['作废原因','무효 사유']);
 const keys=new Map();pairs.forEach(([source,ko],i)=>{const key='ck_plan_'+i;keys.set(source,key);LANG.zh[key]=source.replace(/\s*(?:\/|·)\s*[가-힣].*$/u,'');LANG.ko[key]=ko;});
 const key=value=>keys.get(value),text=value=>key(value)?L(key(value)):value;
 const attrs=value=>key(value)?' data-i18n="'+key(value)+'"':'';

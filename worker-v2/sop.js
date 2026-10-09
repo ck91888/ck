@@ -278,7 +278,7 @@ export async function handleSop(b,env) {
    permit(u,department,['manager','service','dispatcher']);
    row={id:'ISSUE-'+issue.id,kind:'issue',department,revision:0,data:{}};
    const existing=await read(env,row.id);if(existing&&b.native)return {ok:true,id:existing.id,revision:existing.revision};if(existing)fail('已接入新版，请打开现有记录');
-   return await save(env,b,u,row,{title:issue.issue_description,initial_requirement:issue.issue_description,requirement_text:issue.issue_description,legacy_id:issue.id,native:!!b.native,status:issue.status==='completed'?'closed':issue.status==='responded'?'responded':'open',messages:[],changes:[],requirement_version:0,ack_version:0,created_at:t});
+   return await save(env,b,u,row,{title:issue.issue_description,initial_requirement:issue.issue_description,requirement_text:issue.issue_description,legacy_id:issue.id,native:!!b.native,status:['completed','closed'].includes(issue.status)?'closed':issue.status==='cancelled'?'cancelled':issue.status==='responded'?'responded':'open',messages:[],changes:[],requirement_version:0,ack_version:0,created_at:t});
   }
   if(!row)fail('记录不存在');
   const d=structuredClone(row.data),extra=[];
@@ -460,7 +460,7 @@ export async function handleSop(b,env) {
    }
   } else if(b.action.startsWith('sop_issue_')) {
    if(row.kind!=='issue')fail('记录类型错误');
-   if(d.status==='cancelled')fail('问题已取消');
+   if(d.status==='cancelled')fail('问题已作废');
    if(b.action==='sop_issue_append'||b.action==='sop_issue_change') {
     permit(u,row.department,['manager','service']);const message=required(b.message,'内容');
     d.requirement_version++;
@@ -477,7 +477,8 @@ export async function handleSop(b,env) {
      if(d.native){const active=await stmt(env,"SELECT id FROM v2_issue_handle_runs WHERE issue_id=? AND run_status!='completed' LIMIT 1",d.legacy_id).first(),working=await stmt(env,"SELECT w.id FROM v2_ops_job_workers w JOIN v2_ops_jobs j ON j.id=w.job_id WHERE j.related_doc_type='issue' AND j.related_doc_id=? AND w.left_at='' LIMIT 1",d.legacy_id).first();if(active||working)fail('仓库仍在处理，请先完成最新处理轮次及交接');extra.push(stmt(env,"UPDATE sop_records SET revision=CASE WHEN NOT EXISTS(SELECT 1 FROM v2_issue_handle_runs WHERE issue_id=? AND run_status!='completed') AND NOT EXISTS(SELECT 1 FROM v2_ops_job_workers w JOIN v2_ops_jobs j ON j.id=w.job_id WHERE j.related_doc_type='issue' AND j.related_doc_id=? AND w.left_at='') THEN revision ELSE NULL END WHERE id=?",d.legacy_id,d.legacy_id,row.id));}
      d.status='closed';
    } else if(b.action==='sop_issue_cancel') {
-    permit(u,row.department,['manager','service']);const active=await stmt(env,"SELECT id FROM v2_issue_handle_runs WHERE issue_id=? AND run_status!='completed'",d.legacy_id).first();if(active)fail('仓库仍在处理，请先完成交接再取消');d.cancel_reason=required(b.reason,'取消原因');d.status='cancelled';
+    permit(u,row.department,['manager','service']);const active=await stmt(env,"SELECT id FROM v2_issue_handle_runs WHERE issue_id=? AND run_status!='completed' LIMIT 1",d.legacy_id).first(),working=await stmt(env,"SELECT w.id FROM v2_ops_job_workers w JOIN v2_ops_jobs j ON j.id=w.job_id WHERE j.related_doc_type='issue' AND j.related_doc_id=? AND w.left_at='' LIMIT 1",d.legacy_id).first();if(active||working)fail('仓库仍在处理，请先完成交接再作废');d.cancel_reason=required(b.reason,'作废原因');
+    extra.push(stmt(env,"UPDATE sop_records SET revision=CASE WHEN NOT EXISTS(SELECT 1 FROM v2_issue_handle_runs WHERE issue_id=? AND run_status!='completed') AND NOT EXISTS(SELECT 1 FROM v2_ops_job_workers w JOIN v2_ops_jobs j ON j.id=w.job_id WHERE j.related_doc_type='issue' AND j.related_doc_id=? AND w.left_at='') THEN revision ELSE NULL END WHERE id=?",d.legacy_id,d.legacy_id,row.id));d.status='cancelled';
    } else fail('未知问题操作');
    if(d.native){
     if(b.action==='sop_issue_change'||b.action==='sop_issue_append'){

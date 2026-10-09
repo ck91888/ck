@@ -1198,13 +1198,13 @@ async function loadIssueDetail() {
   if (it.status !== "completed" && it.status !== "closed" && it.status !== "cancelled") {
     html += '<div class="card">';
     if (it.status === "responded" || it.status === "rework_required") {
-      html += '<button class="btn btn-success" onclick="completeIssue(this)">' + L("complete_issue") + '</button> ';
-      html += '<button class="btn btn-warning" onclick="reworkIssue(this)">' + L("rework_issue") + '</button> ';
+    if (!window.CK_SOP_ROLLOUT?.enabled) html += '<button class="btn btn-success" onclick="completeIssue(this)">' + L("complete_issue") + '</button> ';
+    if (!window.CK_SOP_ROLLOUT?.enabled) html += '<button class="btn btn-warning" onclick="reworkIssue(this)">' + L("rework_issue") + '</button> ';
     }
     if (it.status === "pending" || it.status === "processing") {
-      html += '<button class="btn btn-success" onclick="completeIssue(this)">' + L("complete_issue") + '</button> ';
+    if (!window.CK_SOP_ROLLOUT?.enabled) html += '<button class="btn btn-success" onclick="completeIssue(this)">' + L("complete_issue") + '</button> ';
     }
-    html += '<button class="btn btn-danger" onclick="cancelIssue(this)">' + L("cancel_issue") + '</button>';
+    if (!window.CK_SOP_ROLLOUT?.enabled) html += '<button class="btn btn-danger" onclick="cancelIssue(this)">' + L("cancel_issue") + '</button>';
     html += '<div style="margin-top:10px;"><label>' + L("attachments") + '</label>';
     html += '<div class="att-grid" id="issueDetailAtts">';
     html += renderPhotoSourceBar(
@@ -1276,6 +1276,7 @@ async function markIssueAccounted(btnEl) {
 }
 
 async function completeIssue(btnEl) {
+  if (window.CK_SOP_ROLLOUT?.enabled) { await loadIssueDetail(); return; }
   if (!confirm(L("confirm_complete_issue") + "?")) return;
   withActionLock('completeIssue', btnEl || null, '提交中.../저장중...', async function() {
     var res = await api({ action: "v2_issue_close", id: _currentIssueId });
@@ -1289,6 +1290,7 @@ async function completeIssue(btnEl) {
 }
 
 async function reworkIssue(btnEl) {
+  if (window.CK_SOP_ROLLOUT?.enabled) { await loadIssueDetail(); return; }
   var note = prompt(L("rework_prompt"));
   if (!note || !note.trim()) return;
   withActionLock('reworkIssue', btnEl || null, '提交中.../저장중...', async function() {
@@ -1303,6 +1305,7 @@ async function reworkIssue(btnEl) {
 }
 
 async function cancelIssue(btnEl) {
+  if (window.CK_SOP_ROLLOUT?.enabled) { await loadIssueDetail(); return; }
   if (!confirm(L("confirm") + "?")) return;
   withActionLock('cancelIssue', btnEl || null, '提交中.../저장중...', async function() {
     var res = await api({ action: "v2_issue_cancel", id: _currentIssueId });

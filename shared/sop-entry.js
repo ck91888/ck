@@ -41,11 +41,18 @@
  }
  async function issuePanel(){
   const id=window._currentIssueId,body=document.getElementById('issueDetailBody');if(!id||!body)return;
-  const r=await request('sop_issue_adopt',{legacy_id:id,native:true,client_req_id:crypto.randomUUID()});
-  // The original attachment/history area remains, but all current edits share one revision.
-  body.querySelectorAll('button[onclick]').forEach(b=>{if(/completeIssue|reworkIssue|cancelIssue|handleIssueFinish/.test(b.getAttribute('onclick')))b.hidden=true;});
+  const token=body._ckIssueLoad=(body._ckIssueLoad||0)+1,host=panel(body);
+  host.textContent='正在加载问题操作 / 문제 작업 로딩 중';
+  try{
+   const r=await request('sop_issue_adopt',{legacy_id:id,native:true,client_req_id:crypto.randomUUID()});
+   if(window._currentIssueId!==id||body._ckIssueLoad!==token||!host.isConnected)return;
    const refreshSource=()=>window._currentIssueId===id?window.loadIssueDetail():Promise.resolve();
-   mount(panel(body),{tab:'issue',id:r.id,context:app==='001'?'field':'collab',back:()=>app==='001'?goPage('issue_list'):goTab('issue'),onRefresh:refreshSource,onSaved:refreshSource});
+   mount(host,{tab:'issue',id:r.id,context:app==='001'?'field':'collab',back:()=>app==='001'?goPage('issue_list'):goTab('issue'),onRefresh:refreshSource,onSaved:refreshSource});
+  }catch(error){
+   if(window._currentIssueId!==id||body._ckIssueLoad!==token||!host.isConnected)return;
+   host.textContent='问题操作加载失败 / 문제 작업 로딩 실패：'+error.message;
+   host.append(button('重试加载 / 다시 시도',()=>window.loadIssueDetail()));
+  }
  }
  async function checkPanel(){
   const body=document.getElementById('checkDetailBody'),id=window._currentVerifyBatchId;if(!body||!id)return;

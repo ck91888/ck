@@ -3082,7 +3082,7 @@ async function loadIssueDetail() {
         html += '<label>上传照片 / 사진 업로드</label>';
         html += '<div class="photo-upload" id="issuePhotos"></div>';
         html += renderPhotoSourceBar("uploadIssueHandlePhoto(\'camera\')", "uploadIssueHandlePhoto(\'album\')");
-        html += '<button class="btn btn-danger mt-10" onclick="handleIssueFinish(this)">结束处理 / 처리 종료</button>';
+        if (!window.CK_SOP_ROLLOUT?.enabled) html += '<button class="btn btn-danger mt-10" onclick="handleIssueFinish(this)">结束处理 / 처리 종료</button>';
         html += '<button class="btn btn-outline mt-10" onclick="handleIssueLeave(this)">暂时离开 / 일시 퇴장</button>';
         html += '</div>';
       }

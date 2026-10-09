@@ -134,10 +134,11 @@ async function detail(id,individual=!!window.CK_SOP_ROLLOUT?.workChain){const r=
  } else if(x.kind==='issue'){
   const changes=(x.changes||[]).map(m=>`<p class="warn">第 ${m.version} 版 · ${esc(m.by)}：${esc(m.text)}</p>`).join('');
   $('detailBody').innerHTML=`<article><h3>要求版本 ${x.requirement_version} / 已确认 ${x.ack_version}</h3>${changes}<h3>沟通与反馈</h3>${(x.messages||[]).map(m=>`<p><b>${esc(m.by)}</b> · ${esc(m.at)}<br>${esc(m.text)}</p>`).join('')}</article>`;
-  if(x.status==='cancelled')return;
-   if(x.status==='closed'){if(['manager','service'].includes(user.role))action('修改作业要求并重新开启','sop_issue_change',area('message','最新完整要求及重新开启原因',x.requirement_text||x.title));return;}
+  if(x.status==='cancelled')$('detailBody').insertAdjacentHTML('beforeend','<p>'+mark('作废原因')+'：'+esc(x.cancel_reason||'—')+'</p>');
+   if(x.status==='closed'&&['manager','service'].includes(user.role))action('修改作业要求并重新开启','sop_issue_change',area('message','最新完整要求及重新开启原因',x.requirement_text||x.title));
+   if(!['cancelled','closed'].includes(x.status)){
    if(['manager','service'].includes(user.role)){
-    if(options.context!=='field')action('取消问题','sop_issue_cancel',area('reason','取消原因'));
+    if(options.context!=='field')action('作废问题','sop_issue_cancel',area('reason','作废原因'));
     action('追加说明','sop_issue_append',area('message','追加内容'));
     action('修改作业要求','sop_issue_change',area('message','最新完整要求及修改原因（保留原记录）',x.requirement_text||x.title));
     if(x.status==='responded')action('确认关闭','sop_issue_close','<p>确认仓库已完成最新要求。</p>');
@@ -145,6 +146,7 @@ async function detail(id,individual=!!window.CK_SOP_ROLLOUT?.workChain){const r=
    if(['manager','dispatcher','reviewer'].includes(user.role)){
     if(x.requirement_version>x.ack_version)action('确认已阅读最新要求','sop_issue_ack','<p>确认当前页面展示的最新要求；提交后如再次变更，仍需重新确认。</p>',()=>({requirement_version:x.requirement_version}));
     action('仓库反馈','sop_issue_feedback',area('message','处理结果'));
+   }
    }
  } else if(x.kind==='check')renderCheck(x,a,action);
  if(!officeFiles&&x.kind==='need'&&window.CKCargoGroups){const groups=document.createElement('section');$('detailBody').append(groups);await CKCargoGroups.field(groups,x,{onChange:()=>detail(x.id,true)});}
