@@ -38,9 +38,9 @@ function printHarness(){
  return{window,documents,codes};
 }
 function formHarness(record,fields,api){
- const elements=new Map(),node=id=>{if(!elements.has(id))elements.set(id,{id,textContent:'',innerHTML:'',disabled:false,value:'',dataset:{},classList:{toggle(){}},showModal(){},elements:[{name:'pallet'},{name:'barcode'}],querySelectorAll(){return[];}});return elements.get(id);};
+ const elements=new Map(),node=id=>{if(!elements.has(id))elements.set(id,{id,textContent:'',innerHTML:'',disabled:false,value:'',dataset:{},classList:{toggle(){}},showModal(){this.open=true;},elements:[{name:'pallet'},{name:'barcode'}],querySelectorAll(){return[];}});return elements.get(id);};
  class FixtureFormData{constructor(){this.values={...fields};}*[Symbol.iterator](){yield* Object.entries(this.values);}}
- const context={current:record,planObserver:null,copy:null,$:node,crypto,FormData:FixtureFormData,TypeError,notice(){},closeModal:async()=>{},api,detail:async()=>{},load:async()=>{}};
+ const context={current:record,cargoDraft:null,planObserver:null,copy:null,$:node,crypto,FormData:FixtureFormData,TypeError,notice(){},closeModal:async()=>{},api,detail:async()=>{},load:async()=>{}};
  vm.createContext(context);const text=source('shared/sop-native.js');
  vm.runInContext(text.slice(text.indexOf('function form(title'),text.indexOf("$('cancel').onclick=closeModal;")),context);
  context.form('QA scan','QA fields','sop_check_scan',v=>v,async()=>{});

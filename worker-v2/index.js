@@ -1,3 +1,4 @@
+import {uploadCargoDraft} from './cargo-create.js';
 import {restingDispatch} from './dispatch-access.js';
 import {pauseNative} from './native-lifecycle.js';
 import {ensureDocumentNumbers,jobNumbers,jobNumberSQL,jobDisplayMetadata,decorateJobNumber,businessReference,jobBusinessFilter} from './document-numbers.js';
@@ -3821,9 +3822,11 @@ route("v2_inbound_plan_create", async (body, env) => {
       if(env.SOP_UPGRADE_ENABLED!=='true'||env.SOP_ACCEPT_NEW==='false')throw Error('作业需求功能未开启');
       workBundle=await workPlanStatements(env,body.work_requests,{type:'inbound',id,customer},env.SOP_REQUEST_USER||{id:'service',name:created_by},t);
     }
-    await env.DB.batch([...inboundStatements,...workBundle.statements,...planAuditStatements(env,'inbound',id,'create',t)]);
+    const result={ ok: true, id, display_no, outbound_id, outbound_display_no, needs:workBundle.needs.map(n=>({id:n.id,title:n.title})), outbounds:workBundle.outbounds };
+    const grouped=body.work_requests?.some(n=>n.cargo_groups),claim=[];if(grouped){if(!body.client_req_id)throw Error('缺少创建请求编号');claim.push(env.DB.prepare('INSERT INTO v2_idempotency_keys(idem_key,action,response_json,created_at) VALUES(?,?,?,?)').bind(body.client_req_id,'v2_inbound_plan_create',JSON.stringify(result),t));}
+    try{await env.DB.batch([...claim,...inboundStatements,...workBundle.statements,...planAuditStatements(env,'inbound',id,'create',t)]);}catch(error){if(grouped){const old=await env.DB.prepare('SELECT response_json FROM v2_idempotency_keys WHERE idem_key=? AND action=?').bind(body.client_req_id,'v2_inbound_plan_create').first();if(old)return JSON.parse(old.response_json);}throw error;}
     if(lines.some(x=>x.unit_type==='courier'))await syncCourierArrival(env,id,recalcInboundPlanCompletion);
-    return { ok: true, id, display_no, outbound_id, outbound_display_no, needs:workBundle.needs.map(n=>({id:n.id,title:n.title})), outbounds:workBundle.outbounds };
+    return result;
   });
 });
 
@@ -12913,6 +12916,7 @@ async function handleMultipartUpload(formData, env) {
       && v003IsPublicField(fieldBody);
     if (!isOpsAuth(fieldBody, env) && !publicArrival) return err("unauthorized", 401);
     if (!related_doc_type || !related_doc_id) return err("missing attachment target");
+    if(related_doc_type==='cargo_draft')return json(await uploadCargoDraft(formData,env));
     if(attachment_category==='unload_photo')return json(await uploadUnloadPhoto(formData,env));
     if(workChainEnabled(env)){
       if(attachment_category==='batch_work_material')return json(await uploadBatchMaterial(formData,env));

@@ -1,3 +1,4 @@
+import {cargoCreateStatements} from './cargo-create.js';
 import { workChainEnabled, chainDate } from './work-chain.js';
 import { nextOutboundDisplayNo } from './outbound-number.js';
 import {completionDate} from './completion-date.js';
@@ -29,6 +30,7 @@ export async function workPlanStatements(env,rows,source,actor,t){
    statements.push(sql(`INSERT INTO v2_outbound_orders(id,order_date,customer,biz_class,outbound_mode,instruction,status,source_inbound_plan_id,created_by,created_at,updated_at,display_no,expected_ship_at,wms_work_order_no,planned_box_count,planned_pallet_count,uses_stock_operation,stock_operation_status,outbound_requirement,destination,po_no) VALUES(?,?,?,?,?,?,'pending_issue',?,?,?,?,?,?,?,?,?,0,'pending',?,?,?)`,obid,new Date(Date.parse(t)+9*3600000).toISOString().slice(0,10),data.customer,department==='import'?'bulk':department,ob.outbound_mode,data.instructions,source.type==='inbound'?source.id:'',actor.name,t,t,display,ship,data.supply_chain_no,unit==='箱'?quantity:0,unit==='托'?quantity:0,str(ob.outbound_requirement),str(ob.destination),str(ob.po_no)));
   }
   if(data.links.reduce((n,x)=>n+x.quantity,0)>(data.planned_quantity||0))throw Error('出库分配数量超过本作业计划数量');
+  statements.push(...await cargoCreateStatements(env,item,data,id,actor,t));
   const state=JSON.stringify(data);
   statements.push(sql('INSERT INTO sop_events VALUES(?,?,?,?,?,?,?,?,?,?)','CREATE-'+id,id,0,'sop_need_create',actor.id,actor.name,'{}',state,JSON.stringify({ok:true,id,revision:1}),t));
   statements.push(sql('INSERT INTO sop_records VALUES(?,?,?,?,?,?)',id,'need',1,department,state,t));needs.push({id,...data});

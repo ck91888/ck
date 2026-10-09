@@ -2666,6 +2666,7 @@ async function submitInbound(btnEl) {
       cargo = lines.map(function(ln) { return unitTypeLabel(ln.unit_type) + ' ' + ln.planned_qty; }).join(' / ');
     }
 
+    try{if(window.CKInboundWorks?.prepare)workRequests=await CKInboundWorks.prepare(workRequests);}catch(error){alert(error.message||'资料上传失败，请重试');return;}
     // 第一步：创建入库计划（不再用 auto_create_outbound 单条）
     var ibRes = await api({
       action: "v2_inbound_plan_create",

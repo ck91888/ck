@@ -1,3 +1,4 @@
+import {cancelCargoDraft} from './cargo-create.js';
 import {assignCargoProcess,taskGroups} from './cargo-processes.js';
 import {cargoSplit} from './cargo-split.js';
 import {cargoReferencesFile} from './cargo-allocation.js';
@@ -108,6 +109,7 @@ export async function handleSop(b,env) {
  const u=auth.user;
  try {
   await ensureDocumentNumbers(env);
+  const cancelledDraft=await cancelCargoDraft(b,env,u);if(cancelledDraft)return cancelledDraft;
   const split=await cargoSplit(b,env,u);if(split)return split;
   const shipping=await cargoShipping(b,env,u);if(shipping)return shipping;
   const execution=await cargoExecution(b,env,u);if(execution)return execution;

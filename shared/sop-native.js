@@ -24,22 +24,23 @@ function input(name,label,type='text',value='',required=true){return `<label>${m
 function area(name,label,value='',required=true){return `<label>${mark(label)}<textarea name="${name}" ${required?'required':''}>${esc(value)}</textarea></label>`;}
 function select(name,label,values,value=''){return `<label>${mark(label)}<select name="${name}">${Object.entries(values).map(([k,v])=>`<option${copy?copy.attrs(v):''} value="${esc(k)}" ${k===value?'selected':''}>${esc(copy?copy.text(v):v)}</option>`).join('')}</select></label>`;}
 function depInput(){const ds=user.role==='manager'?departments:Object.fromEntries((user.departments||[]).map(k=>[k,departments[k]||k]));return select('department','部门 / 부서',ds);}
- async function closeModal(){planObserver?.disconnect();planObserver=null;const modal=$('modal'),picker=staffPicker;staffPicker=null;if(picker)await picker.destroy();if(scanner){await scanner.stop().catch(()=>{});scanner=null;}modal?.close();}
+ let cargoDraft=null;
+ async function closeModal(){cargoDraft?.destroy();cargoDraft=null;planObserver?.disconnect();planObserver=null;const modal=$('modal'),picker=staffPicker;staffPicker=null;if(picker)await picker.destroy();if(scanner){await scanner.stop().catch(()=>{});scanner=null;}modal?.close();}
 // Retry the identical request after a transport error. Never create a second mutation id.
 function form(title,html,action,build,after){
   planObserver?.disconnect();planObserver=null;$('editor').oninput=null;$('editor').onchange=null;$('modal').classList.toggle('ck-plan-editor',action==='sop_need_create'||action==='sop_need_from_outbound');
   if(copy)copy.bind($('editorTitle'),title);else $('editorTitle').textContent=title;$('fields').innerHTML=html;$('formError').textContent='';$('save').disabled=false;$('cancel').disabled=false;
   let pending=null,pendingValues=null,submitting=false;const revision=current?.revision,id=current?.id;
-  $('editor').onsubmit=async e=>{e.preventDefault();if(submitting)return;submitting=true;$('save').disabled=true;$('cancel').disabled=true;
- try{const values=Object.fromEntries(new FormData($('editor'))),valueKey=JSON.stringify(values);if(valueKey!==pendingValues){pending=null;pendingValues=valueKey;}if(!pending){for(const el of $('editor').elements){if(!el._ckSources||!values[el.name])continue;const selected=el._ckSources.find(x=>x.id===values[el.name]||(x.number||x.label.split(' / ')[0])===values[el.name]);if(!selected)throw Error('请从列表选择有效单据');values[el.name]=selected.id;}pending={...await build(values),client_req_id:crypto.randomUUID()};if(id&&!pending.id&& !action.endsWith('_create')&&action!=='sop_issue_adopt'){pending.id=id;pending.revision=revision;}}
-   const result=await api(action,pending);await closeModal();await(after?after(result):id?detail(id):load());if(current?.kind==='issue'&&options.onSaved)await options.onSaved(result);notice('已保存 / 저장 완료');
+  $('editor').onsubmit=async e=>{e.preventDefault();if(submitting)return;submitting=true;$('save').disabled=true;$('cancel').disabled=false;
+ try{const values=Object.fromEntries(new FormData($('editor'))),valueKey=JSON.stringify({values,cargo:values.operation_kind==='direct_forward'?null:cargoDraft?.read()||null});if(valueKey!==pendingValues){pending=null;pendingValues=valueKey;}if(!pending){for(const el of $('editor').elements){if(!el._ckSources||!values[el.name])continue;const selected=el._ckSources.find(x=>x.id===values[el.name]||(x.number||x.label.split(' / ')[0])===values[el.name]);if(!selected)throw Error('请从列表选择有效单据');values[el.name]=selected.id;}pending={...await build(values),client_req_id:crypto.randomUUID()};if(id&&!pending.id&& !action.endsWith('_create')&&action!=='sop_issue_adopt'){pending.id=id;pending.revision=revision;}}
+   if(!$('modal').open)throw Error('已取消创建');$('cancel').disabled=true;const result=await api(action,pending);await closeModal();await(after?after(result):id?detail(id):load());if(current?.kind==='issue'&&options.onSaved)await options.onSaved(result);notice('已保存 / 저장 완료');
  }catch(e){$('formError').textContent=e.message; // Business errors return a response: allow corrections with a new request.
   if(!(e instanceof TypeError)){pending=null;}
    }finally{submitting=false;const save=$('save'),cancel=$('cancel');if(save)save.disabled=false;if(cancel)cancel.disabled=false;}};
  $('modal').showModal();
 }
 $('cancel').onclick=closeModal;
- $('modal').addEventListener('cancel',e=>{e.preventDefault();if(!$('save').disabled)closeModal();});
+ $('modal').addEventListener('cancel',e=>{e.preventDefault();if(!$('cancel').disabled)closeModal();});
  $('refresh').onclick=()=> (options.onRefresh?options.onRefresh():current?detail(current.id,true):currentGroup?groupDetail({group_key:currentGroup}):load()).catch(e=>notice(e.message));
 function renderTabs(){}
 let checkingUpdates=false;
@@ -79,17 +80,18 @@ async function groupDetail(query){
   const origin=source==='inventory'?'<input type="hidden" name="source_type" value="inventory"><p class="ck-plan-wide muted">'+mark('使用已有库存；入库作业请从入库计划建立，人员在现场派工时选择。')+'</p>':'<p class="ck-plan-wide muted">'+mark('关联来源')+'：'+esc(doc.display_no||doc.title||source)+'。'+mark('沿用原单据客户和来源，人员在现场派工时选择。')+'</p>';
   return section(source==='inventory'?'库存来源':'关联货物',origin+depInput()+input('customer','客户','text',doc.customer||'')+input('supply_chain_no',source==='inventory'?'供应链系统单号（必填）':'供应链系统单号（选填）','text',doc.supply_chain_no||'',source==='inventory')+input('scope_text','箱唛／货物范围（选填）','text','',false)+input('location','货物位置（选填）','text','',false))+
    section('作业要求与货量',input('title','作业名称','text',doc.title?'关联作业 '+doc.title:'')+select('operation_kind','作业类型 / 작업 종류',{operation:'需操作／加工',direct_forward:'直接转发（无加工）'})+'<div class="ck-plan-wide">'+area('instructions','操作要求',doc.instructions||'')+'</div>'+input('planned_quantity','本计划货量（已知则填）','number','',false)+select('planned_unit','货量单位',{'':'请选择单位',箱:'箱',件:'件',托:'托'})+'<p class="ck-plan-wide muted" data-quantity-help>'+mark('填写作业前的货量；未预约可暂不填。直接转发或同时预约出库时，数量和单位必填。')+'</p>'+input('deadline','要求完成日期（选填）','date','',false)+(supplement?input('reason','追加作业原因（必填）'):'') )+
-   section('出库预约（可选）','<div id="optionalOutbounds" class="ck-plan-wide ck-work-plans"></div>');
+   '<section id="createCargoGroups" class="ck-plan-wide"></section>'+section('出库预约（可选）','<div id="optionalOutbounds" class="ck-plan-wide ck-work-plans"></div>');
  }
  function setupNeedFields(){
   const editor=$('editor'),quantity=editor.elements.planned_quantity,unit=editor.elements.planned_unit;
   quantity.min='1';quantity.step='1';
+  cargoDraft?.destroy();cargoDraft=window.CKCargoGroups&&window.CK_SOP_ROLLOUT?.workChain?CKCargoGroups.create($('createCargoGroups')):null;
   const read=CKOptionalOutbounds($('optionalOutbounds'),{unit:()=>unit.value,unitControl:unit});
-  const sync=()=>{const booking=!!$('optionalOutbounds').querySelector('[data-outbound-row]'),required=booking||editor.elements.operation_kind.value==='direct_forward';quantity.required=required;unit.required=required||!!quantity.value;};
-  editor.oninput=sync;editor.onchange=sync;planObserver=new MutationObserver(sync);planObserver.observe($('optionalOutbounds'),{childList:true,subtree:true});sync();return read;
+  const sync=()=>{const cargoHost=$('createCargoGroups'),direct=editor.elements.operation_kind.value==='direct_forward';if(cargoHost){cargoHost.hidden=direct;cargoHost.querySelectorAll('input,textarea,select,button').forEach(x=>x.disabled=direct);}const booking=!!$('optionalOutbounds').querySelector('[data-outbound-row]'),required=booking||editor.elements.operation_kind.value==='direct_forward';quantity.required=required;unit.required=required||!!quantity.value;};
+  editor.oninput=sync;editor.onchange=sync;planObserver=new MutationObserver(sync);planObserver.observe($('optionalOutbounds'),{childList:true,subtree:true});sync();return async()=>{const outbounds=read(),groups=editor.elements.operation_kind.value==='direct_forward'?null:cargoDraft?.read();if(groups&&outbounds.length)throw Error('分组作业请在审核后按组安排出库');const draft=cargoDraft;if(groups)await draft.prepare(groups);return {outbounds,...(groups?{cargo_groups:groups}:{})};};
  }
  function create(kind){current=null;
-  if(kind==='need'){let readObs;form('新增库存作业计划',needFields(),'sop_need_create',v=>({...v,outbounds:readObs()}),r=>detail(r.id));readObs=setupNeedFields();}
+  if(kind==='need'){let readObs;form('新增库存作业计划',needFields(),'sop_need_create',async v=>({...v,...await readObs()}),r=>detail(r.id));readObs=setupNeedFields();}
  if(kind==='task')taskForm();
  if(kind==='check')form('建立出库日期总清单',input('ship_date','出库日期','date'),'sop_check_create',v=>v,r=>detail(r.id));
  if(kind==='issue')form('接入现有问题',input('legacy_id','现有问题系统ID')+'<p class="warn">只接入没有正在进行处理轮次的问题。接入后统一在新版沟通，历史保留。</p>','sop_issue_adopt',v=>v,r=>detail(r.id));
@@ -191,7 +193,7 @@ async function openSource(){
  if(linked.items.length&&!options.supplement){await load();notice('此单已有作业计划，请引用已有记录。');for(const x of linked.items)$('content').prepend(btn('打开关联作业：'+x.title,()=>detail(x.id)));return;}
  const r=await api('sop_source_detail',{source_id,type:source});const doc=r.source;
  await load();
-  let readObs;form(source==='outbound'?'将出库操作统一为关联作业':'从入库计划创建作业计划',needFields({source,doc,supplement:options.supplement}),source==='outbound'?'sop_need_from_outbound':'sop_need_create',v=>({...v,source_id,source_type:source,outbounds:readObs()}),r=>detail(r.id));readObs=setupNeedFields();
+  let readObs;form(source==='outbound'?'将出库操作统一为关联作业':'从入库计划创建作业计划',needFields({source,doc,supplement:options.supplement}),source==='outbound'?'sop_need_from_outbound':'sop_need_create',async v=>({...v,source_id,source_type:source,...await readObs()}),r=>detail(r.id));readObs=setupNeedFields();
   $('editor').elements.department.value=doc.department;
   $('editor').elements.customer.readOnly=true;
 }
