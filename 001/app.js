@@ -20,13 +20,44 @@ var _photoUploadCtx = {};  // { related_doc_type, attachment_category, related_d
 // 问题点处理本轮草稿（防止上传照片后 textarea 被清空 + 缓存当前轮已上传缩略图）
 // session_photos 仅缓存"本轮上传成功"的附件 — loadIssueDetail 再渲染时与 atts 合并去重
 var _issueHandleDraft = { issue_id: '', run_id: '', feedback_note: '', session_photos: [] };
+var _issueDrafts = new Map();
+function _selectIssueDraft(id) {
+  _saveIssueFeedbackDraft();
+  if (_issueHandleDraft.issue_id) _issueDrafts.set(_issueHandleDraft.issue_id, _issueHandleDraft);
+  _issueHandleDraft = _issueDrafts.get(id) || { issue_id:id, run_id:'', feedback_note:'', session_photos:[] };
+  _issueDrafts.set(id, _issueHandleDraft);
+}
 function _resetIssueHandleDraft() {
+  _issueDrafts.delete(_issueHandleDraft.issue_id);
   _issueHandleDraft = { issue_id: '', run_id: '', feedback_note: '', session_photos: [] };
 }
 function _saveIssueFeedbackDraft() {
   var ta = document.getElementById('issueFeedback');
-  if (ta) _issueHandleDraft.feedback_note = ta.value || '';
+  if (ta && (!ta.dataset.issueId || ta.dataset.issueId===_issueHandleDraft.issue_id)) _issueHandleDraft.feedback_note = ta.value || '';
 }
+// The upgraded feedback dialog owns the only editor; uploads keep their original run association.
+window.CKIssueFeedback = function(id) {
+  if (_issueHandleDraft.issue_id !== id) _selectIssueDraft(id);
+  var draft = _issueHandleDraft;
+  return {
+    value:function(){return draft.feedback_note;},
+    mount:function(editor){
+      var ta=editor.elements.message;ta.id='issueFeedback';ta.dataset.issueId=id;ta.oninput=function(){draft.feedback_note=ta.value;};
+      var photos=document.createElement('section');
+      photos.innerHTML='<p>照片上传成功即保留在本问题；关闭窗口会保留草稿。 / 업로드한 사진과 작성 내용은 창을 닫아도 유지됩니다.</p><div class="photo-upload" id="issuePhotos"></div>'+renderPhotoSourceBar("uploadIssueHandlePhoto('camera')","uploadIssueHandlePhoto('album')");
+      ta.parentElement.after(photos);renderIssueSessionPhotos();
+    },
+    validate:function(){if(draft.uploading)throw Error('照片仍在上传，请稍后提交 / 사진 업로드가 끝난 후 제출하세요');},
+    complete:function(){
+      _issueDrafts.delete(id);
+      if (_currentIssueId===id){
+        var ta=document.getElementById('issueFeedback');if(ta)ta.value='';
+        if (_activeJobId && _activeJobId===draft.job_id) { if(window.CKClearNativeJob)CKClearNativeJob();else clearActiveJob(); }
+        _resetIssueHandleDraft();_currentRunId=null;
+      }
+    }
+  };
+};
 var _badgeScanner = null;  // Html5Qrcode instance for badge scan
 var _badgeModalScanner = null; // Html5Qrcode instance for badge change modal
 var _startInflight = false; // in-flight guard for start actions
@@ -116,19 +147,51 @@ async function cycleCameraAndRestart(restartFn) {
   }
 }
 // 通用启动包装：解析摄像头 → start → 注入切换按钮（restart=stop+本函数再调）
+var _managedQrScanners = new Map();
 function startManagedQrScanner(scanner, readerId, scanConfig, onSuccess, onError) {
-  return resolveCameraTarget().then(function(target) {
-    return scanner.start(target, scanConfig, onSuccess, onError || function() {}).then(function() {
-      ensureCameraSwitchButton(readerId, function() {
-        return scanner.stop().then(function() {
-          return startManagedQrScanner(scanner, readerId, scanConfig, onSuccess, onError);
-        }).catch(function() {
-          // stop 可能失败（已停），仍尝试 start
-          return startManagedQrScanner(scanner, readerId, scanConfig, onSuccess, onError);
-        });
-      });
-    });
+  var record={scanner:scanner,readerId:readerId,page:_currentPage,cancelled:false};
+  _managedQrScanners.set(scanner,record);
+  record.ready=resolveCameraTarget().then(async function(target) {
+    if(record.cancelled)return;
+    await scanner.start(target,scanConfig,function(decoded){
+      if(record.cancelled||record.page!==_currentPage||document.querySelector('dialog[open]'))return;
+      if(['inboundScanReader','pickCreateScanReader','pickStartScanReader','bulkScanReader'].includes(readerId)&&!acceptDocumentCode(decoded,readerId))return;
+      onSuccess(decoded);
+    },onError||function(){});
+    if(record.cancelled){await scanner.stop().catch(function(){});return;}
+    ensureCameraSwitchButton(readerId,async function(){record.cancelled=true;await scanner.stop().catch(function(){});return startManagedQrScanner(scanner,readerId,scanConfig,onSuccess,onError);});
   });
+  return record.ready;
+}
+async function stopAllManagedQrScanners(){
+  var records=Array.from(_managedQrScanners.values());
+  records.forEach(function(r){r.cancelled=true;});
+  // Reset only the instances captured here; a newly opened page may start a new camera.
+  ['_pickCreateScanner','_pickStartScanner','_inboundScanner','_bulkScanner','_unloadScanner','_obLoadScanner','_badgeScanner','_badgeModalScanner'].forEach(function(key){if(records.some(function(r){return r.scanner===window[key];}))window[key]=null;});
+  [['pickCreateScanBtn','扫码 / 스캔'],['pickStartScanBtn','扫码 / 스캔'],['ibScanBtn','相机扫码 / 카메라'],['bulkScanBtn','相机扫码 / 카메라']].forEach(function(v){var b=document.getElementById(v[0]);if(b)b.textContent=v[1];});
+  await Promise.all(records.map(function(r){return stopManagedQrScanner(r.scanner);}));
+}
+function stopManagedQrScanner(scanner){
+  var r=_managedQrScanners.get(scanner);
+  if(!r){try{return Promise.resolve(scanner.stop()).catch(function(){});}catch(e){return Promise.resolve();}}
+  r.cancelled=true;
+  if(!r.stopping)r.stopping=(async function(){
+    try{await r.ready;}catch(e){}
+    try{await scanner.stop();}catch(e){}
+    if(_managedQrScanners.get(scanner)===r)_managedQrScanners.delete(scanner);
+    // A newer scanner can already own the same reader after navigation.
+    if(!Array.from(_managedQrScanners.values()).some(function(x){return x.readerId===r.readerId;})){
+      removeCameraSwitchButton(r.readerId);var el=document.getElementById(r.readerId);if(el)el.innerHTML='';
+    }
+  })();
+  return r.stopping;
+}
+function acceptDocumentCode(value,targetId){
+  var error=window.CKDocumentCode?.documentCodeError(value)||'';
+  var target=document.getElementById(targetId),id=targetId+'-scan-error',hint=document.getElementById(id);
+  if(error&&target&&!hint){hint=document.createElement('p');hint.id=id;hint.className='ck-scan-error';hint.setAttribute('role','status');target.after(hint);}
+  if(hint)hint.textContent=error;
+  return !error;
 }
 
 // ===== Action Lock — 防连点 =====
@@ -339,6 +402,7 @@ function goBack() {
 }
 
 function showPage(name) {
+  if(name!==_currentPage)stopAllManagedQrScanners();
   // Stop polling
   if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
 
@@ -419,9 +483,8 @@ function resumeActiveOrHome() {
 function notifyStaleSegmentsOnLogin(staleSegments, res) {
   if (!staleSegments || staleSegments.length === 0) return;
   var lines = staleSegments.map(function(s) {
-    var jt = s.job_type ? (JOB_TYPE_LABEL[s.job_type] || s.job_type) : '';
     var when = s.joined_at ? String(s.joined_at).replace('T', ' ').slice(0, 16) : '--';
-    return '· ' + (jt || s.job_id) + ' · 开始 ' + when + ' · ' + (s.stale_reason || '未退出');
+    return '· ' + window.CKDocumentLabels.jobSummary(s) + ' · 开始 ' + when + ' · ' + (s.stale_reason || '未退出');
   }).join('\n');
   // 是否仍能"返回原任务处理"：当前 active job 命中其中之一时可以继续
   var canResume = !!(res && res.active && res.job && res.segment);
@@ -708,8 +771,7 @@ async function checkMyActiveJob() {
   if (res && res.ok && res.active && res.job) {
     bar.classList.remove("hidden");
     var job = res.job;
-    var typeLabel = JOB_TYPE_LABEL[job.job_type] || job.job_type;
-    label.textContent = typeLabel;
+    label.textContent = window.CKDocumentLabels.jobSummary(job);
     meta.textContent = "状态/상태: " + (STATUS_LABEL[job.status] || job.status) + " | " + (job.active_worker_count || 0) + "人/명 参与中";
     saveActiveJob(job.id, res.segment ? res.segment.id : null);
   } else {
@@ -720,8 +782,10 @@ async function checkMyActiveJob() {
 
 function goMyTask() {
   if (!_activeJobId) return;
+  var jobId = _activeJobId;
   // Get job info from checkMyActiveJob's last result to determine page
-  api({ action: "v2_ops_job_detail", job_id: _activeJobId }).then(function(res) {
+  api({ action: "v2_ops_job_detail", job_id: jobId }).then(function(res) {
+    if (_activeJobId !== jobId) return;
     if (!res || !res.ok || !res.job) { goPage("home"); return; }
     var jt = res.job.job_type || "";
     if (jt === "unload") goPage("unload");
@@ -863,41 +927,8 @@ function renderOutboundOrderRemarks(o) {
   return html;
 }
 
-// 入库明细资料只读渲染（仓库端只需要查看/下载/打开；不可删除）
-function renderInboundMaterialsReadonly(planData) {
-  var atts = (planData && planData.inbound_materials)
-    ? planData.inbound_materials
-    : ((planData && planData.attachments) || []).filter(function(a) {
-        return a && a.attachment_category === 'inbound_material';
-      });
-  if (!atts || atts.length === 0) {
-    return '<div class="card"><div class="card-title">入库明细 / 입고 명세</div>'
-      + '<div class="muted" style="font-size:12px;">暂无入库明细 / 입고 명세 없음</div></div>';
-  }
-  var html = '<div class="card"><div class="card-title">入库明细 / 입고 명세 (' + atts.length + ')</div>';
-  html += '<table class="mini-table" style="width:100%;font-size:12px;">';
-  html += '<thead><tr><th style="text-align:left;">文件名 / 파일명</th><th>操作 / 작업</th></tr></thead><tbody>';
-  atts.forEach(function(att) {
-    var url = att.file_key ? fileUrl(att.file_key) : '';
-    var fn = (att.file_name || '').toLowerCase();
-    var ct = (att.content_type || '').toLowerCase();
-    var isPdf = ct.indexOf('pdf') !== -1 || fn.endsWith('.pdf');
-    var isImg = ct.indexOf('image/') === 0;
-    var openLabel = (isPdf || isImg) ? '打开/打印 / 열기' : '下载 / 다운로드';
-    html += '<tr>';
-    html += '<td style="word-break:break-all;">' + esc(att.file_name || '--') + '</td>';
-    html += '<td style="white-space:nowrap;text-align:right;">';
-    if (url) {
-      html += '<a class="btn btn-outline btn-sm" href="' + esc(url) + '" download="' + esc(att.file_name || '') + '">下载 / 다운로드</a> ';
-      html += '<a class="btn btn-outline btn-sm" href="' + esc(url) + '" target="_blank" rel="noopener">' + esc(openLabel) + '</a>';
-    } else {
-      html += '<span class="muted">--</span>';
-    }
-    html += '</td></tr>';
-  });
-  html += '</tbody></table></div>';
-  return html;
-}
+// Work files are handled on the office PC; retain the legacy call contract.
+function renderInboundMaterialsReadonly() { return ''; }
 
 // ===== 卸货页辅助（自 001/patch.js 合并） =====
 function planNo(plan) { return (plan && (plan.display_no || plan.id)) || ''; }
@@ -933,7 +964,6 @@ function renderUnloadPlanCard(planData, displayNo) {
     } else {
       inner = '<span class="muted">无明细 / 명세 없음</span>';
     }
-    // 仓库端：入库明细资料（只读，下载/打开）
     inner += renderInboundMaterialsReadonly(planData);
     area.innerHTML = inner;
   }
@@ -1013,7 +1043,7 @@ async function initUnload() {
       goPage("home");
       return;
     }
-    if (res && res.ok && res.job && res.job.job_type === "unload" && res.job.status === "working") {
+    if (res && res.ok && res.job && res.job.job_type === "unload" && (res.job.status === "working" || res.can_manage_dispatch && ['pending','awaiting_close','paused'].includes(res.job.status))) {
       // 仅 inbound_plan 关联才回灌 plan 数据；feedback-first 流程 _unloadPlanData 保持 null
       if (res.job.related_doc_type === "inbound_plan" && res.job.related_doc_id) {
         var planRes = await api({ action: "v2_inbound_plan_detail", id: res.job.related_doc_id });
@@ -1284,6 +1314,7 @@ async function resolveInboundCode(btnEl) {
   var inp = document.getElementById("inboundCodeInput");
   var code = (inp ? inp.value : '').trim();
   if (!code) { alert("请输入或扫描单号 / 번호를 입력하세요"); return; }
+  if(!acceptDocumentCode(code,"inboundCodeInput"))return;
   var resultEl = document.getElementById("ibResolveResult");
   var extFields = document.getElementById("ibExternalFields");
   var bc = _resolveBizClass();
@@ -1365,7 +1396,7 @@ function startInboundScan() {
 }
 function stopInboundScan() {
   if (_inboundScanner) {
-    try { _inboundScanner.stop(); } catch(e) {}
+    stopManagedQrScanner(_inboundScanner);
     removeCameraSwitchButton("inboundScanReader");
     _inboundScanner = null;
     var el = document.getElementById("inboundScanReader");
@@ -1704,17 +1735,12 @@ async function refreshUnloadWorkers() {
 
 function startJobPoll(type) {
   if (_pollTimer) clearInterval(_pollTimer);
-  _pollTimer = setInterval(function() {
-    if (type === "unload") refreshUnloadWorkers();
-    if (type === "load") refreshLoadWorkers();
-    if (type === "inbound") refreshInboundWorkers();
-    if (type === "inbound_return") refreshInboundReturnWorkers();
-    if (type === "generic") refreshGenericWorkers();
-    if (type === "pick") refreshPickWorkers();
-    if (type === "bulk") refreshBulkWorkers();
-    if (type === "import_delivery") refreshImportDeliveryWorkers();
-    if (type === "verify_scan") refreshVerifyScanWorkers();
-  }, 5000);
+  var pending=false;
+  var refresh={unload:refreshUnloadWorkers,load:refreshLoadWorkers,inbound:refreshInboundWorkers,inbound_return:refreshInboundReturnWorkers,generic:refreshGenericWorkers,pick:refreshPickWorkers,bulk:refreshBulkWorkers,import_delivery:refreshImportDeliveryWorkers,verify_scan:refreshVerifyScanWorkers}[type];
+  _pollTimer=setInterval(async function(){
+    if(pending||document.hidden||!_activeJobId||!refresh)return;
+    pending=true;try{await refresh();}finally{pending=false;}
+  },10000);
 }
 
 function renderWorkers(containerId, workers) {
@@ -1761,7 +1787,7 @@ async function initInbound() {
       goPage("home");
       return;
     }
-    if (res && res.ok && res.job && res.job.job_type && (res.job.job_type === 'inbound_direct' || res.job.job_type === 'inbound_bulk' || res.job.job_type === 'inbound_change_order') && res.job.status === "working") {
+    if (res && res.ok && res.job && res.job.job_type && (res.job.job_type === 'inbound_direct' || res.job.job_type === 'inbound_bulk' || res.job.job_type === 'inbound_change_order') && (res.job.status === "working" || res.can_manage_dispatch && ['pending','awaiting_close','paused'].includes(res.job.status))) {
       document.getElementById("inboundEntryCard").style.display = "none";
       document.getElementById("inboundWorkingCard").style.display = "";
       loadInboundPlanInfo(res.job.related_doc_id);
@@ -1807,6 +1833,9 @@ async function startInbound(btnEl) {
 
   if (_ibResolvedKind === 'system') {
     payload.plan_id = _ibResolvedPlanId;
+    if (_ibResolvedPlan && _ibResolvedPlan.selected_external_inbound_no) {
+      payload.external_inbound_no = _ibResolvedPlan.selected_external_inbound_no;
+    }
   } else if (_ibResolvedKind === 'external') {
     var exNo = ((document.getElementById("inboundCodeInput") || {}).value || "").trim();
     var exCu = ((document.getElementById("inboundExternalCustomer") || {}).value || "").trim();
@@ -1838,18 +1867,41 @@ async function startInbound(btnEl) {
 }
 
 var _inboundPlanData = null;
+var _inboundPlanLoad = { sequence: 0, jobId: '', planId: '', status: 'idle' };
 
 async function loadInboundPlanInfo(planId) {
+  var context = { sequence: _inboundPlanLoad.sequence + 1, jobId: _activeJobId, planId: planId || '', status: 'loading' };
+  _inboundPlanLoad = context;
   _inboundPlanData = null;
   var infoEl = document.getElementById("inboundPlanInfo");
   var linesEl = document.getElementById("inboundResultLines");
+  var finishButton = document.querySelector('button[onclick="finishInbound(this)"]');
+  if (finishButton) finishButton.disabled = true;
+  if (linesEl) linesEl.innerHTML = '';
+  if (infoEl) infoEl.innerHTML = '<span class="muted">正在读取本次入库计划 / 이번 입고계획 확인 중</span>';
+  var current = function() { return _inboundPlanLoad === context && context.jobId === _activeJobId && _currentPage === 'inbound'; };
+  var failed = function() {
+    if (!current()) return { rendered: false, stale: true };
+    context.status = 'failed';
+    if (infoEl) infoEl.innerHTML = '<p>本单资料尚未读取，不能完成理货 / 계획 확인 후 완료하세요</p><button type="button" onclick="loadInboundPlanInfo(_inboundPlanLoad.planId)">重新读取本单 / 다시 확인</button>';
+    return { rendered: false, failed: true };
+  };
   if (!planId) {
-    if (infoEl) infoEl.innerHTML = '<span class="muted">--</span>';
-    if (linesEl) linesEl.innerHTML = '';
-    return;
+    var legacy;
+    try { legacy = await api({ action: 'v2_ops_job_detail', job_id: context.jobId }); } catch(e) { return failed(); }
+    if (!current()) return { rendered: false, stale: true };
+    if (legacy && legacy.ok && legacy.job && legacy.job.id === context.jobId && /^inbound_/.test(legacy.job.job_type) && legacy.job.related_doc_type !== 'inbound_plan') {
+      context.status = 'legacy_ready';
+      if (infoEl) infoEl.innerHTML = '<span class="muted">原有无计划作业 / 기존 계획 없는 작업</span>';
+      if (finishButton) finishButton.disabled = false;
+      return { rendered: false, legacy: true };
+    }
+    return failed();
   }
-  var res = await api({ action: "v2_inbound_plan_detail", id: planId });
-  if (!res || !res.ok || !res.plan) return;
+  var res;
+  try { res = await api({ action: "v2_inbound_plan_detail", id: planId }); } catch(e) { return failed(); }
+  if (!current()) return { rendered: false, stale: true };
+  if (!res || !res.ok || !res.plan || res.plan.id !== planId) return failed();
   _inboundPlanData = res;
   var p = res.plan;
   var lines = res.lines || [];
@@ -1858,7 +1910,6 @@ async function loadInboundPlanInfo(planId) {
     var html = '<div><b>' + esc(p.display_no || p.id) + '</b> · ' + esc(p.customer || '--') + '</div>';
     html += '<div>' + esc(p.cargo_summary || '--') + '</div>';
     html += renderInboundPlanRemark(p);
-    // 仓库端：入库明细资料（只读，下载/打开） — 直接嵌入 plan info 卡片下方
     html += renderInboundMaterialsReadonly(res);
     infoEl.innerHTML = html;
   }
@@ -1872,7 +1923,7 @@ async function loadInboundPlanInfo(planId) {
         var actualQty = ln.actual_qty || 0;
         var actualDisplay = unloadNotDone ? '<span style="color:#e67e22;font-weight:700;">卸货中/하차중</span>' : String(actualQty);
         html += '<tr>';
-        html += '<td style="padding:4px 6px;">' + esc(ln.unit_type || '--') + '</td>';
+        html += '<td style="padding:4px 6px;">' + esc(unitLabel(ln.unit_type) || '--') + '</td>';
         html += '<td style="padding:4px 6px;text-align:center;">' + actualDisplay + '</td>';
         html += '<td style="padding:4px 6px;"><input type="number" class="input ib-putaway-input" data-unit="' + esc(ln.unit_type || '') + '" value="' + (unloadNotDone ? '' : actualQty) + '" min="0" style="width:80px;text-align:center;" placeholder="' + (unloadNotDone ? '待卸货完成' : '') + '"></td>';
         html += '</tr>';
@@ -1886,6 +1937,9 @@ async function loadInboundPlanInfo(planId) {
       linesEl.innerHTML = '<div style="font-size:12px;color:#999;">无明细行，完成时仅记录备注</div>';
     }
   }
+  context.status = 'ready';
+  if (finishButton) finishButton.disabled = false;
+  return { rendered: true, data: res, jobId: context.jobId, sequence: context.sequence };
 }
 
 async function inboundLeave(btnEl) {
@@ -1909,6 +1963,10 @@ async function inboundLeave(btnEl) {
 
 async function finishInbound(btnEl) {
   if (!_activeJobId) { alert("没有进行中的任务 / 진행 중인 작업 없음"); return; }
+  if (_inboundPlanLoad.jobId !== _activeJobId || !['ready','legacy_ready'].includes(_inboundPlanLoad.status) || (_inboundPlanLoad.status === 'ready' && (!_inboundPlanData || _inboundPlanData.plan.id !== _inboundPlanLoad.planId))) {
+    alert("请先读取本单资料，再完成理货 / 이번 계획을 확인한 후 완료하세요");
+    return;
+  }
   // Front-end pre-check: block finish if unload not done
   if (_inboundPlanData && _inboundPlanData.plan) {
     var pStatus = _inboundPlanData.plan.status;
@@ -1951,9 +2009,12 @@ async function finishInbound(btnEl) {
     if (res && res.ok && !res.already_completed) {
       // Check plan status to show appropriate message
       var planAfter = null;
-      try { planAfter = await api({ action: "v2_inbound_plan_detail", plan_id: _inboundPlanData && _inboundPlanData.plan ? _inboundPlanData.plan.id : "" }); } catch(e) {}
-      var planStatus = (planAfter && planAfter.ok && planAfter.plan) ? planAfter.plan.status : "completed";
-      if (planStatus === "completed") {
+      try { planAfter = await api({ action: "v2_inbound_plan_detail", id: _inboundPlanData && _inboundPlanData.plan ? _inboundPlanData.plan.id : "" }); } catch(e) {}
+      var planStatus = (planAfter && planAfter.ok && planAfter.plan) ? planAfter.plan.status : "";
+      var referenceProgress = planAfter && planAfter.plan && planAfter.plan.inbound_progress;
+      if (referenceProgress && referenceProgress.completed < referenceProgress.total) {
+        alert("本次外部单理货已完成，本计划已完成 " + referenceProgress.completed + "/" + referenceProgress.total + "。\n待完成：" + referenceProgress.items.filter(function(x) { return x.status !== 'completed'; }).map(function(x) { return x.external_no; }).join('、') + "\n이번 입고 완료. 나머지 입고번호 작업을 계속해 주세요.");
+      } else if (planStatus === "completed") {
         alert("入库已完成，状态已更新为\u201C已入库\u201D\n입고 완료, 상태가 \u201C입고완료\u201D로 변경됨");
       } else if (planStatus === "unloading" || planStatus === "unloading_putting_away") {
         alert("本次理货已完成。卸货仍在进行中，如还有未理部分可后续继续理货。\n이번 입고 완료. 하차 진행 중이며, 미입고분은 이후 계속 가능합니다.");
@@ -2003,7 +2064,7 @@ async function initInboundReturn() {
       goPage("home");
       return;
     }
-    if (res && res.ok && res.job && res.job.job_type === 'inbound_return' && res.job.status === 'working') {
+    if (res && res.ok && res.job && res.job.job_type === 'inbound_return' && (res.job.status === 'working' || res.can_manage_dispatch && ['pending','awaiting_close','paused'].includes(res.job.status))) {
       document.getElementById("inboundReturnEntryCard").style.display = "none";
       document.getElementById("inboundReturnWorkingCard").style.display = "";
       renderInboundReturnSession(res.job);
@@ -2023,7 +2084,7 @@ async function initInboundReturn() {
 function renderInboundReturnSession(job) {
   var el = document.getElementById("inboundReturnSessionInfo");
   if (!el) return;
-  var html = '<div><b>任务号/작업번호:</b> ' + esc(job.id) + '</div>';
+  var html = '<div><b>任务 / 작업:</b> ' + esc(window.CKDocumentLabels.jobLabel(job)) + '</div><div><b>派审员 / 배정·검수 담당자:</b> ' + esc(window.CKDocumentLabels.jobDispatcher(job)) + '</div>';
   el.innerHTML = html;
 }
 
@@ -2121,7 +2182,7 @@ async function initImportDelivery() {
       goPage("home");
       return;
     }
-    if (res && res.ok && res.job && res.job.job_type === 'pickup_delivery_import' && res.job.status === 'working') {
+    if (res && res.ok && res.job && res.job.job_type === 'pickup_delivery_import' && (res.job.status === 'working' || res.can_manage_dispatch && ['pending','awaiting_close','paused'].includes(res.job.status))) {
       document.getElementById("idEntryCard").style.display = "none";
       document.getElementById("idWorkingCard").style.display = "";
       renderImportDeliverySession(res.job);
@@ -2140,7 +2201,7 @@ async function initImportDelivery() {
 function renderImportDeliverySession(job) {
   var el = document.getElementById("idSessionInfo");
   if (!el) return;
-  var html = '<div><b>任务号/작업번호:</b> ' + esc(job.id) + '</div>';
+  var html = '<div><b>任务 / 작업:</b> ' + esc(window.CKDocumentLabels.jobLabel(job)) + '</div><div><b>派审员 / 배정·검수 담당자:</b> ' + esc(window.CKDocumentLabels.jobDispatcher(job)) + '</div>';
   el.innerHTML = html;
 }
 
@@ -2238,7 +2299,7 @@ async function initOutboundLoad() {
       goPage("home");
       return;
     }
-    if (res && res.ok && res.job && res.job.job_type === 'load_outbound' && res.job.status === 'working') {
+    if (res && res.ok && res.job && res.job.job_type === 'load_outbound' && (res.job.status === 'working' || res.can_manage_dispatch && ['pending','awaiting_close','paused'].includes(res.job.status))) {
       showOutboundLoadWorking();
       refreshLoadWorkers();
       startJobPoll("load");
@@ -2267,7 +2328,8 @@ function showOutboundLoadWorking() {
 
 // 出库装货：状态/业务文案映射（韩文兼容现有 UI 不强求）
 var _OB_STATUS_LABEL_001 = {
-  ready_to_ship: '待下发',
+  ready_to_ship: '待出库',
+  issued: '已下发',
   preparing_outbound: '备货中'
 };
 var _OB_BIZ_LABEL_001 = {
@@ -2290,8 +2352,8 @@ async function loadOutboundOrders() {
   var opts = '<option value="">-- 选择出库单/출고단 선택 --</option>';
   if (res && res.ok && res.items) {
     var rows = res.items.filter(function(o) {
-      // 装货页只显示可装货状态：ready_to_ship / preparing_outbound
-      return o.status === "ready_to_ship" || o.status === "preparing_outbound";
+      // 新版预约下发后保持 issued；作业审核和变更确认仍由装货接口校验。
+      return o.status === "ready_to_ship" || o.status === "preparing_outbound" || (window.CK_SOP_ROLLOUT?.workChain && o.status === "issued");
     });
     // 排序：1) ready_to_ship 优先 2) 预计出库日期升序 3) display_no 升序
     rows.sort(function(a, b) {
@@ -2326,6 +2388,7 @@ async function loadOutboundOrders() {
 // ===== 出库装货：扫码/识别/清空 =====
 var _obResolvedOrderId = "";
 var _obLoadScanner = null;
+var _obAckRevision = null;
 var _obAckPending = false;  // 当前选中单是否仍待仓库确认变更（阻止开始装货）
 
 // 出库单字段标签（中韩双语）— change_log diff 渲染用
@@ -2373,6 +2436,7 @@ function obFieldDisplayValue001(field, val) {
   return String(val);
 }
 function renderOutboundDiffTable001(diff) {
+  if(window.CKOutboundChanges)return CKOutboundChanges.diff(diff,obFieldLabel001,obFieldDisplayValue001);
   if (!diff || typeof diff !== 'object') return '';
   var keys = Object.keys(diff);
   if (keys.length === 0) return '';
@@ -2405,8 +2469,7 @@ async function resolveOutboundCode(btnEl) {
       var o = res.order;
       _obResolvedOrderId = o.id;
       document.getElementById("loadOrderSelect").value = o.id;
-      _refreshOutboundLoadMaterial();
-      _refreshOutboundLoadOrderState();
+            _refreshOutboundLoadOrderState();
       var modeMap = {warehouse_dispatch:'仓库代发',customer_pickup:'客户自提',milk_express:'牛奶速递',milk_pallet:'牛奶托盘',container_pickup:'整柜提货'};
       if (resultEl) resultEl.innerHTML = '<div style="background:#e8f5e9;border-radius:6px;padding:8px;">' +
         '<b>✓ </b>' + esc(o.display_no || o.id) + '<br>' +
@@ -2494,8 +2557,7 @@ function onOutboundCandidateSelect() {
   var resultEl = document.getElementById("obResolveResult");
   var opt = sel.options[sel.selectedIndex];
   if (resultEl && opt) resultEl.innerHTML = '<div style="background:#e8f5e9;border-radius:6px;padding:8px;"><b>✓ </b>' + esc(opt.textContent) + '</div>';
-  _refreshOutboundLoadMaterial();
-  _refreshOutboundLoadOrderState();
+    _refreshOutboundLoadOrderState();
 }
 
 async function startOutboundLoad(btnEl) {
@@ -2589,45 +2651,12 @@ async function refreshLoadWorkers() {
   if (res && res.ok) renderWorkers("loadWorkers", res.workers);
 }
 
-// ===== 出库资料展示 helper（执行系统通用） =====
+// Keep old callers compatible without loading office work files on field pages.
 async function renderOutboundMaterials(orderId, containerId) {
   var box = document.getElementById(containerId);
   if (!box) return;
-  if (!orderId) { box.innerHTML = ''; return; }
-  box.innerHTML = '<div class="muted" style="font-size:12px;">资料加载中... / 자료 로딩...</div>';
-  try {
-    var res = await api({
-      action: "v2_attachment_list",
-      related_doc_type: "outbound_order",
-      related_doc_id: orderId
-    });
-    if (!res || !res.ok) { box.innerHTML = ''; return; }
-    var atts = (res.items || []).filter(function(a) { return a.attachment_category === 'outbound_material'; });
-    if (atts.length === 0) {
-      box.innerHTML = '<div class="muted" style="font-size:12px;">暂无出库资料 / 출고 자료 없음</div>';
-      return;
-    }
-    var html = '<div style="font-weight:700;margin-bottom:4px;">出库资料 / 출고 자료 (' + atts.length + ')</div>';
-    atts.forEach(function(att) {
-      var url = V2_API + "/file?key=" + encodeURIComponent(att.file_key);
-      html += '<div style="padding:4px 0;border-bottom:1px solid #f0f0f0;">';
-      html += esc(att.file_name) + ' ';
-      html += '<a class="btn btn-outline btn-sm" href="' + esc(url) + '" download="' + esc(att.file_name) + '">下载/다운로드</a> ';
-      html += '<a class="btn btn-outline btn-sm" href="' + esc(url) + '" target="_blank" rel="noopener">打开/打印·열기/인쇄</a>';
-      html += '</div>';
-    });
-    box.innerHTML = html;
-  } catch (e) {
-    box.innerHTML = '<div class="muted" style="color:#c62828;font-size:12px;">资料加载失败</div>';
-  }
-}
-
-// ===== 出库装货：选定单号后展示资料 =====
-async function _refreshOutboundLoadMaterial() {
-  // 装货页可能没有专用容器；如果有则填，没有就跳过
-  var holder = document.getElementById("obLoadMaterialBox");
-  if (!holder) return;
-  await renderOutboundMaterials(_obResolvedOrderId, "obLoadMaterialBox");
+  box.innerHTML = '';
+  box.hidden = true;
 }
 
 // ===== P1-8/P1-9 出库装货：变更确认 + 提货信息 =====
@@ -2639,12 +2668,16 @@ async function _refreshOutboundLoadOrderState() {
     return;
   }
   if (!_obResolvedOrderId) {
+    renderOutboundMaterials('', 'obLoadMaterialBox');
     _obAckPending = false;
     if (ackBox) ackBox.innerHTML = '';
     if (pickupBox) pickupBox.innerHTML = '';
     return;
   }
-  var res = await api({ action: 'v2_outbound_order_detail', id: _obResolvedOrderId });
+  var requestedId=_obResolvedOrderId,loadToken=window._OutboundLoadStateSequence=(window._OutboundLoadStateSequence||0)+1;
+  _obAckRevision=null;
+  var res = await api({ action: 'v2_outbound_order_detail', id: requestedId });
+  if(requestedId!==_obResolvedOrderId||loadToken!==window._OutboundLoadStateSequence)return;
   if (!res || !res.ok || !res.order) {
     _obAckPending = false;
     if (ackBox) ackBox.innerHTML = '';
@@ -2652,6 +2685,8 @@ async function _refreshOutboundLoadOrderState() {
     return;
   }
   var o = res.order;
+  renderOutboundMaterials(requestedId,'obLoadMaterialBox',res.attachments||[]);
+  _obAckRevision = Number(o.revision_no||0);
   _obAckPending = Number(o.warehouse_ack_required) === 1;
   var pendingLogs = res.pending_change_logs || [];
   var allLogs = res.change_logs || [];
@@ -2673,8 +2708,8 @@ async function _refreshOutboundLoadOrderState() {
       if (pendingLogs.length > 0) {
         pendingLogs.forEach(function(log) {
           html += '<div style="margin-top:8px;padding-top:8px;border-top:1px dashed #f5b7b1;">';
-          html += '<div style="font-size:12px;color:#444;"><b>#' + Number(log.revision_no || 0) + '</b> · ' + esc(log.changed_by || '--') + ' · ' + esc(log.changed_at ? log.changed_at.replace('T', ' ').slice(0, 16) : '--') + '</div>';
-          html += renderOutboundDiffTable001(log.diff);
+          html += '<div style="font-size:12px;color:#444;"><b>#' + Number(log.revision_no || 0) + '</b> · ' + esc(log.changed_by || '--') + ' · ' + esc(log.changed_at ? new Date(log.changed_at).toLocaleString('zh-CN',{timeZone:'Asia/Seoul',hour12:false}) : '--') + '</div>';
+          html += (window.CKOutboundChanges?CKOutboundChanges.summary(log):'')+renderOutboundDiffTable001(log.diff);
           html += '</div>';
         });
       } else if (hasRevisionWithoutLog) {
@@ -2684,7 +2719,7 @@ async function _refreshOutboundLoadOrderState() {
       html += '</div>';
     } else if (allLogs.length > 0 && o.warehouse_ack_by) {
       html += '<div style="border:1px solid #2e7d32;background:#e8f5e9;border-radius:6px;padding:8px;margin-top:6px;font-size:12px;color:#1b5e20;">';
-      html += '✓ 已确认 / 확인됨: ' + esc(o.warehouse_ack_by) + (o.warehouse_ack_at ? ' · ' + esc(o.warehouse_ack_at.replace('T',' ').slice(0,16)) : '');
+      html += '✓ 已确认 / 확인됨: ' + esc(o.warehouse_ack_by) + (o.warehouse_ack_at ? ' · ' + esc(new Date(o.warehouse_ack_at).toLocaleString('zh-CN',{timeZone:'Asia/Seoul',hour12:false})) : '');
       html += '</div>';
     }
     ackBox.innerHTML = html;
@@ -2726,6 +2761,7 @@ async function ackOutboundChange(btnEl) {
     var res = await api({
       action: 'v2_outbound_order_ack_change',
       id: _obResolvedOrderId,
+      revision_no: _obAckRevision,
       worker_name: getWorkerName(),
       worker_id: getWorkerId()
     });
@@ -2744,6 +2780,7 @@ async function confirmOutboundPickup(btnEl) {
     var res = await api({
       action: 'v2_outbound_pickup_confirm',
       id: _obResolvedOrderId,
+      revision_no: _obAckRevision,
       worker_name: getWorkerName(),
       worker_id: getWorkerId()
     });
@@ -2983,6 +3020,7 @@ function filterIssues(filter, btn) {
 }
 
 function openIssue(id) {
+  if (_currentIssueId!==id) _selectIssueDraft(id);
   _currentIssueId = id;
   goPage("issue_detail");
 }
@@ -2991,15 +3029,17 @@ function openIssue(id) {
 async function loadIssueDetail() {
   var body = document.getElementById("issueDetailBody");
   if (!body || !_currentIssueId) return;
+  var issueId=_currentIssueId,loadToken=body._legacyIssueLoad=(body._legacyIssueLoad||0)+1;
   // 进入新 issue 时清掉旧 draft（保留同一 issue 内的草稿）
   if (_issueHandleDraft.issue_id && _issueHandleDraft.issue_id !== _currentIssueId) {
-    _resetIssueHandleDraft();
+    _selectIssueDraft(issueId);
   }
   // 重渲前先把当前 textarea 的草稿落到内存（避免被覆盖）
   _saveIssueFeedbackDraft();
   body.innerHTML = '<div class="card"><span class="muted">加载中.../로딩중...</span></div>';
 
-  var res = await api({ action: "v2_issue_detail", id: _currentIssueId });
+  var res = await api({ action: "v2_issue_detail", id: issueId });
+  if(_currentIssueId!==issueId||body._legacyIssueLoad!==loadToken)return;
   if (!res || !res.ok || !res.issue) {
     body.innerHTML = '<div class="card"><span class="muted">加载失败/로딩 실패</span></div>';
     return;
@@ -3007,11 +3047,12 @@ async function loadIssueDetail() {
 
   var it = res.issue;
   var runs = res.handle_runs || [];
-  var atts = res.attachments || [];
+  var atts = res.all_attachments || res.attachments || [];
   // 恢复 _currentRunId（页面刷新后接续进行中处理）
   var _myWorkingRun = null;
+  _currentRunId=null;
   for (var ri = 0; ri < runs.length; ri++) {
-    if (runs[ri].run_status === 'working' && runs[ri].handler_id === getWorkerId()) {
+    if (runs[ri].run_status === 'working' && (runs[ri].handler_id === getWorkerId() || runs[ri].id === _issueHandleDraft.run_id)) {
       _currentRunId = runs[ri].id;
       _myWorkingRun = runs[ri];
       break;
@@ -3019,6 +3060,7 @@ async function loadIssueDetail() {
   }
   // 是否需要"继续处理"：本人有 working run，但本端没有活动 job（说明此前点过暂时离开）
   var _needResume = !!(_myWorkingRun && _myWorkingRun.job_id && _activeJobId !== _myWorkingRun.job_id);
+  _issueHandleDraft.job_id=_myWorkingRun?.job_id||'';
 
   var html = '<div class="card">';
   html += '<div style="font-size:18px;font-weight:700;margin-bottom:8px;">' + esc(_issueTitleText(it)) + '</div>';
@@ -3062,13 +3104,19 @@ async function loadIssueDetail() {
     }
     if (it.status === "processing") {
       if (_needResume) {
+        if(window.CK_SOP_ROLLOUT?.enabled){
+          html += '<p>处理任务仍保留，可打开查看人员、暂停或恢复。 / 기존 처리 작업에서 인원·중지·재개를 확인하세요.</p>';
+          html += '<button class="btn btn-outline" onclick="CKOpenNativeJob({id:\''+esc(_myWorkingRun.job_id)+'\',job_type:\'issue_handle\'})">查看处理任务 / 처리 작업 보기</button>';
+        }else{
         html += '<div class="detail-section">';
         html += '<div style="background:#fff3e0;border-left:3px solid #ef6c00;padding:8px 10px;margin-bottom:8px;font-size:13px;color:#bf360c;">';
         html += '此前已暂时离开，请先点击"继续处理"再继续作业（工时按实际参与段累计）<br>일시 퇴장 후 재개하려면 먼저 "처리 재개"를 누르세요 (작업시간은 실제 참여 구간만 누적)';
         html += '</div>';
         html += '<button class="btn btn-success" onclick="handleIssueResume(this)">继续处理 / 처리 재개</button>';
         html += '</div>';
+        }
       } else {
+        if (!window.CK_SOP_ROLLOUT?.enabled) {
         html += '<div class="detail-section"><label>反馈内容 / 피드백 내용 <span style="color:red;">*必填/필수</span></label>';
         // textarea 双向绑定 _issueHandleDraft.feedback_note：每次 input 同步到内存
         // 上传照片若触发整页重渲，新元素由本函数末尾恢复 value
@@ -3077,8 +3125,9 @@ async function loadIssueDetail() {
         html += '<div class="photo-upload" id="issuePhotos"></div>';
         html += renderPhotoSourceBar("uploadIssueHandlePhoto(\'camera\')", "uploadIssueHandlePhoto(\'album\')");
         html += '<button class="btn btn-danger mt-10" onclick="handleIssueFinish(this)">结束处理 / 처리 종료</button>';
-        html += '<button class="btn btn-outline mt-10" onclick="handleIssueLeave(this)">暂时离开 / 일시 퇴장</button>';
         html += '</div>';
+        }
+        html += '<button class="btn btn-outline mt-10" onclick="handleIssueLeave(this)">'+(window.CK_SOP_ROLLOUT?.enabled?'调整人员 / 인원 변경':'暂时离开 / 일시 퇴장')+'</button>';
       }
     }
     html += '</div>';
@@ -3306,6 +3355,7 @@ function addPickCreateDoc() {
   var inp = document.getElementById("pickCreateDocInput");
   var val = (inp ? inp.value : "").trim();
   if (!val) return;
+  if(!acceptDocumentCode(val,'pickCreateDocInput')){if(inp){inp.value='';inp.focus();}return;}
   if (_pickCreateDocNos.indexOf(val) === -1) {
     _pickCreateDocNos.push(val);
     renderPickDocList("pickCreateDocList", _pickCreateDocNos, "_pickCreateDocNos", "pickCreateDocList");
@@ -3347,7 +3397,7 @@ function togglePickCreateScan() {
 
 function stopPickCreateScan() {
   if (_pickCreateScanner) {
-    try { _pickCreateScanner.stop(); } catch(e) {}
+    stopManagedQrScanner(_pickCreateScanner);
     removeCameraSwitchButton("pickCreateScanReader");
     _pickCreateScanner = null;
     var el = document.getElementById("pickCreateScanReader");
@@ -3370,7 +3420,7 @@ async function submitCreatePickTrip(btnEl) {
       worker_name: getWorkerName()
     });
     if (res && res.ok) {
-      var trip = res.trip_no || res.display_no || res.job_id;
+      var trip = window.CKDocumentLabels.jobSummary(Object.assign({ job_type: 'pick_direct' }, res));
       alert("趟次已创建：" + trip + "\n趟次已创建，不记录你的拣货工时。请把拣货单交给实际拣货人扫码开始。\n\n차수 생성됨: " + trip + "\n차수가 생성되었습니다. 작업시간은 기록되지 않으며, 피킹번호를 실제 작업자에게 전달해 스캔하여 시작하세요.");
       _pickCreateDocNos = [];
       renderPickDocList("pickCreateDocList", _pickCreateDocNos, "_pickCreateDocNos", "pickCreateDocList");
@@ -3390,6 +3440,7 @@ function addPickStartDoc() {
   var inp = document.getElementById("pickStartDocInput");
   var val = (inp ? inp.value : "").trim();
   if (!val) return;
+  if(!acceptDocumentCode(val,'pickStartDocInput')){if(inp){inp.value='';inp.focus();}return;}
   if (_pickStartDocNos.indexOf(val) === -1) {
     _pickStartDocNos.push(val);
     renderPickDocList("pickStartDocList", _pickStartDocNos, "_pickStartDocNos", "pickStartDocList");
@@ -3486,7 +3537,7 @@ function togglePickStartScan() {
 
 function stopPickStartScan() {
   if (_pickStartScanner) {
-    try { _pickStartScanner.stop(); } catch(e) {}
+    stopManagedQrScanner(_pickStartScanner);
     removeCameraSwitchButton("pickStartScanReader");
     _pickStartScanner = null;
     var el = document.getElementById("pickStartScanReader");
@@ -3555,7 +3606,7 @@ function enterPickWorkingSection(startRes) {
   api({ action: "v2_ops_job_detail", job_id: _activeJobId }).then(function(res) {
     if (res && res.ok && res.job) {
       var t = document.getElementById("pickWorkingTitle");
-      if (t) t.textContent = "趟次/차수: " + (res.job.display_no || _activeJobId);
+      if (t) t.textContent = "趟次/차수: " + window.CKDocumentLabels.jobSummary(res.job);
       // 找当前 worker 自己的 open segment 作为开始时间
       var mySeg = (res.workers || []).find(function(w) {
         return w.worker_id === getWorkerId() && !w.left_at;
@@ -3713,8 +3764,9 @@ async function loadPickActiveList() {
     var canFinalize = (t.status !== 'completed') && noWorkerActive && isCreator;
 
     html += '<div class="trip-card">';
-    html += '<div class="trip-card-header"><span class="trip-tag">' + esc(t.display_no || t.id) + '</span>';
+    html += '<div class="trip-card-header"><span class="trip-tag">' + esc(window.CKDocumentLabels.jobLabel(t)) + '</span>';
     html += '<span class="st st-' + esc(stCls) + '">' + esc(stLabel) + '</span></div>';
+    html += '<div class="trip-card-meta">派审员 / 배정·검수 담당자: ' + esc(window.CKDocumentLabels.jobDispatcher(t)) + '</div>';
     html += '<div class="trip-card-meta">拣货单 / 피킹번호 (' + esc(summary) + '):</div>' + docsHtml;
     html += '<div class="trip-card-meta" style="margin-top:6px;">在岗拣货人 / 작업중:</div><div style="margin-top:2px;">' + wHtml + '</div>';
     html += '<div class="trip-card-meta" style="margin-top:6px;color:#999;font-size:11px;">趟次创建人 / 생성자: ' + esc(t.created_by || "--") + '</div>';
@@ -3845,6 +3897,54 @@ var _bulkScanner = null;
 
 var _bulkElapsedTimer = null;
 var _bulkStartedAt = null;
+var _bulkFormJobId = null;
+var _bulkSubmittingJobId = null;
+var _bulkLoadSequence = 0;
+
+function _bulkResetForm(jobId) {
+  _bulkFormJobId = jobId || null;
+  _bulkStopElapsedTimer();
+  _bulkStartedAt = null;
+  for (var i = 0; i < _bulkOutputFieldIds.length; i++) {
+    var field = document.getElementById(_bulkOutputFieldIds[i]);
+    if (field) field.value = "0";
+  }
+  for (var id of ['bulkCustomer', 'bulkRemark', 'bulkResultNote', 'bulkOrderInput']) {
+    var input = document.getElementById(id);
+    if (input) { input.value = ''; input.readOnly = false; input.style.background = ''; }
+  }
+  var forklift = document.getElementById('bulkUsedForklift');
+  if (forklift) forklift.checked = false;
+  for (var id of ['bulkCustomerRequired','bulkCustomerHint']) {
+    var hint = document.getElementById(id); if (hint) hint.style.display = '';
+  }
+  for (var id of ['bulkActiveOrderNo','bulkStartTime','bulkElapsed','bulkWorkerCount']) {
+    var text = document.getElementById(id); if (text) text.textContent = '--';
+  }
+  var card = document.getElementById('bulkLinkedObCard');if (card) card.style.display = 'none';
+  var body = document.getElementById('bulkLinkedObBody');if (body) body.innerHTML = '';
+  renderWorkers('bulkWorkers', []);
+  _bulkSetSubmitting(!!jobId && _bulkSubmittingJobId === jobId);
+}
+
+function _bulkBindForm(jobId) {
+  if (_bulkFormJobId !== jobId) _bulkResetForm(jobId);
+  else _bulkSetSubmitting(_bulkSubmittingJobId === jobId);
+}
+
+function _bulkRestoreCustomer(job) {
+  var input = document.getElementById('bulkCustomer');
+  var linked = !!job.linked_outbound_order_id;
+  if (input) {
+    // Never overwrite an unsaved customer on a polling refresh of this same job.
+    if (linked || !input.value) input.value = job.customer || '';
+    input.readOnly = linked;
+    input.style.background = linked ? '#f5f5f5' : '';
+  }
+  for (var id of ['bulkCustomerRequired','bulkCustomerHint']) {
+    var hint = document.getElementById(id);if (hint) hint.style.display = linked ? 'none' : '';
+  }
+}
 
 function _bulkSwitchState(state) {
   // state: 'idle' | 'working'
@@ -3898,6 +3998,8 @@ function _bulkStopElapsedTimer() {
 }
 
 function _bulkEnterWorkingState(workOrderNo, jobDetail) {
+  _bulkBindForm(_activeJobId);
+  if (jobDetail) _bulkRestoreCustomer(jobDetail);
   _bulkSwitchState("working");
   var noEl = document.getElementById("bulkActiveOrderNo");
   if (noEl) noEl.textContent = workOrderNo || "--";
@@ -3915,24 +4017,32 @@ function _bulkEnterWorkingState(workOrderNo, jobDetail) {
     } catch(e) { stEl.textContent = "--"; }
   }
   _bulkStartElapsedTimer();
-  refreshBulkWorkers();
 }
 
 function initBulkOp() {
+  var sequence = ++_bulkLoadSequence, jobId = _activeJobId;
   _bulkStopElapsedTimer();
-  if (_activeJobId) {
+  if (jobId) {
+    _bulkBindForm(jobId);
     // Resume into working state
     _bulkSwitchState("working");
-    refreshBulkWorkers();
-    api({ action: "v2_ops_job_detail", job_id: _activeJobId }).then(function(res) {
-      if (res && res.ok && res.job) {
+    return api({ action: "v2_ops_job_detail", job_id: jobId }).then(function(res) {
+      if (sequence !== _bulkLoadSequence || _activeJobId !== jobId || _currentPage !== 'bulk_op') return;
+      if (res && res.ok && res.job && res.job.id === jobId && res.job.job_type === 'bulk_op') {
         _bulkEnterWorkingState(res.job.related_doc_id || "", res.job);
+        renderWorkers('bulkWorkers', res.workers);
         // Worker count
         var wcEl = document.getElementById("bulkWorkerCount");
         if (wcEl) wcEl.textContent = (res.job.active_worker_count || 0) + " 人/명";
+        startJobPoll('bulk');
+      } else {
+        _bulkShowError(res && res.error || '无法读取当前工单，请返回后重试 / 작업 정보를 다시 확인하세요');
       }
+    }).catch(function(error) {
+      if (sequence === _bulkLoadSequence && _activeJobId === jobId && _currentPage === 'bulk_op') _bulkShowError(error.message);
     });
   } else {
+    _bulkResetForm(null);
     _bulkSwitchState("idle");
   }
   startJobPoll("bulk");
@@ -3970,7 +4080,7 @@ function startBulkScan() {
 
 function stopBulkScan() {
   if (_bulkScanner) {
-    try { _bulkScanner.stop(); } catch(e) {}
+    stopManagedQrScanner(_bulkScanner);
     removeCameraSwitchButton("bulkScanReader");
     _bulkScanner = null;
     var el = document.getElementById("bulkScanReader");
@@ -3986,17 +4096,22 @@ async function startBulkJob(btnEl) {
     alert("请输入或扫描工单号\n작업지시 번호를 입력하거나 스캔하세요");
     return;
   }
-  withActionLock('startBulkJob', btnEl || null, '提交中.../저장중...', async function() {
+  if(!acceptDocumentCode(workOrderNo,'bulkOrderInput'))return;
+  var sequence = ++_bulkLoadSequence;
+  return withActionLock('startBulkJob', btnEl || null, '提交中.../저장중...', async function() {
     var res = await api({
       action: "v2_bulk_op_job_start",
       work_order_no: workOrderNo,
       worker_id: getWorkerId(),
       worker_name: getWorkerName()
     });
+    if (sequence !== _bulkLoadSequence || _currentPage !== 'bulk_op') return;
     if (res && res.ok) {
       saveActiveJob(res.job_id, res.worker_seg_id);
       // Switch to working state
       _bulkEnterWorkingState(workOrderNo, null);
+      refreshBulkWorkers();
+      startJobPoll("bulk");
 
       // 客户字段：系统单 → 自动带出 + 只读；非系统工单 → 可编辑且必填
       var custEl = document.getElementById("bulkCustomer");
@@ -4099,6 +4214,8 @@ async function bulkLeave(btnEl) {
 
 async function finishBulkJob(btnEl) {
   if (!_activeJobId) { alert("没有进行中的任务 / 진행 중인 작업 없음"); return; }
+  var jobId = _activeJobId;
+  if (_bulkFormJobId !== jobId) { initBulkOp(); return; }
   // 客户字段（系统单 readonly 已带出；非系统单必填）
   var bulkCustomerVal = ((document.getElementById("bulkCustomer") || {}).value || "").trim();
   var custReq = document.getElementById("bulkCustomerRequired");
@@ -4109,12 +4226,14 @@ async function finishBulkJob(btnEl) {
     return;
   }
   if (!confirm("确认完成本次大货操作？\n이번 대량화물 작업을 완료하시겠습니까?")) return;
-  withActionLock('finishBulkJob', btnEl || null, '提交中.../저장중...', async function() {
+  return withActionLock('finishBulkJob', btnEl || null, '提交中.../저장중...', async function() {
     // Enter submitting state
+    _bulkSubmittingJobId = jobId;
     _bulkSetSubmitting(true);
+    try {
     var res = await api({
       action: "v2_bulk_op_job_finish",
-      job_id: _activeJobId,
+      job_id: jobId,
       worker_id: getWorkerId(),
       customer: bulkCustomerVal,
       packed_sku_count: parseInt(document.getElementById("bulkPackedSku").value) || 0,
@@ -4132,7 +4251,9 @@ async function finishBulkJob(btnEl) {
       result_note: (document.getElementById("bulkResultNote") || {}).value || ""
     });
 
+    if (_activeJobId !== jobId || _bulkFormJobId !== jobId || _currentPage !== 'bulk_op') return;
     if (res && res.ok && !res.already_completed) {
+      _bulkResetForm(null);
       // Success — exit
       _bulkStopElapsedTimer();
       alert("大货操作已完成 / 대량화물 작업 완료");
@@ -4140,6 +4261,7 @@ async function finishBulkJob(btnEl) {
       clearActiveJob();
       goPage("order_op_menu");
     } else if (isAlreadyCompletedResponse(res)) {
+      _bulkResetForm(null);
       _bulkStopElapsedTimer();
       try { stopBulkScan(); } catch(e) {}
       handleFinishSuccessAndExit("任务已完成，已返回上一级\n작업이 이미 완료되어 이전으로 이동", function() { goPage('order_op_menu'); });
@@ -4164,14 +4286,23 @@ async function finishBulkJob(btnEl) {
       _bulkSetSubmitting(false);
       _bulkShowError("失败/실패: " + (res ? (res.message || res.error) : "unknown"));
     }
+    } catch(error) {
+      if (_activeJobId === jobId && _bulkFormJobId === jobId && _currentPage === 'bulk_op') _bulkShowError(error.message || '提交失败，请重试 / 저장 실패');
+    } finally {
+      if (_bulkSubmittingJobId === jobId) _bulkSubmittingJobId = null;
+      if (_bulkFormJobId === jobId) _bulkSetSubmitting(false);
+    }
   });
 }
 
 async function refreshBulkWorkers() {
-  if (!_activeJobId) return;
-  var res = await api({ action: "v2_ops_job_detail", job_id: _activeJobId });
-  if (res && res.ok) {
+  var jobId = _activeJobId, sequence = _bulkLoadSequence;
+  if (!jobId || _currentPage !== 'bulk_op') return;
+  var res = await api({ action: "v2_ops_job_detail", job_id: jobId });
+  if (sequence !== _bulkLoadSequence || _activeJobId !== jobId || _bulkFormJobId !== jobId || _currentPage !== 'bulk_op') return;
+  if (res && res.ok && res.job && res.job.id === jobId) {
     renderWorkers("bulkWorkers", res.workers);
+    _bulkRestoreCustomer(res.job);
     // Update worker count in card
     var wcEl = document.getElementById("bulkWorkerCount");
     if (wcEl && res.job) wcEl.textContent = (res.job.active_worker_count || 0) + " 人/명";
@@ -4245,7 +4376,7 @@ function _gjStopElapsedTimer() {
 function _gjEnterWorkingState(jobDetail) {
   _gjSwitchState("working");
   var titleEl = document.getElementById("gjActiveTitle");
-  if (titleEl) titleEl.textContent = _genericJobCtx.title || "--";
+  if (titleEl) titleEl.textContent = window.CKDocumentLabels.jobSummary(jobDetail || _genericJobCtx);
   var realStart = null;
   if (jobDetail && jobDetail.created_at) {
     realStart = new Date(jobDetail.created_at);
@@ -4525,7 +4656,7 @@ function uploadIssueHandlePhoto(source) {
   if (_currentRunId) {
     docType = 'issue_handle_run';
     docId = _currentRunId;
-  } else if (_activeJobId) {
+  } else if (_activeJobId && (!window.CK_SOP_ROLLOUT?.enabled || _issueHandleDraft.job_id===_activeJobId)) {
     docType = 'ops_job';
     docId = _activeJobId;
   } else if (_currentIssueId) {
@@ -4538,7 +4669,8 @@ function uploadIssueHandlePhoto(source) {
   _photoUploadCtx = {
     related_doc_type: docType,
     attachment_category: 'issue_handle_photo',
-    related_doc_id: docId
+    related_doc_id: docId,
+    issue_id: _currentIssueId
   };
   _triggerPhotoInput(source);
 }
@@ -4571,8 +4703,11 @@ async function handlePhotoUpload(input) {
   var ctx = {
     related_doc_type: _photoUploadCtx.related_doc_type || '',
     related_doc_id: _photoUploadCtx.related_doc_id || '',
-    attachment_category: _photoUploadCtx.attachment_category || ''
+    attachment_category: _photoUploadCtx.attachment_category || '',
+    issue_id: _photoUploadCtx.issue_id || ''
   };
+  var issueDraft=ctx.issue_id?(_issueDrafts.get(ctx.issue_id)||_issueHandleDraft):null;
+  if(issueDraft)issueDraft.uploading=(issueDraft.uploading||0)+1;
   // 上传前先把"反馈内容"草稿保存好——任何后续渲染都能恢复
   _saveIssueFeedbackDraft();
   // 文件名去重（同一批次内）
@@ -4626,6 +4761,10 @@ async function handlePhotoUpload(input) {
     || (ctx.related_doc_type === 'issue_handle_run')
     || (ctx.related_doc_type === 'ops_job' && _currentPage === 'issue_detail');
   if (isIssueHandleUpload) {
+    if(issueDraft){
+      issueDraft.session_photos.push.apply(issueDraft.session_photos,newAtts);
+      if(_currentIssueId===ctx.issue_id)renderIssueSessionPhotos();
+    }else{
     if (_currentIssueId && _issueHandleDraft.issue_id !== _currentIssueId) {
       // 切换到新问题点：清空旧 draft session（避免互相串）
       _resetIssueHandleDraft();
@@ -4636,7 +4775,9 @@ async function handlePhotoUpload(input) {
       _issueHandleDraft.session_photos.push(newAtts[k]);
     }
     renderIssueSessionPhotos();
+    }
   }
+  if(issueDraft)issueDraft.uploading--;
 
   if (fail.length === 0) {
     alert('上传成功 / 업로드 성공: ' + ok.length + ' 张');
@@ -4710,7 +4851,7 @@ function initVerifyScan() {
   // 已在本人 verify_scan 任务中 — 直接回 working 态
   if (_activeJobId) {
     api({ action: "v2_ops_job_detail", job_id: _activeJobId }).then(function(res) {
-      if (res && res.ok && res.job && res.job.job_type === "verify_scan" && res.job.status === "working") {
+      if (res && res.ok && res.job && res.job.job_type === "verify_scan" && (res.job.status === "working" || res.can_manage_dispatch && ['pending','awaiting_close','paused'].includes(res.job.status))) {
         _vsBatchId = res.job.related_doc_id || "";
         entry.style.display = "none";
         working.style.display = "";
@@ -5073,11 +5214,10 @@ async function loadRealtimeBoard(btnEl) {
       actHtml = '<div class="muted">当前无在岗人员 / 근무중 없음</div>';
     } else {
       actList.forEach(function(w) {
-        var jobLbl = JOB_TYPE_LABEL[w.job_type] || w.job_type || '--';
+        var jobLbl = window.CKDocumentLabels.jobSummary(w);
         var dur = _rtbDuration(w.joined_at);
         actHtml += '<div style="border-bottom:1px solid #f0f0f0;padding:6px 0;font-size:13px;">';
         actHtml += '<div><b>' + esc(w.worker_name || w.worker_id || '--') + '</b> · <span style="color:#1565c0;">' + esc(jobLbl) + '</span>';
-        if (w.display_no) actHtml += ' · <span class="muted">' + esc(w.display_no) + '</span>';
         actHtml += '</div>';
         actHtml += '<div class="muted" style="font-size:11px;">开始 / 시작: ' + _rtbFmt(w.joined_at) + (dur ? ' · 已 ' + dur : '') + '</div>';
         actHtml += '</div>';
@@ -5091,10 +5231,9 @@ async function loadRealtimeBoard(btnEl) {
       offHtml = '<div class="muted">今日无人离岗 / 퇴근 없음</div>';
     } else {
       offList.forEach(function(w) {
-        var jobLbl = JOB_TYPE_LABEL[w.last_job_type] || w.last_job_type || '--';
+        var jobLbl = window.CKDocumentLabels.jobSummary(Object.assign({}, w, { job_type: w.last_job_type || w.job_type, display_no: w.last_display_no || w.display_no, started_at: w.last_joined_at || w.started_at }));
         offHtml += '<div style="border-bottom:1px solid #f0f0f0;padding:6px 0;font-size:13px;">';
         offHtml += '<div><b>' + esc(w.worker_name || w.worker_id || '--') + '</b> · <span class="muted">' + esc(jobLbl) + '</span>';
-        if (w.last_display_no) offHtml += ' · <span class="muted">' + esc(w.last_display_no) + '</span>';
         offHtml += '</div>';
         offHtml += '<div class="muted" style="font-size:11px;">最后离岗 / 마지막 퇴근: ' + _rtbFmt(w.last_left_at) + '</div>';
         offHtml += '</div>';

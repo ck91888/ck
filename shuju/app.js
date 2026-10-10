@@ -363,7 +363,7 @@ function renderLiveWorkers() {
     html += "<td>" + esc(bizLabel(w.biz_class)) + "</td>";
     html += "<td>" + esc(flowLabel(w.flow_stage)) + "</td>";
     html += "<td>" + esc(jobTypeLabel(w.job_type)) + "</td>";
-    html += "<td>" + esc(w.display_no || w.related_doc_id || "--") + "</td>";
+    html += "<td>" + esc(window.CKDocumentLabels.jobSummary(w)) + "</td>";
     html += "<td>" + esc(fmtTime(w.joined_at)) + "</td>";
     var minClass = (Number(minutesOpen) >= 720 || isStale) ? ' class="stale-warning"' : '';
     html += "<td" + minClass + ">" + minutesOpen + "</td>";
@@ -404,6 +404,8 @@ function forceLeaveWorker(jobId, workerId, segmentId, workerName, joinedAt, jobS
   var old = document.getElementById('forceLeaveOverlay');
   if (old) old.parentNode.removeChild(old);
 
+  // Use the same real job metadata as the selected row; keep action IDs untouched.
+  var selectedJob = (_liveWorkersCache || []).find(function(w) { return w.job_id === jobId && w.worker_id === workerId && (!segmentId || w.segment_id === segmentId); }) || { joined_at: joinedAt };
   var minutesOpen = minutesSince(joinedAt);
   // 默认值：当前 KST，分钟精度
   var nowLocal = nowKstDatetimeLocal();
@@ -417,7 +419,7 @@ function forceLeaveWorker(jobId, workerId, segmentId, workerName, joinedAt, jobS
   html += '<div style="font-size:16px;font-weight:700;margin-bottom:10px;">强制退出 / 강제 퇴장</div>';
   html += '<div class="muted" style="font-size:12px;line-height:1.6;margin-bottom:8px;">'
         + '<div>员工 / 직원: <b>' + esc(workerName || workerId) + '</b></div>'
-        + '<div>任务 / 작업: ' + esc(jobId) + (jobStatus ? '（状态: ' + esc(jobStatus) + '）' : '') + '</div>'
+        + '<div>任务 / 작업: ' + esc(window.CKDocumentLabels.jobSummary(selectedJob)) + (jobStatus ? '（状态: ' + esc(jobStatus) + '）' : '') + '</div>'
         + '<div>开始 / 시작: ' + esc(fmtKstFull(joinedAt)) + '</div>'
         + '<div>已持续 / 경과: ' + minutesOpen + ' 分钟 / 분</div>'
         + '</div>';
@@ -586,7 +588,7 @@ async function loadLiveDocs() {
     var flows = docFlows[key] || [];
     var isParallel = flows.indexOf("unload") !== -1 && flows.indexOf("inbound") !== -1;
     html += "<tr>";
-    html += "<td><b>" + esc(d.display_no || d.related_doc_id || d.job_id) + "</b></td>";
+    html += "<td><b>" + esc(window.CKDocumentLabels.jobSummary(d)) + "</b></td>";
     html += "<td>" + esc(bizLabel(d.biz_class)) + "</td>";
     html += "<td>" + esc(flowLabel(d.flow_stage)) + (isParallel ? ' <span class="tag tag-orange" style="font-size:10px;">并行</span>' : '') + "</td>";
     html += "<td>" + esc(d.worker_names || "--") + "</td>";
@@ -667,7 +669,7 @@ async function loadOrders(btn) {
     if (!resultSummary) resultSummary = '<span class="muted">--</span>';
     html += '<tr>';
     html += '<td>' + esc((j.created_at || '').slice(0, 10)) + '</td>';
-    html += '<td><b>' + esc(j.display_no || j.related_doc_id || j.id) + '</b></td>';
+    html += '<td><b>' + esc(window.CKDocumentLabels.jobSummary(j)) + '</b></td>';
     html += '<td>' + esc(flowLabel(j.flow_stage)) + '</td>';
     html += '<td>' + esc(jobTypeLabel(j.job_type)) + '</td>';
     html += '<td>' + esc(bizLabel(j.biz_class)) + '</td>';
@@ -705,7 +707,8 @@ async function exportOrders(btn) {
     var csvRows = rows.map(function(r) {
     return {
       日期: r['日期'] || '',
-      单号: r['单号'] || '',
+      单号: window.CKDocumentLabels.jobLabel(Object.assign({ display_no: r['单号'] }, r)),
+      派审员: window.CKDocumentLabels.jobDispatcher(r),
       客户: r.customer || '',
       业务阶段: flowLabel(r.flow_stage),
       任务类型: jobTypeLabel(r.job_type),
@@ -766,7 +769,7 @@ async function exportOrders(btn) {
       库内操作完成时间: r.stock_op_completed_at || '',
       库内操作完成人: r.stock_op_completed_by || '',
       出库资料数: r.material_count || 0,
-      job_id: r.job_id,
+      作业计划号: r.work_plan_no || '',
       原始结果JSON: r.raw_result_json_compact || ''
     };
   });
@@ -824,16 +827,17 @@ async function openOrderDetail(jobId) {
   html += '</div>';
 
   html += '<h3>基本信息</h3>';
-  html += '<table class="data-table"><tr><th>job_id</th><td>' + esc(j.id) + '</td>';
-  html += '<th>display_no</th><td>' + esc(j.display_no || '--') + '</td></tr>';
+  html += '<table class="data-table"><tr><th>作业计划号</th><td>' + esc(j.work_plan_no || '--') + '</td>';
+  html += '<th>业务单号</th><td>' + esc(window.CKDocumentLabels.jobLabel(j)) + '</td></tr>';
+  html += '<tr><th>派审员 / 배정·검수 담당자</th><td colspan="3">' + esc(window.CKDocumentLabels.jobDispatcher(j)) + '</td></tr>';
   html += '<tr><th>业务阶段</th><td>' + esc(flowLabel(j.flow_stage)) + '</td>';
   html += '<th>任务类型</th><td>' + esc(jobTypeLabel(j.job_type)) + '</td></tr>';
   html += '<tr><th>业务分类</th><td>' + esc(bizLabel(j.biz_class)) + '</td>';
   html += '<th>状态</th><td>' + statusTag(j.status) + '</td></tr>';
   html += '<tr><th>客户 / 고객</th><td>' + esc(j.customer || '--') + '</td>';
   html += '<th>结果摘要</th><td>' + esc(j.result_summary || '--') + '</td></tr>';
-  html += '<tr><th>related_doc_id</th><td>' + esc(j.related_doc_id || '--') + '</td>';
-  html += '<th>linked_outbound_order_id</th><td>' + esc(j.linked_outbound_order_id || '--') + '</td></tr>';
+  html += '<tr><th>关联单号</th><td>' + esc(window.CKDocumentLabels.jobLabel(j)) + '</td>';
+  html += '<th>关联出库计划</th><td>' + esc(j.outbound_plan_no || '--') + '</td></tr>';
   html += '<tr><th>created_at</th><td>' + esc(fmtTime(j.created_at)) + '</td>';
   html += '<th>updated_at</th><td>' + esc(fmtTime(j.updated_at)) + '</td></tr>';
   if (j.finished_at) {
@@ -1032,6 +1036,8 @@ function closeOrderDetail() {
 // 工时分析 (workhours)
 // =====================================================
 var _whSummary = null;
+var _whQuery = null;
+function workhourKstDate(value) { var ms=Date.parse(value||'');return Number.isFinite(ms)?new Date(ms+9*3600000).toISOString().slice(0,10):''; }
 
 function whFilterParams() {
   return {
@@ -1044,6 +1050,7 @@ function whFilterParams() {
 }
 
 async function loadWorkhours(btn) {
+  _whSummary=null;_whQuery=null;
   setBtnLoading(btn, true);
   var params = whFilterParams();
   params.action = "v2_dashboard_workhour_summary";
@@ -1054,6 +1061,7 @@ async function loadWorkhours(btn) {
     return;
   }
   _whSummary = res;
+  _whQuery = Object.assign({},params);
   var s = res.summary || {};
 
   // 顶部统计卡
@@ -1080,7 +1088,7 @@ async function loadWorkhours(btn) {
   var tb1 = '';
   if (bw.length === 0) tb1 = '<tr><td colspan="5" class="muted" style="text-align:center;">暂无数据</td></tr>';
   else bw.forEach(function(w) {
-    tb1 += '<tr><td><b>' + esc(w.worker_name) + '</b></td>';
+    tb1 += '<tr><td><b>' + esc(w.worker_name) + '</b><small style="display:block;overflow-wrap:anywhere">' + esc(w.worker_id||'工牌待核实') + '</small></td>';
     tb1 += '<td>' + round1(w.total_minutes) + '</td>';
     tb1 += '<td>' + round1(w.total_hours) + '</td>';
     tb1 += '<td>' + (w.job_count || 0) + '</td>';
@@ -1113,9 +1121,9 @@ async function loadWorkhours(btn) {
     var longTag = s.long_segment ? ' <span class="tag tag-orange" style="font-size:10px;">长工时</span>' : '';
     var activeTag = s.active ? ' <span class="tag tag-green" style="font-size:10px;">在岗</span>' : '';
     tb3 += '<tr><td>' + esc(s.worker_name) + '</td>';
-    tb3 += '<td>' + esc((s.joined_at || '').slice(0, 10)) + '</td>';
+    tb3 += '<td>' + esc(workhourKstDate(s.joined_at)) + '</td>';
     tb3 += '<td>' + esc(jobTypeLabel(s.job_type)) + '</td>';
-    tb3 += '<td>' + esc(s.display_no || s.job_id) + '</td>';
+    tb3 += '<td>' + esc(window.CKDocumentLabels.jobSummary(s)) + '</td>';
     tb3 += '<td>' + esc(fmtTime(s.joined_at)) + '</td>';
     tb3 += '<td>' + esc(fmtTime(s.left_at)) + '</td>';
     tb3 += '<td>' + round1(s.minutes || 0) + activeTag + longTag + anomalyTag + '</td>';
@@ -1133,15 +1141,15 @@ function exportWorkhoursSegments() {
   if (!_whSummary) { alert("请先查询"); return; }
   var rows = (_whSummary.segments || []).map(function(s) {
     return {
-      员工: s.worker_name, 日期: (s.joined_at || '').slice(0, 10),
-      任务类型: jobTypeLabel(s.job_type), 任务号: s.display_no || s.job_id,
+      员工: s.worker_name, 工牌: s.worker_id, 日期: workhourKstDate(s.joined_at),
+      任务类型: jobTypeLabel(s.job_type), 任务号: window.CKDocumentLabels.jobLabel(s), 派审员: window.CKDocumentLabels.jobDispatcher(s),
       开始: fmtTime(s.joined_at), 结束: fmtTime(s.left_at),
       分钟: round1(s.minutes), 状态: statusLabel(s.status),
       在岗: s.active, 异常: s.anomaly ? 1 : 0, 异常原因: s.anomaly_reason || '',
       长工时: s.long_segment ? 1 : 0
     };
   });
-  exportCsv("workhour_segments_" + defaultDateRangeToday() + ".csv", rows);
+  exportCsv("workhour_segments_" + (_whQuery?.start_date||"all") + "_" + (_whQuery?.end_date||"all") + ".csv", rows);
 }
 
 // =====================================================
@@ -1431,7 +1439,7 @@ async function loadManagement(btn) {
   var tb2 = '';
   if (bw.length === 0) tb2 = '<tr><td colspan="6" class="muted" style="text-align:center;">暂无数据</td></tr>';
   else bw.forEach(function(w) {
-    tb2 += '<tr><td><b>' + esc(w.worker_name) + '</b></td>';
+    tb2 += '<tr><td><b>' + esc(w.worker_name) + '</b><small style="display:block;overflow-wrap:anywhere">' + esc(w.worker_id||'工牌待核实') + '</small></td>';
     tb2 += '<td>' + (w.total_hours || 0) + '</td>';
     tb2 += '<td>' + fmtNumber(w.wms_qty) + '</td>';
     tb2 += '<td>' + fmtNumber(w.wms_boxes) + '</td>';
@@ -1439,6 +1447,9 @@ async function loadManagement(btn) {
     tb2 += '<td>' + (w.boxes_per_hour || 0) + '</td></tr>';
   });
   document.getElementById("mgmtByWorkerBody").innerHTML = tb2;
+  var unmatched = res.unmatched_wms || [], hint = document.getElementById('mgmtUnmatchedWms');
+  if (!hint) { hint=document.createElement('section');hint.id='mgmtUnmatchedWms';document.getElementById('mgmtByWorkerBody').closest('table').after(hint); }
+  hint.innerHTML = (res.truncated ? '<p class="muted">当前数据已截断，请缩小日期范围后核对统计。</p>' : '') + (unmatched.length ? '<h3>WMS产量待核实</h3><p class="muted">以下姓名没有唯一工牌对应，保留在WMS总量中，尚未计入个人产量。</p>' + unmatched.map(function(x){return '<p>'+esc(x.worker_name)+' · '+fmtNumber(x.qty)+'件 / '+fmtNumber(x.boxes)+'箱 · '+esc(x.reason)+'</p>';}).join('') : '');
 }
 
 // ===== Init =====
@@ -1549,8 +1560,9 @@ function _renderResultModal(opt) {
   html += '<div class="modal-box" onclick="event.stopPropagation();" style="max-width:560px;">';
   html += '<div style="font-size:16px;font-weight:700;margin-bottom:10px;">' + (isCorrection ? '修改产出数据 / 결과 수정' : '补充产出并完成 / 결과 입력 후 완료') + '</div>';
   html += '<div class="muted" style="font-size:12px;line-height:1.6;margin-bottom:8px;">'
-        + '<div>job_id: ' + esc(j.id) + ' · ' + esc(jobTypeLabel(j.job_type)) + '</div>'
-        + '<div>当前状态: ' + statusTag(j.status) + ' · 关联单据: ' + esc(j.related_doc_id || j.linked_outbound_order_id || '--') + '</div>'
+        + '<div>业务单号: ' + esc(window.CKDocumentLabels.jobLabel(j)) + ' · ' + esc(jobTypeLabel(j.job_type)) + '</div>'
+        + '<div>派审员 / 배정·검수 담당자: ' + esc(window.CKDocumentLabels.jobDispatcher(j)) + '</div>'
+        + '<div>当前状态: ' + statusTag(j.status) + ' · 关联单据: ' + esc(window.CKDocumentLabels.jobLabel(j)) + '</div>'
         + '</div>';
 
   defs.forEach(function(f) {

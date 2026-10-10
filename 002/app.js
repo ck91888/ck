@@ -83,7 +83,15 @@ var _WRITE_ACTIONS = [
 function _genReqId(action) {
   return action + '_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
 }
+var _createSubmissionIntents = {};
 async function api(params) {
+  var intentAction = params.action === 'v2_inbound_plan_create' || params.action === 'v2_outbound_order_create';
+  if (intentAction && !params.client_req_id) {
+    var intentData = Object.assign({}, params); delete intentData.k;
+    var signature = JSON.stringify(intentData), saved = _createSubmissionIntents[params.action];
+    if (!saved || saved.signature !== signature) saved = _createSubmissionIntents[params.action] = { signature: signature, requestId: _genReqId(params.action) };
+    params.client_req_id = saved.requestId;
+  }
   params.k = getKey();
   if (_WRITE_ACTIONS.indexOf(params.action) !== -1 && !params.client_req_id) {
     params.client_req_id = _genReqId(params.action);
@@ -94,7 +102,9 @@ async function api(params) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(params)
     });
-    return await res.json();
+    var result = await res.json();
+    if (intentAction && result && result.ok) delete _createSubmissionIntents[params.action];
+    return result;
   } catch(e) {
     // TypeError: Failed to fetch / NetworkError — 不是业务错误，是网络/域名问题
     return {
@@ -491,6 +501,7 @@ function obFieldDisplayValue(field, val) {
 
 // 渲染单条 change_log 的 diff 明细表
 function renderOutboundDiffTable(diff) {
+  if(window.CKOutboundChanges)return CKOutboundChanges.diff(diff,obFieldLabel,obFieldDisplayValue);
   if (!diff || typeof diff !== 'object') return '';
   var keys = Object.keys(diff);
   if (keys.length === 0) return '';
@@ -534,13 +545,13 @@ function renderOutboundChangeLogsCard(o, change_logs, pending_change_logs) {
         html += '<div style="font-size:13px;line-height:1.7;">';
         html += '<div><b>修改版本 / 버전:</b> #' + Number(log.revision_no || 0);
         if (log.change_type && log.change_type !== 'order_update') {
-          html += ' <span class="muted" style="font-size:11px;">[' + esc(log.change_type) + ']</span>';
+          html += ' <span class="muted" style="font-size:11px;">[' + esc(window.CKOutboundChanges?CKOutboundChanges.title(log):log.change_type) + ']</span>';
         }
         html += '</div>';
         html += '<div><b>修改人 / 수정자:</b> ' + esc(log.changed_by || '--') + '</div>';
         html += '<div><b>修改时间 / 수정 시간:</b> ' + esc(log.changed_at ? fmtTime(log.changed_at) : '--') + '</div>';
         html += '</div>';
-        html += renderOutboundDiffTable(log.diff);
+        html += (window.CKOutboundChanges?CKOutboundChanges.summary(log):'')+renderOutboundDiffTable(log.diff);
         html += '</div>';
       });
     } else if (hasRevisionWithoutLog) {
@@ -581,7 +592,7 @@ function renderOutboundChangeLogsCard(o, change_logs, pending_change_logs) {
         html += '</span>';
       }
       html += '</div>';
-      html += renderOutboundDiffTable(log.diff);
+      html += (window.CKOutboundChanges?CKOutboundChanges.summary(log):'')+renderOutboundDiffTable(log.diff);
       html += '</div>';
     });
     html += '</details>';
@@ -605,6 +616,7 @@ async function ackOutboundChangeProxy(btnEl) {
       action: 'v2_outbound_order_ack_change',
       id: _currentOutboundId,
       worker_name: getUser() + '（办公室代确认）',
+      revision_no: Number(window._currentOutboundOrderCache?.revision_no||0),
       source: '002_office_proxy'
     });
     if (res && res.ok) {
@@ -1106,9 +1118,11 @@ function openIssueDetail(id) {
 async function loadIssueDetail() {
   var body = document.getElementById("issueDetailBody");
   if (!body || !_currentIssueId) return;
+  var issueId=_currentIssueId,loadToken=body._legacyIssueLoad=(body._legacyIssueLoad||0)+1;
   body.innerHTML = '<div class="card muted">' + L("loading") + '</div>';
 
-  var res = await api({ action: "v2_issue_detail", id: _currentIssueId });
+  var res = await api({ action: "v2_issue_detail", id: issueId });
+  if(_currentIssueId!==issueId||body._legacyIssueLoad!==loadToken)return;
   if (!res || !res.ok || !res.issue) {
     body.innerHTML = '<div class="card muted">加载失败</div>';
     return;
@@ -1186,13 +1200,13 @@ async function loadIssueDetail() {
   if (it.status !== "completed" && it.status !== "closed" && it.status !== "cancelled") {
     html += '<div class="card">';
     if (it.status === "responded" || it.status === "rework_required") {
-      html += '<button class="btn btn-success" onclick="completeIssue(this)">' + L("complete_issue") + '</button> ';
-      html += '<button class="btn btn-warning" onclick="reworkIssue(this)">' + L("rework_issue") + '</button> ';
+    if (!window.CK_SOP_ROLLOUT?.enabled) html += '<button class="btn btn-success" onclick="completeIssue(this)">' + L("complete_issue") + '</button> ';
+    if (!window.CK_SOP_ROLLOUT?.enabled) html += '<button class="btn btn-warning" onclick="reworkIssue(this)">' + L("rework_issue") + '</button> ';
     }
     if (it.status === "pending" || it.status === "processing") {
-      html += '<button class="btn btn-success" onclick="completeIssue(this)">' + L("complete_issue") + '</button> ';
+    if (!window.CK_SOP_ROLLOUT?.enabled) html += '<button class="btn btn-success" onclick="completeIssue(this)">' + L("complete_issue") + '</button> ';
     }
-    html += '<button class="btn btn-danger" onclick="cancelIssue(this)">' + L("cancel_issue") + '</button>';
+    if (!window.CK_SOP_ROLLOUT?.enabled) html += '<button class="btn btn-danger" onclick="cancelIssue(this)">' + L("cancel_issue") + '</button>';
     html += '<div style="margin-top:10px;"><label>' + L("attachments") + '</label>';
     html += '<div class="att-grid" id="issueDetailAtts">';
     html += renderPhotoSourceBar(
@@ -1206,7 +1220,7 @@ async function loadIssueDetail() {
   // P1-6：记帐操作（已完成/已关闭后可标记需记帐）
   var canMarkAcct = (it.status === 'completed' || it.status === 'closed');
   var hasAcctData = Number(it.accounting_required) === 1 || Number(it.accounted) === 1;
-  if (canMarkAcct || hasAcctData) {
+  if (!window.CK_SOP_ROLLOUT?.enabled && (canMarkAcct || hasAcctData)) {
     html += '<div class="card"><div class="card-title">记帐 / 기장</div>';
     if (Number(it.accounting_required) === 1) {
       html += '<div class="detail-field"><b>提示记帐:</b> ' + esc(it.accounting_required_by || '') + ' · ' + esc(fmtTime(it.accounting_required_at)) + '</div>';
@@ -1264,6 +1278,7 @@ async function markIssueAccounted(btnEl) {
 }
 
 async function completeIssue(btnEl) {
+  if (window.CK_SOP_ROLLOUT?.enabled) { await loadIssueDetail(); return; }
   if (!confirm(L("confirm_complete_issue") + "?")) return;
   withActionLock('completeIssue', btnEl || null, '提交中.../저장중...', async function() {
     var res = await api({ action: "v2_issue_close", id: _currentIssueId });
@@ -1277,6 +1292,7 @@ async function completeIssue(btnEl) {
 }
 
 async function reworkIssue(btnEl) {
+  if (window.CK_SOP_ROLLOUT?.enabled) { await loadIssueDetail(); return; }
   var note = prompt(L("rework_prompt"));
   if (!note || !note.trim()) return;
   withActionLock('reworkIssue', btnEl || null, '提交中.../저장중...', async function() {
@@ -1291,6 +1307,7 @@ async function reworkIssue(btnEl) {
 }
 
 async function cancelIssue(btnEl) {
+  if (window.CK_SOP_ROLLOUT?.enabled) { await loadIssueDetail(); return; }
   if (!confirm(L("confirm") + "?")) return;
   withActionLock('cancelIssue', btnEl || null, '提交中.../저장중...', async function() {
     var res = await api({ action: "v2_issue_cancel", id: _currentIssueId });
@@ -1534,11 +1551,14 @@ function removeOcMaterial(idx) {
 }
 
 function clearOcMaterials() {
+  delete _createSubmissionIntents.v2_outbound_order_create;
   _obCreateMaterials = [];
   _renderOcMaterialsList();
 }
 
 async function submitOutbound(btnEl) {
+  if(window.CKWorkChain?.multiBookingReady?.())return CKWorkChain.submitOutbounds(btnEl);
+  if(window.CKWorkChain?.enabled()){try{CKWorkChain.prepareOutbound({expected_ship_at:document.getElementById('oc-expected-ship-at').value});}catch(e){alert(e.message);return;}}
   var customer = document.getElementById("oc-customer").value.trim();
   if (!customer) { alert(L("customer") + "!"); return; }
   var bizSel = document.getElementById("oc-biz-class");
@@ -1738,6 +1758,7 @@ function removeIbcMaterial(idx) {
   _renderIbcMaterialsList();
 }
 function clearIbcMaterials() {
+  delete _createSubmissionIntents.v2_inbound_plan_create;
   _ibCreateMaterials = [];
   _renderIbcMaterialsList();
 }
@@ -1754,7 +1775,9 @@ async function loadOutboundDetail() {
   if (!body || !_currentOutboundId) return;
   body.innerHTML = '<div class="card muted">' + L("loading") + '</div>';
 
-  var res = await api({ action: "v2_outbound_order_detail", id: _currentOutboundId });
+  var requestedId=_currentOutboundId,loadToken=window._OutboundDetailLoad=(window._OutboundDetailLoad||0)+1;
+  var res = await api({ action: "v2_outbound_order_detail", id: requestedId });
+  if(requestedId!==_currentOutboundId||loadToken!==window._OutboundDetailLoad)return;
   if (!res || !res.ok || !res.order) {
     body.innerHTML = '<div class="card muted">加载失败</div>';
     return;
@@ -1802,9 +1825,18 @@ async function loadOutboundDetail() {
   html += '<div class="detail-section"><b>' + L("outbound_requirement") + ':</b>'
        + (o.outbound_requirement ? '<div class="remark-block">' + esc(o.outbound_requirement) + '</div>' : ' --')
        + '</div>';
+  if (res.sop_needs && res.sop_needs.length) {
+    html += '<div class="detail-section"><b>关联作业 / 연결 작업:</b>';
+    res.sop_needs.forEach(function(n) {
+      html += '<div class="remark-block"><b>' + esc(n.title) + '</b><br>' + esc(n.instructions) + '<br>' + esc(n.status) +
+        ' <a href="../002/?need=' + encodeURIComponent(n.id) + '&individual=1">查看关联作业 / 작업 보기</a></div>';
+    });
+    html += '</div>';
+  } else {
   html += '<div class="detail-section"><b>' + L("instruction") + ':</b>'
        + (o.instruction ? '<div class="remark-block">' + esc(o.instruction) + '</div>' : ' --')
        + '</div>';
+  }
   html += '<div class="detail-section"><b>' + L("remark") + ':</b>'
        + (o.remark ? '<div class="remark-block">' + esc(o.remark) + '</div>' : ' --')
        + '</div>';
@@ -1901,11 +1933,13 @@ async function loadOutboundDetail() {
     html += '</div>';
   }
 
-  // 出库资料（attachment_category = 'outbound_material'）
+  // The same work-plan files are read here; no second upload area.
+  var chainMaterials=!!window.CKWorkChain?.enabled();
+  // 出库资料（attachment_category = 'outbound_material')
   var outboundMaterials = atts.filter(function(a) { return a.attachment_category === 'outbound_material'; });
-  html += '<div class="card"><div class="card-title">' + esc(L("outbound_materials")) + ' (' + outboundMaterials.length + ')</div>';
+  html += '<div class="card"><div class="card-title">' + esc(chainMaterials?(getLang()==='ko'?'연결 작업 자료':'关联作业资料'):L("outbound_materials")) + ' (' + outboundMaterials.length + ')</div>';
   if (outboundMaterials.length === 0) {
-    html += '<div class="muted">' + esc(L("outbound_materials_empty")) + '</div>';
+    html += '<div class="muted">' + esc(chainMaterials?(getLang()==='ko'?'연결 작업계획에서 자료를 업로드하세요.':'暂无关联作业资料，请到上方关联作业计划统一上传。'):L("outbound_materials_empty")) + '</div>';
   } else {
     html += '<table class="line-table"><thead><tr><th>文件名</th><th>上传人</th><th>时间</th><th>操作</th></tr></thead><tbody>';
     outboundMaterials.forEach(function(att) {
@@ -1928,10 +1962,12 @@ async function loadOutboundDetail() {
     html += '</tbody></table>';
   }
   // 客服在详情页补传按钮
+  if(!chainMaterials){
   html += '<div style="margin-top:8px;">';
   html += '<input id="ob-detail-upload-input" type="file" multiple accept=".xlsx,.xls,.csv,.pdf,.jpg,.jpeg,.png" style="display:none;" onchange="uploadOutboundMaterialsFromDetail(this)">';
   html += '<button class="btn btn-outline btn-sm" onclick="document.getElementById(\'ob-detail-upload-input\').click()">+ ' + esc(L("outbound_materials")) + '</button>';
   html += '</div>';
+  }
   html += '</div>';
 
   // Attachments — grouped by category（车辆照片 / 其它非出库资料）
@@ -2362,15 +2398,17 @@ async function loadInboundList() {
       html += '<span class="st" style="background:#f3e5f5;color:#6a1b9a;border:1px solid #ce93d8;">手动完成 / 수동 완료</span> ';
     }
     html += accountTag(p);
+    if(window.CKInboundIssueTag)html+=CKInboundIssueTag(p);
     html += dynTag;
     // 多业务类型 tag（兼容老数据：列表后端注入 biz_classes，缺则回退 biz_class 单值）
     var bizArr = (p.biz_classes && p.biz_classes.length) ? p.biz_classes : (p.biz_class ? [p.biz_class] : []);
     for (var bi = 0; bi < bizArr.length; bi++) {
-      html += '<span class="biz-tag biz-' + esc(bizArr[bi]) + '" style="margin-right:4px;">' + esc(bizLabel(bizArr[bi])) + '</span>';
+      html += '<span class="biz-tag biz-' + esc(bizArr[bi]) + '" style="margin-right:4px;">' + esc((window.CKInboundLabel ? CKInboundLabel(bizArr[bi]) : bizLabel(bizArr[bi]))) + '</span>';
     }
     html += ' ' + esc(p.display_no || p.id) + ' · ' + esc(p.customer || "--") + ' · ' + esc(p.cargo_summary || "");
+    if(window.CKInboundReferenceNotice)html+=CKInboundReferenceNotice(p);
     html += '</div>';
-    var ibMeta = esc(p.plan_date || "") + ' · ' + esc(dateOnly(p.expected_arrival) || "") + ' · ' + esc(fmtTime(p.created_at));
+    var ibMeta = (window.CK_SOP_ROLLOUT?.staging ? '预计到达 ' + esc(dateOnly(p.expected_arrival) || '待定') : esc(p.plan_date || '') + ' · ' + esc(dateOnly(p.expected_arrival) || '')) + ' · ' + esc(fmtTime(p.created_at));
     // line summary：箱/托/件 — 仅显示有数量的项
     var lineSum = p.line_summary || {};
     var lineParts = [];
@@ -2594,15 +2632,22 @@ async function submitInbound(btnEl) {
   if (!customer) { alert("请填写客户 / 고객을 입력하세요"); return; }
   // 业务类型至少选一个
   var bizArr = getIbcBizClasses();
-  if (bizArr.length === 0) { alert("请至少选择一个业务类型（代发/大货/退件）/ 업무 유형을 1개 이상 선택하세요"); return; }
+  if (bizArr.length === 0) { alert("请至少选择一个入库业务分类 / 입고 유형을 1개 이상 선택하세요"); return; }
   // 严格校验：必须至少有一行 planned_qty>0 的明细
   var linesPre = getIbcLines();
   if (linesPre.length === 0) { alert("请至少填写一行货物明细 / 화물 명세를 1건 이상 입력하세요"); return; }
 
+  var workRequests=[];try{workRequests=window.CKInboundWorks?CKInboundWorks.read():[];}catch(e){alert(e.message);return;}
   // P1-4 关联出库计划行 — 校验
   var linkOb = document.getElementById("ibc-link-ob");
   var linkObOn = !!(linkOb && linkOb.checked);
   var linkObRows = linkObOn ? getIbcLinkObRows() : [];
+  // Optional outbound rows left at their defaults do not constitute a shipping plan.
+  if(window.CKHasStandaloneOutbound){
+    linkObRows=linkObRows.filter(CKHasStandaloneOutbound);
+    linkObOn=linkObOn&&linkObRows.length>0;
+  }
+  if(workRequests.length&&linkObOn){alert('下方另填的出库资料尚未归属作业计划。请将其填到对应需求下，或取消下方“另建出库计划”的勾选。没有出库预约可以直接保存入库和作业计划。 / 출고 예약 없이 작업 계획만 저장할 수 있습니다.');return;}
   if (linkObOn) {
     if (linkObRows.length === 0) { alert("已勾选'关联出库计划'但未添加任何行 / 출고 계획이 없습니다"); return; }
     for (var li = 0; li < linkObRows.length; li++) {
@@ -2626,10 +2671,12 @@ async function submitInbound(btnEl) {
       cargo = lines.map(function(ln) { return unitTypeLabel(ln.unit_type) + ' ' + ln.planned_qty; }).join(' / ');
     }
 
+    try{if(window.CKInboundWorks?.prepare)workRequests=await CKInboundWorks.prepare(workRequests);}catch(error){alert(error.message||'资料上传失败，请重试');return;}
     // 第一步：创建入库计划（不再用 auto_create_outbound 单条）
     var ibRes = await api({
       action: "v2_inbound_plan_create",
       plan_date: date,
+      work_requests: workRequests,
       customer: customer,
       biz_class: biz,
       biz_classes: biz_classes,
@@ -2665,7 +2712,7 @@ async function submitInbound(btnEl) {
     }
 
     // 第二步：循环创建关联出库单
-    var createdObs = [];
+    var createdObs = (ibRes.outbounds||[]).map(function(x){return x.display_no||x.id;});
     var failedObs = [];
     for (var i = 0; i < linkObRows.length; i++) {
       var row = linkObRows[i];
@@ -2696,6 +2743,8 @@ async function submitInbound(btnEl) {
     }
 
     var msg = "已创建入库计划 / 입고 계획 생성: " + planDispNo;
+    if(ibRes.needs&&ibRes.needs.length)msg+="\n同步作业计划："+ibRes.needs.length+"条";
+    if(window.CKInboundWorks)CKInboundWorks.clear();
     if (matFiles.length > 0) {
       msg += "\n入库明细 / 입고 명세: 上传 " + (matFiles.length - matFailed.length) + "/" + matFiles.length;
     }
@@ -2758,7 +2807,9 @@ async function loadInboundDetail() {
   if (!body || !_currentInboundId) return;
   body.innerHTML = '<div class="card muted">' + L("loading") + '</div>';
 
-  var res = await api({ action: "v2_inbound_plan_detail", id: _currentInboundId });
+  var requestedId=_currentInboundId,loadToken=window._InboundDetailLoad=(window._InboundDetailLoad||0)+1;
+  var res = await api({ action: "v2_inbound_plan_detail", id: requestedId });
+  if(requestedId!==_currentInboundId||loadToken!==window._InboundDetailLoad)return;
   if (!res || !res.ok || !res.plan) {
     body.innerHTML = '<div class="card muted">' + L("error") + '</div>';
     return;
@@ -2800,10 +2851,10 @@ async function loadInboundDetail() {
                      ((p.biz_classes && p.biz_classes.length) ? p.biz_classes : (p.biz_class ? [p.biz_class] : []));
   var bizTagsHtml = '';
   for (var dbi = 0; dbi < detailBizArr.length; dbi++) {
-    bizTagsHtml += '<span class="biz-tag biz-' + esc(detailBizArr[dbi]) + '" style="margin-right:4px;">' + esc(bizLabel(detailBizArr[dbi])) + '</span>';
+    bizTagsHtml += '<span class="biz-tag biz-' + esc(detailBizArr[dbi]) + '" style="margin-right:4px;">' + esc((window.CKInboundLabel ? CKInboundLabel(detailBizArr[dbi]) : bizLabel(detailBizArr[dbi]))) + '</span>';
   }
   html += '<div><b>' + L("biz_class") + ':</b> ' + (bizTagsHtml || '--') + '</div>';
-  html += '<div><b>' + L("plan_date") + ':</b> ' + esc(p.plan_date) + '</div>';
+  if (!window.CK_SOP_ROLLOUT?.staging) html += '<div><b>' + L("plan_date") + ':</b> ' + esc(p.plan_date) + '</div>';
   html += '<div><b>' + L("customer") + ':</b> ' + esc(p.customer) + '</div>';
   html += '<div><b>' + L("cargo_summary") + ':</b> ' + esc(p.cargo_summary) + '</div>';
   html += '<div><b>' + L("expected_arrival") + ':</b> ' + esc(dateOnly(p.expected_arrival) || '--') + '</div>';
@@ -2849,8 +2900,10 @@ async function loadInboundDetail() {
     html += '</div>';
   }
 
+  // Pure courier plans use the scanned arrival progress instead of a truck-unloading card.
+  var courierOnly = p.courier_progress && !lines.some(function(x){return x.unit_type !== 'courier' && Number(x.planned_qty)>0;});
   // --- 到仓卸货状态卡片（plan 级别，仅一次卸货） ---
-  if (!isReturnSession) {
+  if (!isReturnSession && !courierOnly) {
     var us = res.unload_summary || null;
     var unloadDone = us && us.completed;
     var unloadingNow = us && us.status === 'unloading';
@@ -2906,8 +2959,8 @@ async function loadInboundDetail() {
       var stClass = (t.status === 'completed') ? 'st-completed' : 'st-pending';
       var stText = (t.status === 'completed') ? (getLang() === 'ko' ? '완료' : '已完成') : (getLang() === 'ko' ? '미완료' : '未完成');
       html += '<tr>';
-      html += '<td><span class="biz-tag biz-' + esc(t.biz_class) + '">' + esc(bizLabel(t.biz_class)) + '</span></td>';
-      html += '<td>' + esc(inboundBizTaskLabel(t.biz_class)) + '</td>';
+      html += '<td><span class="biz-tag biz-' + esc(t.biz_class) + '">' + esc(window.CKInboundLabel ? CKInboundLabel(t.biz_class) : bizLabel(t.biz_class)) + '</span></td>';
+      html += '<td>' + esc(window.CKInboundLabel && p.source_type !== 'return_session' && p.source_type !== 'external_inbound' ? (['direct_ship','bulk_putaway'].includes(t.biz_class) ? '现场理货入库 / 현장 검수·입고' : (courierOnly ? '快递收齐后入库 / 택배 수령 완료 후 입고' : '卸货后自动入库 / 하차 후 자동 입고')) : inboundBizTaskLabel(t.biz_class)) + '</td>';
       html += '<td><span class="st ' + stClass + '">' + esc(stText) + '</span></td>';
       // 完成人优先显示 worker_names（姓名串），fallback 到 completed_by（worker_id）
       var doneBy = t.worker_names || t.completed_by || '';
@@ -3025,6 +3078,7 @@ async function loadInboundDetail() {
     html += '</div>';
   }
 
+  if(window.CKUnloadPhotos)html += CKUnloadPhotos.gallery(res.arrival_photos || []);
   // --- 入库明细资料（attachment_category = 'inbound_material'） ---
   var inboundMaterials = (res.inbound_materials && res.inbound_materials.length)
     ? res.inbound_materials
@@ -3063,7 +3117,7 @@ async function loadInboundDetail() {
   html += '</div>';
 
   // --- 其它附件（车辆/卸货照片等非 inbound_material） ---
-  var otherAtts = atts.filter(function(a) { return a.attachment_category !== 'inbound_material'; });
+  var otherAtts = atts.filter(function(a) { return a.attachment_category !== 'inbound_material' && a.attachment_category !== 'unload_photo'; });
   if (otherAtts.length > 0) {
     html += '<div class="card"><div class="card-title">' + L("attachments") + ' (' + otherAtts.length + ')</div>';
     html += '<div class="att-grid">';
@@ -3113,7 +3167,7 @@ async function loadInboundDetail() {
   window._currentInboundLines = lines;
 
   html += '<div class="card">';
-  html += '<button class="btn btn-outline btn-sm" onclick="printIbQr()">' + L("print") + '</button> ';
+  html += '<button class="btn btn-outline btn-sm" onclick="printIbQr(this)">' + L("print") + '</button> ';
 
   if (isCompletable) {
     if (hasActiveJob) {
@@ -3901,23 +3955,49 @@ function buildInboundQrHtml(text, cellSize) {
 }
 
 // 入库计划单 A4 打印：左上抬头 + 右上小二维码 + 双列信息 + 明细表 + 签字行
-function printIbQr() {
-  var displayNo = window._currentInboundPretty || _currentInboundId || '';
+var _inboundPrintPending = false;
+async function printIbQr(btnEl) {
+  if(_inboundPrintPending)return;
   var planId = _currentInboundId || '';
-  var plan = window._currentInboundPlanCache || {};
+  var text=function(zh,ko){return getLang()==='ko'?ko:zh;};
+  if(!planId){alert(text('请先打开入库计划','입고계획을 먼저 여세요.'));return;}
+  _inboundPrintPending=true;
+  var button=btnEl||document.querySelector('#inboundDetailBody button[onclick^="printIbQr("]');
+  if(button)button.disabled=true;
+  var win,recorded=false;
+  try{
+  win = window.open('', '_blank');
+  if(!win){alert(text('请允许浏览器打开打印窗口，尚未记录下发。','팝업을 허용하세요. 배포는 아직 기록되지 않았습니다.'));return;}
+  win.document.write('<p>'+text('正在读取最新入库计划和作业要求…','최신 입고계획과 작업 지시를 불러오는 중…')+'</p>');
+  var latest;
+  try{latest=await api({action:'v2_inbound_plan_detail',id:planId});if(!latest||!latest.ok)throw Error(latest&&(latest.error||latest.message)||'读取失败');}
+  catch(e){win.close();alert(text('未能读取最新作业要求，未打印旧版。请重试：','최신 작업 지시를 읽지 못했습니다. 이전 버전은 인쇄하지 않았습니다. 다시 시도하세요: ')+e.message);return;}
+  var plan = latest.plan;
+  if(window.CK_SOP_ROLLOUT?.staging&&plan.status==='cancelled'){win.close();alert('已取消的入库计划不能打印下发 / 취소된 입고계획은 배포할 수 없습니다');return;}
+  var displayNo = plan.display_no || planId;
+  var printNeeds=latest.sop_needs||[];
+  var printStatus={pending:'待安排',assigned:'已分配',working:'作业中',paused:'已暂停',awaiting_review:'待审核',rework:'待整改',waiting_customer:'已审核·待客户安排',linked:'已关联出库',closed:'已关闭',cancelled:'已取消·不得执行'};
+  var workHtml='<h2>本批作业要求及卸货分货依据 / 작업·분류 지시</h2>';
+  if(printNeeds.length){
+   workHtml+='<table class="work-requirements"><thead><tr><th>序号</th><th>箱唛／货物范围</th><th>计划数量</th><th>作业要求</th><th>状态／版本</th></tr></thead><tbody>';
+   printNeeds.forEach(function(n,i){workHtml+='<tr><td>'+(i+1)+'</td><td>'+esc(n.scope_text||'见作业要求')+'</td><td>'+esc(n.planned_quantity?n.planned_quantity+' '+(n.planned_unit||''):'见要求')+'</td><td><b>'+esc(n.title)+'</b><div class="work-text">'+esc(n.instructions)+'</div>'+(n.location?'<div>位置：'+esc(n.location)+'</div>':'')+'</td><td>'+esc(printStatus[n.status]||n.status)+'<br>V'+esc(n.revision||1)+'</td></tr>';});
+   workHtml+='</tbody></table><p class="work-note">卸货前按本表确认货物范围及处理去向，再分别卸货、分货；要求不清或实物不符时，报告负责人确认。已取消要求不得执行。</p>';
+  }else workHtml+='<p class="work-note">当前未填写作业要求；按入库计划卸货。后续如新增要求，请重新打印最新版本。</p>';
 
   var qrHtml = '';
   try { qrHtml = buildInboundQrHtml(displayNo || planId, 3); }
   catch (e) { qrHtml = '<div style="color:red;font-size:10px;">QR error</div>'; }
 
-  var detailBody = document.getElementById('inboundDetailBody');
-  var tables = detailBody ? detailBody.querySelectorAll('table.line-table') : [];
-  var linesHtml = tables.length ? tables[0].outerHTML : '';
+  var linesHtml='<h2>入库货物明细 / 입고 화물 명세</h2><table class="inbound-cargo"><thead><tr><th>类型</th><th>计划数量</th><th>备注</th></tr></thead><tbody>';
+  (latest.lines||[]).forEach(function(ln){linesHtml+='<tr><td>'+esc(unitTypeLabel(ln.unit_type))+'</td><td>'+esc(ln.planned_qty)+'</td><td>'+esc(ln.remark||'—')+'</td></tr>';});
+  linesHtml+='</tbody></table>';
+  if(plan.courier_progress){
+    linesHtml+='<h2>快递单号 / 택배 송장번호</h2><p style="overflow-wrap:anywhere">'+plan.courier_progress.items.map(function(x){return esc(x.tracking_no);}).join(' · ')+'</p>';
+  }
 
   var bizMap = { direct_ship: '直发/직배송', bulk: '大货/대량', return_op: '退件/반품', inventory_op: '库内/창고' };
-  var bizText = bizMap[plan.biz_class] || plan.biz_class || '';
+  var bizText = (plan.biz_classes||[plan.biz_class]).map(function(b){return window.CKInboundLabel ? CKInboundLabel(b) : (bizMap[b]||b);}).join('、');
 
-  var win = window.open('', '_blank');
   var html = '<!doctype html><html><head><meta charset="utf-8"/><title>' + esc(displayNo) + '</title>' +
     '<style>' +
     'body{font-family:"Microsoft YaHei","Helvetica Neue",Arial,sans-serif;margin:20px 30px;color:#000;}' +
@@ -3932,6 +4012,7 @@ function printIbQr() {
     'table{width:100%;border-collapse:collapse;font-size:12px;margin-bottom:14px;}' +
     'th,td{border:1px solid #333;padding:5px 6px;text-align:left;}' +
     'th{background:#eee;font-weight:700;}' +
+    'h2{font-size:15px;margin:16px 0 8px}.work-text{white-space:pre-wrap;overflow-wrap:anywhere;margin-top:4px}.work-note{font-size:12px;line-height:1.6}thead{display:table-header-group}tr{break-inside:avoid}td{vertical-align:top;overflow-wrap:anywhere}.work-requirements th:nth-child(4){width:43%}' +
     '.sig-row{display:flex;gap:40px;margin-top:30px;font-size:13px;}' +
     '.sig-item{flex:1;}' +
     '.sig-line{border-bottom:1px solid #333;height:30px;margin-top:4px;}' +
@@ -3948,26 +4029,40 @@ function printIbQr() {
     '<div class="info-grid">' +
       '<div><span class="label">入库单号：</span>' + esc(displayNo) + '</div>' +
       '<div><span class="label">货物摘要：</span>' + esc(plan.cargo_summary || '') + '</div>' +
-      '<div><span class="label">计划日期：</span>' + esc(plan.plan_date || '') + '</div>' +
+      (window.CK_SOP_ROLLOUT?.staging ? '' : '<div><span class="label">计划日期：</span>' + esc(plan.plan_date || '') + '</div>') +
       '<div><span class="label">预计到达日期 / 입고 예정일：</span>' + esc(dateOnly(plan.expected_arrival) || '--') + '</div>' +
       '<div><span class="label">客户：</span>' + esc(plan.customer || '') + '</div>' +
       '<div><span class="label">提出人：</span>' + esc(plan.created_by || '') + '</div>' +
       '<div><span class="label">业务分类：</span>' + esc(bizText) + '</div>' +
+      (window.CKInboundLabel ? '<div><span class="label">外部系统入库单号：</span>' + esc(plan.external_inbound_no || '待补充 / 보완 대기') + '</div>' : '') +
+      (plan.issue_state?'<div><span class="label">计划版本：</span>V'+esc(plan.issue_state.revision)+'</div>':'')+
       (plan.remark ? '<div><span class="label">备注：</span>' + esc(plan.remark) + '</div>' : '') +
       (plan.purpose ? '<div style="grid-column:1/-1;"><span class="label">入库目的：</span>' + esc(plan.purpose) + '</div>' : '') +
     '</div>' +
-    linesHtml +
+    linesHtml + workHtml +
     '<div class="sig-row">' +
       '<div class="sig-item"><span class="label">制单人：</span>' + esc(plan.created_by || '') + '<div class="sig-line"></div></div>' +
       '<div class="sig-item"><span class="label">仓库确认：</span><div class="sig-line"></div></div>' +
       '<div class="sig-item"><span class="label">客户签收：</span><div class="sig-line"></div></div>' +
       '<div class="sig-item"><span class="label">日期：</span><div class="sig-line"></div></div>' +
     '</div>' +
-    '<div class="footer">Printed from CK Warehouse V2</div>' +
+    '<div class="footer">Printed from CK Warehouse V2 · ' + esc(new Date().toLocaleString('zh-CN',{timeZone:'Asia/Seoul'})) + ' KST</div>' +
     '<script>window.onload=function(){window.print();}<\/script>' +
     '</body></html>';
+  win.document.open();
   win.document.write(html);
-  win.document.close();
+  if(win.closed)return;
+  var issueResult;
+  if(window.CK_SOP_ROLLOUT?.staging){
+    if(!window.CKInboundRecordPrintIssue)throw Error(text('打印下发功能未就绪，请刷新后重试','인쇄·배포 기능이 준비되지 않았습니다. 새로고침 후 다시 시도하세요.'));
+    issueResult=await CKInboundRecordPrintIssue(plan);
+    if(!issueResult?.ok)throw Error(issueResult?.error||text('未能记录下发','배포를 기록하지 못했습니다.'));
+    recorded=true;
+  }
+  if(!win.closed)win.document.close();
+  if(recorded&&window.CKInboundPrintIssued){try{await CKInboundPrintIssued(plan,issueResult);}catch(e){alert(text('已记录下发，但页面刷新失败，请刷新查看：','배포는 기록되었으나 화면을 갱신하지 못했습니다. 새로고침하세요: ')+e.message);}}
+  }catch(e){if(win&&!win.closed)win.close();alert((recorded?text('已记录下发，但打印未完成，请重试打印：','배포는 기록되었으나 인쇄가 완료되지 않았습니다. 다시 인쇄하세요: '):text('未能确认下发结果，打印已停止。请重试打印：','배포 결과를 확인하지 못해 인쇄를 중단했습니다. 다시 인쇄하세요: '))+e.message);}
+  finally{_inboundPrintPending=false;if(button?.isConnected)button.disabled=false;}
 }
 
 async function cancelInboundPlan(btnEl) {
@@ -4225,6 +4320,7 @@ async function loadFeedbackDetail() {
   }
   html += '</div>';
 
+  if(window.CKUnloadPhotos && ['unplanned_unload','unload_no_doc'].includes(fb.feedback_type))html += CKUnloadPhotos.gallery(res.arrival_photos || []);
   // Unload result lines (from feedback itself — unplanned_unload flow)
   if (feedbackResultLines.length > 0) {
     html += '<div class="card"><div class="card-title">卸货结果明细</div>';
@@ -4509,12 +4605,8 @@ async function loadOrderOpsList() {
     var typeText = orderOpsJobTypeText(j.job_type);
 
     // Trip/work order column
-    var tripHtml = '--';
-    if (j.display_no) {
-      tripHtml = '<span class="trip-tag">' + esc(j.display_no) + '</span>';
-    } else if (j.related_doc_id) {
-      tripHtml = '<span class="doc-tag">' + esc(j.related_doc_id) + '</span>';
-    }
+    var tripHtml = '<span class="trip-tag">' + esc(window.CKDocumentLabels.jobLabel(j)) + '</span>'
+      + '<div class="muted">派审员 / 배정·검수 담당자: ' + esc(window.CKDocumentLabels.jobDispatcher(j)) + '</div>';
 
     // Doc nos column (pick docs or --)
     var docHtml = '<span class="muted">--</span>';
@@ -4523,7 +4615,7 @@ async function loadOrderOpsList() {
         return '<span class="doc-tag">' + esc(d) + '</span>';
       }).join('') + '</div>';
     } else if (j.related_doc_id && j.display_no) {
-      docHtml = '<span class="doc-tag">' + esc(j.related_doc_id) + '</span>';
+      docHtml = '<span class="doc-tag">' + esc(window.CKDocumentLabels.jobLabel(j)) + '</span>';
     }
 
     var stText = orderOpsStatusText(j.status);
@@ -4574,18 +4666,15 @@ async function loadOrderOpsDetail(id) {
   var flowLabel = orderOpsFlowText(j.flow_stage);
   var html = '<div class="card">';
   html += '<div class="card-title">' + esc(typeText);
-  if (j.display_no) html += ' · <span style="font-family:monospace;color:#2f54eb;">' + esc(j.display_no) + '</span>';
+  html += ' · <span style="color:#2f54eb;">' + esc(window.CKDocumentLabels.jobLabel(j)) + '</span>';
   html += '</div>';
   html += '<div class="detail-grid">';
   html += '<div class="detail-field"><b>' + L("order_ops_field_status") + ':</b> <span class="st st-' + esc(j.status) + '">' + esc(stText) + '</span></div>';
   html += '<div class="detail-field"><b>' + L("order_ops_field_biz_class") + ':</b> ' + esc(bizLabel(j.biz_class)) + '</div>';
-  if (j.display_no) {
-    var tripLabel = (j.job_type === 'bulk_op') ? L("order_ops_field_work_order") : L("order_ops_field_trip_no");
-    html += '<div class="detail-field"><b>' + tripLabel + ':</b> <span class="trip-tag">' + esc(j.display_no) + '</span></div>';
-  }
+  html += '<div class="detail-field"><b>派审员 / 배정·검수 담당자:</b> ' + esc(window.CKDocumentLabels.jobDispatcher(j)) + '</div>';
   html += '<div class="detail-field"><b>' + L("order_ops_field_job_type") + ':</b> ' + esc(flowLabel) + '</div>';
   if (j.related_doc_id) {
-    html += '<div class="detail-field"><b>' + L("related_doc_no") + ':</b> <span class="doc-tag">' + esc(j.related_doc_id) + '</span></div>';
+    html += '<div class="detail-field"><b>' + L("related_doc_no") + ':</b> <span class="doc-tag">' + esc(window.CKDocumentLabels.jobLabel(j)) + '</span></div>';
   }
   html += '<div class="detail-field"><b>' + L("order_ops_field_creator") + ':</b> ' + esc(j.created_by || "--") + '</div>';
   html += '<div class="detail-field"><b>' + L("order_ops_field_started_at") + ':</b> ' + esc(fmtTime(j.created_at)) + '</div>';
@@ -4810,6 +4899,7 @@ var _currentVerifyBatchId = null;
 async function loadVerifyList() {
   var body = document.getElementById("checkListBody");
   if (!body) return;
+  var owner=body._ckWorkflowOwner,request=body._ckVerifyListRequest=(body._ckVerifyListRequest||0)+1;
   body.innerHTML = '<span class="muted">加载中...</span>';
   var status = (document.getElementById("checkFilterStatus") || {}).value || "";
   var customer = (document.getElementById("checkFilterCustomer") || {}).value || "";
@@ -4819,6 +4909,7 @@ async function loadVerifyList() {
     status: status, customer_name: customer,
     limit: _chPager.limit, offset: getOffset('check')
   });
+  if(body._ckWorkflowOwner!==owner||body._ckVerifyListRequest!==request)return;
   if (!res || !res.ok) { body.innerHTML = '<span class="muted">加载失败</span>'; return; }
   var items = res.items || [];
   var pagerHtml = renderPager('check', res, 'loadVerifyList');
@@ -4904,8 +4995,11 @@ function toggleVerifyPallet(pno) {
 async function loadVerifyDetail() {
   var body = document.getElementById("checkDetailBody");
   if (!body || !_currentVerifyBatchId) return;
+  var batchId=_currentVerifyBatchId,token=body._legacyCheckLoad=(body._legacyCheckLoad||0)+1;
+  delete body.dataset.ckLegacyCheck;body.dataset.ckCheckMode='loading';
   body.innerHTML = '<span class="muted">加载中...</span>';
-  var res = await api({ action: "v2_verify_batch_detail", id: _currentVerifyBatchId });
+  var res = await api({ action: "v2_verify_batch_detail", id: batchId });
+  if(_currentVerifyBatchId!==batchId||body._legacyCheckLoad!==token)return;
   if (!res || !res.ok) { body.innerHTML = '<span class="muted">加载失败</span>'; return; }
   _verifyDetailCache = res;
   // 进入详情默认 "只看异常"
@@ -4917,6 +5011,7 @@ async function loadVerifyDetail() {
 function renderVerifyDetail() {
   var body = document.getElementById("checkDetailBody");
   if (!body || !_verifyDetailCache) return;
+  if(_verifyDetailCache.batch?.id!==_currentVerifyBatchId||window.CK_SOP_ROLLOUT?.enabled&&body.dataset.ckCheckMode==='native')return;
   var res = _verifyDetailCache;
   var b = res.batch;
   var s = res.summary || {};
@@ -4937,7 +5032,8 @@ function renderVerifyDetail() {
     return String(a.barcode || '').localeCompare(String(b2.barcode || ''));
   });
 
-  var canClose = (b.status === 'pending' || b.status === 'verifying');
+  var entryReady=!window.CK_SOP_ROLLOUT?.enabled||body.dataset.ckLegacyCheck===b.id;
+  var canClose = entryReady && (b.status === 'pending' || b.status === 'verifying');
   var html = '';
 
   // 批次头
@@ -4960,7 +5056,7 @@ function renderVerifyDetail() {
     html += '<button class="btn btn-primary btn-sm" onclick="updateVerifyBatch(\'' + esc(b.id) + '\',\'completed\',this)">标记已完成</button> ';
     html += '<button class="btn btn-outline btn-sm" onclick="updateVerifyBatch(\'' + esc(b.id) + '\',\'cancelled\',this)">作废批次</button>';
   } else {
-    html += '<span class="muted">批次已关闭，不可变更</span>';
+    html += '<span class="muted">'+(entryReady?'批次已关闭，不可变更':'正在确认核对入口 / 검수 화면 확인 중')+'</span>';
   }
   html += '</div></div>';
 
