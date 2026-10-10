@@ -18,12 +18,16 @@
  function button(label,fn){const b=document.createElement('button');b.type='button';b.className='btn btn-outline';b.textContent=label;b.onclick=async()=>{if(b.disabled)return;b.disabled=true;try{await fn();}catch(e){alert(e.message);}finally{b.disabled=false;}};return b;}
  function panel(parent){let el=parent.querySelector('[data-ck-workflow]');if(!el){el=document.createElement('div');el.dataset.ckWorkflow='true';parent.prepend(el);}return el;}
  function block(parent,text){let el=parent.querySelector('.ck-inline-heading');if(el)return el;el=document.createElement('div');el.className='ck-inline-heading';el.innerHTML='<b>'+esc(text)+'</b><div class="ck-buttons"></div>';parent.prepend(el);return el;}
- function wrap(name,after){const original=window[name];if(typeof original!=='function')return;window[name]=async function(...args){const out=await original.apply(this,args);await after(...args);return out;};}
+ function wrap(name,after){const original=window[name];if(typeof original!=='function')return;window[name]=async function(...args){const key={loadIssueDetail:'_currentIssueId',loadVerifyDetail:'_currentVerifyBatchId',loadInboundDetail:'_currentInboundId',loadOutboundDetail:'_currentOutboundId'}[name],id=window[key];const out=await original.apply(this,args);if(key&&window[key]!==id)return out;await after(...args);return out;};}
  async function sourcePanel(type,id,target){
   const body=document.getElementById(target);if(!body||!id)return;
+  window.CKWorkChain?.hideFileControls(body,type);
+  const token=body._ckSourceLoad=(body._ckSourceLoad||0)+1;
+  try{
   const fresh=detailNeeds[type];
   const r=fresh?.id===id?{items:fresh.items}:await request('sop_linked',{source_id:id});
-  if((type==='inbound'?window._currentInboundId:window._currentOutboundId)!==id)return;
+  if((type==='inbound'?window._currentInboundId:window._currentOutboundId)!==id||body._ckSourceLoad!==token)return;
+  body.querySelector('[data-ck-source-error]')?.remove();
   if(fresh?.id===id){
    body.querySelector('[data-operation-audit]')?.remove();const card=document.createElement('section');card.className='card ck-operation-audit';card.dataset.operationAudit='true';
    card.innerHTML='<div class="card-title">计划操作记录 / 계획 작업 기록</div><p>创建人 / 생성자: '+esc(fresh.creator||'历史记录未填写 / 기존 기록 없음')+'</p><p class="muted">姓名为操作人自行填写的标签 / 작업자가 직접 입력한 이름</p>'+(fresh.audit.length?'<ol>'+fresh.audit.map(a=>'<li><b>'+esc(a.actor_name)+'</b> · '+(a.kind==='create'?'创建 / 생성':'修改 / 수정')+' · '+esc(new Date(a.created_at).toLocaleString('sv-SE',{timeZone:'Asia/Seoul',hour12:false}))+' KST</li>').join('')+'</ol>':'<p>此功能启用前的记录不补填操作姓名 / 기능 도입 전 기록은 소급 작성하지 않습니다.</p>');body.prepend(card);
@@ -38,6 +42,10 @@
   for(const n of r.items){const b=button(n.title+' · '+n.status,()=>{goView('need');mount(document.getElementById('view-need'),{tab:'need',id:n.id,context:'collab'});});buttons.append(b);}
   if(type==='outbound'&&window.CKWorkChain?.enabled()){if(!r.items.length)buttons.append('历史出库计划暂无作业计划，请在作业计划中关联这张历史单据。');return;}
   buttons.append(button(r.items.length?'新增补充作业（需说明原因）':'建立到货后作业计划',()=>{goView('need');mount(document.getElementById('view-need'),{tab:'need',source:type,source_id:id,supplement:r.items.length>0,context:'collab'});}));
+  }catch(error){
+   if((type==='inbound'?window._currentInboundId:window._currentOutboundId)!==id||body._ckSourceLoad!==token)return;
+   const head=block(body,'关联作业加载失败 / 연결 작업 로딩 실패');head.dataset.ckSourceError='';head.querySelector('b').textContent='关联作业加载失败 / 연결 작업 로딩 실패：'+error.message;head.querySelector('.ck-buttons').replaceChildren(button('重试加载 / 다시 시도',()=>sourcePanel(type,id,target)));
+  }
  }
  async function issuePanel(){
   const id=window._currentIssueId,body=document.getElementById('issueDetailBody');if(!id||!body)return;
@@ -56,9 +64,16 @@
  }
  async function checkPanel(){
   const body=document.getElementById('checkDetailBody'),id=window._currentVerifyBatchId;if(!body||!id)return;
-  const r=await request('sop_check_for_batch',{legacy_id:id});
-  if(r.record){body.replaceChildren();mount(panel(body),{tab:'check',id:r.record.id,back:()=>goTab('check')});}
-  else {const head=block(body,'按出库日期追加、撤销和分轮核对');head.querySelector('.ck-buttons').append(button('设置出库日期并继续此批次',()=>mount(panel(body),{tab:'check',source:'check',source_id:id})));}
+  const token=body._ckCheckLoad=(body._ckCheckLoad||0)+1,host=panel(body);host.textContent='正在加载核对入口 / 검수 화면 로딩 중';
+  try{
+   const r=await request('sop_check_for_batch',{legacy_id:id});
+   if(window._currentVerifyBatchId!==id||body._ckCheckLoad!==token||!host.isConnected)return;
+   if(r.record){body.dataset.ckCheckMode='native';body.replaceChildren();mount(panel(body),{tab:'check',id:r.record.id,back:()=>goTab('check')});}
+   else {body.dataset.ckLegacyCheck=id;body.dataset.ckCheckMode='legacy';renderVerifyDetail();const head=block(body,'按出库日期追加、撤销和分轮核对');head.querySelector('.ck-buttons').replaceChildren(button('设置出库日期并继续此批次',()=>{body.dataset.ckCheckMode='native';body.replaceChildren();mount(panel(body),{tab:'check',source:'check',source_id:id});}));}
+  }catch(error){
+   if(window._currentVerifyBatchId!==id||body._ckCheckLoad!==token||!host.isConnected)return;
+   host.textContent='核对入口加载失败 / 검수 화면 로딩 실패：'+error.message;host.append(button('重试加载 / 다시 시도',()=>window.loadVerifyDetail()));
+  }
  }
  async function outboundPicker(){
   if(window.CKWorkChain?.enabled())return CKWorkChain.outboundPicker(params.get('need')||'');

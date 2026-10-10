@@ -134,6 +134,12 @@ async function detail(id,individual=!!window.CK_SOP_ROLLOUT?.workChain){const r=
  } else if(x.kind==='issue'){
   const changes=(x.changes||[]).map(m=>`<p class="warn">第 ${m.version} 版 · ${esc(m.by)}：${esc(m.text)}</p>`).join('');
   $('detailBody').innerHTML=`<article><h3>要求版本 ${x.requirement_version} / 已确认 ${x.ack_version}</h3>${changes}<h3>沟通与反馈</h3>${(x.messages||[]).map(m=>`<p><b>${esc(m.by)}</b> · ${esc(m.at)}<br>${esc(m.text)}</p>`).join('')}</article>`;
+  const accounting=x.accounting||{},requested=Number(accounting.accounting_required)===1,accounted=Number(accounting.accounted)===1;
+  $('detailBody').insertAdjacentHTML('beforeend','<article data-issue-accounting><h3>'+mark('客服记账 / 고객지원 기장')+'</h3><p>'+mark(accounted?'已确认记账 / 기장 확인 완료':requested?'待客服记账 / 고객지원 기장 대기':'尚未提示记账 / 기장 요청 전')+'</p>'+(requested?'<p>'+mark('提示客服记账 / 고객지원 기장 요청')+' · '+esc(accounting.accounting_required_by)+' · '+esc(accounting.accounting_required_at)+'</p><p>'+esc(accounting.accounting_note||'')+'</p>':'')+(accounted?'<p>'+mark('确认已记账 / 기장 완료 확인')+' · '+esc(accounting.accounted_by)+' · '+esc(accounting.accounted_at)+'</p>':'')+'</article>');
+  if(x.status!=='cancelled'&&!accounted&&['manager','service','dispatcher','reviewer'].includes(user.role)){
+   action(requested?'修改记账备注 / 기장 메모 수정':'提示客服记账 / 고객지원 기장 요청','sop_issue_request_accounting',area('note','记账备注（选填） / 기장 메모 (선택)',accounting.accounting_note||'',false)+'<p>'+mark('仅发送待记账提示，不自动收费。 / 기장 요청만 등록하며 자동 청구하지 않습니다.')+'</p>');
+   if(requested&&['responded','closed'].includes(x.status)&&['manager','service'].includes(user.role)&&options.context!=='field'&&user.scope!=='field')action('确认已记账 / 기장 완료 확인','sop_issue_confirm_accounted','<p>'+mark('确认客服已完成记账；这里只登记确认人和时间。 / 기장 완료 여부와 확인자·시간만 기록합니다.')+'</p>');
+  }
   if(x.status==='cancelled')$('detailBody').insertAdjacentHTML('beforeend','<p>'+mark('作废原因')+'：'+esc(x.cancel_reason||'—')+'</p>');
    if(x.status==='closed'&&['manager','service'].includes(user.role))action('修改作业要求并重新开启','sop_issue_change',area('message','最新完整要求及重新开启原因',x.requirement_text||x.title));
    if(!['cancelled','closed'].includes(x.status)){
@@ -145,7 +151,11 @@ async function detail(id,individual=!!window.CK_SOP_ROLLOUT?.workChain){const r=
    }
    if(['manager','dispatcher','reviewer'].includes(user.role)){
     if(x.requirement_version>x.ack_version)action('确认已阅读最新要求','sop_issue_ack','<p>确认当前页面展示的最新要求；提交后如再次变更，仍需重新确认。</p>',()=>({requirement_version:x.requirement_version}));
-    action('仓库反馈','sop_issue_feedback',area('message','处理结果'));
+    a.append(btn('仓库反馈',()=>{
+     const draft=options.context==='field'?window.CKIssueFeedback?.(x.legacy_id):null;
+     form('仓库反馈',area('message','反馈结果 / 처리 결과',draft?.value()||''),'sop_issue_feedback',v=>{draft?.validate();return v;},async r=>{draft?.complete();await detail(r.id);});
+     draft?.mount($('editor'));
+    }));
    }
    }
  } else if(x.kind==='check')renderCheck(x,a,action);

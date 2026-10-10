@@ -3,6 +3,21 @@ import test from 'node:test';import assert from 'node:assert/strict';
 import worker from '../worker-v2/index.js';import entry from '../worker-v2/staging-entry.js';
 import {database} from './d1-adapter.mjs';import {digest} from '../worker-v2/access-control.js';
 const origin='https://fixture.local';
+test('field run photos retain the issue round with owner checks, authenticated attribution and historical read access',async()=>{
+ const {env,cookies,ok,employee,checkin,login}=await setup();const owner=await employee('PHOTO-OWNER'),other=await employee('PHOTO-OTHER');await checkin(owner);await checkin(other);
+ const issue=await ok('office','v2_issue_create',{biz_class:'bulk',customer:'Synthetic photo',issue_description:'Synthetic round'});await login(owner);
+ const job=await ok('field','sop_native_start',{payload:{action:'v2_issue_handle_start',issue_id:issue.id,client_req_id:crypto.randomUUID()},workers:[{id:owner.badgeId,name:owner.name}],lead_id:owner.badgeId,estimated_minutes:10,labor_department:'bulk'});
+ const run=env.DB.raw.prepare('SELECT id FROM v2_issue_handle_runs WHERE job_id=?').get(job.job_id);let puts=0;env.R2_BUCKET.put=async()=>{puts++;};
+ const upload=async(id=run.id,category='issue_handle_photo',type='image/png')=>{const form=new FormData();form.set('action','v2_attachment_upload');form.set('related_doc_type','issue_handle_run');form.set('related_doc_id',id);form.set('attachment_category',category);form.set('uploaded_by','Forged name');form.set('file',new Blob([new Uint8Array([137,80,78,71,13,10,26,10,0])],{type}),'synthetic.png');return worker.fetch(new Request(origin+'/001/api',{method:'POST',headers:{Cookie:cookies.field,Origin:origin},body:form}),env);};
+ let response=await upload();assert.equal(response.status,200);const saved=await response.json();assert.equal(saved.ok,true,saved.error);const att=env.DB.raw.prepare('SELECT * FROM v2_attachments WHERE id=?').get(saved.id);assert.equal(att.related_doc_id,run.id);assert.equal(att.uploaded_by,owner.name);
+ assert.equal((await upload('MISSING')).status,403);assert.equal((await upload(run.id,'pallet_label')).status,403);assert.equal((await upload(run.id,'issue_handle_photo','text/plain')).status,400);
+ const session=env.DB.raw.prepare("SELECT departments FROM ck_access_sessions WHERE user_id=? AND scope='field'").get(owner.id);
+ env.DB.raw.prepare("UPDATE ck_access_sessions SET departments=? WHERE user_id=? AND scope='field'").run(JSON.stringify(['import']),owner.id);assert.equal((await upload()).status,403,'same owner cannot upload outside the session departments');assert.equal((await worker.fetch(new Request(origin+'/001/api/file?key='+encodeURIComponent(att.file_key),{headers:{Cookie:cookies.field}}),env)).status,401);
+ env.DB.raw.prepare("UPDATE ck_access_sessions SET departments=? WHERE user_id=? AND scope='field'").run(session.departments,owner.id);
+ await login(other);assert.equal((await upload()).status,403);assert.equal(puts,1);
+ env.DB.raw.prepare("UPDATE v2_issue_handle_runs SET run_status='completed' WHERE id=?").run(run.id);await login(owner);assert.equal((await upload()).status,403);
+ response=await worker.fetch(new Request(origin+'/001/api/file?key='+encodeURIComponent(att.file_key),{headers:{Cookie:cookies.field}}),env);assert.equal(response.status,200);
+});
 async function setup(){
  const DB=database(),env={DB,SOP_ENVIRONMENT:'staging',SOP_UPGRADE_ENABLED:'true',SOP_ACCEPT_NEW:'true',SOP_ATTENDANCE_ENABLED:'true',SOP_ACCESS_CONTROL:'true',SOP_PUBLIC_TEST_ACCESS:'true',SOP_ADMIN_CODE_SHA256:await digest('fixture-only-code'),ADMINKEY:'legacy-secret',OPSKEY:'legacy-ops',R2_BUCKET:{async get(){return {body:'fixture',httpMetadata:{contentType:'image/png'}};}},ASSETS:{async fetch(){return new Response('fixture asset');}}};
  const cookies={office:'',field:'',kiosk:''},paths={office:'/api',field:'/001/api',kiosk:'/attendance/api'};

@@ -12797,8 +12797,14 @@ export default {
     env = { ...env, SOP_REQUEST_USER: await sessionUser(request, env) };
     if(accessEnabled(env)&&env.SOP_REQUEST_USER?.scope==='field'&&isMultipart){
       const doc=formData.get('related_doc_type'),id=formData.get('related_doc_id');
-      if(!['inbound_plan','outbound_order','field_feedback','ops_job','issue_ticket','sop_task'].includes(doc))return err('现场无此附件上传权限',403);
+      if(!['inbound_plan','outbound_order','field_feedback','ops_job','issue_ticket','issue_handle_run','sop_task'].includes(doc))return err('现场无此附件上传权限',403);
       if(doc==='ops_job'&&!await nativeOwner({job_id:id},env))return err('仅本任务派审员可上传附件',403);
+      if(doc==='issue_handle_run'){
+        const run=await env.DB.prepare("SELECT r.job_id,t.biz_class FROM v2_issue_handle_runs r JOIN v2_ops_jobs j ON j.id=r.job_id JOIN v2_issue_tickets t ON t.id=r.issue_id WHERE r.id=? AND r.run_status='working' AND j.status NOT IN ('completed','cancelled')").bind(id).first();
+        const file=formData.get('file');
+        if(!run||!(env.SOP_REQUEST_USER.departments||[]).includes(run.biz_class==='return'?'direct_ship':run.biz_class)||!await nativeOwner({job_id:run.job_id},env)||formData.get('attachment_category')!=='issue_handle_photo')return err('仅本任务派审员可上传当前处理轮次照片',403);
+        if(!file||!['image/jpeg','image/png','image/webp'].includes(file.type)||!file.size||file.size>10*1024*1024)return err('仅支持10MB以内的JPG、PNG、WebP照片');
+      }
     }
     const accessBlock=accessGuard(body,env,request);if(accessBlock)return accessBlock;
     await officeOperationContext(request,env);
@@ -12906,7 +12912,7 @@ async function handleMultipartUpload(formData, env) {
     const related_doc_type = v003Text(formData.get("related_doc_type"), 80);
     const related_doc_id = v003Text(formData.get("related_doc_id"), 120);
     const attachment_category = v003Text(formData.get("attachment_category"), 80);
-    const uploaded_by = env.SOP_OPERATION_CONTEXT?.operator_name || (related_doc_type==='sop_task'||attachment_category==='location_photo' ? env.SOP_REQUEST_USER?.name||'' : v003Text(formData.get("uploaded_by"), 120));
+    const uploaded_by = env.SOP_OPERATION_CONTEXT?.operator_name || (related_doc_type==='sop_task'||related_doc_type==='issue_handle_run'||attachment_category==='location_photo' ? env.SOP_REQUEST_USER?.name||'' : v003Text(formData.get("uploaded_by"), 120));
     const fieldBody = {
       k,
       operator_id: v003Text(formData.get("operator_id"), 80),

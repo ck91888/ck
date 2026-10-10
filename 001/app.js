@@ -20,13 +20,44 @@ var _photoUploadCtx = {};  // { related_doc_type, attachment_category, related_d
 // 问题点处理本轮草稿（防止上传照片后 textarea 被清空 + 缓存当前轮已上传缩略图）
 // session_photos 仅缓存"本轮上传成功"的附件 — loadIssueDetail 再渲染时与 atts 合并去重
 var _issueHandleDraft = { issue_id: '', run_id: '', feedback_note: '', session_photos: [] };
+var _issueDrafts = new Map();
+function _selectIssueDraft(id) {
+  _saveIssueFeedbackDraft();
+  if (_issueHandleDraft.issue_id) _issueDrafts.set(_issueHandleDraft.issue_id, _issueHandleDraft);
+  _issueHandleDraft = _issueDrafts.get(id) || { issue_id:id, run_id:'', feedback_note:'', session_photos:[] };
+  _issueDrafts.set(id, _issueHandleDraft);
+}
 function _resetIssueHandleDraft() {
+  _issueDrafts.delete(_issueHandleDraft.issue_id);
   _issueHandleDraft = { issue_id: '', run_id: '', feedback_note: '', session_photos: [] };
 }
 function _saveIssueFeedbackDraft() {
   var ta = document.getElementById('issueFeedback');
-  if (ta) _issueHandleDraft.feedback_note = ta.value || '';
+  if (ta && (!ta.dataset.issueId || ta.dataset.issueId===_issueHandleDraft.issue_id)) _issueHandleDraft.feedback_note = ta.value || '';
 }
+// The upgraded feedback dialog owns the only editor; uploads keep their original run association.
+window.CKIssueFeedback = function(id) {
+  if (_issueHandleDraft.issue_id !== id) _selectIssueDraft(id);
+  var draft = _issueHandleDraft;
+  return {
+    value:function(){return draft.feedback_note;},
+    mount:function(editor){
+      var ta=editor.elements.message;ta.id='issueFeedback';ta.dataset.issueId=id;ta.oninput=function(){draft.feedback_note=ta.value;};
+      var photos=document.createElement('section');
+      photos.innerHTML='<p>照片上传成功即保留在本问题；关闭窗口会保留草稿。 / 업로드한 사진과 작성 내용은 창을 닫아도 유지됩니다.</p><div class="photo-upload" id="issuePhotos"></div>'+renderPhotoSourceBar("uploadIssueHandlePhoto('camera')","uploadIssueHandlePhoto('album')");
+      ta.parentElement.after(photos);renderIssueSessionPhotos();
+    },
+    validate:function(){if(draft.uploading)throw Error('照片仍在上传，请稍后提交 / 사진 업로드가 끝난 후 제출하세요');},
+    complete:function(){
+      _issueDrafts.delete(id);
+      if (_currentIssueId===id){
+        var ta=document.getElementById('issueFeedback');if(ta)ta.value='';
+        if (_activeJobId && _activeJobId===draft.job_id) { if(window.CKClearNativeJob)CKClearNativeJob();else clearActiveJob(); }
+        _resetIssueHandleDraft();_currentRunId=null;
+      }
+    }
+  };
+};
 var _badgeScanner = null;  // Html5Qrcode instance for badge scan
 var _badgeModalScanner = null; // Html5Qrcode instance for badge change modal
 var _startInflight = false; // in-flight guard for start actions
@@ -2989,6 +3020,7 @@ function filterIssues(filter, btn) {
 }
 
 function openIssue(id) {
+  if (_currentIssueId!==id) _selectIssueDraft(id);
   _currentIssueId = id;
   goPage("issue_detail");
 }
@@ -2997,15 +3029,17 @@ function openIssue(id) {
 async function loadIssueDetail() {
   var body = document.getElementById("issueDetailBody");
   if (!body || !_currentIssueId) return;
+  var issueId=_currentIssueId,loadToken=body._legacyIssueLoad=(body._legacyIssueLoad||0)+1;
   // 进入新 issue 时清掉旧 draft（保留同一 issue 内的草稿）
   if (_issueHandleDraft.issue_id && _issueHandleDraft.issue_id !== _currentIssueId) {
-    _resetIssueHandleDraft();
+    _selectIssueDraft(issueId);
   }
   // 重渲前先把当前 textarea 的草稿落到内存（避免被覆盖）
   _saveIssueFeedbackDraft();
   body.innerHTML = '<div class="card"><span class="muted">加载中.../로딩중...</span></div>';
 
-  var res = await api({ action: "v2_issue_detail", id: _currentIssueId });
+  var res = await api({ action: "v2_issue_detail", id: issueId });
+  if(_currentIssueId!==issueId||body._legacyIssueLoad!==loadToken)return;
   if (!res || !res.ok || !res.issue) {
     body.innerHTML = '<div class="card"><span class="muted">加载失败/로딩 실패</span></div>';
     return;
@@ -3013,11 +3047,12 @@ async function loadIssueDetail() {
 
   var it = res.issue;
   var runs = res.handle_runs || [];
-  var atts = res.attachments || [];
+  var atts = res.all_attachments || res.attachments || [];
   // 恢复 _currentRunId（页面刷新后接续进行中处理）
   var _myWorkingRun = null;
+  _currentRunId=null;
   for (var ri = 0; ri < runs.length; ri++) {
-    if (runs[ri].run_status === 'working' && runs[ri].handler_id === getWorkerId()) {
+    if (runs[ri].run_status === 'working' && (runs[ri].handler_id === getWorkerId() || runs[ri].id === _issueHandleDraft.run_id)) {
       _currentRunId = runs[ri].id;
       _myWorkingRun = runs[ri];
       break;
@@ -3025,6 +3060,7 @@ async function loadIssueDetail() {
   }
   // 是否需要"继续处理"：本人有 working run，但本端没有活动 job（说明此前点过暂时离开）
   var _needResume = !!(_myWorkingRun && _myWorkingRun.job_id && _activeJobId !== _myWorkingRun.job_id);
+  _issueHandleDraft.job_id=_myWorkingRun?.job_id||'';
 
   var html = '<div class="card">';
   html += '<div style="font-size:18px;font-weight:700;margin-bottom:8px;">' + esc(_issueTitleText(it)) + '</div>';
@@ -3068,13 +3104,19 @@ async function loadIssueDetail() {
     }
     if (it.status === "processing") {
       if (_needResume) {
+        if(window.CK_SOP_ROLLOUT?.enabled){
+          html += '<p>处理任务仍保留，可打开查看人员、暂停或恢复。 / 기존 처리 작업에서 인원·중지·재개를 확인하세요.</p>';
+          html += '<button class="btn btn-outline" onclick="CKOpenNativeJob({id:\''+esc(_myWorkingRun.job_id)+'\',job_type:\'issue_handle\'})">查看处理任务 / 처리 작업 보기</button>';
+        }else{
         html += '<div class="detail-section">';
         html += '<div style="background:#fff3e0;border-left:3px solid #ef6c00;padding:8px 10px;margin-bottom:8px;font-size:13px;color:#bf360c;">';
         html += '此前已暂时离开，请先点击"继续处理"再继续作业（工时按实际参与段累计）<br>일시 퇴장 후 재개하려면 먼저 "처리 재개"를 누르세요 (작업시간은 실제 참여 구간만 누적)';
         html += '</div>';
         html += '<button class="btn btn-success" onclick="handleIssueResume(this)">继续处理 / 처리 재개</button>';
         html += '</div>';
+        }
       } else {
+        if (!window.CK_SOP_ROLLOUT?.enabled) {
         html += '<div class="detail-section"><label>反馈内容 / 피드백 내용 <span style="color:red;">*必填/필수</span></label>';
         // textarea 双向绑定 _issueHandleDraft.feedback_note：每次 input 同步到内存
         // 上传照片若触发整页重渲，新元素由本函数末尾恢复 value
@@ -3082,9 +3124,10 @@ async function loadIssueDetail() {
         html += '<label>上传照片 / 사진 업로드</label>';
         html += '<div class="photo-upload" id="issuePhotos"></div>';
         html += renderPhotoSourceBar("uploadIssueHandlePhoto(\'camera\')", "uploadIssueHandlePhoto(\'album\')");
-        if (!window.CK_SOP_ROLLOUT?.enabled) html += '<button class="btn btn-danger mt-10" onclick="handleIssueFinish(this)">结束处理 / 처리 종료</button>';
-        html += '<button class="btn btn-outline mt-10" onclick="handleIssueLeave(this)">暂时离开 / 일시 퇴장</button>';
+        html += '<button class="btn btn-danger mt-10" onclick="handleIssueFinish(this)">结束处理 / 처리 종료</button>';
         html += '</div>';
+        }
+        html += '<button class="btn btn-outline mt-10" onclick="handleIssueLeave(this)">'+(window.CK_SOP_ROLLOUT?.enabled?'调整人员 / 인원 변경':'暂时离开 / 일시 퇴장')+'</button>';
       }
     }
     html += '</div>';
@@ -4613,7 +4656,7 @@ function uploadIssueHandlePhoto(source) {
   if (_currentRunId) {
     docType = 'issue_handle_run';
     docId = _currentRunId;
-  } else if (_activeJobId) {
+  } else if (_activeJobId && (!window.CK_SOP_ROLLOUT?.enabled || _issueHandleDraft.job_id===_activeJobId)) {
     docType = 'ops_job';
     docId = _activeJobId;
   } else if (_currentIssueId) {
@@ -4626,7 +4669,8 @@ function uploadIssueHandlePhoto(source) {
   _photoUploadCtx = {
     related_doc_type: docType,
     attachment_category: 'issue_handle_photo',
-    related_doc_id: docId
+    related_doc_id: docId,
+    issue_id: _currentIssueId
   };
   _triggerPhotoInput(source);
 }
@@ -4659,8 +4703,11 @@ async function handlePhotoUpload(input) {
   var ctx = {
     related_doc_type: _photoUploadCtx.related_doc_type || '',
     related_doc_id: _photoUploadCtx.related_doc_id || '',
-    attachment_category: _photoUploadCtx.attachment_category || ''
+    attachment_category: _photoUploadCtx.attachment_category || '',
+    issue_id: _photoUploadCtx.issue_id || ''
   };
+  var issueDraft=ctx.issue_id?(_issueDrafts.get(ctx.issue_id)||_issueHandleDraft):null;
+  if(issueDraft)issueDraft.uploading=(issueDraft.uploading||0)+1;
   // 上传前先把"反馈内容"草稿保存好——任何后续渲染都能恢复
   _saveIssueFeedbackDraft();
   // 文件名去重（同一批次内）
@@ -4714,6 +4761,10 @@ async function handlePhotoUpload(input) {
     || (ctx.related_doc_type === 'issue_handle_run')
     || (ctx.related_doc_type === 'ops_job' && _currentPage === 'issue_detail');
   if (isIssueHandleUpload) {
+    if(issueDraft){
+      issueDraft.session_photos.push.apply(issueDraft.session_photos,newAtts);
+      if(_currentIssueId===ctx.issue_id)renderIssueSessionPhotos();
+    }else{
     if (_currentIssueId && _issueHandleDraft.issue_id !== _currentIssueId) {
       // 切换到新问题点：清空旧 draft session（避免互相串）
       _resetIssueHandleDraft();
@@ -4724,7 +4775,9 @@ async function handlePhotoUpload(input) {
       _issueHandleDraft.session_photos.push(newAtts[k]);
     }
     renderIssueSessionPhotos();
+    }
   }
+  if(issueDraft)issueDraft.uploading--;
 
   if (fail.length === 0) {
     alert('上传成功 / 업로드 성공: ' + ok.length + ' 张');

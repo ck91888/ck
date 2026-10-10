@@ -114,7 +114,7 @@ export async function accessSessionAction(b,env,request){
 export const FIELD_ACTIONS=new Set(`
 sop_identity sop_logout sop_login sop_native_start sop_native_rest_return sop_native_pause sop_native_resume sop_native_people sop_native_adopt sop_crew_availability sop_crew_status sop_crew_return sop_dispatch_list sop_field_resolve sop_need_groups sop_cargo_groups sop_cargo_group_complete sop_cargo_group_review sop_cargo_job_finish sop_cargo_groups_ack sop_batch_work_materials sop_work_materials sop_work_material_remove sop_need_forward_ready sop_list sop_get sop_linked sop_source_detail sop_updates sop_check_for_batch
 sop_task_dispatch sop_task_start sop_task_pause sop_task_people sop_task_complete_review sop_task_review sop_task_finish
-sop_issue_adopt sop_issue_ack sop_issue_append sop_issue_feedback sop_check_scan sop_check_resolve sop_check_round sop_check_close
+sop_issue_adopt sop_issue_ack sop_issue_append sop_issue_feedback sop_issue_request_accounting sop_check_scan sop_check_resolve sop_check_round sop_check_close
 sop_courier_config sop_courier_list sop_courier_detail sop_courier_receive sop_courier_update sop_courier_handover
 sop_attendance_config sop_attendance_lookup sop_attendance_summary sop_attendance_break_start sop_attendance_break_end
 v2_inbound_plan_list v2_inbound_plan_detail v2_inbound_plan_ops_candidates v2_inbound_plan_find_by_code v2_inbound_resolve_code
@@ -168,6 +168,10 @@ export async function accessAdminAction(b,env){
 export async function accessFileAllowed(request,env,key){
  const u=await accessUser(request,env);if(!u||u.scope==='kiosk')return false;
  if(u.scope==='office')return true;
- const a=await q(env,'SELECT related_doc_type FROM v2_attachments WHERE file_key=?',key).first();
+ const a=await q(env,'SELECT related_doc_type,related_doc_id FROM v2_attachments WHERE file_key=?',key).first();
+ if(a?.related_doc_type==='issue_handle_run'){
+  const issue=await q(env,'SELECT t.biz_class FROM v2_issue_handle_runs r JOIN v2_issue_tickets t ON t.id=r.issue_id WHERE r.id=?',a.related_doc_id).first();
+  return !!issue&&(u.departments||[]).includes(issue.biz_class==='return'?'direct_ship':issue.biz_class);
+ }
  return !!a&&['inbound_plan','outbound_order','field_feedback','ops_job','issue_ticket','sop_task','sop_need'].includes(a.related_doc_type);
 }

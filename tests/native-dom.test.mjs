@@ -296,7 +296,7 @@ test('work files remain available on office PC and do not render or load on fiel
   assert.ok(field.querySelector('input[type=file]'),'office feedback has a file picker');
   assert.match(field.querySelector('button[type=submit]').textContent,/代录仓库反馈/);
   assert.equal(field.querySelector('[data-kind]'),null,'office feedback cannot be mislabeled as a customer document');
-  p.w.toggleLang();assert.match(office.textContent,/고객 담당자가 창고에 제공하는 작업 자료/);assert.match(field.textContent,/창고에서 고객 담당자에게 전달하는 작업 설명/);
+  p.w.toggleLang();await p.w.loadDashboard();assert.match(office.textContent,/고객 담당자가 창고에 제공하는 작업 자료/);assert.match(field.textContent,/창고에서 고객 담당자에게 전달하는 작업 설명/);
   let fileReads=0;const request=p.w.CKSession.request;p.w.CKSession.request=(action,...args)=>{if(['sop_work_materials','sop_batch_work_materials'].includes(action))fileReads++;return request(action,...args);};
   await p.w.CKWorkChain.materials(host,need,{field:true});
   await p.w.CKWorkChain.mountNeed(host,need,{field:true});

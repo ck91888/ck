@@ -1118,9 +1118,11 @@ function openIssueDetail(id) {
 async function loadIssueDetail() {
   var body = document.getElementById("issueDetailBody");
   if (!body || !_currentIssueId) return;
+  var issueId=_currentIssueId,loadToken=body._legacyIssueLoad=(body._legacyIssueLoad||0)+1;
   body.innerHTML = '<div class="card muted">' + L("loading") + '</div>';
 
-  var res = await api({ action: "v2_issue_detail", id: _currentIssueId });
+  var res = await api({ action: "v2_issue_detail", id: issueId });
+  if(_currentIssueId!==issueId||body._legacyIssueLoad!==loadToken)return;
   if (!res || !res.ok || !res.issue) {
     body.innerHTML = '<div class="card muted">加载失败</div>';
     return;
@@ -1218,7 +1220,7 @@ async function loadIssueDetail() {
   // P1-6：记帐操作（已完成/已关闭后可标记需记帐）
   var canMarkAcct = (it.status === 'completed' || it.status === 'closed');
   var hasAcctData = Number(it.accounting_required) === 1 || Number(it.accounted) === 1;
-  if (canMarkAcct || hasAcctData) {
+  if (!window.CK_SOP_ROLLOUT?.enabled && (canMarkAcct || hasAcctData)) {
     html += '<div class="card"><div class="card-title">记帐 / 기장</div>';
     if (Number(it.accounting_required) === 1) {
       html += '<div class="detail-field"><b>提示记帐:</b> ' + esc(it.accounting_required_by || '') + ' · ' + esc(fmtTime(it.accounting_required_at)) + '</div>';
@@ -4993,8 +4995,11 @@ function toggleVerifyPallet(pno) {
 async function loadVerifyDetail() {
   var body = document.getElementById("checkDetailBody");
   if (!body || !_currentVerifyBatchId) return;
+  var batchId=_currentVerifyBatchId,token=body._legacyCheckLoad=(body._legacyCheckLoad||0)+1;
+  delete body.dataset.ckLegacyCheck;body.dataset.ckCheckMode='loading';
   body.innerHTML = '<span class="muted">加载中...</span>';
-  var res = await api({ action: "v2_verify_batch_detail", id: _currentVerifyBatchId });
+  var res = await api({ action: "v2_verify_batch_detail", id: batchId });
+  if(_currentVerifyBatchId!==batchId||body._legacyCheckLoad!==token)return;
   if (!res || !res.ok) { body.innerHTML = '<span class="muted">加载失败</span>'; return; }
   _verifyDetailCache = res;
   // 进入详情默认 "只看异常"
@@ -5006,6 +5011,7 @@ async function loadVerifyDetail() {
 function renderVerifyDetail() {
   var body = document.getElementById("checkDetailBody");
   if (!body || !_verifyDetailCache) return;
+  if(_verifyDetailCache.batch?.id!==_currentVerifyBatchId||window.CK_SOP_ROLLOUT?.enabled&&body.dataset.ckCheckMode==='native')return;
   var res = _verifyDetailCache;
   var b = res.batch;
   var s = res.summary || {};
@@ -5026,7 +5032,8 @@ function renderVerifyDetail() {
     return String(a.barcode || '').localeCompare(String(b2.barcode || ''));
   });
 
-  var canClose = (b.status === 'pending' || b.status === 'verifying');
+  var entryReady=!window.CK_SOP_ROLLOUT?.enabled||body.dataset.ckLegacyCheck===b.id;
+  var canClose = entryReady && (b.status === 'pending' || b.status === 'verifying');
   var html = '';
 
   // 批次头
@@ -5049,7 +5056,7 @@ function renderVerifyDetail() {
     html += '<button class="btn btn-primary btn-sm" onclick="updateVerifyBatch(\'' + esc(b.id) + '\',\'completed\',this)">标记已完成</button> ';
     html += '<button class="btn btn-outline btn-sm" onclick="updateVerifyBatch(\'' + esc(b.id) + '\',\'cancelled\',this)">作废批次</button>';
   } else {
-    html += '<span class="muted">批次已关闭，不可变更</span>';
+    html += '<span class="muted">'+(entryReady?'批次已关闭，不可变更':'正在确认核对入口 / 검수 화면 확인 중')+'</span>';
   }
   html += '</div></div>';
 

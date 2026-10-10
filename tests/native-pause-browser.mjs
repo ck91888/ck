@@ -27,16 +27,16 @@ const active=id=>DB.raw.prepare("SELECT COUNT(*) n FROM v2_ops_job_workers WHERE
 const waitStatus=async(id,status)=>{await page.waitForFunction(async({id,status})=>{const r=await window.CKSession.request('v2_ops_job_detail',{job_id:id});return r.job.status===status;},{id,status});};
 fs.mkdirSync('/tmp/ck-pause-browser',{recursive:true});
 try{
- await page.goto(origin+'/001/');await page.waitForFunction(()=>window.CKSession?.user&&window.CKOpenNativeJob);
+ await page.goto(origin+'/001/');await page.waitForFunction(()=>window.CKSession?.user&&window.CKOpenNativeJob&&window.CKEditNativePeople);
  for(const [i,j] of jobs.entries()){
   // Exercise actual home-card click after one-person rest, with no saved lead.
-  await call('sop_attendance_break_start',{id:j.d.id});await page.reload();await page.waitForFunction(()=>window.CKOpenNativeJob&&window.CKSession?.user);await page.evaluate(()=>goPage('home'));
+  await call('sop_attendance_break_start',{id:j.d.id});await page.reload();await page.waitForFunction(()=>window.CKEditNativePeople&&window.CKOpenNativeJob&&window.CKSession?.user);await page.evaluate(()=>goPage('home'));
   const detail=await call('v2_ops_job_detail',{job_id:j.job_id});const label=await page.evaluate(d=>window.CKDocumentLabels.jobLabel(d.job),detail);
-  const card=page.locator('.ck-native-task').filter({has:page.locator('strong',{hasText:label})}).first();await card.waitFor();await card.click();
+  const card=page.locator('#page-home .ck-native-task:visible').filter({has:page.locator('strong',{hasText:label})}).first();await card.waitFor();await card.click();
   await page.getByRole('button',{name:/暂停整个任务/}).first().waitFor();console.log('Entry opened:',detail.job.job_type);assert.equal(active(j.job_id),0);
   await page.getByRole('button',{name:/暂停整个任务/}).first().click();await page.locator('dialog[open] textarea[name=reason]').fill('虚构午间暂停');await page.locator('dialog[open] button[type=submit]').click();await waitStatus(j.job_id,'paused');
   await call('sop_attendance_break_end',{id:j.d.id});assert.equal(active(j.job_id),0);
-  await page.reload();await page.waitForFunction(()=>window.CKOpenNativeJob&&window.CKSession?.user);await page.evaluate(()=>goPage('home'));await page.locator('.ck-native-task').filter({has:page.locator('strong',{hasText:label})}).first().click();
+  await page.reload();await page.waitForFunction(()=>window.CKEditNativePeople&&window.CKOpenNativeJob&&window.CKSession?.user);await page.evaluate(()=>goPage('home'));await page.locator('#page-home .ck-native-task:visible').filter({has:page.locator('strong',{hasText:label})}).first().click();
   await page.getByRole('button',{name:/恢复整个任务/}).first().click();const form=page.locator('dialog[open] form');await form.locator('[data-staff-badge]').fill(j.staff.id+'|'+j.staff.name);await form.locator('[data-staff-add]').click();await form.locator('button[type=submit]').click();await waitStatus(j.job_id,'working');assert.equal(active(j.job_id),1);
   if(i===0){await page.waitForFunction(()=>document.getElementById('gjWorkerCount').textContent.startsWith('1'));assert.match(await page.locator('#gjWorkers').innerText(),/虚构浏览器人员0/);}
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
@@ -48,4 +48,4 @@ try{
  await page.locator('.courier-field [data-pause]').click();await page.locator('dialog[open] button[type=submit]').click();await waitStatus(courier.id,'working');assert.equal(active(courier.id),1);
  await page.setViewportSize({width:1365,height:900});await page.screenshot({path:'/tmp/ck-pause-browser/courier-desktop.png',fullPage:true});
  assert.deepEqual(errors,[]);console.log('Browser PASS: home-card → resting original job → pause → end personal break without starting → refresh → confirm crew and resume; packing, picking, unloading, bulk; courier pause/resume; mobile and desktop.');
-}finally{await browser.close();await new Promise(r=>server.close(r));DB.raw.close();}
+}catch(error){console.error(await page.locator('body').innerText());await page.screenshot({path:'/tmp/ck-pause-browser/failure.png',fullPage:true});throw error;}finally{await browser.close();await new Promise(r=>server.close(r));DB.raw.close();}

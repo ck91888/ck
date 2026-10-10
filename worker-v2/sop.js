@@ -1,3 +1,4 @@
+import {issueAccounting} from './issue-accounting.js';
 import {cargoReservations} from './cargo-reservations.js';
 import {cancelCargoDraft} from './cargo-create.js';
 import {assignCargoProcess,taskGroups} from './cargo-processes.js';
@@ -164,6 +165,7 @@ export async function handleSop(b,env) {
   }
   if(b.action==='sop_get') {
    const row=await read(env,b.id); if(!row) fail('记录不存在'); permit(u,row.department,roles);
+   if(row.kind==='issue'&&!b.version_only)row.data.accounting=await issueAccounting(env,row.data.legacy_id);
    const events=b.version_only?[]:await all(env,'SELECT action,actor_name,before_json,after_json,created_at FROM sop_events WHERE record_id=? ORDER BY created_at DESC LIMIT 100',row.id);
    return {ok:true,record:b.version_only?publicState(row):(await recordNumbers(env,[publicState(row)]))[0],events};
   }
@@ -478,6 +480,22 @@ export async function handleSop(b,env) {
     permit(u,row.department,['manager','service']);if(d.status!=='responded'||d.ack_version!==d.requirement_version)fail('需仓库反馈并确认最新要求');
      if(d.native){const active=await stmt(env,"SELECT id FROM v2_issue_handle_runs WHERE issue_id=? AND run_status!='completed' LIMIT 1",d.legacy_id).first(),working=await stmt(env,"SELECT w.id FROM v2_ops_job_workers w JOIN v2_ops_jobs j ON j.id=w.job_id WHERE j.related_doc_type='issue' AND j.related_doc_id=? AND w.left_at='' LIMIT 1",d.legacy_id).first();if(active||working)fail('仓库仍在处理，请先完成最新处理轮次及交接');extra.push(stmt(env,"UPDATE sop_records SET revision=CASE WHEN NOT EXISTS(SELECT 1 FROM v2_issue_handle_runs WHERE issue_id=? AND run_status!='completed') AND NOT EXISTS(SELECT 1 FROM v2_ops_job_workers w JOIN v2_ops_jobs j ON j.id=w.job_id WHERE j.related_doc_type='issue' AND j.related_doc_id=? AND w.left_at='') THEN revision ELSE NULL END WHERE id=?",d.legacy_id,d.legacy_id,row.id));}
      d.status='closed';
+   } else if(b.action==='sop_issue_request_accounting'||b.action==='sop_issue_confirm_accounted') {
+    permit(u,row.department,b.action==='sop_issue_request_accounting'?['manager','service','dispatcher','reviewer']:['manager','service']);
+    if(b.action==='sop_issue_confirm_accounted'&&u.scope==='field')fail('请由客服确认已记账');
+    d.accounting=await issueAccounting(env,d.legacy_id);
+    row.data.accounting=structuredClone(d.accounting);
+    if(Number(d.accounting.accounted)===1)fail('已确认记账，不能重复提交或重置');
+    if(b.action==='sop_issue_request_accounting'){
+     const first=Number(d.accounting.accounting_required)!==1;
+     d.accounting={...d.accounting,accounting_required:1,accounting_note:text(b.note),accounting_required_by:first?u.name:d.accounting.accounting_required_by,accounting_required_at:first?t:d.accounting.accounting_required_at};
+     extra.push(stmt(env,'UPDATE v2_issue_tickets SET accounting_required=1,accounting_required_by=?,accounting_required_at=?,accounting_note=?,updated_at=? WHERE id=?',d.accounting.accounting_required_by,d.accounting.accounting_required_at,d.accounting.accounting_note,t,d.legacy_id));
+    }else{
+     if(Number(d.accounting.accounting_required)!==1)fail('尚未提示客服记账');
+     if(!['responded','closed'].includes(d.status))fail('请先完成仓库反馈再确认记账');
+     d.accounting={...d.accounting,accounted:1,accounted_by:u.name,accounted_at:t};
+     extra.push(stmt(env,'UPDATE v2_issue_tickets SET accounted=1,accounted_by=?,accounted_at=?,updated_at=? WHERE id=?',u.name,t,t,d.legacy_id));
+    }
    } else if(b.action==='sop_issue_cancel') {
     permit(u,row.department,['manager','service']);const active=await stmt(env,"SELECT id FROM v2_issue_handle_runs WHERE issue_id=? AND run_status!='completed' LIMIT 1",d.legacy_id).first(),working=await stmt(env,"SELECT w.id FROM v2_ops_job_workers w JOIN v2_ops_jobs j ON j.id=w.job_id WHERE j.related_doc_type='issue' AND j.related_doc_id=? AND w.left_at='' LIMIT 1",d.legacy_id).first();if(active||working)fail('仓库仍在处理，请先完成交接再作废');d.cancel_reason=required(b.reason,'作废原因');
     extra.push(stmt(env,"UPDATE sop_records SET revision=CASE WHEN NOT EXISTS(SELECT 1 FROM v2_issue_handle_runs WHERE issue_id=? AND run_status!='completed') AND NOT EXISTS(SELECT 1 FROM v2_ops_job_workers w JOIN v2_ops_jobs j ON j.id=w.job_id WHERE j.related_doc_type='issue' AND j.related_doc_id=? AND w.left_at='') THEN revision ELSE NULL END WHERE id=?",d.legacy_id,d.legacy_id,row.id));d.status='cancelled';
@@ -637,7 +655,7 @@ export async function guardLegacy(b,env){
  if(b.action?.startsWith('v2_issue_')&&!/detail|list/.test(b.action)){
   let id=b.id||b.issue_id;if(!id&&b.run_id){const run=await stmt(env,'SELECT issue_id FROM v2_issue_handle_runs WHERE id=?',b.run_id).first();id=run?.issue_id;}
   if(id){const row=await read(env,'ISSUE-'+id);if(row){
-   if(row.data.native&&['v2_issue_handle_start','v2_issue_handle_resume','v2_issue_mark_accounted','v2_issue_mark_accounting_required'].includes(b.action))return null;
+   if(row.data.native&&['v2_issue_handle_start','v2_issue_handle_resume'].includes(b.action))return null;
    return '请使用本问题详情中的追加、修改、确认和反馈按钮，确保按最新要求处理';
   }}
  }
