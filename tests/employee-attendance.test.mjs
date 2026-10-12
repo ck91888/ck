@@ -28,12 +28,12 @@ test('employee updates preserve historical attendance and require checkout befor
  await assert.rejects(call('employee_update',{id:p.id,version:1,name:p.name,department:'office',enabled:false}),/尚未签退/);
  const changed=await call('employee_update',{id:p.id,version:1,name:'更正姓名',department:'office',enabled:true});assert.equal(changed.person.version,2);assert.equal(changed.person.badgeId,p.badgeId);
  const saved=(await call('summary',{scope:'employee'})).items[0].record;assert.equal(saved.name,p.name);assert.equal(saved.department,'bulk');await assert.rejects(call('employee_update',{id:p.id,version:1,name:p.name,department:'office',enabled:true}),/已更新/);
- await call('checkout',{id:r.id});await call('employee_update',{id:p.id,version:2,name:'更正姓名',department:'office',enabled:false});assert.equal((await call('employee_search',{term:'CK001'})).items.length,0);await assert.rejects(call('checkin',{badge:p.badgeId}),/未登记/);assert.equal((await call('summary',{scope:'employee'})).items.length,1);
+ await call('checkout',{id:r.id});await call('employee_update',{id:p.id,version:2,name:'更正姓名',department:'office',enabled:false});assert.equal((await call('employee_search',{term:'CK001'})).items.length,0);await assert.rejects(call('checkin',{badge:p.badgeId}),/已停用/);assert.equal((await call('summary',{scope:'employee'})).items.length,1);
 });
 test('employee shifts enforce signed-in task participation, actual breaks and personal checkout closure',async()=>{
  const {call,DB,env}=setup();const p=(await call('employee_register',registration)).person;
  DB.raw.exec("INSERT INTO v2_ops_jobs(id,job_type,biz_class,status) VALUES('J','bulk_op','bulk','working')");
- assert.match(await guardAttendance({action:'sop_task_dispatch',workers:[{id:p.badgeId}]},env),/当天签到/);
+ assert.match(await guardAttendance({action:'sop_task_dispatch',workers:[{id:p.badgeId}]},env),/未找到当天有效签到/);
  const insert=id=>DB.raw.prepare('INSERT INTO v2_ops_job_workers(id,job_id,worker_id,joined_at) VALUES(?,?,?,?)').run(id,'J',p.badgeId,new Date().toISOString());assert.throws(()=>insert('PRE'),/Employee attendance/);
  const r=(await call('checkin',{badge:p.badgeId})).record;insert('W');assert.equal((await call('summary',{scope:'employee'})).items[0].totals.rest,0);
  await call('break_start',{id:r.id});assert.throws(()=>insert('REST'),/Employee attendance/);await call('break_end',{id:r.id});await call('checkout',{badge:p.badgeId});assert.equal(DB.raw.prepare("SELECT COUNT(*) n FROM v2_ops_job_workers WHERE worker_id=? AND left_at='' ").get(p.badgeId).n,0);assert.equal(DB.raw.prepare("SELECT status FROM v2_ops_jobs WHERE id='J'").get().status,'working');assert.throws(()=>insert('AFTER'),/Employee attendance/);

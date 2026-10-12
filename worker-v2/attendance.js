@@ -7,6 +7,7 @@ import { EMPLOYEE_SCHEMA, employeeDepartments, employeeAction, isEmployee } from
 import { laborDepartment } from '../shared/labor-department.js';
 import {sourceActiveWorkers,personHasPendingReturn} from './crew-borrow.js';
 import {ensurePermanentBadges,permanentPeopleSelect,updatePermanentBadge} from './permanent-badges.js';
+import {missingAttendanceMessage} from './attendance-dispatch-identity.js';
 export const ATTENDANCE_SCHEMA=[
  `CREATE TABLE IF NOT EXISTS ck_attendance_people(id TEXT PRIMARY KEY,badge_id TEXT NOT NULL UNIQUE,name TEXT NOT NULL,agency TEXT NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('daily','permanent')),enabled INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL)`,
  `CREATE TABLE IF NOT EXISTS ck_attendance_days(id TEXT PRIMARY KEY,person_id TEXT NOT NULL,worker_id TEXT NOT NULL,name TEXT NOT NULL,agency TEXT NOT NULL,day TEXT NOT NULL,identity_key TEXT NOT NULL,signed_in TEXT NOT NULL,signed_out TEXT NOT NULL DEFAULT '',version INTEGER NOT NULL DEFAULT 1,UNIQUE(day,worker_id),UNIQUE(day,identity_key))`,
@@ -239,6 +240,6 @@ export async function guardAttendance(body,env){
   q(env,"SELECT DISTINCT worker_id,job_id FROM v2_ops_job_workers WHERE worker_id IN (SELECT value FROM json_each(?)) AND left_at=''",ids)
  ]);
  const records=new Map(days.results.map(r=>[r.worker_id,r])),resting=new Set(rests.results.map(r=>r.worker_id)),occupied=new Set(busy.results.filter(r=>r.job_id!==jobId).map(r=>r.worker_id)),retained=new Set(['sop_task_people','sop_native_people'].includes(action)?busy.results.filter(r=>r.job_id===jobId).map(r=>r.worker_id):[]);
-  for(const w of daily){const record=records.get(w.id);if(!record)return (w.name||w.id)+' 请先办理当天签到 / 먼저 출근 등록하세요';if(isEmployee(w.id)&&(!record.employee_enabled||!record.employee_profile))return record.name+' 已停用或未登记，不能加入作业 / 비활성 직원입니다';if(w.id.startsWith('DAF-')&&!record.employee_enabled&&!retained.has(w.id))return record.name+' 工牌已停用，不能加入新作业 / 비활성 명찰은 새 작업에 배정할 수 없습니다';if(record.signed_out)return record.name+' 已签退，不能开始作业 / 이미 퇴근했습니다';if(resting.has(w.id))return record.name+' 正在休息，请先结束休息 / 휴식을 먼저 종료하세요';if(occupied.has(w.id)&&!env.SOP_CREW_BORROW?.plans.some(p=>p.worker.id===w.id))return record.name+' 已在另一任务，请先办理交接';}
+  for(const w of daily){const record=records.get(w.id);if(!record)return missingAttendanceMessage(w,day);if(isEmployee(w.id)&&(!record.employee_enabled||!record.employee_profile))return record.name+' 已停用或未登记，不能加入作业 / 비활성 직원입니다';if(w.id.startsWith('DAF-')&&!record.employee_enabled&&!retained.has(w.id))return record.name+' 工牌已停用，不能加入新作业 / 비활성 명찰은 새 작업에 배정할 수 없습니다';if(record.signed_out)return record.name+' 已签退，不能开始作业 / 이미 퇴근했습니다';if(resting.has(w.id))return record.name+' 正在休息，请先结束休息 / 휴식을 먼저 종료하세요';if(occupied.has(w.id)&&!env.SOP_CREW_BORROW?.plans.some(p=>p.worker.id===w.id))return record.name+' 已在另一任务，请先办理交接';}
  return null;
 }
