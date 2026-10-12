@@ -94,6 +94,7 @@ export async function completeUnloadedDispositions(env,planId,t){
  // keep its separate cross-dock disposition pending after unloading.
  await env.DB.prepare(`UPDATE v2_inbound_plan_biz_tasks SET status='completed',completed_at=?,completed_by=?,completion_source='unload',completion_note='卸货完成后自动入库',updated_at=?
   WHERE plan_id=? AND biz_class IN ('bulk','return','change_order') AND status!='completed'
+  AND EXISTS(SELECT 1 FROM v2_inbound_plans p WHERE p.id=v2_inbound_plan_biz_tasks.plan_id AND p.status!='cancelled' AND COALESCE(p.is_deleted,0)=0)
   AND NOT EXISTS(SELECT 1 FROM v2_ops_jobs j WHERE j.related_doc_type='inbound_plan' AND j.related_doc_id=? AND j.job_type=v2_inbound_plan_biz_tasks.job_type AND j.status IN ('pending','working','awaiting_close')
     AND (?=0 OR v2_inbound_plan_biz_tasks.biz_class!='bulk'))`).bind(completedAt,plan.unload_completed_by||'',t,planId,planId,needsPutaway(plan)?1:0).run();
 }

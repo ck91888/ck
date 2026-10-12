@@ -20,6 +20,7 @@ import {validateNativeMutation, nativePeople, finishNativePick, finishNativeOutb
 import {findUnloadPlan, startUnloadTrip, finishUnloadTrip, tripPlans} from './unload-trip.js';
 import {ensureLoadSchema,loadTripEnabled,loadCandidates,resolveLoadOrder,loadOrdersForJob,finishLoadTrip,validateLegacyLoadFinish} from './outbound-load-trip.js';
 import {handleCourier,validateCourierLines,courierPlanStatements,courierProgress,courierProgressRead,courierProgressRows,courierReady,protectCourierEdit,syncCourierArrival} from './courier.js';
+import {ensureCourierClaims} from './courier-claims.js';
 import { inboundFlowEnabled, inboundCode, inboundCodes, inboundReferenceValue, inboundCodeProgress, selectInboundReference, validateInboundCode, resolveInboundPlan, putawayTaskBiz, completeUnloadedDispositions, bindInboundCode, inboundLabels, inboundReferenceData, departmentCodes, putawayClasses } from './inbound-flow.js';
 import { handleAttendance, guardAttendance, ensureAttendance } from './attendance.js';
 import {crewBorrowEnabled,ensureCrewBorrow,prepareCrewBorrow,crewAvailability,crewStatus,crewRetry,canCrewDestination,reconcileCrewReturns,reconcilePersonReturns,borrowedOut} from './crew-borrow.js';
@@ -4055,7 +4056,7 @@ async function recalcInboundPlanCompletion(env, plan_id, t, opts) {
     const next = otherInbound ? 'unloading_putting_away' : 'unloading';
     if (plan.status !== next) {
       await env.DB.prepare(
-        "UPDATE v2_inbound_plans SET status=?, updated_at=? WHERE id=?"
+        "UPDATE v2_inbound_plans SET status=?, updated_at=? WHERE id=? AND status!='cancelled'"
       ).bind(next, ts, plan_id).run();
     }
     return next;
@@ -4064,7 +4065,7 @@ async function recalcInboundPlanCompletion(env, plan_id, t, opts) {
   // A truck milestone cannot complete a mixed plan while declared parcels are missing.
   if(!await courierReady(env,plan_id)){
     const next=plan.unload_completed_at?(otherInbound?'putting_away':'arrived_pending_putaway'):plan.status;
-    if(next!==plan.status)await env.DB.prepare('UPDATE v2_inbound_plans SET status=?,updated_at=? WHERE id=?').bind(next,ts,plan_id).run();
+    if(next!==plan.status)await env.DB.prepare(`UPDATE v2_inbound_plans SET status=?,updated_at=? WHERE id=? AND status!='cancelled'`).bind(next,ts,plan_id).run();
     return next;
   }
   await completeUnloadedDispositions(env,plan_id,ts);
@@ -4088,7 +4089,7 @@ async function recalcInboundPlanCompletion(env, plan_id, t, opts) {
     }
     if (plan.status !== next) {
       await env.DB.prepare(
-        "UPDATE v2_inbound_plans SET status=?, updated_at=? WHERE id=?"
+        "UPDATE v2_inbound_plans SET status=?, updated_at=? WHERE id=? AND status!='cancelled'"
       ).bind(next, ts, plan_id).run();
     }
     return next;
@@ -4102,7 +4103,7 @@ async function recalcInboundPlanCompletion(env, plan_id, t, opts) {
   else next = 'arrived_pending_putaway';
   if (plan.status !== next) {
     await env.DB.prepare(
-      "UPDATE v2_inbound_plans SET status=?, updated_at=? WHERE id=?"
+      "UPDATE v2_inbound_plans SET status=?, updated_at=? WHERE id=? AND status!='cancelled'"
     ).bind(next, ts, plan_id).run();
   }
   return next;
@@ -4666,7 +4667,10 @@ route("v2_inbound_plan_update", async (body, env) => {
     const biz_classes_json = JSON.stringify(bizNorm.list);
     const {externalNo,bulkExternalNo} = await inboundReferenceData(env,bizNorm.list,body,plan);
 
-    await referenceWriteBatch(env,id,[env.DB.prepare(
+    const statements=[];
+    // Fire the courier edit guard inside the same transaction as all changes.
+    if(inboundFlowEnabled(env))statements.push(env.DB.prepare('UPDATE ck_courier_plan_items SET line_id=line_id WHERE plan_id=?').bind(id));
+    statements.push(env.DB.prepare(
       `UPDATE v2_inbound_plans SET plan_date=?, customer=?, biz_class=?, biz_classes_json=?,
         cargo_summary=?, expected_arrival=?, purpose=?, remark=?, external_inbound_no=?, bulk_external_inbound_no=?, updated_at=? WHERE id=?`
     ).bind(
@@ -4678,7 +4682,7 @@ route("v2_inbound_plan_update", async (body, env) => {
       String(body.purpose != null ? body.purpose : (plan.purpose || "")),
       String(body.remark != null ? body.remark : (plan.remark || "")),
       externalNo, bulkExternalNo, t, id
-    ),...planAuditStatements(env,'inbound',id,'update',t)]);
+    ));
 
     // biz_tasks 同步：pending 可增删；completed 不允许删
     const existing = await env.DB.prepare(
@@ -4695,29 +4699,29 @@ route("v2_inbound_plan_update", async (body, env) => {
         if (er.status === 'completed') {
           return { ok: false, error: "completed_biz_cannot_remove", message: "业务类型 " + biz + " 已有完成记录，不能移除" };
         }
-        await env.DB.prepare("DELETE FROM v2_inbound_plan_biz_tasks WHERE id=?").bind(er.id).run();
+        statements.push(env.DB.prepare("DELETE FROM v2_inbound_plan_biz_tasks WHERE id=?").bind(er.id));
       }
     }
     // 新增：target 中 existing 没有 → INSERT pending
     for (const biz of bizNorm.list) {
       if (!existSet[biz]) {
-        await env.DB.prepare(
+        statements.push(env.DB.prepare(
           `INSERT OR IGNORE INTO v2_inbound_plan_biz_tasks (id, plan_id, biz_class, job_type, status, created_at, updated_at)
            VALUES(?,?,?,?, 'pending', ?, ?)`
-        ).bind("IBT-" + uid(), id, biz, mapInboundBizToJobType(biz), t, t).run();
+        ).bind("IBT-" + uid(), id, biz, mapInboundBizToJobType(biz), t, t));
       }
     }
 
     // Replace expected waybills and lines atomically.
     if (Array.isArray(body.lines)) {
-      const statements=[env.DB.prepare("DELETE FROM ck_courier_plan_items WHERE plan_id=?").bind(id),env.DB.prepare("DELETE FROM v2_inbound_plan_lines WHERE plan_id=?").bind(id)];
+      statements.push(env.DB.prepare("DELETE FROM ck_courier_plan_items WHERE plan_id=?").bind(id),env.DB.prepare("DELETE FROM v2_inbound_plan_lines WHERE plan_id=?").bind(id));
       for(let i=0;i<body.lines.length;i++){
         const ln=body.lines[i],lineId="IPL-"+uid();
         statements.push(env.DB.prepare("INSERT INTO v2_inbound_plan_lines(id,plan_id,line_no,unit_type,planned_qty,remark) VALUES(?,?,?,?,?,?)").bind(lineId,id,i+1,String(ln.unit_type||''),Number(ln.planned_qty||0),String(ln.remark||'')),...courierPlanStatements(env,id,lineId,ln));
       }
-      await env.DB.batch(statements);
-      if(body.lines.some(x=>x.unit_type==='courier'))await syncCourierArrival(env,id,recalcInboundPlanCompletion);
     }
+    await referenceWriteBatch(env,id,[...statements,...planAuditStatements(env,'inbound',id,'update',t)]);
+    if(body.lines?.some(x=>x.unit_type==='courier'))await syncCourierArrival(env,id,recalcInboundPlanCompletion);
 
     return { ok: true, id, biz_classes: bizNorm.list };
   });
@@ -4766,6 +4770,8 @@ route("v2_inbound_plan_cancel", async (body, env) => {
   const plan = await env.DB.prepare("SELECT * FROM v2_inbound_plans WHERE id=?").bind(id).first();
   if (!plan) return err("plan not found", 404);
 
+  if(inboundFlowEnabled(env)&&plan.status==='cancelled')return json({ok:true,duplicate:true,operator,cancelled_at:plan.updated_at});
+
   // 只允许 pending / arrived_pending_putaway 取消
   const allowCancel = ['pending', 'arrived_pending_putaway'];
   if (!allowCancel.includes(plan.status)) {
@@ -4774,7 +4780,7 @@ route("v2_inbound_plan_cancel", async (body, env) => {
 
   // 检查是否有进行中的 unload 或 inbound job
   const activeJob = await env.DB.prepare(
-    "SELECT id, job_type FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND status IN ('pending','working','awaiting_close') LIMIT 1"
+    "SELECT id, job_type FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND status NOT IN ('completed','cancelled') LIMIT 1"
   ).bind(id).first();
   if (activeJob) {
     return json({ ok: false, error: "active_job_exists", message: "当前仍有进行中的现场任务（" + (activeJob.job_type || "") + "），不能取消" });
@@ -4789,7 +4795,18 @@ route("v2_inbound_plan_cancel", async (body, env) => {
   }
   updateSql += " WHERE id=?";
   binds.push(id);
-  await env.DB.prepare(updateSql).bind(...binds).run();
+  if(inboundFlowEnabled(env)){
+    // Recheck after concurrent dispatch. A retry cannot append the reason twice.
+    updateSql += " AND status IN ('pending','arrived_pending_putaway') AND NOT EXISTS(SELECT 1 FROM v2_inbound_plan_jobs j WHERE j.plan_id=v2_inbound_plans.id AND j.status NOT IN ('completed','cancelled'))";
+    const statements=[env.DB.prepare(updateSql).bind(...binds)],context=env.SOP_OPERATION_CONTEXT;
+    if(context?.operator_name)statements.push(env.DB.prepare('INSERT INTO ck_plan_operation_audit SELECT ?,?,?,?,?,?,? WHERE changes()=1').bind(crypto.randomUUID(),'inbound',id,'cancel',env.SOP_REQUEST_USER.id,context.operator_name,t));
+    const results=await env.DB.batch(statements);
+    if(!results[0].meta.changes){
+      const current=await env.DB.prepare('SELECT status,updated_at FROM v2_inbound_plans WHERE id=?').bind(id).first();
+      if(current?.status==='cancelled')return json({ok:true,duplicate:true,operator,cancelled_at:current.updated_at});
+      return json({ok:false,error:'cancel_state_changed',message:'计划状态或现场任务已变化，请刷新后核对 / 계획 또는 작업 상태가 변경되었습니다'});
+    }
+  }else await env.DB.prepare(updateSql).bind(...binds).run();
 
   return json({ ok: true, operator, cancelled_at: t });
 });
@@ -4806,6 +4823,7 @@ route("v2_inbound_plan_delete", async (body, env) => {
     if (plan.status !== 'cancelled') {
       return { ok: false, error: "only_cancelled_can_delete", message: "只能删除已取消的入库计划，请先取消" };
     }
+    if(inboundFlowEnabled(env)&&await env.DB.prepare('SELECT 1 FROM ck_courier_plan_items WHERE plan_id=? UNION ALL SELECT 1 FROM ck_courier_plan_item_history WHERE plan_id=? LIMIT 1').bind(id,id).first())return {ok:false,error:'courier_history_cannot_delete',message:'此计划保留快递关联历史，不能删除 / 택배 이력이 있어 삭제할 수 없습니다'};
     // 在制 / 待续作业 → 拒（按规范要求二次校验）
     const activeJob = await env.DB.prepare(
       "SELECT id, job_type FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND status IN ('pending','working','awaiting_close') LIMIT 1"
@@ -6246,45 +6264,36 @@ route("v2_inbound_plan_force_complete", async (body, env) => {
     }
 
     const t = now();
-    // 确保 biz_tasks 行齐全
-    await ensureInboundPlanBizTasks(env, plan);
-    // 把所有未完成 biz_task 标 completed（manual_force 来源）
-    await env.DB.prepare(`
-      UPDATE v2_inbound_plan_biz_tasks
-        SET status='completed', completed_at=?, completed_by=?, worker_names=?,
-            total_minutes=COALESCE(total_minutes,0),
-            completion_source='manual_force', completion_note=?, updated_at=?
-        WHERE plan_id=? AND status!='completed'
-    `).bind(t, operator, operator, reason, t, id).run();
-
-    // 实际数量写入 v2_inbound_plan_lines（按 unit_type=carton/pallet 分别 upsert）
-    // v2_inbound_plans 主表无 actual_box_count / actual_pallet_count 字段
-    async function upsertPlanLineActual(unit_type, qty) {
-      if (qty == null || !Number.isFinite(qty)) return;
-      const existed = await env.DB.prepare(
-        "SELECT id FROM v2_inbound_plan_lines WHERE plan_id=? AND unit_type=? LIMIT 1"
-      ).bind(id, unit_type).first();
-      if (existed) {
-        await env.DB.prepare(
-          "UPDATE v2_inbound_plan_lines SET actual_qty=? WHERE id=?"
-        ).bind(qty, existed.id).run();
-      } else if (qty > 0) {
-        const maxRow = await env.DB.prepare(
-          "SELECT MAX(line_no) AS m FROM v2_inbound_plan_lines WHERE plan_id=?"
-        ).bind(id).first();
-        const nextLineNo = (maxRow && Number(maxRow.m) ? Number(maxRow.m) : 0) + 1;
-        await env.DB.prepare(
-          "INSERT INTO v2_inbound_plan_lines(id, plan_id, line_no, unit_type, planned_qty, actual_qty, remark) VALUES(?,?,?,?,?,?,?)"
-        ).bind(uid(), id, nextLineNo, unit_type, 0, qty, 'manual_force_complete').run();
-      }
+    // The completion marker, quantities and tasks either all commit or none do.
+    const statements=[env.DB.prepare(`UPDATE v2_inbound_plans SET status='completed', updated_at=?, force_completed=1, force_completed_by=?, force_completed_at=?, force_complete_reason=?, manual_completed_by=?, manual_completed_at=?
+      WHERE id=? AND updated_at=? AND status IN ('pending','arrived_pending_putaway','putting_away','partially_completed') AND COALESCE(is_deleted,0)=0
+      AND NOT EXISTS(SELECT 1 FROM v2_inbound_plan_jobs j WHERE j.plan_id=v2_inbound_plans.id AND j.status NOT IN ('completed','cancelled'))
+      AND NOT EXISTS(SELECT 1 FROM ck_courier_plan_items ci WHERE ci.plan_id=v2_inbound_plans.id AND NOT EXISTS(SELECT 1 FROM ck_courier_receipts r WHERE r.tracking_no=ci.tracking_no))
+    `).bind(t,operator,t,reason,operator,t,id,plan.updated_at)];
+    const guardKey='FORCE-'+crypto.randomUUID();
+    statements.push(env.DB.prepare("INSERT INTO v2_idempotency_keys(idem_key,action,response_json,created_at) SELECT ?,'inbound_force_commit','{}',? WHERE changes()=1").bind(guardKey,t));
+    const applied="EXISTS(SELECT 1 FROM v2_idempotency_keys WHERE idem_key=? AND action='inbound_force_commit')";
+    for(const biz of extractPlanBizClasses(plan))statements.push(env.DB.prepare(`
+      INSERT OR IGNORE INTO v2_inbound_plan_biz_tasks(id,plan_id,biz_class,job_type,status,created_at,updated_at)
+      SELECT ?,?,?,?,'pending',?,? WHERE ${applied}
+    `).bind('IBT-'+uid(),id,biz,mapInboundBizToJobType(biz),t,t,guardKey));
+    statements.push(env.DB.prepare(`UPDATE v2_inbound_plan_biz_tasks
+      SET status='completed',completed_at=?,completed_by=?,worker_names=?,total_minutes=COALESCE(total_minutes,0),completion_source='manual_force',completion_note=?,updated_at=?
+      WHERE plan_id=? AND status!='completed' AND ${applied}
+    `).bind(t,operator,operator,reason,t,id,guardKey));
+    for(const [unit,qty]of [['carton',actual_box_count],['pallet',actual_pallet_count]]){
+      if(qty==null||!Number.isFinite(qty))continue;
+      statements.push(env.DB.prepare(`UPDATE v2_inbound_plan_lines SET actual_qty=?
+        WHERE id=(SELECT id FROM v2_inbound_plan_lines WHERE plan_id=? AND unit_type=? LIMIT 1) AND ${applied}
+      `).bind(qty,id,unit,guardKey));
+      if(qty>0)statements.push(env.DB.prepare(`INSERT INTO v2_inbound_plan_lines(id,plan_id,line_no,unit_type,planned_qty,actual_qty,remark)
+        SELECT ?,?,COALESCE((SELECT MAX(line_no) FROM v2_inbound_plan_lines WHERE plan_id=?),0)+1,?,0,?,'manual_force_complete'
+        WHERE NOT EXISTS(SELECT 1 FROM v2_inbound_plan_lines WHERE plan_id=? AND unit_type=?) AND ${applied}
+      `).bind(uid(),id,id,unit,qty,id,unit,guardKey));
     }
-    await upsertPlanLineActual('carton', actual_box_count);
-    await upsertPlanLineActual('pallet', actual_pallet_count);
-
-    // 更新入库计划：force_completed=1 + status=completed（仅写真实存在字段）
-    await env.DB.prepare(
-      "UPDATE v2_inbound_plans SET status='completed', updated_at=?, force_completed=1, force_completed_by=?, force_completed_at=?, force_complete_reason=?, manual_completed_by=?, manual_completed_at=? WHERE id=?"
-    ).bind(t, operator, t, reason, operator, t, id).run();
+    statements.push(env.DB.prepare('DELETE FROM v2_idempotency_keys WHERE idem_key=?').bind(guardKey));
+    const results=await env.DB.batch(statements);
+    if(!results[0].meta.changes)return {ok:false,error:'plan_state_changed',message:'计划、收货或现场任务已变化，请刷新后核对 / 계획 상태가 변경되었습니다'};
 
     return { ok: true, status: 'completed', force_completed: 1, completed_at: t, completed_by: operator };
   });
@@ -12741,6 +12750,7 @@ export default {
     try {
       await ensureMigrated(env.DB);
       await ensureInboundReferenceGuard(env);
+      await ensureCourierClaims(env);
       await ensureInboundDocuments(env);
       await ensureBatchMaterialState(env);
       await ensureReferenceHistory(env);
@@ -12820,7 +12830,7 @@ export default {
       try{return json(await handleFeedbackLink(body,env,{ensureTasks:ensureInboundPlanBizTasks,recalc:recalcInboundPlanCompletion,syncCourier:syncCourierArrival}));}catch(e){return json({ok:false,error:e.message},409);}
     }
     if(action.startsWith('sop_courier_')){
-      if(!['sop_courier_config','sop_courier_list','sop_courier_detail'].includes(action)&&(request.method!=='POST'||request.headers.get('Origin')&&request.headers.get('Origin')!==url.origin))return err('Invalid request origin',403);
+      if(!['sop_courier_config','sop_courier_list','sop_courier_detail','sop_courier_lookup'].includes(action)&&(request.method!=='POST'||request.headers.get('Origin')&&request.headers.get('Origin')!==url.origin))return err('Invalid request origin',403);
       try{return json(await handleCourier(body,env,recalcInboundPlanCompletion));}catch(e){return json({ok:false,error:e.message},400);}
     }
     if(action==='sop_native_rest_return'){

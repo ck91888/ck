@@ -2,6 +2,8 @@ import {courierOwners,trackingNumber,trackingNumbers} from '../shared/courier-ru
 import {ensureCourierBatches,courierBatchDetail,courierBatchList,courierBatchOperation,courierScanGuard,courierCommitAccess} from './courier-batches.js';
 import {nativeOwner} from './sop-dispatch.js';
 import {inboundFlowEnabled} from './inbound-flow.js';
+import {claimCourierStatements,reusableCourierPlan} from './courier-claims.js';
+import {lookupCourierArrival} from './courier-arrival.js';
 const q=(env,sql,...args)=>env.DB.prepare(sql).bind(...args);
 const rows=async(env,sql,...args)=>(await q(env,sql,...args).all()).results||[];
 const ownerIds=new Set(courierOwners.map(x=>x[0]));
@@ -18,18 +20,19 @@ export async function validateCourierLines(env,lines,id=''){
  if(courier.length!==1)fail('请把本计划快递单号填写在同一行 / 택배 송장번호를 한 행에 입력하세요');
  const codes=trackingNumbers(courier[0].tracking_nos);
  if(!codes.length)fail('选择快递后必须填写快递单号 / 택배 송장번호가 필요합니다');
- for(const code of codes){const existing=await q(env,`SELECT p.display_no FROM ck_courier_plan_items i JOIN v2_inbound_plans p ON p.id=i.plan_id WHERE i.tracking_no=? AND i.plan_id!=?`,code,id).first();if(existing)fail(code+' 已关联 '+existing.display_no+'，请先核对 / 이미 연결된 송장번호');}
+ for(const code of codes){const existing=await q(env,`SELECT p.display_no FROM ck_courier_plan_items i LEFT JOIN v2_inbound_plans p ON p.id=i.plan_id WHERE i.tracking_no=? AND i.plan_id!=? AND (p.id IS NULL OR NOT (${reusableCourierPlan('p')}))`,code,id).first();if(existing)fail(code+' 已关联 '+(existing.display_no||'历史入库计划')+'，请先核对 / 이미 연결된 송장번호');}
  return list.map(x=>x.unit_type==='courier'?{...x,planned_qty:codes.length,tracking_nos:codes}:x);
 }
 export function courierPlanStatements(env,planId,lineId,line){
  if(line.unit_type!=='courier')return [];
- return line.tracking_nos.map(code=>q(env,'INSERT INTO ck_courier_plan_items(tracking_no,plan_id,line_id) VALUES(?,?,?)',code,planId,lineId));
+ return line.tracking_nos.flatMap(code=>claimCourierStatements(env,planId,lineId,code));
 }
 export async function courierProgress(env,planId){
   if(!inboundFlowEnabled(env))return null;
   return courierProgressRows((await courierProgressRead(env,planId).all()).results||[]);
 }
-export const courierProgressRead=(env,planId)=>q(env,`SELECT i.tracking_no,r.id AS receipt_id,r.owner,r.received_at,r.scanner_name,r.status,r.handed_to,r.handed_at FROM ck_courier_plan_items i LEFT JOIN ck_courier_receipts r ON r.tracking_no=i.tracking_no WHERE i.plan_id=? ORDER BY i.tracking_no`,planId);
+export const courierProgressRead=(env,planId)=>q(env,`SELECT i.tracking_no,r.id AS receipt_id,r.owner,r.received_at,r.scanner_name,r.status,r.handed_to,r.handed_at,r.scanner_id,bi.batch_id,b.batch_no FROM ck_courier_plan_items i LEFT JOIN ck_courier_receipts r ON r.tracking_no=i.tracking_no LEFT JOIN ck_courier_batch_items bi ON bi.receipt_id=r.id LEFT JOIN ck_courier_batches b ON b.id=bi.batch_id WHERE i.plan_id=?
+ UNION ALL SELECT tracking_no,json_extract(receipt_json,'$.receipt_id'),json_extract(receipt_json,'$.owner'),json_extract(receipt_json,'$.received_at'),json_extract(receipt_json,'$.scanner_name'),json_extract(receipt_json,'$.status'),json_extract(receipt_json,'$.handed_to'),json_extract(receipt_json,'$.handed_at'),json_extract(receipt_json,'$.scanner_id'),json_extract(receipt_json,'$.batch_id'),json_extract(receipt_json,'$.batch_no') FROM ck_courier_plan_item_history WHERE plan_id=? ORDER BY tracking_no`,planId,planId);
 export const courierProgressRows=items=>items.length?{total:items.length,received:items.filter(x=>x.receipt_id).length,items}:null;
 export async function courierReady(env,planId){const p=await courierProgress(env,planId);return !p||p.total===p.received;}
 export async function protectCourierEdit(env,id){
@@ -40,7 +43,7 @@ export async function syncCourierArrival(env,planId,recalc){
  const progress=await courierProgress(env,planId);if(!progress)return null;
  const p=await q(env,'SELECT * FROM v2_inbound_plans WHERE id=?',planId).first();if(!p||p.is_deleted||p.status==='cancelled')return {progress,status:p?.status||''};
  // Count from immutable receipts, not client-supplied quantities. Safe after retries/concurrent scans.
- await q(env,`UPDATE v2_inbound_plan_lines SET actual_qty=(SELECT COUNT(*) FROM ck_courier_plan_items i JOIN ck_courier_receipts r ON r.tracking_no=i.tracking_no WHERE i.line_id=v2_inbound_plan_lines.id) WHERE plan_id=? AND unit_type='courier'`,planId).run();
+ await q(env,`UPDATE v2_inbound_plan_lines SET actual_qty=(SELECT COUNT(*) FROM ck_courier_plan_items i JOIN ck_courier_receipts r ON r.tracking_no=i.tracking_no WHERE i.line_id=v2_inbound_plan_lines.id) WHERE plan_id=? AND unit_type='courier' AND EXISTS(SELECT 1 FROM v2_inbound_plans p WHERE p.id=v2_inbound_plan_lines.plan_id AND p.status!='cancelled' AND COALESCE(p.is_deleted,0)=0)`,planId).run();
  const nonCourier=await q(env,"SELECT 1 FROM v2_inbound_plan_lines WHERE plan_id=? AND unit_type!='courier' AND planned_qty>0 LIMIT 1",planId).first();
  if(progress.received===progress.total&&(!nonCourier||p.unload_completed_at)){
   const last=progress.items.filter(x=>x.received_at).sort((a,b)=>a.received_at.localeCompare(b.received_at)).at(-1),t=last.received_at;
@@ -74,8 +77,9 @@ function rollbackArrivalStatements(env,planId,eventId,t){
  ];
 }
 export async function handleCourier(b,env,recalc){
- const write=!['sop_courier_config','sop_courier_list','sop_courier_detail'].includes(b.action),u=user(env,write);
+ const write=!['sop_courier_config','sop_courier_list','sop_courier_detail','sop_courier_lookup'].includes(b.action),u=user(env,write);
  await ensureCourierBatches(env);
+ if(b.action==='sop_courier_lookup')return lookupCourierArrival(env,b);
  if(b.action==='sop_courier_receive'&&b.operation)return courierBatchOperation(env,b);
  if(b.action==='sop_courier_config'&&b.operation==='batches')return courierBatchList(env,{active:true});
  if(b.action==='sop_courier_detail'&&b.batch_id)return {ok:true,batch:await courierBatchDetail(env,b.batch_id)};
@@ -131,15 +135,17 @@ export async function handleCourier(b,env,recalc){
   if(linked&&purchase)fail('此单同时关联入库计划和采购，请办公室核实后收货');
   const id='CR-'+crypto.randomUUID(),t=stamp(),access=courierCommitAccess(env,batchId);
   await env.DB.batch([
-   q(env,`INSERT OR IGNORE INTO ck_courier_receipts(id,tracking_no,owner,received_at,scanner_id,scanner_name,actor_id,actor_name,location,note,shipment_id,status,version) SELECT ?,?,?,?,?,?,?,?,?,?,?,'received',1 WHERE ${courierScanGuard} AND ${access.sql}`,id,code,owner,t,who.id,who.name,u.id,u.name,limited(b.location,50),limited(b.note),purchase?.id||'',batchId,badge,...access.args),
+   q(env,`INSERT OR IGNORE INTO ck_courier_receipts(id,tracking_no,owner,received_at,scanner_id,scanner_name,actor_id,actor_name,location,note,shipment_id,status,version) SELECT ?,?,?,?,?,?,?,?,?,?,?,'received',1 WHERE ${courierScanGuard} AND ${access.sql}
+    AND NOT EXISTS(SELECT 1 FROM ck_courier_plan_items ci JOIN v2_inbound_plans p ON p.id=ci.plan_id WHERE ci.tracking_no=? AND (p.status='cancelled' OR COALESCE(p.is_deleted,0)!=0))`,id,code,owner,t,who.id,who.name,u.id,u.name,limited(b.location,50),limited(b.note),purchase?.id||'',batchId,badge,...access.args,code),
    q(env,`INSERT INTO ck_courier_batch_items(receipt_id,batch_id) SELECT id,? FROM ck_courier_receipts WHERE id=?`,batchId,id),
    q(env,`INSERT INTO ck_courier_events(id,receipt_id,kind,actor_id,actor_name,detail,created_at) SELECT ?,id,'receive',?,?,?,? FROM ck_courier_receipts WHERE id=?`,'CE-'+crypto.randomUUID(),u.id,u.name,JSON.stringify({owner,scanner:who}),t,id)
   ]);
   const r=await q(env,'SELECT * FROM ck_courier_receipts WHERE tracking_no=?',code).first();
-  if(!r)fail('保存未完成：批次已结束或扫描人已离开，请刷新 / 차수·인원 상태를 확인하세요');
+  if(!r)fail('保存未完成：批次、人员或关联计划状态已变化，请刷新 / 차수·인원·계획 상태를 확인하세요');
   // A duplicate also needs a live scanner; it must not hide a closed or off-duty page.
   if(r.id!==id&&!await q(env,`SELECT 1 WHERE ${courierScanGuard} AND ${access.sql}`,batchId,badge,...access.args).first())fail('批次或扫描人状态已变化，请刷新 / 차수·인원 상태 변경');
-  const plan=linked?await syncCourierArrival(env,linked.id,recalc):null;
+  const currentLink=await q(env,'SELECT plan_id FROM ck_courier_plan_items WHERE tracking_no=?',code).first();
+  const plan=currentLink?await syncCourierArrival(env,currentLink.plan_id,recalc):null;
   return {ok:true,duplicate:r.id!==id,owner_conflict:r.owner!==owner,item:await joinedReceipt(env,r.id),plan,batch:await courierBatchDetail(env,batchId)};
  }
  if(b.action==='sop_courier_update'){
@@ -163,8 +169,10 @@ export async function handleCourier(b,env,recalc){
   if(purchase&&!['supplies','purchase'].includes(owner))fail('该单命中耗材／采购登记，请核对所属');
   if(changed&&newPlan&&purchase)fail('新单号同时关联入库与采购，请办公室核实');
   const eventId='CE-'+crypto.randomUUID();
+  const unchangedClaims=changed?`AND COALESCE((SELECT plan_id FROM ck_courier_plan_items WHERE tracking_no=ck_courier_receipts.tracking_no),'')=? AND COALESCE((SELECT plan_id FROM ck_courier_plan_items WHERE tracking_no=?),'')=?
+   AND NOT EXISTS(SELECT 1 FROM ck_courier_plan_items ci JOIN v2_inbound_plans p ON p.id=ci.plan_id WHERE ci.tracking_no=? AND (p.status='cancelled' OR COALESCE(p.is_deleted,0)!=0 OR COALESCE(p.accounted,0)!=0))`:'';
   const result=await env.DB.batch([
-   q(env,`INSERT INTO ck_courier_events(id,receipt_id,kind,actor_id,actor_name,detail,created_at) SELECT ?,id,'update',?,?,?,? FROM ck_courier_receipts WHERE id=? AND version=? ${changed?'AND '+correctionGuard:''}`,eventId,u.id,u.name,JSON.stringify({before:{tracking_no:old.tracking_no,owner:old.owner,status:old.status,handed_to:old.handed_to},after:{tracking_no:code,owner,status,handed_to:recipient},note}),t,old.id,old.version),
+   q(env,`INSERT INTO ck_courier_events(id,receipt_id,kind,actor_id,actor_name,detail,created_at) SELECT ?,id,'update',?,?,?,? FROM ck_courier_receipts WHERE id=? AND version=? ${changed?'AND '+correctionGuard:''} ${unchangedClaims}`,eventId,u.id,u.name,JSON.stringify({before:{tracking_no:old.tracking_no,owner:old.owner,status:old.status,handed_to:old.handed_to},after:{tracking_no:code,owner,status,handed_to:recipient},note}),t,old.id,old.version,...(changed?[oldPlan?.plan_id||'',code,newPlan?.id||'',code]:[])),
    q(env,`UPDATE ck_courier_receipts SET tracking_no=?,shipment_id=?,owner=?,status=?,handed_to=?,handed_at=CASE WHEN handed_at='' AND ?='handed_over' THEN ? ELSE handed_at END,note=?,version=version+1 WHERE id=? AND version=? AND EXISTS(SELECT 1 FROM ck_courier_events WHERE id=?)`,code,changed?(purchase?.id||''):old.shipment_id,owner,status,recipient,status,t,storedNote,old.id,old.version,eventId),
    ...(changed&&oldPlan?rollbackArrivalStatements(env,oldPlan.plan_id,eventId,t):[])
   ]);

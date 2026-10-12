@@ -4084,7 +4084,7 @@ async function cancelInboundPlan(btnEl) {
     } else if (res && res.error === "cancel_not_allowed") {
       alert(res.message || "当前状态不允许取消");
     } else {
-      alert("失败: " + (res ? res.error : "unknown"));
+      alert("失败: " + (res ? (res.message || res.error) : "unknown"));
     }
   });
 }

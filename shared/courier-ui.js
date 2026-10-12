@@ -9,7 +9,8 @@ let rules,owners;
 const label=id=>owners.find(x=>x[0]===id)?.[1]||id||'—';
 const options=(all=false)=> (all?'<option value="">全部所属 / 전체</option>':'')+owners.map(x=>'<option value="'+esc(x[0])+'">'+esc(x[1])+'</option>').join('');
 const alertText=(el,message,bad=false)=>{el.textContent=message;el.classList.toggle('courier-error',bad);};
-function progressHtml(p){if(!p)return '';return '<section class="courier-progress"><h3>快递到仓 / 택배 도착 <span>'+p.received+' / '+p.total+'</span></h3><div class="courier-table-scroll"><table><thead><tr><th>快递单号 / 송장번호</th><th>所属 / 소속</th><th>入仓时间 / 도착 시간</th><th>扫描人 / 스캔 담당</th></tr></thead><tbody>'+p.items.map(x=>'<tr><td>'+esc(x.tracking_no)+'</td><td>'+esc(label(x.owner))+'</td><td>'+esc(x.received_at?time(x.received_at):'未到仓 / 미도착')+'</td><td>'+esc(x.scanner_name||'—')+'</td></tr>').join('')+'</tbody></table></div></section>';}
+const arrivalLabel=p=>p.received===p.total?'已到仓 / 도착 완료':p.received?'部分到仓 / 일부 도착':'未到仓 / 미도착';
+function progressHtml(p,preview=false){if(!p)return '';return '<section class="courier-progress"><h3>快递到仓 / 택배 도착 <span data-arrival-summary>'+arrivalLabel(p)+' · '+p.received+' / '+p.total+'</span></h3><div class="courier-table-scroll"><table><thead><tr><th>快递单号 / 송장번호</th><th>所属 / 소속</th><th>入仓时间（韩国） / 도착 시간 (한국)</th><th>扫描批次 / 스캔 차수</th><th>扫描人 / 스캔 담당</th>'+(preview?'<th>计划关联 / 계획 연결</th>':'')+'</tr></thead><tbody>'+p.items.map(x=>'<tr><td data-label="快递单号 / 송장번호">'+esc(x.tracking_no)+'</td><td data-label="所属 / 소속">'+esc(label(x.owner))+'</td><td data-label="入仓时间（韩国） / 도착 시간 (한국)">'+esc(x.received_at?time(x.received_at):'未到仓 / 미도착')+'</td><td data-label="扫描批次 / 스캔 차수">'+esc(x.batch_no||(x.receipt_id?'历史无批次 / 과거 차수 없음':'—'))+'</td><td data-label="扫描人 / 스캔 담당">'+esc(x.scanner_name||'—')+'</td>'+(preview?'<td data-label="计划关联 / 계획 연결"'+(x.claim_status==='conflict'?' class="courier-claim-conflict"':'')+'>'+esc(x.claim_status==='conflict'?'已关联 '+(x.display_no||'其他计划')+'，请先核对 / 연결 확인 필요':x.claim_status==='reusable'?'原计划已取消，可重新关联 / 취소 계획 재연결 가능':'可关联 / 연결 가능')+'</td>':'')+'</tr>').join('')+'</tbody></table></div></section>';}
 async function detail(id,refresh,inlineHost,onClose,canOpen){
  const r=await api('detail',{id});if(canOpen&&!canOpen())return;
  const x=r.item,d=document.createElement(inlineHost?'section':'dialog');d.className='courier-dialog'+(inlineHost?' courier-inline-editor':' ck-workflow courier-receipt-detail');
@@ -139,11 +140,35 @@ function field(host){
  return {open,stop};
 }
 function installPlanFields(){
+ const table=document.getElementById('ibcLinesTable'),preview=document.createElement('section');preview.className='courier-arrival-preview';preview.hidden=true;preview.setAttribute('aria-label','快递实际到仓预查 / 택배 도착 확인');table.after(preview);
+ let previewSeq=0,previewTimer;
+ const visible=()=>document.getElementById('view-inbound_create')?.style.display!=='none';
+ const entered=()=>[...document.querySelectorAll('#ibcLinesBody tr')].filter(tr=>tr.querySelector('.ibc-line-type').value==='courier').map(tr=>tr.querySelector('textarea')?.value||'');
+ const resetPreview=()=>{previewSeq++;clearTimeout(previewTimer);preview.replaceChildren();preview.hidden=true;preview.removeAttribute('aria-busy');};
+ const lookup=async(codes,signature,token)=>{
+  let timeout;const current=()=>token===previewSeq&&visible()&&JSON.stringify(entered())===signature;
+  try{
+   const result=await Promise.race([api('lookup',{tracking_nos:codes}),new Promise((_,reject)=>{timeout=setTimeout(()=>reject(Error('读取超时，请重试 / 조회 시간 초과')),15000);})]);
+   if(!current())return;
+   if(result.total!==codes.length||!Array.isArray(result.items)||result.items.length!==codes.length||result.items.some((x,i)=>x.tracking_no!==codes[i]||!['available','reusable','conflict'].includes(x.claim_status))||result.received!==result.items.filter(x=>x.receipt_id).length)throw Error('到仓记录响应不完整，请重试 / 도착 기록을 다시 확인하세요');
+   preview.innerHTML=progressHtml(result,true)+'<p class="courier-preview-note">按原始扫描记录显示；保存时重新核实到仓与计划关联。卸货、理货和作业审批仍按实际流程完成。 / 원본 스캔 기록 기준이며 저장 시 다시 확인합니다. 하차·적치·작업 승인은 기존 절차대로 진행합니다.</p>';
+  }catch(e){if(current()){preview.innerHTML='<p class="courier-feedback courier-error" role="status"></p><button type="button" class="btn btn-outline" data-arrival-retry>重新查询 / 다시 조회</button>';preview.querySelector('[role=status]').textContent='到仓记录读取失败，尚未确认 / 도착 기록 확인 실패\n'+e.message;preview.querySelector('[data-arrival-retry]').onclick=()=>schedulePreview(0);}}
+  finally{clearTimeout(timeout);if(current())preview.removeAttribute('aria-busy');}
+ };
+ function schedulePreview(delay=250){
+  resetPreview();if(!visible())return;
+  const values=entered();if(!values.length||!values.some(x=>x.trim()))return;
+  let codes;try{if(values.length>1)throw Error('请把快递单号填写在同一行 / 한 행에 입력하세요');codes=rules.trackingNumbers(values[0]);}catch(e){preview.hidden=false;preview.innerHTML='<p class="courier-feedback courier-error" role="status"></p>';preview.firstElementChild.textContent=e.message;return;}
+  preview.hidden=false;preview.setAttribute('aria-busy','true');preview.innerHTML='<p class="courier-feedback" role="status">正在核实实际到仓记录… / 실제 도착 기록 확인 중…</p>';
+  const signature=JSON.stringify(values),token=previewSeq;previewTimer=setTimeout(()=>lookup(codes,signature,token),delay);
+ }
  const enhance=tr=>{const select=tr.querySelector('.ibc-line-type');if(!select||select.dataset.courier)return;select.dataset.courier='1';select.add(new Option('快递 / 택배','courier'));
  const wrap=document.createElement('label');wrap.className='courier-plan-numbers';wrap.hidden=true;wrap.innerHTML='快递单号 / 송장번호<textarea rows="3" maxlength="6000" placeholder="每行一个单号 / 한 줄에 한 번호"></textarea><small>数量按不同单号自动计算 / 송장별 수량 자동 계산</small>';tr.querySelector('td').append(wrap);
- const qty=tr.querySelector('.ibc-line-qty');select.addEventListener('change',()=>{const yes=select.value==='courier';wrap.hidden=!yes;qty.readOnly=yes;if(yes){qty.value='0';wrap.querySelector('textarea').focus();}});wrap.querySelector('textarea').oninput=()=>{try{qty.value=rules.trackingNumbers(wrap.querySelector('textarea').value).length;}catch{qty.value='0';}};
+ const qty=tr.querySelector('.ibc-line-qty');select.addEventListener('change',()=>{const yes=select.value==='courier';wrap.hidden=!yes;qty.readOnly=yes;if(yes){try{qty.value=rules.trackingNumbers(wrap.querySelector('textarea').value).length;}catch{qty.value='0';}wrap.querySelector('textarea').focus();}schedulePreview();});wrap.querySelector('textarea').oninput=()=>{try{qty.value=rules.trackingNumbers(wrap.querySelector('textarea').value).length;}catch{qty.value='0';}schedulePreview();};
  };
  const add=window.addIbcLine;window.addIbcLine=function(...args){add(...args);document.querySelectorAll('#ibcLinesBody tr').forEach(enhance);};document.querySelectorAll('#ibcLinesBody tr').forEach(enhance);
+ new MutationObserver(()=>schedulePreview()).observe(document.getElementById('ibcLinesBody'),{childList:true});
+ const view=window.goView;window.goView=function(name,...args){resetPreview();const result=view(name,...args);if(name==='inbound_create')schedulePreview();return result;};
  const read=window.getIbcLines;window.getIbcLines=function(){const old=read().filter(x=>x.unit_type!=='courier');let count=0;for(const tr of document.querySelectorAll('#ibcLinesBody tr'))if(tr.querySelector('select').value==='courier'){count++;const codes=rules.trackingNumbers(tr.querySelector('textarea').value);if(!codes.length)throw Error('选择快递后请填写快递单号 / 송장번호를 입력하세요');old.push({unit_type:'courier',planned_qty:codes.length,tracking_nos:codes,remark:tr.querySelector('.ibc-line-remark').value.trim()});}if(count>1)throw Error('请把快递单号填写在同一行 / 한 행에 입력하세요');return old;};
  const submit=window.submitInbound;window.submitInbound=async function(...args){try{getIbcLines();return await submit(...args);}catch(e){alert(e.message);}};
  const unit=window.unitTypeLabel;window.unitTypeLabel=value=>value==='courier'?'快递 / 택배':unit(value);
