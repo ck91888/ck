@@ -165,13 +165,24 @@ export async function accessAdminAction(b,env){
  ]);}catch{return denied('权限已变化，请刷新后重试',409);}
  return response({ok:true,version:next});
 }
+// Original issue files and handling photos share the issue's department scope.
+export async function issueAttachmentAllowed(env,u,type,id){
+ if(!u||u.scope==='kiosk')return false;
+ let issue;
+ if(type==='issue_handle_run')issue=await q(env,'SELECT t.biz_class FROM v2_issue_handle_runs r JOIN v2_issue_tickets t ON t.id=r.issue_id WHERE r.id=?',id).first();
+ else {
+  issue=await q(env,'SELECT biz_class FROM v2_issue_tickets WHERE id=?',id).first();
+  // Historical clients sometimes attached originals to the handling job ID.
+  if(!issue)issue=await q(env,'SELECT t.biz_class FROM v2_issue_handle_runs r JOIN v2_issue_tickets t ON t.id=r.issue_id WHERE r.job_id=?',id).first();
+ }
+ return !!issue&&(u.scope==='office'||(u.departments||[]).includes(issue.biz_class==='return'?'direct_ship':issue.biz_class));
+}
 export async function accessFileAllowed(request,env,key){
  const u=await accessUser(request,env);if(!u||u.scope==='kiosk')return false;
- if(u.scope==='office')return true;
  const a=await q(env,'SELECT related_doc_type,related_doc_id FROM v2_attachments WHERE file_key=?',key).first();
- if(a?.related_doc_type==='issue_handle_run'){
-  const issue=await q(env,'SELECT t.biz_class FROM v2_issue_handle_runs r JOIN v2_issue_tickets t ON t.id=r.issue_id WHERE r.id=?',a.related_doc_id).first();
-  return !!issue&&(u.departments||[]).includes(issue.biz_class==='return'?'direct_ship':issue.biz_class);
- }
- return !!a&&['inbound_plan','outbound_order','field_feedback','ops_job','issue_ticket','sop_task','sop_need'].includes(a.related_doc_type);
+ // Draft blobs are never downloadable, including by another shared office session.
+ if(key.startsWith('issue-drafts/')&&!a)return false;
+ if(a&&['issue_ticket','issue','issue_handle','issue_handle_run'].includes(a.related_doc_type))return issueAttachmentAllowed(env,u,a.related_doc_type,a.related_doc_id);
+ if(u.scope==='office')return true;
+ return !!a&&['inbound_plan','outbound_order','field_feedback','ops_job','sop_task','sop_need'].includes(a.related_doc_type);
 }

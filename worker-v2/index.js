@@ -1,3 +1,4 @@
+import {uploadIssueDraft,cancelIssueDraft,removeIssueDraftFile,createIssueWithAttachments} from './issue-create.js';
 import {uploadCargoDraft} from './cargo-create.js';
 import {restingDispatch} from './dispatch-access.js';
 import {pauseNative} from './native-lifecycle.js';
@@ -12,7 +13,7 @@ import {referenceWriteBatch,ensureReferenceHistory} from './inbound-reference-hi
 import {ensureInboundDocuments,inboundDocumentStates,inboundDocumentStateRead,documentStatesFromRows,confirmInboundIssue} from './inbound-documents.js';
 import {adoptLegacyLoad} from './legacy-load.js';
 import {uploadBatchMaterial} from './batch-work-materials.js';
-import {accessEnabled,accessGuard,accessAdminAction,accessFileAllowed} from './access-control.js';
+import {accessEnabled,accessGuard,accessAdminAction,accessFileAllowed,issueAttachmentAllowed} from './access-control.js';
 import {officeOperationContext,confirmOfficeOperator,officeOperationGuard,planAuditStatements,planOperationAudit} from './office-operator.js';
 import {uploadUnloadPhoto,unloadPhotos,inboundAttachmentRead} from './unload-photos.js';
 import {handleFeedbackLink,feedbackLinkDetail,feedbackLinkRead,feedbackLinkActor,feedbackSource,reconcileFeedbackLink} from './feedback-link.js';
@@ -2216,6 +2217,10 @@ route("v2_dashboard_summary", async (body, env) => {
 // =====================================================
 route("v2_issue_create", async (body, env) => {
   if (!isAuth(body, env)) return err("unauthorized", 401);
+  if (body.issue_attachments) {
+    try { return json(await createIssueWithAttachments(body,env)); }
+    catch(e) { return json({ok:false,error:e.message},409); }
+  }
   return withIdem(env, body, "v2_issue_create", async () => {
     const desc = String(body.issue_description || "").trim();
     if (!desc) return { ok: false, error: "issue_description is required" };
@@ -2238,6 +2243,15 @@ route("v2_issue_create", async (body, env) => {
     ).run();
     return { ok: true, id };
   });
+});
+
+route("v2_issue_draft_remove", async (body,env)=>{
+  if(!isAuth(body,env))return err("unauthorized",401);
+  try{return json(await removeIssueDraftFile(body,env));}catch(e){return json({ok:false,error:e.message},409);}
+});
+route("v2_issue_draft_cancel", async (body,env)=>{
+  if(!isAuth(body,env))return err("unauthorized",401);
+  try{return json(await cancelIssueDraft(body,env));}catch(e){return json({ok:false,error:e.message},409);}
 });
 
 route("v2_issue_list", async (body, env) => {
@@ -2298,6 +2312,7 @@ route("v2_issue_list", async (body, env) => {
 
 route("v2_issue_detail", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  if(accessEnabled(env)&&!await issueAttachmentAllowed(env,env.SOP_REQUEST_USER,"issue_ticket",String(body.id||"")))return err("无此问题权限 / 문제 접근 권한이 없습니다",403);
   const id = String(body.id || "").trim();
   if (!id) return err("missing id");
   const row = await env.DB.prepare("SELECT * FROM v2_issue_tickets WHERE id=?").bind(id).first();
@@ -7195,6 +7210,7 @@ route("v2_attachment_list", async (body, env) => {
   const doc_type = String(body.related_doc_type || "").trim();
   const doc_id = String(body.related_doc_id || "").trim();
   if (!doc_type || !doc_id) return err("missing related_doc_type or related_doc_id");
+  if(accessEnabled(env)&&["issue_ticket","issue","issue_handle","issue_handle_run"].includes(doc_type)&&!await issueAttachmentAllowed(env,env.SOP_REQUEST_USER,doc_type,doc_id))return err("无此附件权限",403);
   if(workChainEnabled(env)&&doc_type==='outbound_order'){const base=(await env.DB.prepare('SELECT * FROM v2_attachments WHERE related_doc_type=? AND related_doc_id=?').bind(doc_type,doc_id).all()).results||[];const files=await workMaterials(env,await chainLinked(env,doc_id),doc_id);const items=new Map(base.map(f=>[f.id,f]));for(const f of files)items.set(f.id,{...f,attachment_category:'outbound_material',canonical_material:true});return json({ok:true,items:[...items.values()]});}
   const rs = await env.DB.prepare(
     "SELECT a.* FROM v2_attachments a WHERE a.related_doc_type=? AND a.related_doc_id=?"+batchVisibleSql(env)+" ORDER BY a.created_at DESC"
@@ -12905,6 +12921,7 @@ export default {
       }
     }
     const accessBlock=accessGuard(body,env,request);if(accessBlock)return accessBlock;
+    if(accessEnabled(env)&&action==='v2_attachment_get'&&!await accessFileAllowed(request,env,String(body.file_key||'')))return err('无此附件权限',403);
     await officeOperationContext(request,env);
     const operatorResponse=await confirmOfficeOperator(body,env,request);if(operatorResponse)return operatorResponse;
     const operationBlock=officeOperationGuard(body,env,request);if(operationBlock)return operationBlock;
@@ -13022,6 +13039,9 @@ async function handleMultipartUpload(formData, env) {
       && v003IsPublicField(fieldBody);
     if (!isOpsAuth(fieldBody, env) && !publicArrival) return err("unauthorized", 401);
     if (!related_doc_type || !related_doc_id) return err("missing attachment target");
+    if(related_doc_type==='issue_draft')return json(await uploadIssueDraft(formData,env));
+    if(attachment_category==='issue_original')return err('原始附件须从新建问题的附件草稿提交 / 새 문제의 첨부 초안을 제출하세요',403);
+    if(accessEnabled(env)&&['issue_ticket','issue','issue_handle'].includes(related_doc_type)&&!await issueAttachmentAllowed(env,env.SOP_REQUEST_USER,related_doc_type,related_doc_id))return err('无此问题附件权限',403);
     if(related_doc_type==='cargo_draft')return json(await uploadCargoDraft(formData,env));
     if(attachment_category==='unload_photo')return json(await uploadUnloadPhoto(formData,env));
     if(workChainEnabled(env)){

@@ -3090,7 +3090,7 @@ async function loadIssueDetail() {
       if (att.content_type && att.content_type.startsWith("image/")) {
         html += '<img class="photo-thumb" src="' + esc(fileUrl(att.file_key)) + '" onclick="showLightbox(\'' + esc(fileUrl(att.file_key)) + '\')">';
       } else {
-        html += '<div style="font-size:12px;margin:4px 0;">' + esc(att.file_name) + '</div>';
+        html += '<a class="issue-document-download" href="' + esc(fileUrl(att.file_key)) + '" download="' + esc(att.file_name || '附件') + '" target="_blank" rel="noopener">📎 ' + esc(att.file_name || '附件') + '</a>';
       }
     });
     html += '</div></div>';

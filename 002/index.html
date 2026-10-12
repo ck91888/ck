@@ -124,7 +124,23 @@
         <label>问题描述 / 문제 설명 <span style="color:#d32f2f;">*</span></label>
         <textarea id="ic-desc" rows="5" required placeholder="请直接描述问题（如：单号xxx少3箱 / 标签错误 / 客户反馈未发出）&#10;문제를 직접 입력하세요 (예: 주문번호 xxx 3박스 부족 / 라벨 오류 / 고객 미출고 문의)"></textarea>
       </div>
-      <button class="btn btn-primary btn-full mt-10" onclick="submitIssue(this)">提交</button>
+      <section id="ic-attachments" class="ic-attachments" aria-labelledby="ic-attachments-title" hidden>
+        <div class="ic-attachment-heading"><h3 id="ic-attachments-title" data-i18n="ic_attachments">附件</h3><span id="ic-file-count"></span></div>
+        <p class="ic-file-help" data-i18n="ic_limits">最多20个附件，每个20MB。支持JPG、PNG、WebP、PDF、Excel和CSV。</p>
+        <div class="ic-file-actions">
+          <button type="button" class="btn btn-outline" onclick="document.getElementById('ic-photos').click()" data-i18n="ic_photos">选择照片</button>
+          <button type="button" class="btn btn-outline" onclick="document.getElementById('ic-camera').click()" data-i18n="ic_camera">拍照</button>
+          <button type="button" class="btn btn-outline" onclick="document.getElementById('ic-documents').click()" data-i18n="ic_documents">选择文档</button>
+        </div>
+        <input id="ic-photos" type="file" accept=".jpg,.jpeg,.png,.webp" multiple hidden onchange="pickIssueFiles(this)">
+        <input id="ic-camera" type="file" accept="image/jpeg,image/png,image/webp" capture="environment" hidden onchange="pickIssueFiles(this)">
+        <input id="ic-documents" type="file" accept=".pdf,.xls,.xlsx,.csv" multiple hidden onchange="pickIssueFiles(this)">
+        <div id="ic-file-list" class="ic-file-list"></div>
+        <p class="ic-file-help" data-i18n="ic_upload_hint">提交时上传；成功后与问题一起保存，办公室和对应现场可查看。</p>
+        <p id="ic-file-error" class="ic-file-error" role="alert"></p>
+        <p id="ic-submit-status" class="ic-submit-status" role="status" aria-live="polite"></p>
+      </section>
+      <button id="ic-submit" class="btn btn-primary btn-full mt-10" onclick="submitIssue(this)">提交</button>
     </div>
   </div>
 
