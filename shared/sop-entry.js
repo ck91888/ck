@@ -175,15 +175,24 @@
    showPage('home');
    if(params.get('task')||params.get('need')){goPage('bulk_op',{task:params.get('task')||params.get('need')});}
   }else if(app==='shuju'){
-   localStorage.removeItem(SHUJU_KEY_STORAGE);showApp();
+   localStorage.removeItem(SHUJU_KEY_STORAGE);
+   const legacyDashboard=u.role==='manager';
+   if(legacyDashboard)showApp();
+   else {
+    // Attendance readers must not boot the manager-only legacy dashboard:
+    // its unauthorized background request would lock their valid session.
+    document.getElementById('loginWrap').style.display='none';document.getElementById('appWrap').style.display='';startClock();
+    document.querySelectorAll('.tab-content').forEach(x=>x.style.display='none');
+    document.querySelectorAll('.tab-bar button').forEach(x=>x.hidden=true);
+   }
    const b=button('派工质量与待办',()=>{document.querySelectorAll('.tab-content').forEach(x=>x.style.display='none');window._currentTab='sop';host.style.display='';mount(host,{tab:'dashboard',context:'dashboard'});});
    const bar=document.querySelector('.tab-bar');bar.append(b);const host=document.createElement('div');host.id='ck-dashboard';host.style.display='none';document.getElementById('appWrap').append(host);
    const people=document.createElement('div');people.id='ck-labor-dashboard';people.hidden=true;document.getElementById('appWrap').append(people);const peopleButton=button('日当人力 / 일용직',async()=>{document.querySelectorAll('.tab-content').forEach(x=>x.style.display='none');host.style.display='none';people.hidden=false;window._currentTab='labor';bar.querySelectorAll('button').forEach(x=>x.classList.remove('active'));peopleButton.classList.add('active');await CKLabor(people);});bar.prepend(peopleButton);
    const employees=document.createElement('div');employees.hidden=true;document.getElementById('appWrap').append(employees);const employeeButton=button('职员出勤 / 직원',async()=>{document.querySelectorAll('.tab-content').forEach(x=>x.style.display='none');host.style.display='none';people.hidden=true;employees.hidden=false;window._currentTab='employees';bar.querySelectorAll('button').forEach(x=>x.classList.remove('active'));employeeButton.classList.add('active');await CKEmployee.dashboard(employees);});bar.insertBefore(employeeButton,peopleButton.nextSibling);peopleButton.addEventListener('click',()=>employees.hidden=true);b.addEventListener('click',()=>employees.hidden=true);
-   const original=window.switchTab;window.switchTab=function(...args){host.style.display='none';people.hidden=true;employees.hidden=true;return original(...args);};
-   const realtime=window.loadRealtime;window.loadRealtime=async function(...args){const result=await realtime(...args);try{const r=await CKAttendance.api('summary');const a=document.getElementById('statActiveWorkers'),t=document.getElementById('statTodayLogins');a.textContent=r.items.filter(x=>!x.record.outAt).length;t.textContent=r.items.length;a.parentElement.querySelector('.stat-label').textContent='已签到未签退日当';a.parentElement.querySelector('.stat-sub').textContent='包含作业、休息与尚未分配人员';t.parentElement.querySelector('.stat-label').textContent='今日签到日当';t.parentElement.querySelector('.stat-sub').textContent='来自签到点的去重出勤人数';}catch(e){document.getElementById('statTodayLogins').textContent='读取失败';}return result;};await loadRealtime();
+   const original=window.switchTab;window.switchTab=function(...args){if(!legacyDashboard)return;host.style.display='none';people.hidden=true;employees.hidden=true;return original(...args);};
+   const realtime=window.loadRealtime;window.loadRealtime=async function(...args){if(!legacyDashboard)return;const result=await realtime(...args);try{const r=await CKAttendance.api('summary');const a=document.getElementById('statActiveWorkers'),t=document.getElementById('statTodayLogins');a.textContent=r.items.filter(x=>!x.record.outAt).length;t.textContent=r.items.length;a.parentElement.querySelector('.stat-label').textContent='已签到未签退日当';a.parentElement.querySelector('.stat-sub').textContent='包含作业、休息与尚未分配人员';t.parentElement.querySelector('.stat-label').textContent='今日签到日当';t.parentElement.querySelector('.stat-sub').textContent='来自签到点的去重出勤人数';}catch(e){document.getElementById('statTodayLogins').textContent='读取失败';}return result;};if(legacyDashboard)await loadRealtime();
    b.addEventListener('click',()=>{people.hidden=true;bar.querySelectorAll('button').forEach(x=>x.classList.remove('active'));b.classList.add('active');});
-   if(params.get('tab')==='labor')peopleButton.click();if(params.get('tab')==='employees')employeeButton.click();
+   if(params.get('tab')==='labor')peopleButton.click();else if(params.get('tab')==='employees'||!legacyDashboard)employeeButton.click();
   }else if(app==='003'){
    S003.key='';S003.role='admin';S003.operatorId=u.id;S003.operatorName=u.name;bootApp();
   }else if(app==='attendance'){

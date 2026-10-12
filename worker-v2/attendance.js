@@ -9,6 +9,7 @@ import {sourceActiveWorkers,personHasPendingReturn} from './crew-borrow.js';
 import {ensurePermanentBadges,permanentPeopleSelect,updatePermanentBadge} from './permanent-badges.js';
 import {missingAttendanceMessage} from './attendance-dispatch-identity.js';
 import {attendanceOpenSegment} from './attendance-segments.js';
+import {employeeWorkdayAccess,employeeWorkdays} from './employee-workday.js';
 import {canonicalDailyBadge,isSystemDailyBadge,isAttendanceBadge,sameWorkerBadge} from '../shared/badge-identity.js';
 import {workerBadgeMatch,canonicalWorkerSQL,resolveDailyBadge,dailyIdentityMap,ensureDailyBadgeIdentity} from './daily-badge-identity.js';
 export const ATTENDANCE_SCHEMA=[
@@ -76,21 +77,25 @@ async function closePerson(env,r,t,reason){
  sql.push(q(env,"UPDATE v2_pick_worker_docs SET status='completed',finished_at=?,minutes_worked=COALESCE((SELECT minutes_worked FROM v2_ops_job_workers WHERE id=segment_id),minutes_worked) WHERE segment_id IN (SELECT value FROM json_each(?)) AND status='working'",t,JSON.stringify(open.map(s=>s.id))));
  const ids=[...new Set(open.map(s=>s.job_id))];return {sql,open,valid,ids};
 }
-async function overview(env,date,t,scope='daily'){
+async function overview(env,date,t,scope='daily',detailPersonId=''){
+ if(scope==='employee')employeeWorkdayAccess(env);
  const filter=scope==='employee'?" AND d.worker_id LIKE 'EMP-%'":scope==='all'?'':" AND d.worker_id NOT LIKE 'EMP-%'";
  const start=new Date(date+'T00:00:00+09:00').toISOString(),end=new Date(Date.parse(start)+86400000).toISOString();
  const days=await rows(env,attendanceDaySelect+' WHERE d.day=?'+filter+' ORDER BY d.signed_in,d.name,d.id',date);
- const segments=await jobNumbers(env,await rows(env,`SELECT w.*,j.biz_class,j.job_type,j.status AS job_status,j.display_no,s.kind AS assignment_kind,s.department AS assigned_department,s.state AS assignment_state FROM v2_ops_job_workers w JOIN v2_ops_jobs j ON j.id=w.job_id LEFT JOIN sop_records s ON s.id=j.id AND s.kind IN ('task','dispatch') WHERE julianday(w.joined_at)<julianday(?) AND (w.left_at='' OR julianday(w.left_at)>julianday(?))`,end,start),'job_id');
+ const employeeTables=scope==='employee'?new Set((await rows(env,"SELECT name FROM sqlite_master WHERE type='table'")).map(x=>x.name)):null,assignmentAvailable=!employeeTables||employeeTables.has('sop_records');
+ let segments=await rows(env,`SELECT w.*,j.biz_class,j.job_type,j.status AS job_status,j.display_no,${assignmentAvailable?"s.kind AS assignment_kind,s.department AS assigned_department,s.state AS assignment_state":"'' AS assignment_kind,'' AS assigned_department,'{}' AS assignment_state"} FROM v2_ops_job_workers w JOIN v2_ops_jobs j ON j.id=w.job_id ${assignmentAvailable?"LEFT JOIN sop_records s ON s.id=j.id AND s.kind IN ('task','dispatch')":''} WHERE julianday(w.joined_at)<julianday(?) AND (w.left_at='' OR julianday(w.left_at)>julianday(?))`,end,start);
+ if(!employeeTables||assignmentAvailable&&employeeTables.has('sop_document_numbers'))segments=await jobNumbers(env,segments,'job_id');
  for(const s of segments){let assignment={};try{assignment=JSON.parse(s.assignment_state||'{}');}catch{}s.labor_department=assignment.labor_department||'';}
  const breaks=await rows(env,'SELECT b.* FROM ck_attendance_breaks b JOIN ck_attendance_days d ON d.id=b.attendance_id WHERE d.day=?',date);
  const history=await rows(env,'SELECT e.* FROM ck_attendance_events e JOIN ck_attendance_days d ON d.id=e.record_id WHERE d.day=? ORDER BY e.version',date);
- const output=[],deletedItems=[],blockers=await attendanceVoidBlockers(env,date),identities=await dailyIdentityMap(env,days);
+ const validSegments=new Map(),output=[],deletedItems=[],blockers=await attendanceVoidBlockers(env,date),identities=await dailyIdentityMap(env,days);
  for(const d of days){
   const record=publicDay(d),br=breaks.filter(x=>x.attendance_id===d.id);record.breaks=br.map(x=>({id:x.id,start:x.started_at,end:x.ended_at}));
   const identity=identities.get(d.id),own=(identity.conflict?[]:segments.filter(x=>sameWorkerBadge(x.worker_id,d.worker_id))).map(x=>({id:x.id,jobId:x.job_id,jobNo:x.display_business_no||x.job_label,...jobDisplayMetadata(x),jobType:x.job_type,jobStatus:x.job_status,badgeId:canonicalDailyBadge(x.worker_id),sourceWorkerId:x.worker_id,department:laborDepartment(x),start:x.joined_at,end:x.left_at,reason:x.leave_reason}));
   const identityConflict=identity.conflict||new Set(own.filter(s=>!s.end).map(s=>s.sourceWorkerId)).size>1;
   const events=history.filter(e=>e.record_id===d.id),decisions=new Map(own.filter(s=>!s.end).map(s=>[s.id,attendanceOpenSegment(record,s,events,t)]));
   const verifiedWindow=own.filter(s=>s.end||decisions.get(s.id)?.eligible);
+  validSegments.set(d.person_id,identityConflict?[]:verifiedWindow);
   const totals=attendanceReport(record,verifiedWindow,t,date);
   if(identityConflict){totals.bulk=totals.direct_ship=totals.import=totals.other=totals.unassigned=0;totals.conflict=Math.max(0,totals.presence-totals.rest);totals.flags.push('工牌大小写身份或活动记录冲突，工时待核实 / 명찰·작업 기록 충돌');}
   if(own.some(s=>s.department==='other'))totals.flags.push('有作业尚未确认用工部门');
@@ -103,12 +108,14 @@ async function overview(env,date,t,scope='daily'){
  }
  const stale=await rows(env,"SELECT d.id,d.worker_id,d.name,d.agency,d.day,d.signed_in FROM ck_attendance_days d WHERE d.day<? AND d.signed_out='' AND "+activeAttendanceSQL('d')+filter+" ORDER BY d.day DESC LIMIT 100",date);
  const identityWarnings=segments.filter(w=>isAttendanceBadge(w.worker_id)&&(scope!=='employee'||/^EMP-/i.test(w.worker_id))&&(scope==='employee'||scope==='all'||!/^EMP-/i.test(w.worker_id))).flatMap(w=>{const candidates=days.filter(d=>sameWorkerBadge(d.worker_id,w.worker_id));const d=candidates[0],reason=candidates.length!==1||!d?'作业工牌没有唯一的当天签到，待负责人核实':identities.get(d.id)?.conflict?'工牌身份记录冲突，待负责人核实':d.voided_at?'作业关联已删除签到，待负责人核实':'';return reason?[{worker_id:w.worker_id,worker_name:w.worker_name,job_id:w.job_id,job_label:w.display_business_no||w.job_label||w.display_no||w.job_id,reason}]:[];});
+ if(scope==='employee'){const details=await employeeWorkdays(env,{date,asOf:t,items:detailPersonId?output.filter(item=>item.record.personId===detailPersonId):output,validSegments,detailPersonId});if(detailPersonId){const detail=details.get(detailPersonId);if(!detail)fail('没有该职员当天的签到记录 / 해당 직원의 당일 출근 기록이 없습니다');return detail;}}
  return {ok:true,date,asOf:t,agencies,identityWarnings,items:output,deletedItems:env.SOP_REQUEST_USER?.role==='manager'?deletedItems:[],stale,publicTest:!!env.SOP_REQUEST_USER?.public_test};
 }
 export async function handleAttendance(b,env){
  if(!attendanceEnabled(env))return {ok:false,error:'签到尚未启用'};
  await ensureAttendance(env);const u=access(env),t=new Date().toISOString(),day=kstDay(t),action=b.action;
  if(action==='sop_attendance_config')return {ok:true,day,asOf:t,agencies,employeeDepartments,user:{id:u.id,name:u.name,role:u.role},publicTest:!!u.public_test};
+ if(action==='sop_attendance_employee_work_detail'){employeeWorkdayAccess(env);const personId=typeof b.person_id==='string'?b.person_id:'';if(!personId||!await q(env,"SELECT p.id FROM ck_attendance_people p JOIN ck_employee_profiles e ON e.person_id=p.id WHERE p.id=? AND p.badge_id='EMP-'||e.employee_no AND p.kind='permanent'",personId).first())fail('职员身份不存在 / 직원 정보가 없습니다');return overview(env,dateOf(b.date||day),t,'employee',personId);}
  if(action==='sop_attendance_summary'){access(env,['manager','dispatcher','reviewer','viewer']);return overview(env,dateOf(b.date||day),t,b.scope);}
  if(['sop_attendance_employee_people','sop_attendance_employee_search','sop_attendance_employee_import_preview'].includes(action))return employeeAction(b,env,{access,fail,nameOf,text,commit,u,t});
  if(action==='sop_attendance_lookup'){
