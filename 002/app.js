@@ -103,7 +103,7 @@ async function api(params) {
       body: JSON.stringify(params)
     });
     var result = await res.json();
-    if (intentAction && result && result.ok) delete _createSubmissionIntents[params.action];
+    if (intentAction && result && result.ok && _createSubmissionIntents[params.action] === saved) delete _createSubmissionIntents[params.action];
     return result;
   } catch(e) {
     // TypeError: Failed to fetch / NetworkError — 不是业务错误，是网络/域名问题
@@ -2657,6 +2657,10 @@ async function submitInbound(btnEl) {
     }
   }
 
+  var createSession;
+  try { createSession = window.CKInboundCreate ? CKInboundCreate.capture() : null; }
+  catch(error) { alert(error.message); return; }
+  var currentCreate = function() { return !createSession || CKInboundCreate.isCurrent(createSession); };
   withActionLock('submitInbound', btnEl || null, '提交中.../저장중...', async function() {
     var date = document.getElementById("ibc-date").value || kstToday();
     var biz_classes = bizArr;
@@ -2666,14 +2670,16 @@ async function submitInbound(btnEl) {
     var purpose = document.getElementById("ibc-purpose").value.trim();
     var remark = document.getElementById("ibc-remark").value.trim();
     var lines = linesPre;
+    var matFiles = _ibCreateMaterials.slice(0);
     // 货物摘要为空时，自动用明细生成
     if (!cargo) {
       cargo = lines.map(function(ln) { return unitTypeLabel(ln.unit_type) + ' ' + ln.planned_qty; }).join(' / ');
     }
 
-    try{if(window.CKInboundWorks?.prepare)workRequests=await CKInboundWorks.prepare(workRequests);}catch(error){alert(error.message||'资料上传失败，请重试');return;}
+    try{if(window.CKInboundWorks?.prepare)workRequests=await CKInboundWorks.prepare(workRequests);}catch(error){if(currentCreate())alert(error.message||'资料上传失败，请重试');return;}
+    if(!currentCreate())return;
     // 第一步：创建入库计划（不再用 auto_create_outbound 单条）
-    var ibRes = await api({
+    var createPayload = {
       action: "v2_inbound_plan_create",
       plan_date: date,
       work_requests: workRequests,
@@ -2686,18 +2692,29 @@ async function submitInbound(btnEl) {
       remark: remark,
       lines: lines,
       created_by: getUser()
-    });
+    };
+    if(createSession){
+      Object.assign(createPayload,createSession.references||{});
+      if(createSession.feedback_context)createPayload.feedback_context=createSession.feedback_context;
+    }
+    var ibRes = await api(createPayload);
 
     if (!ibRes || !ibRes.ok) {
-      alert("失败 / 실패: " + (ibRes ? (ibRes.message || ibRes.error) : "unknown"));
+      if(currentCreate())alert("失败 / 실패: " + (ibRes ? (ibRes.message || ibRes.error) : "unknown"));
       return;
     }
     var planId = ibRes.id;
     var planDispNo = ibRes.display_no || planId;
+    if(ibRes.already_linked){
+      if(currentCreate()){
+        alert('此卸货单已关联入库计划 / 이미 연결된 입고계획: '+planDispNo);
+        if(createSession)CKInboundCreate.complete(createSession,planId);else openInboundDetail(planId);
+      }
+      return;
+    }
 
     // 第一步.5：上传入库明细资料（计划创建成功后再上传，related_doc_id=planId）
     var matFailed = [];
-    var matFiles = _ibCreateMaterials.slice(0);
     if (matFiles.length > 0 && planId) {
       for (var mi = 0; mi < matFiles.length; mi++) {
         try {
@@ -2744,7 +2761,6 @@ async function submitInbound(btnEl) {
 
     var msg = "已创建入库计划 / 입고 계획 생성: " + planDispNo;
     if(ibRes.needs&&ibRes.needs.length)msg+="\n同步作业计划："+ibRes.needs.length+"条";
-    if(window.CKInboundWorks)CKInboundWorks.clear();
     if (matFiles.length > 0) {
       msg += "\n入库明细 / 입고 명세: 上传 " + (matFiles.length - matFailed.length) + "/" + matFiles.length;
     }
@@ -2753,9 +2769,16 @@ async function submitInbound(btnEl) {
     }
     if (createdObs.length > 0) msg += "\n关联出库 / 연결된 출고 (" + createdObs.length + "): " + createdObs.join(", ");
     if (failedObs.length > 0) msg += "\n出库创建失败 / 출고 생성 실패:\n" + failedObs.join("\n");
+    if(!currentCreate())return;
     alert(msg);
+    if(createSession){CKInboundCreate.complete(createSession,planId);return;}
+    resetInboundCreateForm();
+    goTab("inbound");
+  });
+}
 
-    // 重置表单
+// One reset for ordinary creation and feedback-origin creation. Source state is owned by CKInboundCreate.
+function resetInboundCreateForm() {
     document.getElementById("ibc-customer").value = "";
     document.getElementById("ibc-cargo").value = "";
     document.getElementById("ibc-arrival").value = "";
@@ -2765,6 +2788,8 @@ async function submitInbound(btnEl) {
     var ibcMatEl = document.getElementById("ibc-materials");
     if (ibcMatEl) ibcMatEl.value = "";
     clearIbcMaterials();
+    if(window.CKInboundWorks)CKInboundWorks.clear();
+    var linkOb = document.getElementById("ibc-link-ob");
     if (linkOb) linkOb.checked = false;
     var panel = document.getElementById("ibcLinkObPanel");
     if (panel) panel.style.display = "none";
@@ -2772,9 +2797,8 @@ async function submitInbound(btnEl) {
     if (rowsHolder) rowsHolder.innerHTML = "";
     var chks = document.querySelectorAll('#ibc-biz-classes .ibc-biz-chk');
     for (var ci = 0; ci < chks.length; ci++) chks[ci].checked = false;
+    document.querySelectorAll('#view-inbound_create .ck-external-field').forEach(function(field){field.querySelectorAll('textarea').forEach(function(input){input.value='';});field.hidden=true;});
     ensureFirstIbcLine();
-    goTab("inbound");
-  });
 }
 
 // 确保入库创建表单始终存在至少一行明细
@@ -4268,6 +4292,7 @@ async function loadFeedbackList() {
   body.innerHTML = pagerHtml + html + pagerHtml;
 }
 
+var _feedbackDetailGeneration = 0;
 function openFeedbackDetail(id) {
   _currentFeedbackId = id;
   goView("feedback_detail");
@@ -4279,7 +4304,9 @@ async function loadFeedbackDetail() {
   if (!body || !_currentFeedbackId) return;
   body.innerHTML = '<div class="card muted">' + L("loading") + '</div>';
 
-  var res = await api({ action: "v2_feedback_detail", id: _currentFeedbackId });
+  var feedbackId = _currentFeedbackId, generation = ++_feedbackDetailGeneration;
+  var res = await api({ action: "v2_feedback_detail", id: feedbackId });
+  if(generation!==_feedbackDetailGeneration||feedbackId!==_currentFeedbackId||_currentView!=='feedback_detail')return;
   if (!res || !res.ok || !res.feedback) {
     body.innerHTML = '<div class="card muted">' + L("error") + '</div>';
     return;

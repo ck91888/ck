@@ -6,24 +6,59 @@ const qty=n=>Number(n||0).toLocaleString('zh-CN',{maximumFractionDigits:4});
 window.CKInstallFeedbackLink=function(app){
  if(app!=='002'||!window.CK_SOP_ROLLOUT?.staging)return;
  const processed=document.querySelector('#fbFilterStatus option[value="converted"]');if(processed)processed.textContent='已处理（关联／新建）';
+ const office=()=>['manager','service','reviewer'].includes(window.CKSession?.user?.role)&&window.CKSession?.scope!=='field';
+ const createView=document.getElementById('view-inbound_create'),customerInput=document.getElementById('ibc-customer'),customerPlaceholder=customerInput.placeholder;
+ let createGeneration=0,createSource=null,detailGeneration=0;
+ function clearSource(){createGeneration++;createSource=null;createView.querySelector('[data-feedback-create-source]')?.remove();customerInput.placeholder=customerPlaceholder;}
+ function newForm(){clearSource();window.resetInboundCreateForm();if(window._createSubmissionIntents)delete window._createSubmissionIntents.v2_inbound_plan_create;}
+ const currentCreate=snapshot=>snapshot.generation===createGeneration&&createView.style.display!=='none';
+ window.CKInboundCreate={
+  capture(){return {generation:createGeneration,references:window.CKInboundCreateReferences?.()||{},feedback_context:createSource?{feedback_id:createSource.feedback_id,feedback_version:createSource.feedback_version,job_version:createSource.job_version}:null};},
+  isCurrent:currentCreate,
+  complete(snapshot,id){if(!currentCreate(snapshot))return;const linked=!!snapshot.feedback_context;newForm();if(linked)openInboundDetail(id);else goTab('inbound');}
+ };
+ const previousView=window.goView;window.goView=function(name,...args){if(name==='inbound_create')newForm();else if(createView.style.display!=='none')clearSource();return previousView(name,...args);};
+ const cancelCreate=()=>{const id=createSource?.feedback_id;newForm();if(id)openFeedbackDetail(id);else goTab('inbound');};
+ createView.querySelector('.nav-back').onclick=cancelCreate;
+ async function createFromFeedback(fb,button,canApply,error){
+  if(button.disabled||!office())return;button.disabled=true;error.textContent='正在读取原卸货记录 / 원래 하차 기록 확인 중…';
+  try{
+   const r=await CKSession.request('sop_feedback_link_create_preview',{feedback_id:fb.id});if(!canApply())return;
+   if(r.existing_link){openInboundDetail(r.existing_link.plan_id);return;}
+   const source=r.source,units=['container_large','container_small','pallet','carton','cbm'];
+   if(!source||source.feedback_id!==fb.id||!source.feedback_version||!source.job_version||!Array.isArray(source.actual_totals)||!source.actual_totals.some(x=>Number(x.actual_qty)>0)||source.actual_totals.some(x=>!units.includes(x.unit_type)||!Number.isFinite(x.actual_qty)||x.actual_qty<0))throw Error('原卸货数量或单位需先核实 / 원래 수량·단위를 먼저 확인하세요');
+   goView('inbound_create');createSource=source;
+   const tbody=document.getElementById('ibcLinesBody');tbody.replaceChildren();
+   for(const line of source.actual_totals){addIbcLine();const row=tbody.lastElementChild;row.querySelector('.ibc-line-type').value=line.unit_type;row.querySelector('.ibc-line-qty').value=line.actual_qty;}
+   document.getElementById('ibc-cargo').value=source.cargo_summary||source.actual_totals.map(x=>label(x.unit_type)+' '+qty(x.actual_qty)).join(' / ');
+   document.getElementById('ibc-remark').value=[source.content,source.remark].filter((value,index,list)=>value&&list.indexOf(value)===index).join('\n');
+   customerInput.placeholder='请核实并填写客户 / 고객을 확인하고 입력하세요';
+   const banner=document.createElement('section');banner.className='ck-feedback-create-source';banner.dataset.feedbackCreateSource='';
+   banner.innerHTML='<div><strong>来自计划外卸货 / 현장 하차에서 생성</strong><b>'+esc(source.display_no||fb.display_no||fb.id)+'</b></div><p>原卸货实收 / 기존 실제 하차: '+esc(source.actual_totals.map(x=>label(x.unit_type)+' '+qty(x.actual_qty)).join(' · '))+'</p>'+(source.completed_at?'<p>原完成时间 / 기존 완료 시간: '+esc(window.fmtTime?fmtTime(source.completed_at):source.completed_at)+'</p>':'')+'<p>请核实客户并选择业务分类。原客户／唛头等文字保留在备注；原卸货人员、工时、实收和照片随保存关联。 / 고객·입고 유형을 확인하세요. 고객·마크 원문은 비고에 보존하며 기존 작업 기록과 사진을 연결합니다.</p><button type="button" class="btn btn-outline" data-feedback-create-cancel>取消建单，返回原卸货 / 취소·원래 하차로</button>';
+   banner.querySelector('button').onclick=cancelCreate;createView.querySelector('.card').prepend(banner);customerInput.focus();
+  }catch(e){if(canApply())error.textContent=e.message;}
+  finally{if(canApply())button.disabled=false;}
+ }
  let feedback=null,planData=null,feedbackItems=[];
- const apiOriginal=window.api;window.api=async function(body){const r=await apiOriginal(body);if(r?.ok&&body.action==='v2_feedback_detail')feedback=r;if(r?.ok&&body.action==='v2_inbound_plan_detail')planData=r;if(r?.ok&&body.action==='v2_feedback_list')feedbackItems=r.items||[];return r;};
+ const apiOriginal=window.api;window.api=async function(body){const r=await apiOriginal(body);if(r?.ok&&body.action==='v2_feedback_detail'&&body.id===window._currentFeedbackId)feedback=r;if(r?.ok&&body.action==='v2_inbound_plan_detail')planData=r;if(r?.ok&&body.action==='v2_feedback_list')feedbackItems=r.items||[];return r;};
  const listOriginal=window.loadFeedbackList;window.loadFeedbackList=async function(...args){await listOriginal(...args);const host=document.getElementById('feedbackListBody');if(!host)return;for(const row of host.querySelectorAll('.list-item')){const f=feedbackItems.find(f=>row.getAttribute('onclick')?.includes("'"+f.id+"'"));if(f?.linked_plan_no){row.querySelector('.st').textContent='已关联 / 연결 완료';const note=document.createElement('span');note.textContent=' · '+f.linked_plan_no;row.querySelector('.item-meta').append(note);}}};
- const detail=window.loadFeedbackDetail;window.loadFeedbackDetail=async function(...args){await detail(...args);const data=feedback,fb=data?.feedback,host=document.getElementById('feedbackDetailBody');if(!host||!fb||fb.id!==window._currentFeedbackId)return;
-  const link=data.existing_plan_link;
+ const detail=window.loadFeedbackDetail;window.loadFeedbackDetail=async function(...args){const detailToken=++detailGeneration;await detail(...args);const data=feedback,fb=data?.feedback,host=document.getElementById('feedbackDetailBody');if(detailToken!==detailGeneration||!host||!fb||fb.id!==window._currentFeedbackId||document.getElementById('view-feedback_detail').style.display==='none')return;
+  const conversion=document.getElementById('fb-conv-customer')?.closest('.card');conversion?.remove();
+  const link=data.existing_plan_link||(fb.inbound_plan_id?{plan_id:fb.inbound_plan_id,display_no:fb.inbound_plan_id}:null);
   if(link){
-   const panel=document.createElement('section');panel.className='card ck-feedback-link';panel.innerHTML='<strong>已关联已有入库计划 / 기존 입고계획 연결 완료</strong><p>'+esc(link.display_no)+' · '+esc(link.customer)+'</p><p class="muted">'+esc(link.linked_name)+' · '+esc(window.fmtTime?fmtTime(link.linked_at):link.linked_at)+'</p><button type="button" class="btn btn-primary">查看入库计划 / 입고계획 보기</button>';panel.querySelector('button').onclick=()=>openInboundDetail(link.plan_id);host.prepend(panel);
+   const panel=document.createElement('section');panel.className='card ck-feedback-link';panel.innerHTML='<strong>已关联入库计划 / 입고계획 연결 완료</strong><p>'+esc(link.display_no)+(link.customer?' · '+esc(link.customer):'')+'</p>'+(link.linked_at?'<p class="muted">'+esc(link.linked_name)+' · '+esc(window.fmtTime?fmtTime(link.linked_at):link.linked_at)+'</p>':'')+'<button type="button" class="btn btn-primary" data-feedback-create-open>查看入库计划 / 입고계획 보기</button>';panel.querySelector('button').onclick=()=>openInboundDetail(link.plan_id);host.prepend(panel);
    for(const b of host.querySelectorAll('.detail-field b'))if(b.textContent==='已转正入库计划:')b.textContent='已关联入库计划:';
    const status=host.querySelector('.st-converted');if(status)status.textContent='已关联 / 연결 완료';
    return;
   }
-  if(!['unplanned_unload','unload_no_doc'].includes(fb.feedback_type)||!['unloaded_pending_info','open'].includes(fb.status)||fb.inbound_plan_id)return;
-  // Existing plans are the first choice; creating a genuinely missing plan remains available.
-  const conversion=document.getElementById('fb-conv-customer')?.closest('.card');if(conversion){const fold=document.createElement('details');fold.className='ck-feedback-new';fold.innerHTML='<summary>确实没有计划？补充信息并新建 / 기존 계획이 없으면 신규 등록</summary>';conversion.before(fold);fold.append(conversion);}
+  if(!office()||!['unplanned_unload','unload_no_doc'].includes(fb.feedback_type)||!['unloaded_pending_info','open'].includes(fb.status)||fb.inbound_plan_id)return;
+  const choices=document.createElement('section');choices.className='card ck-feedback-choices';choices.innerHTML='<h3>补齐入库计划 / 입고계획 연결</h3><p>尚未建单可新建；已有计划请核对后关联。 / 계획이 없으면 새로 만들고, 있으면 기존 계획을 연결하세요.</p><div><button type="button" class="btn btn-primary" data-feedback-create>新建入库计划 / 입고계획 새로 만들기</button><button type="button" class="btn btn-outline" data-feedback-existing>关联已有入库计划 / 기존 입고계획 연결</button></div><p role="status" aria-live="polite"></p>';
   const panel=document.createElement('section');panel.className='card ck-feedback-link';panel.innerHTML='<h3>关联已有入库计划 / 기존 입고계획 연결</h3><p class="muted">已卸完、现场未识别计划时，在这里补关联。原卸货人员、工时和产出一起保留。<br>하차 완료 후 기존 계획을 연결합니다. 작업 기록은 그대로 유지됩니다.</p><form class="ck-feedback-search"><label for="ck-feedback-keyword">查找计划 / 계획 검색</label><div><input id="ck-feedback-keyword" autocomplete="off" placeholder="客户、计划号或外部入库单号 / 고객·입고번호"><button type="submit" class="btn btn-outline">查找 / 검색</button></div></form><p class="ck-feedback-message" role="status" aria-live="polite"></p><div class="ck-feedback-candidates"></div><div class="ck-feedback-preview"></div>';
-  host.firstElementChild.after(panel);
+  host.firstElementChild.after(choices,panel);
   const form=panel.querySelector('form'),input=form.querySelector('input'),message=panel.querySelector('[role=status]'),list=panel.querySelector('.ck-feedback-candidates'),preview=panel.querySelector('.ck-feedback-preview');let generation=0,selected=null,timer;
-  const current=()=>panel.isConnected&&window._currentFeedbackId===fb.id;
+  const current=()=>panel.isConnected&&window._currentFeedbackId===fb.id&&document.getElementById('view-feedback_detail').style.display!=='none';
+  choices.querySelector('[data-feedback-create]').onclick=e=>createFromFeedback(fb,e.currentTarget,current,choices.querySelector('[role=status]'));
+  choices.querySelector('[data-feedback-existing]').onclick=()=>{panel.scrollIntoView({behavior:'smooth',block:'start'});input.focus();};
   async function choose(id){const token=++generation;message.textContent='正在核对明细 / 확인 중…';preview.replaceChildren();selected=null;try{const r=await CKSession.request('sop_feedback_link_preview',{feedback_id:fb.id,plan_id:id});if(!current()||token!==generation)return;selected=r;message.textContent='';renderPreview();}catch(e){if(current()&&token===generation)message.textContent=e.message;}}
   async function search(offset=0){const token=++generation;selected=null;preview.replaceChildren();message.textContent='正在查找 / 검색 중…';list.replaceChildren();try{
    const r=await CKSession.request('sop_feedback_link_candidates',{feedback_id:fb.id,keyword:input.value,offset});if(!current()||token!==generation)return;

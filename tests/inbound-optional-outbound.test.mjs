@@ -23,7 +23,7 @@ test('partially entered outbound data is never silently discarded',()=>{
  const result=readOptional(context,[{expected_ship_at:'2026-09-25',quantity:'15',outbound_mode:'customer_pickup',po_no:' 000-PO '}]);assert.equal(result.length,1);assert.equal(result[0].quantity,'15');assert.equal(result[0].po_no,'000-PO');
 });
 async function submit({works=[need],checked=true,rows=[blankLegacy],helper=true}={}){
- const context=setup(),requests=[],alerts=[],fields={'ibc-customer':{value:'宝袋'},'ibc-link-ob':{checked}};
+ const context=setup(),requests=[],alerts=[],fields={'ibc-customer':{value:'宝袋'},'ibc-link-ob':{checked}};context._ibCreateMaterials=[];
  Object.assign(context,{document:{getElementById:id=>fields[id]||{value:''}},CKInboundWorks:{read:()=>works},getIbcBizClasses:()=>['bulk'],getIbcLines:()=>[{unit_type:'box',planned_qty:50}],getIbcLinkObRows:()=>rows,kstToday:()=> '2026-09-22',unitTypeLabel:()=> '箱',getUser:()=> '测试负责人',alert:m=>alerts.push(m),api:async payload=>{requests.push(payload);return {ok:false,error:'fixture: stop after request capture'};},withActionLock:(_key,_btn,_text,fn)=>{context.pending=fn();}});
  if(!helper)context.CKHasStandaloneOutbound=undefined;
  vm.runInContext(app.slice(app.indexOf('async function submitInbound('),app.indexOf('function openInboundDetail(')),context);

@@ -79,11 +79,11 @@ window.CKInstallInboundFlow=function(app){
   const feedback=window.loadFeedbackDetail;window.loadFeedbackDetail=async function(...args){await feedback(...args);selectField(document.getElementById('fb-conv-biz'),'ck-fb-external');};
   const original=window.api;window.api=async function(body){
    const fields={v2_inbound_plan_create:'ck-ibc-external',v2_inbound_plan_update:'ck-ib-edit-external',v2_feedback_finalize_to_inbound:'ck-fb-external',v2_feedback_convert_to_inbound:'ck-fb-external',v2_inbound_dynamic_finalize:'ck-dyn-external'};
-   if(fields[body.action]){const input=document.getElementById(fields[body.action]);if(input)Object.assign(body,fieldData(input.closest('.ck-external-field')));}
+   if(fields[body.action]&&!(body.action==='v2_inbound_plan_create'&&Object.hasOwn(body,'direct_external_inbound_no')&&Object.hasOwn(body,'bulk_external_inbound_no'))){const input=document.getElementById(fields[body.action]);if(input)Object.assign(body,fieldData(input.closest('.ck-external-field')));}
    const result=await original(body);
-   if(body.action==='v2_inbound_plan_create'&&result?.ok){const input=document.getElementById('ck-ibc-external');input.closest('.ck-external-field').querySelectorAll('textarea').forEach(x=>x.value='');input.closest('.ck-external-field').hidden=true;}
    return result;
   };
+  window.CKInboundCreateReferences=()=>fieldData(document.getElementById('ck-ibc-external').closest('.ck-external-field'));
  }else if(app==='001'){
   JOB_TYPE_LABEL.inbound_direct=CKInboundLabel('direct_ship');JOB_TYPE_LABEL.inbound_bulk=CKInboundLabel('bulk_putaway');
   for(const button of document.querySelectorAll('#page-inbound_menu button')){const action=button.getAttribute('onclick')||'';if(action.includes('inbound_change_order'))button.remove();else if(action.includes('inbound_direct'))button.textContent=CKInboundLabel('direct_ship');else if(action.includes('inbound_bulk'))button.textContent=CKInboundLabel('bulk_putaway');}
