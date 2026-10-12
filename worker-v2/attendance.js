@@ -6,6 +6,7 @@ import { attendanceReport, kstDay } from './attendance-time.js';
 import { EMPLOYEE_SCHEMA, employeeDepartments, employeeAction, isEmployee } from './employee-attendance.js';
 import { laborDepartment } from '../shared/labor-department.js';
 import {sourceActiveWorkers,personHasPendingReturn} from './crew-borrow.js';
+import {ensurePermanentBadges,permanentPeopleSelect,updatePermanentBadge} from './permanent-badges.js';
 export const ATTENDANCE_SCHEMA=[
  `CREATE TABLE IF NOT EXISTS ck_attendance_people(id TEXT PRIMARY KEY,badge_id TEXT NOT NULL UNIQUE,name TEXT NOT NULL,agency TEXT NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('daily','permanent')),enabled INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL)`,
  `CREATE TABLE IF NOT EXISTS ck_attendance_days(id TEXT PRIMARY KEY,person_id TEXT NOT NULL,worker_id TEXT NOT NULL,name TEXT NOT NULL,agency TEXT NOT NULL,day TEXT NOT NULL,identity_key TEXT NOT NULL,signed_in TEXT NOT NULL,signed_out TEXT NOT NULL DEFAULT '',version INTEGER NOT NULL DEFAULT 1,UNIQUE(day,worker_id),UNIQUE(day,identity_key))`,
@@ -34,9 +35,9 @@ const nameOf=value=>{const n=text(value,41);if(!n||n.length>40||/[|<>\u0000-\u00
 const agencyOf=value=>{if(!agencies.includes(value))fail('请选择人力公司 / 인력회사를 선택하세요');return value;};
 const badgeOf=value=>text(String(value||'').split('|')[0]);
 function dateOf(value){const d=String(value||'');if(!/^\d{4}-\d{2}-\d{2}$/.test(d)||Number.isNaN(Date.parse(d+'T00:00:00+09:00'))||new Date(d+'T00:00:00Z').toISOString().slice(0,10)!==d)fail('日期无效');return d;}
-const publicPerson=p=>({id:p.id,badgeId:p.badge_id,name:p.name,agency:p.agency,badgeType:p.kind,enabled:!!p.enabled,personType:isEmployee(p.badge_id)?'employee':'daily',employeeNo:isEmployee(p.badge_id)?p.badge_id.slice(4):'',department:isEmployee(p.badge_id)?p.agency:''});
+const publicPerson=p=>({id:p.id,badgeId:p.badge_id,name:p.name,agency:p.agency,badgeType:p.kind,enabled:!!p.enabled,version:p.version||1,personType:isEmployee(p.badge_id)?'employee':'daily',employeeNo:isEmployee(p.badge_id)?p.badge_id.slice(4):'',department:isEmployee(p.badge_id)?p.agency:''});
 const publicDay=r=>({id:r.id,personId:r.person_id,badgeId:r.worker_id,name:r.name,agency:r.agency,day:r.day,inAt:r.signed_in,outAt:r.signed_out,version:r.version,badgeType:r.worker_id.startsWith('DAF-')||isEmployee(r.worker_id)?'permanent':'daily',personType:isEmployee(r.worker_id)?'employee':'daily',employeeNo:isEmployee(r.worker_id)?r.worker_id.slice(4):'',department:isEmployee(r.worker_id)?r.agency:'',managementDepartment:r.management_department||'',voided:!!r.voided_at,voidedAt:r.voided_at||'',voidReason:r.void_reason||''});
-export async function ensureAttendance(env){if(!attendanceEnabled(env))return;await ensureSchema(env.DB,'attendance-v2-enabled',()=>env.DB.batch(ATTENDANCE_SCHEMA.map(sql=>env.DB.prepare(sql))));await ensureAttendanceManagement(env);}
+export async function ensureAttendance(env){if(!attendanceEnabled(env))return;await ensureSchema(env.DB,'attendance-v2-enabled',()=>env.DB.batch(ATTENDANCE_SCHEMA.map(sql=>env.DB.prepare(sql))));await ensureAttendanceManagement(env);await ensurePermanentBadges(env);}
 function access(env,allowed=roles){const u=env.SOP_REQUEST_USER;if(!u||!allowed.includes(u.role))fail('无此操作权限 / 권한이 없습니다');return u;}
 const readDay=(env,id)=>q(env,attendanceDaySelect+' WHERE d.id=?',id).first();
 const todayRecord=(env,badge,t)=>q(env,attendanceDaySelect+' WHERE d.worker_id=? AND d.day=?',badge,kstDay(t)).first();
@@ -97,7 +98,7 @@ export async function handleAttendance(b,env){
  if(action==='sop_attendance_summary'){access(env,['manager','dispatcher','reviewer','viewer']);return overview(env,dateOf(b.date||day),t,b.scope);}
  if(['sop_attendance_employee_people','sop_attendance_employee_search','sop_attendance_employee_import_preview'].includes(action))return employeeAction(b,env,{access,fail,nameOf,text,commit,u,t});
  if(action==='sop_attendance_lookup'){
-  const badge=badgeOf(b.badge),p=await q(env,'SELECT * FROM ck_attendance_people WHERE badge_id=? AND enabled=1',badge).first();
+  const badge=badgeOf(b.badge),p=await q(env,"SELECT p.*,v.version FROM ck_attendance_people p LEFT JOIN ck_permanent_badge_profiles v ON v.person_id=p.id WHERE p.badge_id=? AND (p.enabled=1 OR (p.kind='permanent' AND p.badge_id GLOB 'DAF-*'))",badge).first();
   if(!p)fail('工牌未登记，请联系工作人员 / 등록되지 않은 명찰입니다');
   const r=await todayRecord(env,badge,t);if(r?.voided_at)fail('此签到已删除，请联系负责人恢复 / 삭제된 출근 기록은 관리자에게 복구를 요청하세요');return {ok:true,person:publicPerson(p),record:r?publicDay(r):null};
  }
@@ -115,22 +116,23 @@ export async function handleAttendance(b,env){
   const items=[];for(const p of people){const r=await todayRecord(env,p.badge_id,t);items.push({person:publicPerson(p),record:r?publicDay(r):null});}
   return {ok:true,day,items};
  }
- if(action==='sop_attendance_people'){access(env,['manager']);return {ok:true,items:(await rows(env,"SELECT * FROM ck_attendance_people WHERE kind='permanent' AND badge_id NOT LIKE 'EMP-%' ORDER BY name")).map(publicPerson)};}
+ if(action==='sop_attendance_people'){access(env,['manager']);return {ok:true,items:(await rows(env,permanentPeopleSelect+' ORDER BY p.enabled DESC,p.name,p.badge_id')).map(publicPerson)};}
  access(env,['manager','dispatcher','reviewer','kiosk']);
  if(action==='sop_attendance_department')access(env,['manager','dispatcher']);
- if(['sop_attendance_void','sop_attendance_restore'].includes(action))access(env,['manager']);
+ if(['sop_attendance_void','sop_attendance_restore','sop_attendance_permanent_update'].includes(action))access(env,['manager']);
  if(!/^[A-Za-z0-9_-]{8,100}$/.test(String(b.client_req_id||'')))fail('缺少有效请求编号');
  const prior=await cached(env,b);if(prior)return prior;
+ if(action==='sop_attendance_permanent_update')return updatePermanentBadge(b,env,{access,fail,nameOf,agencyOf,commit,u,publicPerson});
  if(action.startsWith('sop_attendance_employee_'))return employeeAction(b,env,{access,fail,nameOf,text,commit,u,t});
  if(action==='sop_attendance_register'){
   access(env,['manager']);const name=nameOf(b.name),agency=agencyOf(b.agency),badge=b.badge?badgeOf(b.badge):'DAF-'+crypto.randomUUID().slice(0,8).toUpperCase();
   if(!/^DAF-[A-Za-z0-9_-]{1,60}$/.test(badge))fail('固定工牌必须使用DAF工号');
   const p={id:uid('ATP'),badge_id:badge,name,agency,kind:'permanent',enabled:1,created_at:t,version:1};
-  return commit(env,b,u,null,p,[q(env,'INSERT INTO ck_attendance_people(id,badge_id,name,agency,kind,enabled,created_at) VALUES(?,?,?,?,?,1,?)',p.id,badge,name,agency,'permanent',t)],{ok:true,person:publicPerson(p)});
+  return commit(env,b,u,null,p,[q(env,'INSERT INTO ck_attendance_people(id,badge_id,name,agency,kind,enabled,created_at) VALUES(?,?,?,?,?,1,?)',p.id,badge,name,agency,'permanent',t),q(env,'INSERT INTO ck_permanent_badge_profiles(person_id,version) VALUES(?,1)',p.id)],{ok:true,person:publicPerson(p)});
  }
  if(action==='sop_attendance_checkin'){
   let person=null,agency,name,identity;
-  if(b.badge){person=await q(env,"SELECT * FROM ck_attendance_people WHERE badge_id=? AND kind='permanent' AND enabled=1",badgeOf(b.badge)).first();if(!person)fail('固定工牌未登记 / 고정 명찰을 확인하세요');name=person.name;identity=person.badge_id;agency=isEmployee(person.badge_id)?person.agency:agencyOf(b.agency);
+  if(b.badge){person=await q(env,"SELECT * FROM ck_attendance_people WHERE badge_id=? AND kind='permanent'",badgeOf(b.badge)).first();if(!person)fail('固定工牌未登记 / 고정 명찰을 확인하세요');if(!person.enabled)fail('工牌已停用，请联系负责人 / 비활성 명찰입니다. 관리자에게 문의하세요');name=person.name;identity=person.badge_id;agency=isEmployee(person.badge_id)?person.agency:agencyOf(b.agency);
    const existing=await todayRecord(env,person.badge_id,t);if(existing?.voided_at)fail('此签到已删除，请联系负责人恢复 / 삭제된 출근 기록은 관리자에게 복구를 요청하세요');if(existing)return {ok:true,existing:true,record:publicDay(existing)};
   }else{
    agency=agencyOf(b.agency);name=nameOf(b.name);const matches=await rows(env,attendanceDaySelect+" WHERE d.name=? AND d.day=? AND d.worker_id NOT LIKE 'EMP-%'",name,day),existing=matches.filter(r=>!r.voided_at);
@@ -194,7 +196,8 @@ export async function handleAttendance(b,env){
   const eligible=[];if(!busy)for(const id of JSON.parse(open.job_ids_json)){const j=await q(env,"SELECT * FROM v2_ops_jobs WHERE id=? AND status IN ('working','awaiting_close')",id).first();if(j){const record=await q(env,"SELECT state FROM sop_records WHERE id=? AND kind IN ('dispatch','task')",id).first();const data=record?JSON.parse(record.state):null;if(!data||(data.status!=='paused'&&(data.workers||[]).some(w=>w.id===before.worker_id)))eligible.push(j);}}
   await q(env,`CREATE TRIGGER IF NOT EXISTS ck_rest_resume_guard BEFORE INSERT ON v2_ops_job_workers WHEN NEW.id LIKE 'WS-REST-%' BEGIN SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM v2_ops_jobs j WHERE j.id=NEW.job_id AND j.status IN ('working','awaiting_close')) OR EXISTS(SELECT 1 FROM sop_records s WHERE s.id=NEW.job_id AND s.kind IN ('task','dispatch') AND (json_extract(s.state,'$.status')='paused' OR NOT EXISTS(SELECT 1 FROM json_each(s.state,'$.workers') w WHERE json_extract(w.value,'$.id')=NEW.worker_id))) THEN RAISE(ABORT,'rest_assignment_changed') END; END`).run();
   // Never restore multiple disputed concurrent jobs. A dispatcher must select one.
-  const resume=eligible.length===1&&!await personHasPendingReturn(env,before.worker_id)?eligible:[],statements=[updateDay(env,before,after),q(env,"UPDATE ck_attendance_breaks SET ended_at=? WHERE id=? AND ended_at=''",t,open.id)];
+  const disabledPermanent=before.worker_id.startsWith('DAF-')&&!await q(env,'SELECT id FROM ck_attendance_people WHERE id=? AND enabled=1',before.person_id).first();
+  const resume=!disabledPermanent&&eligible.length===1&&!await personHasPendingReturn(env,before.worker_id)?eligible:[],statements=[updateDay(env,before,after),q(env,"UPDATE ck_attendance_breaks SET ended_at=? WHERE id=? AND ended_at=''",t,open.id)];
   for(const j of resume){const seg=uid('WS-REST');statements.push(q(env,"INSERT INTO v2_ops_job_workers(id,job_id,worker_id,worker_name,joined_at) VALUES(?,?,?,?,?)",seg,j.id,before.worker_id,before.name,t));
    if(j.job_type==='pick_direct')statements.push(q(env,`INSERT INTO v2_pick_worker_docs(id,job_id,segment_id,worker_id,worker_name,pick_doc_no,started_at,status,created_at) SELECT ?||'-'||id,?,?,?,?,pick_doc_no,?,'working',? FROM v2_ops_job_pick_docs WHERE job_id=? AND pick_status!='completed'`,seg,j.id,seg,before.worker_id,before.name,t,t,j.id));
   }
@@ -233,9 +236,9 @@ export async function guardAttendance(body,env){
  const [days,rests,busy]=await env.DB.batch([
    q(env,'SELECT d.*,p.enabled AS employee_enabled,e.person_id AS employee_profile FROM ck_attendance_days d LEFT JOIN ck_attendance_people p ON p.id=d.person_id LEFT JOIN ck_employee_profiles e ON e.person_id=p.id WHERE d.day=? AND d.worker_id IN (SELECT value FROM json_each(?)) AND '+activeAttendanceSQL('d'),day,ids),
   q(env,"SELECT d.worker_id FROM ck_attendance_breaks b JOIN ck_attendance_days d ON d.id=b.attendance_id WHERE d.day=? AND d.worker_id IN (SELECT value FROM json_each(?)) AND b.ended_at=''",day,ids),
-  q(env,"SELECT DISTINCT worker_id FROM v2_ops_job_workers WHERE worker_id IN (SELECT value FROM json_each(?)) AND left_at='' AND job_id!=?",ids,jobId||'')
+  q(env,"SELECT DISTINCT worker_id,job_id FROM v2_ops_job_workers WHERE worker_id IN (SELECT value FROM json_each(?)) AND left_at=''",ids)
  ]);
- const records=new Map(days.results.map(r=>[r.worker_id,r])),resting=new Set(rests.results.map(r=>r.worker_id)),occupied=new Set(busy.results.map(r=>r.worker_id));
-  for(const w of daily){const record=records.get(w.id);if(!record)return (w.name||w.id)+' 请先办理当天签到 / 먼저 출근 등록하세요';if(isEmployee(w.id)&&(!record.employee_enabled||!record.employee_profile))return record.name+' 已停用或未登记，不能加入作业 / 비활성 직원입니다';if(record.signed_out)return record.name+' 已签退，不能开始作业 / 이미 퇴근했습니다';if(resting.has(w.id))return record.name+' 正在休息，请先结束休息 / 휴식을 먼저 종료하세요';if(occupied.has(w.id)&&!env.SOP_CREW_BORROW?.plans.some(p=>p.worker.id===w.id))return record.name+' 已在另一任务，请先办理交接';}
+ const records=new Map(days.results.map(r=>[r.worker_id,r])),resting=new Set(rests.results.map(r=>r.worker_id)),occupied=new Set(busy.results.filter(r=>r.job_id!==jobId).map(r=>r.worker_id)),retained=new Set(['sop_task_people','sop_native_people'].includes(action)?busy.results.filter(r=>r.job_id===jobId).map(r=>r.worker_id):[]);
+  for(const w of daily){const record=records.get(w.id);if(!record)return (w.name||w.id)+' 请先办理当天签到 / 먼저 출근 등록하세요';if(isEmployee(w.id)&&(!record.employee_enabled||!record.employee_profile))return record.name+' 已停用或未登记，不能加入作业 / 비활성 직원입니다';if(w.id.startsWith('DAF-')&&!record.employee_enabled&&!retained.has(w.id))return record.name+' 工牌已停用，不能加入新作业 / 비활성 명찰은 새 작업에 배정할 수 없습니다';if(record.signed_out)return record.name+' 已签退，不能开始作业 / 이미 퇴근했습니다';if(resting.has(w.id))return record.name+' 正在休息，请先结束休息 / 휴식을 먼저 종료하세요';if(occupied.has(w.id)&&!env.SOP_CREW_BORROW?.plans.some(p=>p.worker.id===w.id))return record.name+' 已在另一任务，请先办理交接';}
  return null;
 }
