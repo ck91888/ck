@@ -1,3 +1,6 @@
+import {workerBadgeMatch} from './daily-badge-identity.js';
+import {sameWorkerBadge} from '../shared/badge-identity.js';
+import {sameBadgeSignature} from './badge-request-signature.js';
 import {cargoReady} from './cargo-allocation.js';
 // Staging only: a truck owns one labor job; each order owns its own loading result.
 import {ensureSchema} from './schema-ready.js';
@@ -91,12 +94,12 @@ export async function startLoadTrip(e,p,staff){
  if(!req||req.length>100)fail('缺少请求编号，请刷新重试');
  const driver=String(p.driver_name||'').trim().slice(0,100),vehicle=String(p.vehicle_no||'').trim().slice(0,50);
  const signature=JSON.stringify({ids:[...ids].sort(),workers:staff.workers.map(w=>({...w})).sort((a,b)=>a.id.localeCompare(b.id)),lead_id:staff.lead_id,department:staff.department,minutes:staff.estimated_minutes,driver,vehicle,...(e.SOP_CREW_BORROW?{borrow_signature:e.SOP_CREW_BORROW.signature}:{})});
- const replay=async()=>{const trip=await q(e,'SELECT * FROM ck_load_trips WHERE request_id=?',req).first();if(!trip)return null;if(trip.owner_id!==e.SOP_REQUEST_USER.id||trip.signature_json!==signature)fail('此次派工请求已变更，请重新核对');return {ok:true,job_id:trip.job_id,is_new_job:false,order_count:ids.length,lead:staff.workers.find(w=>w.id===staff.lead_id),assigned_workers:staff.workers};};
+ const replay=async()=>{const trip=await q(e,'SELECT * FROM ck_load_trips WHERE request_id=?',req).first();if(!trip)return null;if(trip.owner_id!==e.SOP_REQUEST_USER.id||!sameBadgeSignature(trip.signature_json,signature,{sortedWorkers:true}))fail('此次派工请求已变更，请重新核对');return {ok:true,job_id:trip.job_id,is_new_job:false,order_count:ids.length,lead:staff.workers.find(w=>w.id===staff.lead_id),assigned_workers:staff.workers};};
  const old=await replay();if(old)return old;
  const orders=await rows(e,'SELECT * FROM v2_outbound_orders WHERE id IN (SELECT value FROM json_each(?))',JSON.stringify(ids));
  if(orders.length!==ids.length)fail('本车清单中有不存在的出库单，请刷新核对');
  const items=await checked(e,ids.map(id=>orders.find(o=>o.id===id)));items.forEach(assertOrder);
- const busy=await q(e,`SELECT worker_name FROM v2_ops_job_workers WHERE worker_id IN (SELECT value FROM json_each(?)) AND left_at='' LIMIT 1`,JSON.stringify(staff.workers.filter(w=>!e.SOP_CREW_BORROW?.plans.some(p=>p.worker.id===w.id)).map(w=>w.id))).first();if(busy)fail(busy.worker_name+'仍在另一任务中，请先交接');
+ const busy=await q(e,`SELECT worker_name FROM v2_ops_job_workers WHERE EXISTS(SELECT 1 FROM json_each(?) ck_member WHERE ${workerBadgeMatch('worker_id','ck_member.value')}) AND left_at='' LIMIT 1`,JSON.stringify(staff.workers.filter(w=>!e.SOP_CREW_BORROW?.plans.some(p=>sameWorkerBadge(p.worker.id,w.id))).map(w=>w.id))).first();if(busy)fail(busy.worker_name+'仍在另一任务中，请先交接');
  const id='JOB-LD-'+crypto.randomUUID(),t=new Date().toISOString(),lead=staff.workers.find(w=>w.id===staff.lead_id);
  const data={title:'本车装货 · '+ids.length+' 单',owner_id:e.SOP_REQUEST_USER.id,owner:e.SOP_REQUEST_USER.name,lead_id:staff.lead_id,workers:staff.workers,estimated_minutes:staff.estimated_minutes,job_type:'load_outbound',status:'working',created_at:t,source_type:'outbound_order',source_id:ids[0],labor_department:staff.department};
  const result={ok:true,job_id:id,is_new_job:true,order_count:ids.length,lead,assigned_workers:staff.workers};

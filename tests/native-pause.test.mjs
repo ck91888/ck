@@ -13,7 +13,9 @@ function setup(){
 test('explicit pause keeps assignment, closes only this task, resumes once and preserves effective time',async()=>{
  const f=setup(),a=await f.person('QA pause A'),b=await f.person('QA pause B'),other=await f.person('QA other');
  const j=await f.start([a.w,b.w]),k=await f.start([other.w]);
- f.DB.raw.prepare('UPDATE v2_ops_job_workers SET joined_at=? WHERE job_id=?').run(new Date(Date.now()-30*60000).toISOString(),j.job_id);
+ const joinedAt=new Date(Date.now()-30*60000).toISOString();
+ f.DB.raw.prepare('UPDATE ck_attendance_days SET signed_in=? WHERE id IN (?,?)').run(joinedAt,a.d.id,b.d.id);
+ f.DB.raw.prepare('UPDATE v2_ops_job_workers SET joined_at=? WHERE job_id=?').run(joinedAt,j.job_id);
  const body={job_id:j.job_id,revision:1,reason:'午休等待 / 대기',client_req_id:'QA-PAUSE-ONCE'};
  const r=await f.ok('sop_native_pause',body);await f.ok('sop_native_pause',body);assert.equal(r.revision,2);assert.equal(f.status(j.job_id),'paused');assert.equal(f.active(j.job_id).length,0);assert.equal(f.active(k.job_id).length,1);
  const snapshot=JSON.parse(f.DB.raw.prepare('SELECT state FROM sop_records WHERE id=?').get(j.job_id).state);assert.equal(snapshot.workers.length,2);

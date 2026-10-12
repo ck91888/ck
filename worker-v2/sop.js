@@ -1,3 +1,4 @@
+import {canonicalDailyBadge,sameWorkerBadge} from '../shared/badge-identity.js';
 import {issueAccounting} from './issue-accounting.js';
 import {cargoReservations} from './cargo-reservations.js';
 import {cancelCargoDraft} from './cargo-create.js';
@@ -249,7 +250,7 @@ export async function handleSop(b,env) {
    const flow={bulk_op:'order_op',pick_direct:'order_op',pack_direct:'internal',unload:'unload',load_outbound:'outbound',inbound_bulk:'inbound',inbound_direct:'inbound',inbound_return:'inbound',qc:'internal',scan_pallet:'import',load_import:'import',pickup_delivery_import:'import'}[data.job_type]||'internal';
    const extra=[stmt(env,`INSERT INTO v2_ops_jobs(id,flow_stage,biz_class,job_type,related_doc_type,related_doc_id,status,created_by,created_at,updated_at,active_worker_count) VALUES(?,?,?,?,?,?,'pending',?,?,?,0)`,row.id,flow,department,data.job_type,need?.data.source_type==='inbound'?'inbound_plan':need?.data.source_type==='outbound'?'outbound_order':'sop_need',need?.data.source_id||data.need_id,u.id,t,t)];
    data.customer=need?.data.customer||'';extra.push(stmt(env,'UPDATE v2_ops_jobs SET customer=? WHERE id=?',data.customer,row.id));
-   if(b.action==='sop_task_dispatch'){if(department!=='bulk')fail('此作业属于其他部门，请从对应现场入口办理');if(!need)fail('请先扫描作业需求');data.status='working';data.started_at=t;for(const w of workers)extra.push(stmt(env,"INSERT INTO v2_ops_job_workers(id,job_id,worker_id,worker_name,joined_at) VALUES(?,?,?,?,?)",uid('WS'),row.id,w.id,w.name,t));extra.push(stmt(env,"UPDATE v2_ops_jobs SET status='working',active_worker_count=? WHERE id=?",workers.length,row.id));}
+   if(b.action==='sop_task_dispatch'){if(department!=='bulk')fail('此作业属于其他部门，请从对应现场入口办理');if(!need)fail('请先扫描作业需求');data.status='working';data.started_at=t;for(const w of workers)extra.push(stmt(env,"INSERT INTO v2_ops_job_workers(id,job_id,worker_id,worker_name,joined_at) VALUES(?,?,?,?,?)",uid('WS'),row.id,canonicalDailyBadge(w.id),w.name,t));extra.push(stmt(env,"UPDATE v2_ops_jobs SET status='working',active_worker_count=? WHERE id=?",workers.length,row.id));}
    if(need){const nd=structuredClone({...need.data,status:'assigned'});if(nd.cargo_groups)assignCargoProcess(nd,{id:row.id,data},b,u,t);else nd.task_id=row.id;appendRelated(env,extra,key+'-need',u,need,nd,b.action,t);}
    return await save(env,b,u,row,data,extra);
   }
@@ -298,7 +299,7 @@ export async function handleSop(b,env) {
     if(groupedNeed?.data.cargo_groups&&taskGroups(groupedNeed.data.cargo_groups,{id:row.id,data:d}).some(g=>g.ack_version!==(g.mapping_version||1)))fail('请先在资料分组中确认最新版本，再恢复作业');
     if(!['assigned','paused','rework'].includes(d.status))fail('当前状态不能开始');
     const present=await sourceActiveWorkers(env,row.id,d.workers);
-    for(const w of present)extra.push(stmt(env,"INSERT INTO v2_ops_job_workers(id,job_id,worker_id,worker_name,joined_at) VALUES(?,?,?,?,?)",uid('WS'),row.id,w.id,w.name,t));
+    for(const w of present)extra.push(stmt(env,"INSERT INTO v2_ops_job_workers(id,job_id,worker_id,worker_name,joined_at) VALUES(?,?,?,?,?)",uid('WS'),row.id,canonicalDailyBadge(w.id),w.name,t));
     d.status='working';d.started_at=d.started_at||t;d.pause_reason='';
     extra.push(stmt(env,"UPDATE v2_ops_jobs SET status='working',active_worker_count=?,updated_at=? WHERE id=?",present.length,t,row.id));
    } else if(b.action==='sop_task_people') {
@@ -306,10 +307,10 @@ export async function handleSop(b,env) {
     const workers=validateWorkers(b.workers,b.lead_id);required(b.reason,'调整原因');
     if(d.status==='working') {
      const live=await all(env,"SELECT worker_id AS id FROM v2_ops_job_workers WHERE job_id=? AND left_at=''",row.id);
-     const removed=live.filter(w=>!workers.some(n=>n.id===w.id));
+     const removed=live.filter(w=>!workers.some(n=>sameWorkerBadge(n.id,w.id)));
      for(const w of removed)extra.push(stmt(env,"UPDATE v2_ops_job_workers SET left_at=?,minutes_worked=MAX(0,ROUND((julianday(?)-julianday(joined_at))*1440,1)),leave_reason=? WHERE job_id=? AND worker_id=? AND left_at=''",t,t,text(b.reason),row.id,w.id));
      const present=await sourceActiveWorkers(env,row.id,workers);
-     for(const w of present.filter(w=>!live.some(o=>o.id===w.id)))extra.push(stmt(env,"INSERT INTO v2_ops_job_workers(id,job_id,worker_id,worker_name,joined_at) VALUES(?,?,?,?,?)",uid('WS'),row.id,w.id,w.name,t));
+     for(const w of present.filter(w=>!live.some(o=>sameWorkerBadge(o.id,w.id))))extra.push(stmt(env,"INSERT INTO v2_ops_job_workers(id,job_id,worker_id,worker_name,joined_at) VALUES(?,?,?,?,?)",uid('WS'),row.id,canonicalDailyBadge(w.id),w.name,t));
      extra.push(stmt(env,'UPDATE v2_ops_jobs SET active_worker_count=?,updated_at=? WHERE id=?',present.length,t,row.id));
     }
     d.workers=workers;d.lead_id=text(b.lead_id);d.last_adjustment=text(b.reason);
@@ -532,7 +533,7 @@ function appendRelated(env,extra,key,u,row,data,action,t){
 }
 function validateWorkers(workers,lead){
  if(!Array.isArray(workers)||!workers.length||workers.length>50)fail('请扫描1至50名操作人员');
- const ids=new Set();return workers.map(w=>{const id=required(w.id,'工号'),name=required(w.name,'姓名');if(ids.has(id))fail('重复工牌');ids.add(id);return{id,name};}).map((w,i,a)=>{if(!a.some(x=>x.id===lead))fail('主操作员必须在参与人员中');return w;});
+ const ids=new Set();return workers.map(w=>{const id=canonicalDailyBadge(required(w.id,'工号')),name=required(w.name,'姓名');if(ids.has(id))fail('重复工牌');ids.add(id);return{id,name};}).map((w,i,a)=>{if(!a.some(x=>sameWorkerBadge(x.id,lead)))fail('主操作员必须在参与人员中');return w;});
 }
 async function needGroups(env,u,b){
  const departments=u.role==='manager'?[]:u.departments||[];

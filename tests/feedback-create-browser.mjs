@@ -28,12 +28,17 @@ async function raw(body){
 async function call(action,body={}){const r=await raw({action,client_req_id:crypto.randomUUID(),...body});assert.equal(r.ok,true,action+': '+(r.message||r.error));return r;}
 await call('sop_login',{sop_key:'feedback-create-fixture'});await confirmOperation(call,'Synthetic feedback creator');
 const crew=[];
-for(const name of ['Synthetic unload lead','Synthetic unload two','Synthetic unload three'])crew.push((await call('sop_attendance_checkin',{name,agency:'가온'})).record);
+for(const name of ['Synthetic unload lead','Synthetic unload two','Synthetic unload three']){
+ const record=(await call('sop_attendance_checkin',{name,agency:'가온'})).record;
+ // Historical source fixtures must begin after an audited, same-day signup.
+ const inAt=new Date(Math.max(Date.parse(record.day+'T00:00:00+09:00'),Date.now()-30*60000)).toISOString();
+ crew.push((await call('sop_attendance_correct',{id:record.id,version:record.version,inAt,outAt:'',reason:'Synthetic historical unload fixture signup'})).record);
+}
 const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aB9sAAAAASUVORK5CYII=','base64');
 async function unload(label){
  const started=await call('sop_native_start',{payload:{action:'v2_unplanned_unload_start',cargo_summary:'Synthetic '+label+' cargo',customer:'SOURCE-MARK-'+label,source_info:'Synthetic source '+label,remark:'Synthetic original '+label,client_req_id:crypto.randomUUID()},workers:crew.map(p=>({id:p.badgeId,name:p.name})),lead_id:crew[0].badgeId,estimated_minutes:15});
  const job_id=started.job_id,feedback_id=DB.raw.prepare('SELECT related_doc_id FROM v2_ops_jobs WHERE id=?').get(job_id).related_doc_id;
- DB.raw.prepare('UPDATE v2_ops_job_workers SET joined_at=? WHERE job_id=?').run(new Date(Date.now()-20*60000).toISOString(),job_id);
+ DB.raw.prepare('UPDATE v2_ops_job_workers SET joined_at=? WHERE job_id=?').run(new Date(Math.max(Date.now()-20*60000,...crew.map(p=>Date.parse(p.inAt)))).toISOString(),job_id);
  const photo=new FormData();
  for(const [k,v]of Object.entries({action:'v2_attachment_upload',attachment_category:'unload_photo',job_id,related_doc_type:'field_feedback',related_doc_id:feedback_id,client_req_id:crypto.randomUUID()}))photo.set(k,v);
  photo.set('file',new File([png],'Synthetic-'+label+'.png',{type:'image/png'}));

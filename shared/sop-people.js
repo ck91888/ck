@@ -1,21 +1,24 @@
 (function(){
  'use strict';
+ const canonical=id=>window.CKBadgeIdentity?.canonicalDailyBadge(id)??String(id??'');
+ function parse(raw){const parts=String(raw||'').trim().split('|').map(p=>p.trim());if(parts.length===2)parts[0]=canonical(parts[0]);return parts;}
  // One selection model for linked work and the original business start dialog.
  function selection(initial=[],initialLead=''){
-  let people=initial.map(p=>({...p})),lead=initialLead,requireLead=false;
+  let people=[],lead=canonical(initialLead),requireLead=false;
+  for(const person of initial){const id=canonical(person.id);if(!people.some(p=>p.id===id))people.push({...person,id});}
   if(!people.some(p=>p.id===lead))lead=people[0]?.id||'';
   return {
    get people(){return people.map(p=>({...p}));},get lead(){return lead;},
-   select(id){lead=people.some(p=>p.id===id)?id:'';},
+   select(raw){const id=canonical(raw);lead=people.some(p=>p.id===id)?id:'';},
    add(raw){
-    const parts=String(raw||'').trim().split('|').map(p=>p.trim());
+    const parts=parse(raw);
     if(parts.length!==2||!parts[0]||!parts[1])throw Error('工牌格式应为 工号|姓名 / 사번|이름');
     const [id,name]=parts,existing=people.find(p=>p.id===id);
     if(existing)return {added:false,message:'工号 '+id+' 已添加（'+existing.name+'），未重复加入 / 이미 추가된 사번'+(existing.name!==name?'；姓名不一致，请核对工牌':'')};
     people.push({id,name});if(!lead&&!requireLead)lead=id;
     return {added:true,message:'已添加 '+name+'（'+id+'） / 추가 완료'};
    },
-   remove(id){people=people.filter(p=>p.id!==id);if(lead===id){lead='';requireLead=true;return '已移除主操作员，请重新选择 / 주 작업자를 다시 선택하세요';}return '已移除该人员 / 작업자 삭제 완료';},
+   remove(raw){const id=canonical(raw);people=people.filter(p=>p.id!==id);if(lead===id){lead='';requireLead=true;return '已移除主操作员，请重新选择 / 주 작업자를 다시 선택하세요';}return '已移除该人员 / 작업자 삭제 완료';},
    read(){if(!people.length)throw Error('至少登记一名操作人员 / 작업자를 추가하세요');if(!people.some(p=>p.id===lead))throw Error('请选择主操作员 / 주 작업자를 선택하세요');return {workers:people.map(p=>({id:p.id,name:p.name})),lead_id:lead};}
   };
  }
@@ -34,7 +37,7 @@
    lead.required=!allowEmpty||model.people.length>0;lead.value=model.lead;find('count').textContent='已选 '+model.people.length+' 人 / 선택 '+model.people.length+'명';
   }
   function add(raw){if(closed)return;input.value='';if(!borrowContext){try{model.select(lead.value);const result=model.add(raw);render();report(result.message);if(error)error.textContent='';input.focus();}catch(e){showError(e);}return;}checking++;queue=queue.then(async()=>{if(closed){checking--;return;}try{
-   const parts=String(raw||'').trim().split('|').map(x=>x.trim());
+   const parts=parse(raw);
    if(borrowContext&&parts.length===2&&parts[0]&&parts[1]&&!model.people.some(p=>p.id===parts[0])){
     report('正在核对人员当前任务 / 현재 작업 확인 중');
     const a=await CKSession.request('sop_crew_availability',{...borrowContext,worker_id:parts[0]});if(closed)return;

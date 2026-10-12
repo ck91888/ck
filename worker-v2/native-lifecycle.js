@@ -1,3 +1,6 @@
+import {canonicalDailyBadge,sameWorkerBadge} from '../shared/badge-identity.js';
+import {workerBadgeMatch,canonicalWorkerSQL} from './daily-badge-identity.js';
+import {sameBadgeSignature} from './badge-request-signature.js';
 import {ensureSchema} from './schema-ready.js';
 // Staging dispatch ownership and validation shared by the original operation routes.
 import {nativeOwner} from './sop-dispatch.js';
@@ -49,32 +52,32 @@ export async function nativePeople(body,env,{resume=false}={}){
  if(env.SOP_ENVIRONMENT!=='staging'||!await nativeOwner({job_id:body.job_id},env))fail('请由本任务派审员调整人员 / 담당자가 인원을 변경하세요');
  const request=String(body.client_req_id||'');if(!request||request.length>100)fail('缺少请求编号');
  const old=await q(env,'SELECT action,actor_id,record_id,after_json,result_json FROM sop_events WHERE request_id=?',request).first();
- if(old){if(old.action!==action||old.actor_id!==env.SOP_REQUEST_USER.id||old.record_id!==body.job_id||resume&&JSON.parse(old.after_json)._resume_signature!==resumeSignature)fail('请求已被使用');return JSON.parse(old.result_json);}
+ if(old){if(old.action!==action||old.actor_id!==env.SOP_REQUEST_USER.id||old.record_id!==body.job_id||resume&&!sameBadgeSignature(JSON.parse(old.after_json)._resume_signature,resumeSignature))fail('请求已被使用');return JSON.parse(old.result_json);}
  const row=await q(env,"SELECT * FROM sop_records WHERE id=? AND kind='dispatch'",body.job_id).first();
  const job=await q(env,'SELECT * FROM v2_ops_jobs WHERE id=?',body.job_id).first();
  if(!row||!job||!(resume?['paused']:['pending','working','awaiting_close']).includes(job.status))fail('任务已结束，请刷新 / 작업이 종료되었습니다');
  if(Number(body.revision)!==row.revision)fail('人员已被其他操作更新，请重新打开 / 인원 정보가 변경되었습니다');
  const workers=body.workers;
  if(resume&&(!Array.isArray(workers)||!workers.length))fail('请确认实际恢复作业的人员 / 재개할 인원을 확인하세요');
- if(!Array.isArray(workers)||workers.length>50||workers.some(w=>!w.id||!w.name||String(w.id).length>100||String(w.name).length>100)||new Set(workers.map(w=>w.id)).size!==workers.length)fail('工牌无效或重复 / 명찰을 확인하세요');
- if(workers.length&&!workers.some(w=>w.id===body.lead_id))fail('请选择本次主操作员 / 주 작업자를 선택하세요');
- const t=new Date().toISOString(),prior=JSON.parse(row.state),next={...prior,workers,lead_id:workers.length?body.lead_id:prior.lead_id,last_lead:workers.find(w=>w.id===body.lead_id)||prior.workers.find(w=>w.id===prior.lead_id)||prior.last_lead,last_adjustment:String(body.reason||''),...(resume?{status:'working',pause_reason:'',paused_workers:[],_resume_signature:resumeSignature}:{} )};
- if(resume)next.workers=[...(prior.workers||[]).filter(w=>!workers.some(n=>n.id===w.id)),...workers];
+ if(!Array.isArray(workers)||workers.length>50||workers.some(w=>!w.id||!w.name||String(w.id).length>100||String(w.name).length>100)||new Set(workers.map(w=>canonicalDailyBadge(w.id))).size!==workers.length)fail('工牌无效或重复 / 명찰을 확인하세요');
+ if(workers.length&&!workers.some(w=>sameWorkerBadge(w.id,body.lead_id)))fail('请选择本次主操作员 / 주 작업자를 선택하세요');
+ const t=new Date().toISOString(),prior=JSON.parse(row.state),next={...prior,workers,lead_id:workers.length?body.lead_id:prior.lead_id,last_lead:workers.find(w=>sameWorkerBadge(w.id,body.lead_id))||prior.workers.find(w=>sameWorkerBadge(w.id,prior.lead_id))||prior.last_lead,last_adjustment:String(body.reason||''),...(resume?{status:'working',pause_reason:'',paused_workers:[],_resume_signature:resumeSignature}:{} )};
+ if(resume)next.workers=[...(prior.workers||[]).filter(w=>!workers.some(n=>sameWorkerBadge(n.id,w.id))),...workers];
  const active=await rows(env,"SELECT * FROM v2_ops_job_workers WHERE job_id=? AND left_at=''",job.id);
- const out=await borrowedOut(env,job.id),away=new Set(out.map(b=>b.worker_id));
- if(resume&&!workers.some(w=>!away.has(w.id)))fail('所选人员仍在借调中，请确认实际到位人员 / 지원 중인 인원은 먼저 복귀를 확인하세요');
+ const out=await borrowedOut(env,job.id),away=new Set(out.map(b=>canonicalDailyBadge(b.worker_id)));
+ if(resume&&!workers.some(w=>!away.has(canonicalDailyBadge(w.id))))fail('所选人员仍在借调中，请确认实际到位人员 / 지원 중인 인원은 먼저 복귀를 확인하세요');
  const result={ok:true,job_id:job.id,revision:row.revision+1,lead:next.last_lead,...(env.SOP_CREW_BORROW?{has_crew_borrows:true}:{})};
  const sql=[q(env,'INSERT INTO sop_events VALUES(?,?,?,?,?,?,?,?,?,?)',request,job.id,row.revision,action,env.SOP_REQUEST_USER.id,env.SOP_REQUEST_USER.name,row.state,JSON.stringify(next),JSON.stringify(result),t),q(env,'UPDATE sop_records SET state=?,revision=revision+1,updated_at=? WHERE id=?',JSON.stringify(next),t,job.id)];
  if(resume)sql.push(q(env,"UPDATE v2_ops_jobs SET status='working',resumed_at=?,updated_at=? WHERE id=? AND status='paused'",t,t,job.id));
- for(const s of active.filter(s=>!workers.some(w=>w.id===s.worker_id))){
+ for(const s of active.filter(s=>!workers.some(w=>sameWorkerBadge(w.id,s.worker_id)))){
   const minutes=Math.max(0,Math.round((Date.parse(t)-Date.parse(s.joined_at))/6000)/10);
   sql.push(q(env,"UPDATE v2_ops_job_workers SET left_at=?,minutes_worked=?,leave_reason='dispatcher_change' WHERE id=? AND left_at=''",t,minutes,s.id));
   if(job.job_type==='pick_direct')sql.push(q(env,"UPDATE v2_pick_worker_docs SET status='completed',finished_at=?,minutes_worked=? WHERE segment_id=? AND status='working'",t,minutes,s.id));
  }
  sql.push(...crewBorrowStatements(env,env.SOP_CREW_BORROW,job.id,t));
- for(const w of workers.filter(w=>!away.has(w.id)&&!active.some(s=>s.worker_id===w.id))){sql.push(q(env,"INSERT INTO v2_ops_job_workers(id,job_id,worker_id,worker_name,joined_at) VALUES(?,?,?,?,?)",'WS-'+crypto.randomUUID(),job.id,w.id,w.name,t));}
+ for(const w of workers.filter(w=>!away.has(canonicalDailyBadge(w.id))&&!active.some(s=>sameWorkerBadge(s.worker_id,w.id)))){sql.push(q(env,"INSERT INTO v2_ops_job_workers(id,job_id,worker_id,worker_name,joined_at) VALUES(?,?,?,?,?)",'WS-'+crypto.randomUUID(),job.id,w.id,w.name,t));}
  if(job.job_type==='pick_direct')sql.push(...pickTeamStatements(env,job.id,t));
- sql.push(q(env,"UPDATE v2_ops_jobs SET active_worker_count=(SELECT COUNT(DISTINCT worker_id) FROM v2_ops_job_workers WHERE job_id=? AND left_at=''),status=CASE WHEN EXISTS(SELECT 1 FROM v2_ops_job_workers WHERE job_id=? AND left_at='') THEN 'working' ELSE 'awaiting_close' END,updated_at=? WHERE id=?",job.id,job.id,t,job.id));
+ sql.push(q(env,`UPDATE v2_ops_jobs SET active_worker_count=(SELECT COUNT(DISTINCT ${canonicalWorkerSQL('worker_id')}) FROM v2_ops_job_workers WHERE job_id=? AND left_at=''),status=CASE WHEN EXISTS(SELECT 1 FROM v2_ops_job_workers WHERE job_id=? AND left_at='') THEN 'working' ELSE 'awaiting_close' END,updated_at=? WHERE id=?`,job.id,job.id,t,job.id));
  // Install after the SOP schema exists (legacy migrations run before SOP tables).
  await env.DB.prepare("CREATE TRIGGER IF NOT EXISTS ck_native_people_active BEFORE INSERT ON sop_events WHEN NEW.action='sop_native_people' AND NOT EXISTS(SELECT 1 FROM v2_ops_jobs WHERE id=NEW.record_id AND status IN ('pending','working','awaiting_close')) BEGIN SELECT RAISE(ABORT,'job_already_finished'); END").run();
  await ensureNativePauseGuards(env);
@@ -93,7 +96,7 @@ export async function finishNativePick(body,env,{legacy=false}={}){
   q(env,`UPDATE v2_ops_job_pick_docs SET pick_status='completed',pick_finished_at=COALESCE(NULLIF(pick_finished_at,''),?) WHERE job_id=? AND ${gate}`,t,id,...g),
  q(env,`INSERT INTO v2_ops_job_results(id,job_id,remark,result_json,result_lines_json,created_by,created_at)
  SELECT ?,?,?,json_object('kind','trip_finalize','pick_doc_nos',json((SELECT json_group_array(pick_doc_no) FROM v2_ops_job_pick_docs WHERE job_id=?)),
-  'worker_count',COUNT(DISTINCT worker_id),'total_pwd',(SELECT COUNT(*) FROM v2_pick_worker_docs WHERE job_id=?),'total_minutes',ROUND(COALESCE(SUM(minutes_worked),0),1),'result_note',?,'finalized_by',?), '[]',?,? FROM v2_ops_job_workers WHERE job_id=? HAVING ${gate}`,resultId,id,String(body.remark||''),id,id,String(body.result_note||''),actor,actor,t,id,...g),
+  'worker_count',COUNT(DISTINCT ${canonicalWorkerSQL('worker_id')}),'total_pwd',(SELECT COUNT(*) FROM v2_pick_worker_docs WHERE job_id=?),'total_minutes',ROUND(COALESCE(SUM(minutes_worked),0),1),'result_note',?,'finalized_by',?), '[]',?,? FROM v2_ops_job_workers WHERE job_id=? HAVING ${gate}`,resultId,id,String(body.remark||''),id,id,String(body.result_note||''),actor,actor,t,id,...g),
   q(env,`UPDATE v2_ops_jobs SET status='completed',active_worker_count=0,finished_at=?,updated_at=? WHERE id=? AND ${gate}`,t,t,id,...g)];
  try{await env.DB.batch(sql);}catch(e){const j=await q(env,'SELECT status FROM v2_ops_jobs WHERE id=?',id).first();if(j?.status==='completed')return {ok:true,already_completed:true};throw e;}
   const saved=await q(env,'SELECT result_json FROM v2_ops_job_results WHERE id=?',resultId).first();if(!saved)throw Error('人员或任务状态已变化，请先核实人员完成状态');const r=JSON.parse(saved.result_json);
@@ -106,7 +109,7 @@ export async function finishNativeOutbound(body,env,{legacy=false}={}){
   const stock=job.job_type==='outbound_stock_op',box=Number(body.box_count||0),pallet=Number(body.pallet_count||0),remark=String(body.remark||''),by=legacy?String(body.worker_id||env.SOP_REQUEST_USER?.id||''):env.SOP_REQUEST_USER.id;
   let lines;try{lines=body.result_lines_json?JSON.parse(body.result_lines_json):undefined;}catch{}
   const resultId='RES-FINAL-'+id,resultJson=stock&&body.result_json?String(body.result_json):JSON.stringify({box_count:box,pallet_count:pallet,remark,...(lines?{result_lines:lines}:{})}),claim='OUTBOUND-FINAL:'+id,token=crypto.randomUUID(),gate="EXISTS(SELECT 1 FROM v2_idempotency_keys WHERE idem_key=? AND json_extract(response_json,'$._completion_request')=?)",g=[claim,token];
-  const sql=[q(env,`INSERT INTO v2_idempotency_keys(idem_key,action,response_json,created_at) SELECT ?,?,?,? FROM v2_ops_jobs WHERE id=? AND status IN ('pending','working','awaiting_close')${legacy?" AND NOT EXISTS(SELECT 1 FROM v2_ops_job_workers WHERE job_id=? AND worker_id!=? AND left_at='')":''}`,claim,body.action||'v2_outbound_stock_op_finish',JSON.stringify({_completion_request:token}),t,id,...(legacy?[id,by]:[])),
+  const sql=[q(env,`INSERT INTO v2_idempotency_keys(idem_key,action,response_json,created_at) SELECT ?,?,?,? FROM v2_ops_jobs WHERE id=? AND status IN ('pending','working','awaiting_close')${legacy?` AND NOT EXISTS(SELECT 1 FROM v2_ops_job_workers WHERE job_id=? AND NOT ${workerBadgeMatch('worker_id','?')} AND left_at='')`:''}`,claim,body.action||'v2_outbound_stock_op_finish',JSON.stringify({_completion_request:token}),t,id,...(legacy?[id,by]:[])),
   q(env,`INSERT INTO v2_ops_job_results(id,job_id,box_count,pallet_count,remark,result_json,created_by,created_at) SELECT ?,?,?,?,?,?,?,? WHERE ${gate}`,resultId,id,box,pallet,remark,resultJson,by,t,...g),
   q(env,`UPDATE v2_ops_job_workers SET left_at=?,minutes_worked=MAX(0,ROUND((julianday(?)-julianday(joined_at))*14400)/10.0),leave_reason='dispatcher_finish' WHERE job_id=? AND left_at='' AND ${gate}`,t,t,id,...g),
   q(env,`UPDATE v2_ops_jobs SET status='completed',active_worker_count=0,shared_result_json=?,finished_at=?,updated_at=? WHERE id=? AND ${gate}`,resultJson,t,t,id,...g)];

@@ -59,7 +59,7 @@ test('checkout and removal racing with receipt commit reject the stale scanner',
 });
 test('cross Korean midnight continues original batch while new dispatch uses new date; 99 advances to 100',async()=>{
  const f=await fixture(),b=(await f.start()).batch;const now=new Date(),day=new Date(now.getTime()+9*3600000).toISOString().slice(0,10),oldDay=new Date(Date.parse(day+'T00:00:00+09:00')-86400000).toISOString().slice(0,10),oldTime=oldDay+'T10:00:00Z';
- f.DB.raw.prepare('UPDATE ck_courier_batches SET day=?,batch_no=? WHERE id=?').run(oldDay,oldDay+'-01',b.id);f.DB.raw.prepare('UPDATE v2_ops_job_workers SET joined_at=? WHERE job_id=?').run(oldTime,b.id);for(const p of f.staff.slice(0,2))f.DB.raw.prepare('UPDATE ck_attendance_days SET day=?,signed_in=? WHERE worker_id=?').run(oldDay,oldTime,p.id);
+ f.DB.raw.prepare('UPDATE ck_courier_batches SET day=?,batch_no=? WHERE id=?').run(oldDay,oldDay+'-01',b.id);for(const p of f.staff.slice(0,2))f.DB.raw.prepare('UPDATE ck_attendance_days SET day=?,signed_in=? WHERE worker_id=?').run(oldDay,oldTime,p.id);f.DB.raw.prepare('UPDATE v2_ops_job_workers SET joined_at=? WHERE job_id=?').run(oldTime,b.id);
  // Verified office session continues a crew already in progress; field session expiry is unchanged.
  const r=await f.scan(b,'301000000101','8-1',f.staff[0].id,'office');assert.equal(r.ok,true,r.error);assert.equal(r.item.batch_no,oldDay+'-01');
  f.DB.raw.prepare("INSERT INTO ck_courier_batches VALUES('SEQUENCE-99',?,99,?,?)").run(day,day+'-99',now.toISOString());const next=(await f.start([2,3],{},'office')).batch;assert.equal(next.batch_no,day+'-100');assert.equal(next.day,day);

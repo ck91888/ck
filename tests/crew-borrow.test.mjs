@@ -145,7 +145,11 @@ test('old resume endpoint cannot rejoin completed task',async()=>{
 });
 
 test('old-shift open source segment is visible as blocked and cannot be borrowed into today',async()=>{
- const f=await fixture(),s=await f.source();f.DB.raw.prepare("UPDATE v2_ops_job_workers SET joined_at='2000-01-01T00:00:00Z' WHERE job_id=? AND worker_id=?").run(s.job_id,f.staff[0].id);
+ const f=await fixture(),s=await f.source();
+ // Represent a pre-upgrade stale clock; restore the current guard before exercising the API.
+ const guard=f.DB.raw.prepare("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='ck_daily_badge_join_update'").get();
+ try{f.DB.raw.exec('DROP TRIGGER ck_daily_badge_join_update');f.DB.raw.prepare("UPDATE v2_ops_job_workers SET joined_at='2000-01-01T00:00:00Z' WHERE job_id=? AND worker_id=?").run(s.job_id,f.staff[0].id);}
+ finally{f.DB.raw.exec(guard.sql);}
  const a=await f.ok('sop_crew_availability',{worker_id:f.staff[0].id,payload:{action:'v2_unplanned_unload_start'}});assert.equal(a.can_borrow,false);assert.match(a.reason,/旧班次/);assert.equal(f.loans().length,0);
 });
 

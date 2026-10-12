@@ -107,7 +107,8 @@
  };
  async function setup(){
   const u=await CKSession.ready;
-  if(app==='001')window.CKDocumentCode=await import('/shared/document-code.js');
+  const [documents,badges]=await Promise.all([app==='001'?import('/shared/document-code.js'):null,import('/shared/badge-identity.js')]);
+  window.CKBadgeIdentity=badges;if(documents)window.CKDocumentCode=documents;
   const nav=document.createElement('nav');nav.className='ck-cross-nav';nav.innerHTML='<a href="/">CK</a><a href="/001/">现场执行</a><a href="/002/">协同中心</a><a href="/003/">耗材与物品</a><a href="/shuju/">数据看板</a><a href="/attendance/">上下班签到</a>';for(const a of nav.querySelectorAll('a'))if(a.getAttribute('href')===(app==='home'?'/':'/'+app+'/'))a.setAttribute('aria-current','page');document.body.insertBefore(nav,document.body.children[1]||null);if(app==='001'||app==='attendance'){nav.replaceChildren();nav.hidden=true;}
   window.CKInstallInboundFlow?.(app);
   window.CKInstallFeedbackLink?.(app);
@@ -140,10 +141,11 @@
    const iconPaths=['M2 6h12v11H2z M14 10h4l4 4v3h-8 M7 18a2 2 0 1 1-4 0 2 2 0 0 1 4 0 M21 18a2 2 0 1 1-4 0 2 2 0 0 1 4 0','M3 7l9-4 9 4v11l-9 4-9-4z M3 7l9 4 9-4 M12 11v11','M8 5H4v17h16V5h-4 M8 2h8v5H8z M8 12h8 M8 17h6','M3 4h11v15H3z M14 11h8 M18 7l4 4-4 4','M4 7h16 M4 12h16 M4 17h16 M8 4v6 M16 9v6 M10 14v6','M12 3L2 21h20z M12 9v5 M12 17v1','M3 12l7 2 2 7 2-7 7-11z M10 14l11-11','M4 3v18h18 M8 16v-5 M13 16V7 M18 16V4','M9 15l6-6 M8 17l-2 2a4 4 0 0 1-5-5l5-5 M16 7l2-2a4 4 0 0 1 5 5l-5 5'];
    document.querySelectorAll('.home-btn').forEach((b,i)=>{b.setAttribute('role','button');b.tabIndex=0;b.onkeydown=ev=>{if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();b.click();}};const icon=b.querySelector('.icon');if(icon)icon.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="'+(iconPaths[i]||iconPaths[0])+'"/></svg>';});
    const renderPlan=window.renderUnloadPlanCard;window.renderUnloadPlanCard=function(data,no){renderPlan(data,no);const info=document.getElementById('unloadPlanInfo');const box=document.createElement('section');box.className='ck-inbound-work';box.innerHTML='<p>正在读取本批分货要求…</p>';info.append(box);request('sop_linked',{source_id:data.plan.id}).then(r=>{if(!box.isConnected)return;box.innerHTML=r.items.length?'<h3>卸货时的分货与操作要求</h3>'+CKWorkNeedsTable(r.items)+'<p class="ck-muted">打托货边卸边打托；散出货集中放置；入库代发货单独分出并交代发组。已完成内容在交接时说明，后续只做剩余操作。</p>':'<p class="ck-muted">本计划暂无单独作业要求。</p>';}).catch(e=>{box.textContent='作业要求读取失败：'+e.message;});};
-   const tasks=document.createElement('section');tasks.className='ck-inline-heading';tasks.innerHTML='<b>现场在途任务（点击继续原单据操作）</b><div class="ck-buttons"></div>';document.getElementById('page-home').append(tasks);
-   window.initHome=async()=>{CKClearNativeJob();document.getElementById('myTaskBar')?.classList.add('hidden');window._unloadPlanData=null;
-    try{const r=await request('sop_dispatch_list');const list=tasks.querySelector('.ck-buttons');list.replaceChildren();for(const job of r.items)list.append(CKNativeTaskButton(job));if(!r.items.length)list.textContent='暂无现场在途任务 / 진행 중인 현장 작업 없음';}catch(e){tasks.querySelector('.ck-buttons').textContent=e.message;}
-   };
+   const home=document.getElementById('page-home'),tasks=document.createElement('section');tasks.className='ck-inline-heading';tasks.innerHTML='<b>现场在途任务（点击继续原单据操作）</b><button type="button" class="btn btn-outline" data-dispatch-refresh>刷新任务 / 작업 새로고침</button><p data-dispatch-freshness role="status" aria-live="polite"></p><div class="ck-buttons" data-dispatch-tasks>正在读取在途任务 / 진행 작업 확인 중…</div>';home.append(tasks);
+   const homeTasks=CKDispatchHome(tasks,{page:home,read:()=>request('sop_dispatch_list'),render:CKNativeTaskButton});
+   window.loadDispatchTasks=()=>homeTasks.refresh();
+   const originalShowPage=window.showPage;window.showPage=function(name,...args){if(name!=='home')homeTasks.leave();return originalShowPage.call(this,name,...args);};
+   window.initHome=async()=>{CKClearNativeJob();document.getElementById('myTaskBar')?.classList.add('hidden');window._unloadPlanData=null;return homeTasks.enter();};
 
    document.getElementById('headerWorker').textContent=u.name+' · 派审员 / 배정·검수';document.getElementById('headerWorker').onclick=()=>{};
    const dispatch=document.createElement('div');dispatch.id='page-dispatch';dispatch.className='page';dispatch.innerHTML='<button class="nav-back" type="button">← 现场首页</button><div id="ck-dispatch-body"></div>';document.body.append(dispatch);dispatch.querySelector('button').onclick=()=>showPage('home');

@@ -43,6 +43,15 @@ test('labor combines company, department and current-unassigned filters, ignorin
  p.change('[data-department-filter]','bulk');assert.match(p.$('[data-rows]').textContent,/暂无/);p.change('[data-status-filter]','');assert.match(p.$('[data-rows]').textContent,/Fixture B/);
  p.change('[data-company]','포레인');assert.match(p.$('[data-rows]').textContent,/暂无/);assert.deepEqual(p.errors,[]);
 });
+test('orphan work is visible by raw badge and task without creating attendance rows or minutes',domOptions,async t=>{
+ let fail=false;const warning={worker_id:'da-20261008-abcdef12',worker_name:'Synthetic <orphan>',job_id:'SYNTHETIC-JOB',job_label:'SYNTHETIC-PICK-01',reason:'没有当天有效签到 / 유효한 출근 없음'};
+ const p=await fixture(t,{initial:{...report([]),identityWarnings:[warning]},handler:action=>action==='sop_attendance_summary'&&fail?Promise.reject(Error('Synthetic summary unavailable')):undefined});
+ const region=p.$('[data-identity-warnings]');assert.equal(region.hidden,false);assert.match(region.textContent,/da-20261008-abcdef12/);assert.match(region.textContent,/SYNTHETIC-PICK-01/);assert.match(region.textContent,/Synthetic <orphan>/);assert.equal(region.querySelector('orphan'),null);assert.equal(region.querySelector('button'),null);
+ assert.equal(p.all('[data-rows] [data-person]').length,0);assert.equal(p.$('[data-summary] strong').textContent,'0 人');assert.equal(p.all('[data-summary] strong')[3].textContent,'0:00');
+ p.change('[data-status-filter]','unassigned');p.change('[data-department-filter]','direct_ship');p.change('[data-search]','Someone else');assert.equal(region.hidden,false,'attendance filters cannot silently hide unresolved work');
+ const before=region.innerHTML;fail=true;await p.controller.refresh();assert.equal(region.innerHTML,before);assert.equal(p.$('[data-report-freshness]').dataset.freshness,'failed');
+ fail=false;p.current=report([]);await p.controller.refresh();assert.equal(region.hidden,true);assert.equal(region.innerHTML,'');assert.deepEqual(p.errors,[]);
+});
 test('details use a distinct modal; Close and Escape preserve filters, horizontal scroll and return focus',domOptions,async t=>{
  const p=await fixture(t);p.change('[data-search]','Fixture A');const origin=p.$('[data-person="A"]');origin.focus();p.$('.ck-table-wrap').scrollLeft=175;origin.click();
  assert.equal(p.$('[data-detail-dialog]').open,true);assert.equal(p.$('[data-editor]').open,false);assert.match(p.$('[data-detail]').textContent,/当日明细/);

@@ -23,7 +23,9 @@ import {ensureLoadSchema,loadTripEnabled,loadCandidates,resolveLoadOrder,loadOrd
 import {handleCourier,validateCourierLines,courierPlanStatements,courierProgress,courierProgressRead,courierProgressRows,courierReady,protectCourierEdit,syncCourierArrival} from './courier.js';
 import {ensureCourierClaims} from './courier-claims.js';
 import { inboundFlowEnabled, inboundCode, inboundCodes, inboundReferenceValue, inboundCodeProgress, selectInboundReference, validateInboundCode, resolveInboundPlan, putawayTaskBiz, completeUnloadedDispositions, bindInboundCode, inboundLabels, inboundReferenceData, departmentCodes, putawayClasses } from './inbound-flow.js';
-import { handleAttendance, guardAttendance, ensureAttendance } from './attendance.js';
+import { handleAttendance, guardAttendance, ensureAttendance, attendanceEnabled } from './attendance.js';
+import {normalizeDailyBadgeRequest,workerBadgeMatch,canonicalWorkerSQL,resolveDailyBadge} from './daily-badge-identity.js';
+import {canonicalDailyBadge,sameWorkerBadge} from '../shared/badge-identity.js';
 import {crewBorrowEnabled,ensureCrewBorrow,prepareCrewBorrow,crewAvailability,crewStatus,crewRetry,canCrewDestination,reconcileCrewReturns,reconcilePersonReturns,borrowedOut} from './crew-borrow.js';
 import { workChainEnabled, guardWorkChain, chainLinked, workMaterials, uploadWorkMaterial, workMaterialCountFor } from './work-chain.js';
 import {ensureBatchMaterialState,batchVisibleSql,batchStateEnabled} from './batch-material-state.js';
@@ -634,17 +636,22 @@ async function withIdem(env, body, action, fn) {
   return json(result);
 }
 
+// Daily aliases are scoped to the staging attendance rollout.
+const badgeSQL=(env,a,b)=>attendanceEnabled(env)?workerBadgeMatch(a,b):`${a}=${b}`;
+const badgeKey=(env,id)=>attendanceEnabled(env)?canonicalDailyBadge(id):id;
+const badgeColumn=(env,id)=>attendanceEnabled(env)?canonicalWorkerSQL(id):id;
+
 // ===== Worker dedup helpers =====
 // 查找某 worker 在某 job 中是否有未关闭的参与段
 async function findOpenSeg(env, jobId, workerId) {
   return env.DB.prepare(
-    "SELECT * FROM v2_ops_job_workers WHERE job_id=? AND worker_id=? AND left_at='' ORDER BY joined_at DESC LIMIT 1"
+    `SELECT * FROM v2_ops_job_workers WHERE job_id=? AND ${badgeSQL(env,'worker_id','?')} AND left_at='' ORDER BY joined_at DESC LIMIT 1`
   ).bind(jobId, workerId).first();
 }
 
 async function checkWorkerBusy(env, workerId, allowJobId) {
   const seg = await env.DB.prepare(
-    "SELECT w.job_id, j.job_type, j.flow_stage FROM v2_ops_job_workers w JOIN v2_ops_jobs j ON j.id=w.job_id WHERE w.worker_id=? AND w.left_at='' AND j.status IN ('pending','working','awaiting_close') ORDER BY w.joined_at DESC LIMIT 1"
+    `SELECT w.job_id, j.job_type, j.flow_stage FROM v2_ops_job_workers w JOIN v2_ops_jobs j ON j.id=w.job_id WHERE ${badgeSQL(env,'w.worker_id','?')} AND w.left_at='' AND j.status IN ('pending','working','awaiting_close') ORDER BY w.joined_at DESC LIMIT 1`
   ).bind(workerId).first();
   if (!seg) return null;
   if (allowJobId && seg.job_id === allowJobId) return null;
@@ -654,7 +661,7 @@ async function checkWorkerBusy(env, workerId, allowJobId) {
 // 关闭某 worker 在某 job 中的所有 open segments（自愈）
 async function closeAllOpenSegs(env, jobId, workerId, t, reason) {
   const segs = await env.DB.prepare(
-    "SELECT * FROM v2_ops_job_workers WHERE job_id=? AND worker_id=? AND left_at=''"
+    `SELECT * FROM v2_ops_job_workers WHERE job_id=? AND ${badgeSQL(env,'worker_id','?')} AND left_at=''`
   ).bind(jobId, workerId).all();
   const rows = segs.results || [];
   for (const seg of rows) {
@@ -989,7 +996,7 @@ async function _completeVerifyBatchIfLinked(env, jobId, closeAt, source) {
 // 从表中重算某 job 的 active_worker_count
 async function recalcActiveCount(env, jobId, t) {
   const cnt = await env.DB.prepare(
-    "SELECT COUNT(DISTINCT worker_id) as c FROM v2_ops_job_workers WHERE job_id=? AND left_at=''"
+    `SELECT COUNT(DISTINCT ${badgeColumn(env,'worker_id')}) as c FROM v2_ops_job_workers WHERE job_id=? AND left_at=''`
   ).bind(jobId).first();
   const real = cnt ? cnt.c : 0;
   await env.DB.prepare(
@@ -3648,7 +3655,7 @@ route("v2_outbound_stock_op_finish", async (body, env) => {
     const order_id = jobCheck.related_doc_id || "";
 
     if(inboundFlowEnabled(env)&&body.complete_job!==false){
-     const other=await env.DB.prepare("SELECT COUNT(*) AS n FROM v2_ops_job_workers WHERE job_id=? AND worker_id!=? AND left_at=''").bind(job_id,worker_id).first();
+     const other=await env.DB.prepare(`SELECT COUNT(*) AS n FROM v2_ops_job_workers WHERE job_id=? AND NOT ${badgeSQL(env,'worker_id','?')} AND left_at=''`).bind(job_id,worker_id).first();
      if(!Number(other?.n))return finishNativeOutbound(body,env,{legacy:true});
     }
     // 关闭该 worker 全部 open segs
@@ -6006,7 +6013,7 @@ route("v2_inbound_job_finish", async (body, env) => {
     }
 
     if(inboundFlowEnabled(env)&&complete_job&&!leave_only){
-      const others=await env.DB.prepare("SELECT COUNT(*) AS n FROM v2_ops_job_workers WHERE job_id=? AND worker_id!=? AND left_at=''").bind(job_id,worker_id).first();
+      const others=await env.DB.prepare(`SELECT COUNT(*) AS n FROM v2_ops_job_workers WHERE job_id=? AND NOT ${badgeSQL(env,'worker_id','?')} AND left_at=''`).bind(job_id,worker_id).first();
       if(env.SOP_GROUP_FINISH||!others.n){
         const plan=jobRow.related_doc_id?await env.DB.prepare('SELECT * FROM v2_inbound_plans WHERE id=?').bind(jobRow.related_doc_id).first():null;
         const originalBiz=mapInboundJobTypeToBiz(jobRow.job_type)||jobRow.biz_class||'';
@@ -6954,7 +6961,7 @@ route("v2_ops_job_detail", async (body, env) => {
   const [jobRows,workers,results,atts,dispatchRows]=detail,job=jobRows.results[0];
   if (!job) return err("not found", 404);
   if(env.SOP_UPGRADE_ENABLED==='true'){const n=detail.at(-1).results[0];if(n)Object.assign(job,decorateJobNumber(job,n));}
-  job.active_worker_count=new Set(workers.results.filter(w=>!w.left_at).map(w=>w.worker_id)).size;
+  job.active_worker_count=new Set(workers.results.filter(w=>!w.left_at).map(w=>badgeKey(env,w.worker_id))).size;
   return json({
     ok: true, dispatch: inboundFlowEnabled(env)?dispatchRows?.results[0]||null:null, job, can_manage_dispatch: canManage, can_view_resting: await restingDispatch(env,job_id), unload_plans: job.job_type==='unload'?await tripPlans(env,job_id):[],
     load_orders: await loadOrdersForJob(env,job),
@@ -6975,7 +6982,7 @@ route("v2_ops_my_active_job", async (body, env) => {
   const seg = await env.DB.prepare(
     `SELECT w.* FROM v2_ops_job_workers w
      JOIN v2_ops_jobs j ON j.id = w.job_id
-     WHERE w.worker_id=? AND w.left_at='' AND j.status IN ('pending','working','awaiting_close')
+     WHERE ${badgeSQL(env,'w.worker_id','?')} AND w.left_at='' AND j.status IN ('pending','working','awaiting_close')
      ORDER BY w.joined_at DESC LIMIT 1`
   ).bind(worker_id).first();
 
@@ -6988,7 +6995,7 @@ route("v2_ops_my_active_job", async (body, env) => {
             j.status AS job_status, j.job_type, j.flow_stage, j.related_doc_id, j.updated_at AS job_updated_at
        FROM v2_ops_job_workers w
        JOIN v2_ops_jobs j ON j.id = w.job_id
-      WHERE w.worker_id=? AND w.left_at=''
+      WHERE ${badgeSQL(env,'w.worker_id','?')} AND w.left_at=''
       ORDER BY w.joined_at ASC`
   ).bind(worker_id).all();
   const stale_segments = [];
@@ -7960,7 +7967,7 @@ route("v2_pick_job_docs_list", async (body, env) => {
     return Object.assign({}, d, {
       participants: parts,
       active_picker_count: parts.filter(p => p.status === 'working').length,
-      total_picker_count: new Set(parts.map(p => p.worker_id)).size
+      total_picker_count: new Set(parts.map(p => badgeKey(env,p.worker_id))).size
     });
   });
   return json({ ok: true, docs });
@@ -8149,7 +8156,7 @@ route("v2_pick_job_finalize", async (body, env) => {
         return { ok: false, error: "missing_worker_id",
           message: "请提供拣货人ID / worker_id 필요" };
       }
-      if (worker_id !== (job.created_by || '')) {
+      if (!(attendanceEnabled(env)?sameWorkerBadge(worker_id,job.created_by||''):worker_id===(job.created_by||''))) {
         return { ok: false, error: "forbidden_not_creator",
           message: "只有趟次创建人或主管/管理员可以整趟完成 / 차수 생성자 또는 관리자만 전체 완료 가능",
           required_creator: job.created_by || '' };
@@ -8382,7 +8389,7 @@ route("v2_bulk_op_job_start", async (body, env) => {
     const otherActive = await env.DB.prepare(
       `SELECT j.id, j.related_doc_id FROM v2_ops_job_workers w
        JOIN v2_ops_jobs j ON j.id = w.job_id
-       WHERE w.worker_id=? AND w.left_at=''
+       WHERE ${badgeSQL(env,'w.worker_id','?')} AND w.left_at=''
        AND j.job_type='bulk_op'
        AND j.status IN ('pending','working','awaiting_close')
        LIMIT 5`
@@ -8526,7 +8533,7 @@ route("v2_bulk_op_job_finish", async (body, env) => {
 
     // Pre-check: if this user is the only active worker, they MUST record output
     const othersRow = await env.DB.prepare(
-      "SELECT COUNT(*) as c FROM v2_ops_job_workers WHERE job_id=? AND worker_id!=? AND left_at=''"
+      `SELECT COUNT(*) as c FROM v2_ops_job_workers WHERE job_id=? AND NOT ${badgeSQL(env,'worker_id','?')} AND left_at=''`
     ).bind(job_id, worker_id).first();
     const willBeLastPerson = (Number((othersRow && othersRow.c) || 0) === 0);
 
@@ -8977,7 +8984,7 @@ route("v2_ops_realtime_board", async (body, env) => {
       FROM v2_ops_job_workers w
       JOIN v2_ops_jobs j ON w.job_id = j.id
       LEFT JOIN v2_inbound_plans p ON j.related_doc_type='inbound_plan' AND j.related_doc_id = p.id
-      WHERE w.worker_id=? AND w.joined_at >= ? AND w.joined_at < ? AND w.left_at != ''
+      WHERE ${badgeSQL(env,'w.worker_id','?')} AND w.joined_at >= ? AND w.joined_at < ? AND w.left_at != ''
       ORDER BY w.left_at DESC LIMIT 1
     `).bind(tw.worker_id, range.startUtc, range.endUtc).first();
     offWorkers.push({
@@ -9103,7 +9110,7 @@ route("v2_admin_dirty_data_cleanup", async (body, env) => {
       const worker_id = String(body.worker_id || "").trim();
       if (!worker_id) return { ok: false, error: "missing worker_id" };
       const segs = await env.DB.prepare(
-        "SELECT id, job_id FROM v2_ops_job_workers WHERE worker_id=? AND left_at=''"
+        `SELECT id, job_id FROM v2_ops_job_workers WHERE ${badgeSQL(env,'worker_id','?')} AND left_at=''`
       ).bind(worker_id).all();
       const rows = segs.results || [];
       for (const s of rows) {
@@ -9258,7 +9265,7 @@ route("v2_admin_force_worker_leave", async (body, env) => {
       ).bind(segment_id).first();
     } else {
       seg = await env.DB.prepare(
-        "SELECT * FROM v2_ops_job_workers WHERE job_id=? AND worker_id=? AND left_at='' ORDER BY joined_at DESC LIMIT 1"
+        `SELECT * FROM v2_ops_job_workers WHERE job_id=? AND ${badgeSQL(env,'worker_id','?')} AND left_at='' ORDER BY joined_at DESC LIMIT 1`
       ).bind(job_id, worker_id).first();
     }
     if (!seg) return { ok: false, error: "already_closed", message: "未找到未关闭参与段（可能已退出）" };
@@ -12885,6 +12892,7 @@ export default {
     // Staging reuses the original pages and routes under one personal session.
     // The principal is supplied only by a verified HttpOnly cookie, never request JSON.
     env = { ...env, SOP_REQUEST_USER: await sessionUser(request, env) };
+    if(attendanceEnabled(env)&&env.SOP_REQUEST_USER?.scope==='field'){try{await ensureAttendance(env);await resolveDailyBadge(env,env.SOP_REQUEST_USER.badge,{day:kstToday()});}catch(e){return json({ok:false,error:e.message},409);}}
     if(accessEnabled(env)&&env.SOP_REQUEST_USER?.scope==='field'&&isMultipart){
       const doc=formData.get('related_doc_type'),id=formData.get('related_doc_id');
       if(!['inbound_plan','outbound_order','field_feedback','ops_job','issue_ticket','issue_handle_run','sop_task'].includes(doc))return err('现场无此附件上传权限',403);
@@ -12905,6 +12913,8 @@ export default {
     const authResponse = await sessionAction(body, env,request);
     if (authResponse) return authResponse;
     if(accessEnabled(env)){const adminAction=await accessAdminAction(body,env);if(adminAction)return adminAction;}
+    // Resolve generated daily badge aliases before crew preparation and all admission guards.
+    if(attendanceEnabled(env)){try{await ensureAttendance(env);await normalizeDailyBadgeRequest(env,body);}catch(e){return json({ok:false,error:e.message},409);}}
     if(action.startsWith('sop_feedback_link_')){
       if(action==='sop_feedback_link_save'&&(request.method!=='POST'||request.headers.get('Origin')&&request.headers.get('Origin')!==url.origin))return err('Invalid request origin',403);
       try{return json(action==='sop_feedback_link_create_preview'?await feedbackCreatePreview(env,body):await handleFeedbackLink(body,env,{ensureTasks:ensureInboundPlanBizTasks,recalc:recalcInboundPlanCompletion,syncCourier:syncCourierArrival}));}catch(e){return json({ok:false,error:e.message},409);}

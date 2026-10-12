@@ -3,6 +3,7 @@
 import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import path from 'node:path';
 import worker from '../worker-v2/index.js';import {database} from './d1-adapter.mjs';
 import * as documentCode from '../shared/document-code.js';
+import * as badgeIdentity from '../shared/badge-identity.js';
 import * as courierRules from '../shared/courier-rules.js';
 import * as laborDepartment from '../shared/labor-department.js';
 const runtime=process.env.CK_JSDOM_MODULE?await import(process.env.CK_JSDOM_MODULE):null;
@@ -20,7 +21,7 @@ async function fixture(){
   const dom=new JSDOM(html,{url:u.href,runScripts:'dangerously',resources,virtualConsole:vc,pretendToBeVisual:true,beforeParse(w){
    for(const [k,v] of Object.entries(storage))w.sessionStorage.setItem(k,v);
    w.CKDocumentCode=documentCode;
-   w.__fixtureModules={'document-code':documentCode,'courier-rules':courierRules,'labor-department':laborDepartment};
+   w.__fixtureModules={'document-code':documentCode,'badge-identity':badgeIdentity,'courier-rules':courierRules,'labor-department':laborDepartment};
    w.fetch=async(url,options={})=>{const endpoint=new URL(url,w.location.href);assert.equal(endpoint.origin,'https://fixture.test');assert.ok(['/api','/001/api','/attendance/api'].includes(endpoint.pathname));return request(JSON.parse(options.body));};
    w.alert=message=>errors.push('alert: '+message);w.confirm=()=>true;w.prompt=()=>{throw Error('Unexpected login/name prompt')};w.scrollTo=()=>{};w.matchMedia=()=>({matches:false,addEventListener(){},removeEventListener(){}});
    w.HTMLDialogElement.prototype.showModal=function(){this.open=true};w.HTMLDialogElement.prototype.close=function(){this.open=false};

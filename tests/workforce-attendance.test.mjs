@@ -188,7 +188,7 @@ for(const scenario of ['closed work','open work','older open work','cross-midnig
  const start=r.day+'T00:00:00+09:00',before=new Date(Date.parse(start)-3600000).toISOString(),past=new Date(Date.parse(start)-7200000).toISOString();
  if(scenario.includes('work')){
   f.job();const options=scenario==='closed work'?{start:r.inAt,end:r.inAt}:scenario==='older open work'?{start:past,end:before}:scenario==='cross-midnight work'?{start:before,end:start}:scenario==='zero-length work'?{start,end:start}:{};
-  const id=f.segment(r,options);if(scenario==='older open work')f.DB.raw.prepare("UPDATE v2_ops_job_workers SET left_at='' WHERE id=?").run(id);
+  const id=f.segment(r,options);if(scenario==='older open work'){const guard=f.DB.raw.prepare("SELECT sql FROM sqlite_master WHERE name='ck_daily_badge_join_update'").get().sql;f.DB.raw.exec('DROP TRIGGER ck_daily_badge_join_update');try{f.DB.raw.prepare("UPDATE v2_ops_job_workers SET left_at='' WHERE id=?").run(id);}finally{f.DB.raw.exec(guard);}}
  }else if(scenario.includes('break'))f.breakRow(r,{end:scenario==='closed break'?r.inAt:''});
  else await f.loan(r,scenario==='borrowed loan'?'borrowed':'return_pending');
  const snapshot=f.snapshot(),item=await f.item(r.id);
