@@ -1,3 +1,4 @@
+import {pickStartFixture} from './pick-workload-fixture.mjs';
 import test from 'node:test';import assert from 'node:assert/strict';
 import worker from '../worker-v2/index.js';import {database} from './d1-adapter.mjs';
 function setup(){
@@ -5,7 +6,7 @@ function setup(){
  const call=async(action,data={})=>(await worker.fetch(new Request('https://test.local/api',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,client_req_id:crypto.randomUUID(),...data})}),env)).json();
  const ok=async(action,data)=>{const r=await call(action,data);assert.equal(r.ok,true,action+': '+(r.error||r.message));return r;};
  const workers=[{id:'A',name:'甲'},{id:'B',name:'乙'},{id:'C',name:'丙'}];
- const start=(action,data={},staff=workers)=>ok('sop_native_start',{payload:{action,client_req_id:crypto.randomUUID(),...data},workers:staff,lead_id:staff[0].id,estimated_minutes:15,labor_department:'bulk'});
+ const start=(action,data={},staff=workers)=>ok('sop_native_start',{payload:{action,...pickStartFixture(action),client_req_id:crypto.randomUUID(),...data},workers:staff,lead_id:staff[0].id,estimated_minutes:15,labor_department:'bulk'});
  const count=id=>DB.raw.prepare("SELECT COUNT(*) n FROM v2_ops_job_workers WHERE job_id=? AND left_at=''").get(id).n;
  const status=id=>DB.raw.prepare('SELECT status FROM v2_ops_jobs WHERE id=?').get(id).status;
  return {DB,env,call,ok,start,workers,count,status};

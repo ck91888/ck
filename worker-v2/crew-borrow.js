@@ -112,6 +112,7 @@ export function crewBorrowStatements(e,prepared,destinationId,t){
 }
 export function staffedDispatchStatements(e,p,staff,id,t,result){
  const lead=staff.workers.find(w=>sameWorkerBadge(w.id,staff.lead_id)),data={title:p.job_type||'unload',owner_id:e.SOP_REQUEST_USER.id,owner:e.SOP_REQUEST_USER.name,lead_id:lead.id,workers:staff.workers,estimated_minutes:staff.estimated_minutes,job_type:p.job_type||'unload',status:'working',created_at:t,source_type:p.source_type||'',source_id:p.source_id||'',labor_department:staff.department};
+ if(p.job_type==='pick_direct'&&staff.planned_pick_workload)data.planned_pick_workload=staff.planned_pick_workload;
  return [q(e,'INSERT INTO sop_events VALUES(?,?,?,?,?,?,?,?,?,?)','DISPATCH-'+p.client_req_id,id,0,'sop_native_start',e.SOP_REQUEST_USER.id,e.SOP_REQUEST_USER.name,'{}',JSON.stringify(data),JSON.stringify(result),t),q(e,'INSERT INTO sop_records VALUES(?,?,?,?,?,?)',id,'dispatch',1,staff.department,JSON.stringify(data),t),...crewBorrowStatements(e,e.SOP_CREW_BORROW,id,t),...staff.workers.map(w=>q(e,'INSERT INTO v2_ops_job_workers(id,job_id,worker_id,worker_name,joined_at) VALUES(?,?,?,?,?)',sameWorkerBadge(w.id,staff.lead_id)&&result.worker_seg_id?result.worker_seg_id:'WS-'+crypto.randomUUID(),id,w.id,w.name,t))];
 }
 export async function startBorrowableSimple(e,p,staff,feedbackNo){

@@ -1,3 +1,4 @@
+import {fillPickWorkloadFixture} from './pick-workload-fixture.mjs';
 // Actual built /001 and /shuju + real Worker, with an isolated synthetic database.
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -70,6 +71,7 @@ try{
  await field.evaluate(()=>goPage('order_op_menu'));await field.locator('[onclick="goPage(\'pick_direct\')"]').click();await field.locator('#pickStartDocInput').fill('SYNTHETIC-DAILY-PICK-001');await field.locator('#pickStartDocInput').press('Enter');
  await field.locator('[onclick="submitStartPickByDocs(this)"]').click();const crew=field.locator('dialog[open]');
  for(const person of [first,helper]){await crew.locator('[data-staff-badge]').fill(person.badgeId+'|'+person.name);await crew.locator('[data-staff-badge]').press('Enter');}
+ await fillPickWorkloadFixture(crew);
  const started=field.waitForResponse(r=>bodyOf(r.request())?.action==='sop_native_start');await crew.locator('[type=submit]').click();const start=await(await started).json();assert.equal(start.ok,true,JSON.stringify(start));jobId=start.job_id;
  const dispatched=requests.find(r=>r.action==='sop_native_start');assert.deepEqual(dispatched.workers.map(w=>w.id),[first.badgeId,helper.badgeId]);assert.equal(dispatched.workers.some(w=>w.id===second.badgeId),false);
  await field.locator('#pickWorkingSection').waitFor({state:'visible'});

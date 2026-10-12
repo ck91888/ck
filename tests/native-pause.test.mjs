@@ -1,10 +1,11 @@
+import {pickStartFixture} from './pick-workload-fixture.mjs';
 import test from 'node:test';import assert from 'node:assert/strict';
 import worker from '../worker-v2/index.js';import {database} from './d1-adapter.mjs';
 function setup(){
  const DB=database(),env={DB,SOP_ENVIRONMENT:'staging',SOP_UPGRADE_ENABLED:'true',SOP_PUBLIC_TEST_ACCESS:'true',SOP_ATTENDANCE_ENABLED:'true'};
  const call=async(action,data={})=>(await worker.fetch(new Request('https://test.local/api',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,client_req_id:crypto.randomUUID(),...data})}),env)).json();
  const ok=async(a,b)=>{const r=await call(a,b);assert.equal(r.ok,true,a+': '+r.error);return r;};
- const start=(staff,action='v2_ops_job_start',extra={job_type:'pack_direct',flow_stage:'outbound'})=>ok('sop_native_start',{payload:{action,client_req_id:crypto.randomUUID(),...extra},workers:staff,lead_id:staff[0].id,estimated_minutes:15,labor_department:'bulk'});
+ const start=(staff,action='v2_ops_job_start',extra={job_type:'pack_direct',flow_stage:'outbound'})=>ok('sop_native_start',{payload:{action,...pickStartFixture(action),client_req_id:crypto.randomUUID(),...extra},workers:staff,lead_id:staff[0].id,estimated_minutes:15,labor_department:'bulk'});
  const active=id=>DB.raw.prepare("SELECT * FROM v2_ops_job_workers WHERE job_id=? AND left_at=''").all(id);
  const status=id=>DB.raw.prepare('SELECT status FROM v2_ops_jobs WHERE id=?').get(id).status;
  const person=async name=>{const d=(await ok('sop_attendance_checkin',{name,agency:'가온'})).record;return {d,w:{id:d.badgeId,name:d.name}};};
@@ -64,7 +65,7 @@ test('paused pick and external documents retain exclusive claims rather than cre
  const f=setup(),a=await f.person('QA claims A'),b=await f.person('QA claims B');
  for(const [action,extra] of [['v2_pick_job_start',{pick_doc_nos:['QA-PAUSED-CLAIM']}],['v2_bulk_op_job_start',{work_order_no:'QA-PAUSED-EXTERNAL'}]]){
   const j=await f.start([a.w],action,extra);await f.ok('sop_native_pause',{job_id:j.job_id,revision:1,reason:'暂停保留占用'});
-  const duplicate=await f.call('sop_native_start',{payload:{action,client_req_id:crypto.randomUUID(),...extra},workers:[b.w],lead_id:b.w.id,estimated_minutes:10,labor_department:'bulk'});assert.equal(duplicate.ok,false);assert.equal(f.status(j.job_id),'paused');
+  const duplicate=await f.call('sop_native_start',{payload:{action,...pickStartFixture(action),client_req_id:crypto.randomUUID(),...extra},workers:[b.w],lead_id:b.w.id,estimated_minutes:10,labor_department:'bulk'});assert.equal(duplicate.ok,false);assert.equal(f.status(j.job_id),'paused');
  }
 });
 test('paused loading preserves order reservation and rejects cancellation, quantity changes and racing completion',async()=>{
@@ -82,7 +83,8 @@ test('all 20 historical native job types preserve identity through pause and con
  const types=['unload','inbound_direct','inbound_bulk','inbound_return','inbound_change_order','pick_direct','bulk_op','pack_direct','change_order','load_outbound','outbound_stock_op','inventory','disposal','qc','issue_handle','other_internal','scan_pallet','load_import','pickup_delivery_import','verify_scan'];
  const f=setup();for(const [i,type] of types.entries()){
   // Canonical dispatch fixture, including historical types with no new-start entry.
-  const a=await f.person('QA 20类型 '+i),j=await f.start([a.w],'v2_ops_job_start',{job_type:type,flow_stage:'internal'});
+  const a=await f.person('QA 20类型 '+i),j=await f.start([a.w],'v2_ops_job_start',{job_type:type==='pick_direct'?'other_internal':type,flow_stage:'internal'});
+  if(type==='pick_direct'){f.DB.raw.prepare('UPDATE v2_ops_jobs SET job_type=? WHERE id=?').run(type,j.job_id);f.DB.raw.prepare("UPDATE sop_records SET state=json_set(state,'$.job_type',?) WHERE id=?").run(type,j.job_id);}
   await f.ok('sop_native_pause',{job_id:j.job_id,revision:1,reason:'QA '+type});assert.equal(f.active(j.job_id).length,0,type);
   const detail=await f.ok('v2_ops_job_detail',{job_id:j.job_id});assert.equal(detail.can_manage_dispatch,true);assert.equal(detail.job.status,'paused');
   await f.ok('sop_native_resume',{job_id:j.job_id,revision:2,workers:[a.w],lead_id:a.w.id});assert.equal(f.active(j.job_id).length,1,type);

@@ -1,3 +1,4 @@
+import {fillPickWorkloadFixture} from './pick-workload-fixture.mjs';
 // Actual built 001/002 pages, real Worker, synthetic in-memory database and R2 only.
 import assert from 'node:assert/strict';
 import http from 'node:http';import fs from 'node:fs';import path from 'node:path';import {tmpdir} from 'node:os';import {createRequire} from 'node:module';
@@ -20,6 +21,7 @@ const requests=[],alerts=[];field.on('request',r=>{if(r.postData()?.includes('"a
 async function assign(code){
  await field.locator('[onclick="submitStartPickByDocs(this)"]').click();
  const crew=field.locator('dialog[open]');await crew.locator('[data-staff-badge]').fill(code);await crew.locator('[data-staff-badge]').press('Enter');
+ await fillPickWorkloadFixture(crew);
  const response=field.waitForResponse(r=>r.request().postData()?.includes('"action":"sop_native_start"'));
  await crew.locator('[type=submit]').click();return (await response).json();
 }

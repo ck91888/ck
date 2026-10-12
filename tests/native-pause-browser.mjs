@@ -1,3 +1,4 @@
+import {pickStartFixture} from './pick-workload-fixture.mjs';
 // Local browser acceptance against real handlers and built assets. Ephemeral SQLite only.
 import assert from 'node:assert/strict';import http from 'node:http';import fs from 'node:fs';import path from 'node:path';import {createRequire} from 'node:module';
 import worker from '../worker-v2/index.js';import {database} from './d1-adapter.mjs';
@@ -6,9 +7,9 @@ const DB=database(),env={DB,SOP_ENVIRONMENT:'staging',SOP_UPGRADE_ENABLED:'true'
 const call=async(action,b={})=>{const r=await worker.fetch(new Request('http://127.0.0.1/api',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,client_req_id:crypto.randomUUID(),...b})}),env);const v=await r.json();assert.equal(v.ok,true,action+': '+v.error);return v;};
 const jobs=[];for(const [i,action,extra] of [[0,'v2_ops_job_start',{job_type:'pack_direct',flow_stage:'outbound'}],[1,'v2_pick_job_start',{pick_doc_nos:['QA-BROWSER-PICK']}],[2,'v2_unplanned_unload_start',{biz_class:'bulk'}],[3,'v2_bulk_op_job_start',{work_order_no:'QA-BROWSER-EXTERNAL',customer:'虚构浏览器客户'}]]){
  const d=(await call('sop_attendance_checkin',{name:'虚构浏览器人员'+i,agency:'가온'})).record,staff={id:d.badgeId,name:d.name};
- const j=await call('sop_native_start',{payload:{action,client_req_id:crypto.randomUUID(),...extra},workers:[staff],lead_id:staff.id,estimated_minutes:10,labor_department:'bulk'});jobs.push({...j,d,staff});
+ const j=await call('sop_native_start',{payload:{action,...pickStartFixture(action),client_req_id:crypto.randomUUID(),...extra},workers:[staff],lead_id:staff.id,estimated_minutes:10,labor_department:'bulk'});jobs.push({...j,d,staff});
 }
-async function addJob(action,extra,label){const d=(await call('sop_attendance_checkin',{name:'虚构入口 '+label,agency:'가온'})).record,staff={id:d.badgeId,name:d.name};const j=await call('sop_native_start',{payload:{action,client_req_id:crypto.randomUUID(),...extra},workers:[staff],lead_id:staff.id,estimated_minutes:10,labor_department:'bulk'});jobs.push({...j,d,staff});}
+async function addJob(action,extra,label){const d=(await call('sop_attendance_checkin',{name:'虚构入口 '+label,agency:'가온'})).record,staff={id:d.badgeId,name:d.name};const j=await call('sop_native_start',{payload:{action,...pickStartFixture(action),client_req_id:crypto.randomUUID(),...extra},workers:[staff],lead_id:staff.id,estimated_minutes:10,labor_department:'bulk'});jobs.push({...j,d,staff});}
 for(const job_type of ['change_order','inventory','disposal','qc','other_internal','scan_pallet','load_import'])await addJob('v2_ops_job_start',{job_type,flow_stage:'internal'},job_type);
 await addJob('v2_inbound_job_start',{job_type:'inbound_return',biz_class:'return'},'return');await addJob('v2_import_delivery_job_start',{},'delivery');
 for(const [type,biz,classes]of [['inbound_direct','direct_ship',['direct_ship']],['inbound_bulk','bulk',['bulk_putaway']]]){const code='QA-BROWSER-'+type,p=await call('v2_inbound_plan_create',{customer:'虚构入口客户',biz_classes:classes,external_inbound_no:code});DB.raw.prepare("UPDATE v2_inbound_plans SET status='arrived_pending_putaway' WHERE id=?").run(p.id);await addJob('v2_inbound_job_start',{job_type:type,biz_class:biz,plan_id:p.id,external_inbound_no:code},type);}

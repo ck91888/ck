@@ -1,3 +1,4 @@
+import {pickStartFixture} from './pick-workload-fixture.mjs';
 // Synthetic employees, real Worker handlers, and a controlled SQLite :memory: clock.
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -35,7 +36,7 @@ async function fixture(t){
   const login=person=>ok('field','sop_login',{badge:person.badgeId});
   const start=async(actor,people,{scope='field',codes=['SYNTHETIC-PICK-'+crypto.randomUUID()],request=crypto.randomUUID()}={})=>{
     if(scope==='field')await login(actor);
-    const body={payload:{action:'v2_pick_job_start_by_docs',pick_doc_nos:codes,client_req_id:request},workers:people.map(p=>({id:p.badgeId,name:p.name})),lead_id:people[0].badgeId,estimated_minutes:30};
+    const body={payload:{action:'v2_pick_job_start_by_docs',...pickStartFixture('v2_pick_job_start_by_docs'),pick_doc_nos:codes,client_req_id:request},workers:people.map(p=>({id:p.badgeId,name:p.name})),lead_id:people[0].badgeId,estimated_minutes:30};
     return {result:await ok(scope,'sop_native_start',body),body};
   };
   const report=(date=day)=>ok('office','sop_attendance_summary',{date,scope:'employee'});

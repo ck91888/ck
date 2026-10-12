@@ -1,3 +1,4 @@
+import {pickStartFixture,historicalPickStart} from './pick-workload-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
@@ -12,9 +13,9 @@ function fixture(t){
   const call=async(action,data={})=>(await worker.fetch(new Request('https://fixture.invalid/api',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,client_req_id:crypto.randomUUID(),...data})}),env)).json();
   const ok=async(action,data)=>{const r=await call(action,data);assert.equal(r.ok,true,action+': '+(r.error||r.message));return r;};
   const workers=[{id:'QA-ATOMIC-A',name:'QA atomic A'},{id:'QA-ATOMIC-B',name:'QA atomic B'}];
-  const start=(action,data={},native=true)=>native?ok('sop_native_start',{payload:{action,client_req_id:crypto.randomUUID(),...data},workers,lead_id:workers[0].id,estimated_minutes:15,labor_department:'bulk'}):ok(action,{worker_id:workers[0].id,worker_name:workers[0].name,...data});
+  const start=(action,data={},native=true)=>native?ok('sop_native_start',{payload:{action,...pickStartFixture(action),client_req_id:crypto.randomUUID(),...data},workers,lead_id:workers[0].id,estimated_minutes:15,labor_department:'bulk'}):ok(action,{worker_id:workers[0].id,worker_name:workers[0].name,...data});
   const snap=(job,order)=>({job:DB.raw.prepare('SELECT status,active_worker_count,customer,finished_at FROM v2_ops_jobs WHERE id=?').get(job),workers:DB.raw.prepare('SELECT worker_id,left_at,minutes_worked,leave_reason FROM v2_ops_job_workers WHERE job_id=? ORDER BY worker_id').all(job),results:DB.raw.prepare('SELECT id,result_json FROM v2_ops_job_results WHERE job_id=? ORDER BY id').all(job),pick_docs:DB.raw.prepare('SELECT pick_doc_no,pick_status,pick_finished_at FROM v2_ops_job_pick_docs WHERE job_id=? ORDER BY rowid').all(job),worker_docs:DB.raw.prepare('SELECT worker_id,status,finished_at,minutes_worked FROM v2_pick_worker_docs WHERE job_id=? ORDER BY rowid').all(job),...(order?{order:DB.raw.prepare('SELECT status,actual_box_count,actual_pallet_count,stock_operation_status,stock_operation_result_json FROM v2_outbound_orders WHERE id=?').get(order)}:{})});
-  return{DB,call,ok,start,snap,workers};
+  return{DB,env,call,ok,start,snap,workers};
 }
 const bulkBody=job=>({job_id:job.job_id,worker_id:'QA-ATOMIC-A',total_operated_box_count:20,pallet_count:2,client_req_id:'QA-STABLE-FINISH'});
 test('native bulk rankings recognize legacy counter fields and corrections replace prior quantities',async t=>{
@@ -50,7 +51,7 @@ test('native bulk sequential lost-reply replay preserves one result and clock ti
 });
 for(const native of [true,false])test((native?'native':'in-flight legacy')+' pick finalize is atomic after all document and result writes',async t=>{
   const f=fixture(t),numbers=['QA-PICK-A','QA-PICK-B'],j=await f.start('v2_pick_job_start',{pick_doc_nos:numbers},native);
-  if(!native){await f.ok('v2_pick_job_start_by_docs',{pick_doc_nos:numbers,worker_id:f.workers[0].id,worker_name:f.workers[0].name});await f.ok('v2_pick_job_finish',{job_id:j.job_id,worker_id:f.workers[0].id});}
+  if(!native){await historicalPickStart(f.env,f.ok,{pick_doc_nos:numbers,worker_id:f.workers[0].id,worker_name:f.workers[0].name});await f.ok('v2_pick_job_finish',{job_id:j.job_id,worker_id:f.workers[0].id});}
   const before=f.snap(j.job_id);f.DB.raw.exec("CREATE TRIGGER qa_failure BEFORE UPDATE OF status ON v2_ops_jobs WHEN NEW.status='completed' BEGIN SELECT RAISE(ABORT,'qa_failure'); END");
   const body={job_id:j.job_id,worker_id:f.workers[0].id,client_req_id:'QA-PICK-FINISH'};
   assert.equal((await f.call('v2_pick_job_finalize',body)).ok,false);assert.deepEqual(f.snap(j.job_id),before);

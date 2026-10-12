@@ -3607,6 +3607,7 @@ function enterPickWorkingSection(startRes) {
     if (res && res.ok && res.job) {
       var t = document.getElementById("pickWorkingTitle");
       if (t) t.textContent = "趟次/차수: " + window.CKDocumentLabels.jobSummary(res.job);
+      var planBox=document.getElementById('pickPlannedWorkload');if(planBox&&window.CKPickWorkload)planBox.innerHTML=CKPickWorkload.summary(res.job.planned_pick_workload);
       // 找当前 worker 自己的 open segment 作为开始时间
       var mySeg = (res.workers || []).find(function(w) {
         return w.worker_id === getWorkerId() && !w.left_at;

@@ -1,3 +1,4 @@
+import {pickStartFixture,historicalPickStart} from './pick-workload-fixture.mjs';
 // Real Worker API, a controlled clock, and SQLite :memory: only.
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -33,9 +34,9 @@ async function setup(t,{permanent=false,arrival=instant('09:00')}={}){
   const start=async(time='09:10',{mode='native',date=day}={})=>{
     at(time,date);const codes=['SYNTHETIC-PICK-ASSIGNMENT'];let original;
     if(mode!=='native')original=await ok('v2_pick_job_start',{pick_doc_nos:codes,worker_id:record.badgeId,worker_name:record.name});
-    if(mode==='legacy')job=await ok('v2_pick_job_start_by_docs',{pick_doc_nos:codes,worker_id:record.badgeId,worker_name:record.name});
+    if(mode==='legacy')job=await historicalPickStart(env,ok,{pick_doc_nos:codes,worker_id:record.badgeId,worker_name:record.name});
     else job=await ok('sop_native_start',{
-      payload:{action:'v2_pick_job_start_by_docs',pick_doc_nos:codes,client_req_id:crypto.randomUUID()},
+      payload:{action:'v2_pick_job_start_by_docs',...pickStartFixture('v2_pick_job_start_by_docs'),pick_doc_nos:codes,client_req_id:crypto.randomUUID()},
       workers:[{id:record.badgeId,name:record.name}],lead_id:record.badgeId,estimated_minutes:30,
     });
     if(original)assert.equal(job.job_id,original.job_id);

@@ -1,3 +1,4 @@
+import {pickWorkloadContext,pickWorkloadSnapshot} from './pick-workload.js';
 import {staffedDispatchStatements} from './crew-borrow.js';
 import {ensureSchema} from './schema-ready.js';
 import {resolveInboundPlan,putawayTaskBiz,selectInboundReference,planClasses} from './inbound-flow.js';
@@ -24,9 +25,13 @@ export async function startAtomicDocument(e,p,staff,pickNumber){
   if(p.action==='v2_pick_job_start_by_docs'){
    const docs=(await q(e,`SELECT d.*,j.status AS job_status,j.is_temporary_interrupt FROM v2_ops_job_pick_docs d JOIN v2_ops_jobs j ON j.id=d.job_id WHERE d.pick_doc_no IN (SELECT value FROM json_each(?)) ORDER BY d.created_at DESC`,JSON.stringify(codes)).all()).results||[],selected=codes.map(code=>docs.find(d=>d.pick_doc_no===code));
    if(selected.some(d=>!d)||new Set(selected.map(d=>d.job_id)).size!==1||selected.some(d=>['completed','cancelled'].includes(d.job_status)||d.is_temporary_interrupt))return {ok:false,error:'拣货单不存在、跨趟次或原趟次已关闭，请核对原任务'};
-   id=selected[0].job_id;const live=await q(e,"SELECT id FROM v2_ops_job_workers WHERE job_id=? AND left_at='' LIMIT 1",id).first();if(live)return {ok:false,error:'原趟次有人作业，请由负责人交接原任务'};
+   id=selected[0].job_id;const context=await pickWorkloadContext(e,id);
+   if(context.pick_workload_required)staff={...staff,planned_pick_workload:pickWorkloadSnapshot(p.planned_pick_workload,e.SOP_REQUEST_USER,t,context.task_pick_doc_nos)};
+   else if(p.planned_pick_workload!=null)throw Error('已有拣货任务不重填开工工作量，请继续原任务 / 기존 작업의 시작 수량을 다시 입력하지 마세요');
+   const live=await q(e,"SELECT id FROM v2_ops_job_workers WHERE job_id=? AND left_at='' LIMIT 1",id).first();if(live)return {ok:false,error:'原趟次有人作业，请由负责人交接原任务'};
    sql.push(q(e,"UPDATE v2_ops_jobs SET status='working',active_worker_count=?,updated_at=? WHERE id=? AND status IN ('pending','working','awaiting_close')",staff.workers.length,t,id));extra.is_new_job=false;
   }else{
+   staff={...staff,planned_pick_workload:pickWorkloadSnapshot(p.planned_pick_workload,e.SOP_REQUEST_USER,t,codes)};
    const number=await pickNumber();sql.push(q(e,`INSERT INTO v2_ops_jobs(id,flow_stage,biz_class,job_type,related_doc_type,related_doc_id,status,created_by,created_at,updated_at,active_worker_count,display_no) VALUES(?,'order_op','direct_ship','pick_direct','','','working',?,?,?,?,?)`,id,lead.id,t,t,staff.workers.length,number));
    for(const code of codes)sql.push(q(e,"INSERT INTO v2_ops_job_pick_docs(id,job_id,pick_doc_no,pick_status,created_at) VALUES(?,?,?,'pending',?)",'PD-'+crypto.randomUUID(),id,code,t));Object.assign(extra,{trip_no:number,display_no:number,pick_doc_nos:codes});
   }

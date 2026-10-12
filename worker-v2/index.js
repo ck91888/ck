@@ -1,3 +1,4 @@
+import {pickWorkloadContext,readPickWorkload} from './pick-workload.js';
 import {uploadIssueDraft,cancelIssueDraft,removeIssueDraftFile,createIssueWithAttachments} from './issue-create.js';
 import {uploadCargoDraft} from './cargo-create.js';
 import {restingDispatch} from './dispatch-access.js';
@@ -6829,6 +6830,7 @@ route("v2_outbound_order_export", async (body, env) => {
 // =====================================================
 route("v2_ops_job_start", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  if(env.SOP_ENVIRONMENT==='staging'&&env.SOP_UPGRADE_ENABLED==='true'&&String(body.job_type||'').trim()==='pick_direct')return err('请从代发拣货入口开始 / 직배송 피킹 메뉴에서 시작하세요',409);
   const flow_stage = String(body.flow_stage || "").trim();
   const biz_class = String(body.biz_class || "").trim();
   const job_type = String(body.job_type || "").trim();
@@ -6977,6 +6979,7 @@ route("v2_ops_job_detail", async (body, env) => {
   if (!job) return err("not found", 404);
   if(env.SOP_UPGRADE_ENABLED==='true'){const n=detail.at(-1).results[0];if(n)Object.assign(job,decorateJobNumber(job,n));}
   job.active_worker_count=new Set(workers.results.filter(w=>!w.left_at).map(w=>badgeKey(env,w.worker_id))).size;
+  if(job.job_type==='pick_direct')job.planned_pick_workload=readPickWorkload(JSON.parse(dispatchRows?.results[0]?.state||'{}').planned_pick_workload);
   return json({
     ok: true, dispatch: inboundFlowEnabled(env)?dispatchRows?.results[0]||null:null, job, can_manage_dispatch: canManage, can_view_resting: await restingDispatch(env,job_id), unload_plans: job.job_type==='unload'?await tripPlans(env,job_id):[],
     load_orders: await loadOrdersForJob(env,job),
@@ -7751,6 +7754,9 @@ route("v2_pick_job_start_by_docs", async (body, env) => {
     }
 
     const job_id = jobIds[0];
+    // Old in-flight trips may continue without inventing a start-time plan.
+    // A pending trip with no work history must use atomic staffed dispatch.
+    if(env.SOP_ENVIRONMENT==='staging'&&env.SOP_UPGRADE_ENABLED==='true'&&!env.SOP_NATIVE_START&&!(await pickWorkloadContext(env,job_id)).pick_workload_started)return {ok:false,error:'请从代发拣货入口确认人员及计划工作量 / 직배송 피킹 메뉴에서 작업자와 계획 수량을 확인하세요'};
 
     // 创建拣货人 segment（开始计时）
     const seg_id = "WS-" + uid();
@@ -7827,6 +7833,7 @@ route("v2_pick_doc_lookup", async (body, env) => {
   if (!row) {
     return json({ ok: true, found: false, pick_doc_no: docNo });
   }
+  const workload=env.SOP_UPGRADE_ENABLED==='true'?await pickWorkloadContext(env,row.j_id):{};
   const pickStatus = row.pick_status || 'pending';
   // 参与人员明细（多对多）
   const partsRs = await env.DB.prepare(
@@ -7843,6 +7850,7 @@ route("v2_pick_doc_lookup", async (body, env) => {
     ok: true,
     found: true,
     pick_doc_no: row.pick_doc_no,
+    ...workload,
     pick_status: pickStatus,
     pick_started_at: row.pick_started_at || '',
     pick_finished_at: row.pick_finished_at || '',

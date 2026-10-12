@@ -1,3 +1,4 @@
+import {pickStartFixture,fillPickWorkloadFixture} from './pick-workload-fixture.mjs';
 // Actual built /001, /shuju and /attendance; all people and jobs are isolated fixtures.
 import assert from 'node:assert/strict';
 import http from 'node:http';
@@ -57,10 +58,10 @@ field.on('request',request=>{const body=bodyOf(request);if(body)requests.push(bo
 const dashboard=office.locator('#ck-labor-dashboard'),row=person=>dashboard.locator('[data-rows] tr').filter({hasText:person.badgeId});
 const record=name=>{scenarios.push(name);console.log('PASS '+name);};
 async function addBadge(dialog,id,name){await dialog.locator('[data-staff-badge]').fill(id+'|'+name);await dialog.locator('[data-staff-badge]').press('Enter');}
-async function startSelected(dialog){const response=field.waitForResponse(r=>bodyOf(r.request())?.action==='sop_native_start');await dialog.locator('[type=submit]').click();const result=await(await response).json();await field.waitForFunction(()=>!document.querySelector('dialog[open]'));return result;}
+async function startSelected(dialog){await fillPickWorkloadFixture(dialog);const response=field.waitForResponse(r=>bodyOf(r.request())?.action==='sop_native_start');await dialog.locator('[type=submit]').click();const result=await(await response).json();await field.waitForFunction(()=>!document.querySelector('dialog[open]'));return result;}
 async function refreshDashboard(){const response=office.waitForResponse(r=>bodyOf(r.request())?.action==='sop_attendance_summary');await dashboard.locator('[data-refresh]').click();assert.equal((await(await response).json()).ok,true);await office.waitForFunction(()=>!document.querySelector('#ck-labor-dashboard').hasAttribute('aria-busy'));}
 async function legacyJob(person,code,identity={badgeId:person.badgeId,name:person.name}){
- const result=await call('sop_native_start',{payload:{action:'v2_pick_job_start_by_docs',pick_doc_nos:[code],client_req_id:crypto.randomUUID()},workers:[{id:person.badgeId,name:person.name}],lead_id:person.badgeId,estimated_minutes:15,labor_department:'direct_ship'});
+ const result=await call('sop_native_start',{payload:{action:'v2_pick_job_start_by_docs',...pickStartFixture('v2_pick_job_start_by_docs'),pick_doc_nos:[code],client_req_id:crypto.randomUUID()},workers:[{id:person.badgeId,name:person.name}],lead_id:person.badgeId,estimated_minutes:15,labor_department:'direct_ship'});
  // Simulate already-existing lowercase records locally. Production must retain this evidence.
  const lower=identity.badgeId.toLowerCase(),jobId=result.job_id,dispatch=DB.raw.prepare('SELECT state FROM sop_records WHERE id=?').get(jobId),state=JSON.parse(dispatch.state);
  state.workers=state.workers.map(w=>({...w,id:lower,name:identity.name}));state.lead_id=lower;if(state.last_lead)state.last_lead={...state.last_lead,id:lower,name:identity.name};
@@ -119,7 +120,7 @@ try{
  assert.ok(Array.isArray(before.identityWarnings));assert.ok(JSON.stringify(before.identityWarnings).includes(orphan.lower));assert.equal(before.items.some(x=>x.record.badgeId.toUpperCase()===absentBadge),false);assert.equal(before.items.find(x=>x.record.badgeId===orphanSeed.badgeId).totals.direct_ship,0);assert.equal(DB.raw.prepare('SELECT count(*) n FROM ck_attendance_days WHERE lower(worker_id)=?').get(orphan.lower).n,0);assert.equal(await dashboard.locator('[data-rows] tr').filter({hasText:absentBadge}).count(),0);
  const orphanSnapshot=()=>({job:DB.raw.prepare('SELECT * FROM v2_ops_jobs WHERE id=?').get(orphan.jobId),workers:DB.raw.prepare('SELECT * FROM v2_ops_job_workers WHERE job_id=?').all(orphan.jobId),dispatch:DB.raw.prepare('SELECT * FROM sop_records WHERE id=?').get(orphan.jobId),jobs:count('v2_ops_jobs'),segments:count('v2_ops_job_workers'),attendance:count('ck_attendance_days')});const orphanBefore=orphanSnapshot();
  const expanded=await raw('sop_native_people',{job_id:orphan.jobId,revision:orphanBefore.dispatch.revision,workers:[{id:absentBadge,name:orphan.person.name},{id:second.badgeId,name:second.name}],lead_id:absentBadge,reason:'Synthetic attempt to extend invalid legacy crew'});assert.equal(expanded.ok,false,JSON.stringify(expanded));
- const newAttempt=await raw('sop_native_start',{payload:{action:'v2_pick_job_start_by_docs',pick_doc_nos:['SYNTHETIC-ORPHAN-CANNOT-START'],client_req_id:crypto.randomUUID()},workers:[{id:orphan.lower,name:orphan.person.name}],lead_id:orphan.lower,estimated_minutes:15,labor_department:'direct_ship'});assert.equal(newAttempt.ok,false,JSON.stringify(newAttempt));assert.deepEqual(orphanSnapshot(),orphanBefore);
+ const newAttempt=await raw('sop_native_start',{payload:{action:'v2_pick_job_start_by_docs',...pickStartFixture('v2_pick_job_start_by_docs'),pick_doc_nos:['SYNTHETIC-ORPHAN-CANNOT-START'],client_req_id:crypto.randomUUID()},workers:[{id:orphan.lower,name:orphan.person.name}],lead_id:orphan.lower,estimated_minutes:15,labor_department:'direct_ship'});assert.equal(newAttempt.ok,false,JSON.stringify(newAttempt));assert.deepEqual(orphanSnapshot(),orphanBefore);
  await office.screenshot({path:path.join(artifacts,'legacy-missing-attendance-warning.png'),fullPage:true});
  record('legacy lowercase work without attendance is shown as a raw-ID exception outside attendance totals; expansion and new dispatch are rejected without writes');
 

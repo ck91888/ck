@@ -115,7 +115,7 @@ window.CKEmployee={async kiosk(){
  function reviewDecision(d){return ['returned','return','reject','rejected'].includes(d)?'退回 / 반려':['passed','pass','approve','approved'].includes(d)?'通过 / 승인':'结论待核实 / 결과 확인 필요';}
  function documentType(type){return {inbound:'入库计划 / 입고 계획',inbound_plan:'入库计划 / 입고 계획',outbound:'出库计划 / 출고 계획',outbound_plan:'出库计划 / 출고 계획',need:'作业需求 / 작업 요청',work_need:'作业需求 / 작업 요청',work_order:'作业单 / 작업서',task:'作业任务 / 작업',dispatch:'派工作业 / 배정 작업',feedback:'现场反馈 / 현장 보고'}[type]||'业务单据 / 업무 문서';}
  function teamQuantities(quantities,label){return Array.isArray(quantities)&&quantities.length?'<p class="ck-workday-team-result">'+label+'：'+quantities.map(q=>esc(q.label||'')+' '+esc(q.quantity)+' '+esc({pallet:'托 / 팔레트',carton:'箱 / 상자',piece:'件 / 개',bag:'袋 / 포대'}[q.unit]||q.unit||'')).join('；')+'</p>':'';}
- function teamResult(job){return (job.results||[]).map(r=>teamQuantities(r.quantities,'任务整体实收 / 产出（非个人） / 작업 전체 실적 (개인 실적 아님)')).join('');}
+ function teamResult(job){return (job.job_type==='pick_direct'&&window.CKPickWorkload?CKPickWorkload.summary(job.planned_pick_workload):'')+(job.results||[]).map(r=>teamQuantities(r.quantities,'任务整体实收 / 产出（非个人） / 작업 전체 실적 (개인 실적 아님)')).join('');}
  function form(title,html,action,values,send=api){
   if(mutating||!visible())return;const token=++formVersion;formOrigin=document.activeElement;dialog.querySelector('h2').textContent=title;$('fields').innerHTML=html;
   const f=dialog.querySelector('form'),err=f.querySelector('[role=alert]');err.hidden=true;f.querySelector('[type=submit]').disabled=false;$('cancel').disabled=false;$('cancel').onclick=closeForm;let pending=false;

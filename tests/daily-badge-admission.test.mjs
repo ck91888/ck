@@ -1,3 +1,4 @@
+import {pickStartFixture,historicalPickStart} from './pick-workload-fixture.mjs';
 // Actual Worker APIs, a controlled KST clock, and synthetic SQLite :memory: only.
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -26,7 +27,7 @@ function fixture(t){
   const daily=async(name='Synthetic daily picker')=>(await ok('sop_attendance_checkin',{name,agency:'가온'})).record;
   const crew=(...records)=>records.map(r=>({id:r.badgeId,name:r.name}));
   const request=(workers,{code='SYNTHETIC-BADGE-PICK',lead=workers[0].id,client=crypto.randomUUID()}={})=>({
-    payload:{action:'v2_pick_job_start_by_docs',pick_doc_nos:[code],client_req_id:client},workers,lead_id:lead,estimated_minutes:30,
+    payload:{action:'v2_pick_job_start_by_docs',...pickStartFixture('v2_pick_job_start_by_docs'),pick_doc_nos:[code],client_req_id:client},workers,lead_id:lead,estimated_minutes:30,
   });
   const rows=table=>DB.raw.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all();
   const segments=job=>DB.raw.prepare('SELECT * FROM v2_ops_job_workers WHERE job_id=? ORDER BY joined_at,id').all(job);
@@ -148,7 +149,7 @@ for(const kind of ['DAF','EMP'])test(`${kind} custom badge casing stays exact an
 test('legacy individual scan canonicalizes a daily badge and finishing resolves its historic lowercase segment',async t=>{
   const s=fixture(t),p=await s.daily(),codes=['SYNTHETIC-LEGACY-BADGE'];
   const j=await s.ok('v2_pick_job_start',{pick_doc_nos:codes,worker_id:p.badgeId,worker_name:p.name});
-  s.at('09:10');const joined=await s.ok('v2_pick_job_start_by_docs',{pick_doc_nos:codes,worker_id:p.badgeId.toLowerCase(),worker_name:p.name});
+  s.at('09:10');const joined=await historicalPickStart(s.env,s.ok,{pick_doc_nos:codes,worker_id:p.badgeId.toLowerCase(),worker_name:p.name});
   assert.equal(joined.job_id,j.job_id);assert.equal(s.segments(j.job_id).length,1);assert.equal(s.segments(j.job_id)[0].worker_id,p.badgeId);
   s.historicalLower(j.job_id,p.badgeId);const original=s.segments(j.job_id)[0];
   s.at('10:00');await s.ok('v2_pick_job_finish',{job_id:j.job_id,worker_id:p.badgeId});

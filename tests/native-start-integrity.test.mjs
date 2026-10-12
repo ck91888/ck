@@ -1,3 +1,4 @@
+import {pickStartFixture} from './pick-workload-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
@@ -41,7 +42,7 @@ test('concurrent identical native start requests leave only one job and one full
   const after=f.snapshot();assert.equal(after.jobs.length,1);assert.equal(after.workers.filter(w=>!w.left_at).length,2);assert.equal(after.dispatch.length,1);assert.equal(after.events.length,1);assert.equal(after.idem.length,1);
 });
 for(const action of ['v2_inbound_job_start','v2_bulk_op_job_start','v2_pick_job_start','v2_outbound_stock_op_start','v2_issue_handle_start','v2_verify_job_start','v2_unplanned_unload_start','v2_unload_job_start'])test(action+' rolls back its document graph when non-lead registration fails, then same request retries once',async t=>{
- const f=await fixture(t);let payload={action,client_req_id:'QA-DOMAIN-'+action};
+ const f=await fixture(t);let payload={action,...pickStartFixture(action),client_req_id:'QA-DOMAIN-'+action};
  if(action==='v2_inbound_job_start')Object.assign(payload,{job_type:'inbound_return',biz_class:'return',customer_name:'QA returns'});
  if(action==='v2_bulk_op_job_start')Object.assign(payload,{work_order_no:'QA-DOMAIN-BULK',customer:'QA only'});
  if(action==='v2_pick_job_start')payload.pick_doc_nos=['QA-DOMAIN-PICK-A','QA-DOMAIN-PICK-B'];

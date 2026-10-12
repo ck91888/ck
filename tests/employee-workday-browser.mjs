@@ -1,3 +1,4 @@
+import {pickStartFixture} from './pick-workload-fixture.mjs';
 // Actual built /shuju + real Worker. All sessions, people and jobs are synthetic
 // and live only in this process's isolated SQLite memory database.
 import assert from 'node:assert/strict';
@@ -38,7 +39,7 @@ assert.ok(unit>1000,'Run this fixture after the first KST minute.');
 const ago=n=>new Date(now-n*unit).toISOString();
 for(const person of [...employees.map(p=>p.record),helper])await office('sop_attendance_correct',{id:person.id,version:person.version,inAt:ago(50),outAt:'',reason:'Synthetic browser fixture attendance'});
 await call('field','sop_login',{badge:dispatcher.badgeId});
-const start=(invoke,code,crew)=>invoke('sop_native_start',{payload:{action:'v2_pick_job_start_by_docs',pick_doc_nos:[code],client_req_id:crypto.randomUUID()},workers:crew.map(p=>({id:p.badgeId,name:p.name})),lead_id:crew[0].badgeId,estimated_minutes:30,labor_department:'direct_ship'});
+const start=(invoke,code,crew)=>invoke('sop_native_start',{payload:{action:'v2_pick_job_start_by_docs',...pickStartFixture('v2_pick_job_start_by_docs'),pick_doc_nos:[code],client_req_id:crypto.randomUUID()},workers:crew.map(p=>({id:p.badgeId,name:p.name})),lead_id:crew[0].badgeId,estimated_minutes:30,labor_department:'direct_ship'});
 const completed=(await start(field,'SYNTHETIC-OWN-COMPLETE',[participant,helper])).job_id;
 const setCrew=crew=>field('sop_native_people',{job_id:completed,revision:DB.raw.prepare('SELECT revision FROM sop_records WHERE id=?').get(completed).revision,workers:crew.map(p=>({id:p.badgeId,name:p.name})),lead_id:crew[0].badgeId,reason:'Synthetic rejoin fixture'});
 await setCrew([helper]);await setCrew([participant,helper]);

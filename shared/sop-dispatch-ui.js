@@ -58,9 +58,9 @@
    await window.stopAllManagedQrScanners?.();
    const fingerprint=JSON.stringify(Object.fromEntries(Object.entries(body).filter(([k])=>!['client_req_id','worker_id','worker_name','handler_id','handler_name'].includes(k)).sort(([a],[b])=>a.localeCompare(b))));
    let pending=retries.get(fingerprint);
-   if(!pending){const {startDepartment,departments}=await import('/shared/labor-department.js');const staff=await chooseStaff(startDepartment(body),departments,body);if(!staff)return {ok:false,error:'已取消派工'};pending={payload:{...body,client_req_id:body.client_req_id||crypto.randomUUID()},staff};retries.set(fingerprint,pending);}
-   const staff=pending.staff;
    try{
+   if(!pending){const {startDepartment,departments}=await import('/shared/labor-department.js');const staff=await chooseStaff(startDepartment(body),departments,body);if(!staff)return {ok:false,error:'已取消派工'};pending={payload:{...body,...(staff.planned_pick_workload?{planned_pick_workload:staff.planned_pick_workload}:{}),client_req_id:body.client_req_id||crypto.randomUUID()},staff};retries.set(fingerprint,pending);}
+   const staff=pending.staff;
     const r=await CKSession.request('sop_native_start',{payload:pending.payload,...staff});
     retries.delete(fingerprint);lead=r.lead||staff.workers.find(x=>x.id===staff.lead_id);sessionStorage.setItem('ck_test_active_lead',JSON.stringify(lead));
     return r;
@@ -80,8 +80,16 @@
   form.onsubmit=async e=>{e.preventDefault();if(button.disabled||done)return;busy=true;update();try{await picker.ready();if(done)return;const result=await options.onSubmit(picker.read(),form);await close(result);}catch(e){if(!done)error.textContent=e.message;}finally{busy=false;update();}};
   return {dialog,form,picker,promise,close};
  };
- function chooseStaff(department,departments,payload){
+ async function chooseStaff(department,departments,payload){
+  const picking=['v2_pick_job_start','v2_pick_job_start_by_docs'].includes(payload?.action);
+  const scannedDocs=Array.isArray(payload.pick_doc_nos)?payload.pick_doc_nos:String(payload.pick_doc_nos||'').split(',').filter(Boolean);
+  let context={pick_workload_required:true,task_pick_doc_nos:scannedDocs};
+  if(picking&&payload.action==='v2_pick_job_start_by_docs'){
+    const lookup=await CKSession.request('v2_pick_doc_lookup',{pick_doc_no:scannedDocs[0]});
+    if(lookup.found)context=lookup;
+  }
+  const pickFields=picking?(context.pick_workload_required?CKPickWorkload.fields(context.task_pick_doc_nos):CKPickWorkload.summary(context.planned_pick_workload)):'';
   const borrowable=['v2_unload_job_start','v2_unplanned_unload_start','v2_outbound_load_start'].includes(payload?.action)||payload?.action==='v2_ops_job_start'&&payload.job_type==='load_outbound';
-  return CKNativePeopleDialog({title:'负责人分配本次作业人员',description:'扫描实际操作人员工牌；确认后按原业务流程开始计时。',beforeFields:'<label>本次用工部门 / 작업 부서<select name="labor_department" required><option value="">请选择 / 선택하세요</option>'+Object.entries(departments).map(([k,v])=>'<option value="'+k+'" '+(k===department?'selected':'')+'>'+v+'</option>').join('')+'</select></label>',afterFields:'<label>预计操作分钟<input name="minutes" type="number" min="1" step="1" value="30" required></label>',submitLabel:'确认人员并开始',borrowContext:borrowable?{payload}:null,onSubmit:(staff,form)=>({...staff,labor_department:form.elements.labor_department.value,estimated_minutes:Number(form.elements.minutes.value)})}).promise;
+  return CKNativePeopleDialog({className:picking?'ck-pick-start':'',cancelLight:picking,title:picking?'拣货开工确认 / 피킹 시작 확인':'负责人分配本次作业人员',description:'扫描实际操作人员工牌；确认后按原业务流程开始计时。',beforeFields:'<label>本次用工部门 / 작업 부서<select name="labor_department" required><option value="">请选择 / 선택하세요</option>'+Object.entries(departments).map(([k,v])=>'<option value="'+k+'" '+(k===department?'selected':'')+'>'+v+'</option>').join('')+'</select></label>',afterFields:pickFields+'<label>预计操作分钟<input name="minutes" type="number" min="1" step="1" value="30" required></label>',submitLabel:picking?'确认并开始 / 확인·시작':'确认人员并开始',cancelLabel:picking?'取消 / 취소':undefined,borrowContext:borrowable?{payload}:null,onSubmit:(staff,form)=>({...staff,labor_department:form.elements.labor_department.value,estimated_minutes:Number(form.elements.minutes.value),...(picking&&context.pick_workload_required?{planned_pick_workload:CKPickWorkload.read(form)}:{})})}).promise;
  }
 })();

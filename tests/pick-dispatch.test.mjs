@@ -1,3 +1,4 @@
+import {pickStartFixture} from './pick-workload-fixture.mjs';
 import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import vm from 'node:vm';
 import worker from '../worker-v2/index.js';import {database} from './d1-adapter.mjs';
 import {documentCodeError,isStaffBadge} from '../shared/document-code.js';
@@ -6,7 +7,7 @@ function setup(){
  const call=async(action,data={})=>(await worker.fetch(new Request('https://fixture.test/api',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,client_req_id:crypto.randomUUID(),...data})}),env)).json();
  const ok=async(action,data)=>{const r=await call(action,data);assert.equal(r.ok,true,r.error||r.message);return r;};
  const staff=[{id:'EMP-TEST-A',name:'虚拟甲'},{id:'EMP-TEST-B',name:'虚拟乙'}];
- const payload=(numbers,key=crypto.randomUUID())=>({payload:{action:'v2_pick_job_start_by_docs',client_req_id:key,pick_doc_nos:numbers},workers:staff,lead_id:staff[0].id,estimated_minutes:15});
+ const payload=(numbers,key=crypto.randomUUID())=>({payload:{action:'v2_pick_job_start_by_docs',...pickStartFixture('v2_pick_job_start_by_docs'),client_req_id:key,pick_doc_nos:numbers},workers:staff,lead_id:staff[0].id,estimated_minutes:15});
  return {DB,call,ok,staff,payload};
 }
 test('new external pick sheets dispatch directly with leading zeroes preserved; retry, resume and finish share one trip',async()=>{

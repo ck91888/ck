@@ -1,3 +1,4 @@
+import {pickStartFixture} from './pick-workload-fixture.mjs';
 // Synthetic identities and real Worker handlers against SQLite :memory: only.
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -53,7 +54,7 @@ async function fixture(t){
     finally{for(const guard of guards)DB.raw.exec(guard.sql);}
   };
   const start=async(id=canonical,code='SYNTHETIC-DAILY-BADGE-PICK')=>{
-    job=await ok('sop_native_start',{payload:{action:'v2_pick_job_start_by_docs',pick_doc_nos:[code],client_req_id:crypto.randomUUID()},workers:[{id,name:record.name}],lead_id:id,estimated_minutes:30});return job;
+    job=await ok('sop_native_start',{payload:{action:'v2_pick_job_start_by_docs',...pickStartFixture('v2_pick_job_start_by_docs'),pick_doc_nos:[code],client_req_id:crypto.randomUUID()},workers:[{id,name:record.name}],lead_id:id,estimated_minutes:30});return job;
   };
   const legacy=async()=>{
     at('09:10');await start();
@@ -210,7 +211,7 @@ test('a historical registration without a current attendance day never creates a
   const s=await fixture(t);await s.legacy();s.DB.raw.prepare('DELETE FROM ck_attendance_days WHERE id=?').run(s.record.id);s.at('10:00');
   const before=s.snapshot(),report=await s.ok('sop_attendance_summary',{date:day});assert.deepEqual(report.items,[]);
   assert.equal(report.identityWarnings.length,1);assert.equal(report.identityWarnings[0].worker_id,s.lower);assert.equal(report.identityWarnings[0].job_id,s.job.job_id);assert.match(report.identityWarnings[0].reason,/签到|身份|核实/);
-  const denied=await s.call('sop_native_start',{payload:{action:'v2_pick_job_start_by_docs',pick_doc_nos:['SYNTHETIC-ORPHAN-NEW'],client_req_id:crypto.randomUUID()},workers:[{id:s.lower,name:s.record.name}],lead_id:s.lower,estimated_minutes:15});
+  const denied=await s.call('sop_native_start',{payload:{action:'v2_pick_job_start_by_docs',...pickStartFixture('v2_pick_job_start_by_docs'),pick_doc_nos:['SYNTHETIC-ORPHAN-NEW'],client_req_id:crypto.randomUUID()},workers:[{id:s.lower,name:s.record.name}],lead_id:s.lower,estimated_minutes:15});
   assert.equal(denied.ok,false);assert.deepEqual(s.snapshot(),before);assert.equal(s.rows('ck_attendance_people').length,1);assert.equal(s.rows('ck_attendance_days').length,0);assert.equal(s.rows('v2_ops_jobs').length,1);assert.equal(s.segments()[0].worker_id,s.lower);
 });
 

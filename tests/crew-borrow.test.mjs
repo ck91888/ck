@@ -1,3 +1,4 @@
+import {pickStartFixture} from './pick-workload-fixture.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import worker from '../worker-v2/index.js';
@@ -13,7 +14,7 @@ async function fixture(){
  const ok=async(action,data={})=>{const r=await call(action,data);assert.equal(r.ok,true,action+': '+(r.error||r.message));return r;};
  const days=[];for(const name of ['借调甲','留岗乙','目的丙'])days.push((await ok('sop_attendance_checkin',{name,agency:'가온'})).record);
  const staff=days.map(d=>({id:d.badgeId,name:d.name}));
- const start=(action,data={},workers=staff.slice(0,2))=>ok('sop_native_start',{payload:{action,client_req_id:crypto.randomUUID(),...data},workers,lead_id:workers[0].id,estimated_minutes:15,labor_department:'bulk'});
+ const start=(action,data={},workers=staff.slice(0,2))=>ok('sop_native_start',{payload:{action,...pickStartFixture(action),client_req_id:crypto.randomUUID(),...data},workers,lead_id:workers[0].id,estimated_minutes:15,labor_department:'bulk'});
  const source=()=>start('v2_ops_job_start',{job_type:'load_import',flow_stage:'import',biz_class:'import'});
  const segments=id=>DB.raw.prepare('SELECT * FROM v2_ops_job_workers WHERE job_id=? ORDER BY rowid').all(id);
  const live=id=>segments(id).filter(s=>!s.left_at);

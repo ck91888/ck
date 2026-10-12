@@ -1,3 +1,4 @@
+import {readPickWorkload} from './pick-workload.js';
 // Read-only employee workday facts. Account/person IDs identify dispatchers;
 // exact EMP badges identify participants. Names never establish identity.
 import {attendanceReport} from './attendance-time.js';
@@ -86,10 +87,10 @@ export async function employeeWorkdays(env,{date,asOf,items,validSegments,detail
  const audits=tables.has('ck_plan_operation_audit')&&items.length?await rows(env,`SELECT * FROM ck_plan_operation_audit WHERE kind='create' AND actor_id IN (SELECT value FROM json_each(?)) AND julianday(created_at)>=julianday(?) AND julianday(created_at)<julianday(?) AND julianday(created_at)<=julianday(?)`,ids,from,until,asOf):[];
  const ownByPerson=new Map(items.map(item=>[item.record.personId,personalSegments(item.record,validSegments.get(item.record.personId)||[],asOf,date)]));
  const jobIds=[...new Set([...events.map(e=>e.job_id),...[...ownByPerson.values()].flat().map(s=>s.jobId)].filter(Boolean))];
- let jobs=jobIds.length?await rows(env,'SELECT * FROM v2_ops_jobs WHERE id IN (SELECT value FROM json_each(?))',JSON.stringify(jobIds)):[];
+ let jobs=jobIds.length?await rows(env,hasEvents?"SELECT j.*,s.state AS dispatch_state FROM v2_ops_jobs j LEFT JOIN sop_records s ON s.id=j.id AND s.kind='dispatch' WHERE j.id IN (SELECT value FROM json_each(?))":'SELECT * FROM v2_ops_jobs WHERE id IN (SELECT value FROM json_each(?))',JSON.stringify(jobIds)):[];
  if(tables.has('sop_document_numbers')&&hasEvents)jobs=await jobNumbers(env,jobs);
  const customers=await jobCustomers(env,jobs,tables);
- const byJob=new Map(jobs.map(j=>[j.id,{...jobDisplayMetadata(j),display_no:j.display_no||'',customer:(customers.get(j.id)||[]).join('、'),customers:customers.get(j.id)||[],id:j.id,job_id:j.id,status:j.status,completed_at:j.finished_at||'',dispatched_at:'',minutes:0,segments:[],results:[]}]));
+ const byJob=new Map(jobs.map(j=>[j.id,{...jobDisplayMetadata(j),...(j.job_type==='pick_direct'?{planned_pick_workload:readPickWorkload(parse(j.dispatch_state).planned_pick_workload)}:{}),display_no:j.display_no||'',customer:(customers.get(j.id)||[]).join('、'),customers:customers.get(j.id)||[],id:j.id,job_id:j.id,status:j.status,completed_at:j.finished_at||'',dispatched_at:'',minutes:0,segments:[],results:[]}]));
  const results=detailPersonId&&jobIds.length&&tables.has('v2_ops_job_results')?effectiveResults(await rows(env,'SELECT * FROM v2_ops_job_results WHERE job_id IN (SELECT value FROM json_each(?)) ORDER BY created_at,id',JSON.stringify(jobIds))):[];
  for(const r of results)byJob.get(r.job_id)?.results.push(resultFact(r));
 
