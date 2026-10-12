@@ -12,7 +12,7 @@ import {digest} from '../worker-v2/access-control.js';
 import {operationHeaders,rememberOperation,confirmOperation} from './office-operator-fixture.mjs';
 
 const require=createRequire(import.meta.url),{chromium}=require(require.resolve('playwright',{paths:[process.env.CODEX_PRIMARY_RUNTIME_NODE_MODULES]}));
-const DB=database(),artifacts=path.join(tmpdir(),'ck-employee-workday');fs.mkdirSync(artifacts,{recursive:true});
+const DB=database(),artifacts=path.resolve(process.env.CK_EMPLOYEE_ARTIFACTS||path.join(tmpdir(),'ck-employee-workday'));fs.mkdirSync(artifacts,{recursive:true});
 const env={DB,SOP_ENVIRONMENT:'staging',SOP_UPGRADE_ENABLED:'true',SOP_WORK_CHAIN_ENABLED:'true',SOP_ATTENDANCE_ENABLED:'true',SOP_ACCESS_CONTROL:'true',SOP_ADMIN_CODE_SHA256:await digest('employee-workday-fixture')};
 const cookies={manager:'',field:'',reviewer:'',viewer:''};
 async function raw(scope,action,body={}){
@@ -78,12 +78,12 @@ const server=http.createServer(async(req,res)=>{try{
 }catch(error){res.writeHead(500);res.end(error.message);}});
 await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));const origin='http://127.0.0.1:'+server.address().port;
 const browser=await chromium.launch({executablePath:process.env.CK_BROWSER_EXECUTABLE||'/usr/bin/chromium',headless:true,args:['--no-sandbox']});
-const pages=[],errors=[],dialogs=[],scenarios=[],screenshots=[],apiFailures=[],legacyResponses=[];
+const visualResults=[],pages=[],errors=[],dialogs=[],scenarios=[],screenshots=[],apiFailures=[],legacyResponses=[];
 const bodyOf=request=>request.headers()['content-type']?.includes('application/json')?request.postDataJSON():null;
 const record=name=>{scenarios.push(name);console.log('PASS '+name);};
 const frames=page=>page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
-async function pageFor(role,width=1440){
- const context=await browser.newContext({viewport:{width,height:width===390?844:1000}}),page=await context.newPage();pages.push(page);
+async function pageFor(role,width=1440,providedContext=null){
+ const context=providedContext||await browser.newContext({viewport:{width,height:width<=390?844:1000}}),page=await context.newPage();pages.push(page);
  page.setDefaultTimeout(20000);page.on('pageerror',error=>errors.push(error.message));page.on('dialog',async dialog=>{dialogs.push(dialog.message());await dialog.accept();});
  page.on('response',response=>{if(response.status()>=400&&bodyOf(response.request()))apiFailures.push({role,action:bodyOf(response.request()).action,status:response.status()});});
  page.on('response',response=>{const action=bodyOf(response.request())?.action;if(['v2_dashboard_realtime_overview','v2_dashboard_live_docs'].includes(action))legacyResponses.push({role,action,status:response.status()});});
@@ -110,8 +110,63 @@ async function assertModalFits(page){
  assert.equal(geometry.modal,true);assert.ok(geometry.left>=0&&geometry.top>=0&&geometry.right<=geometry.width+1&&geometry.bottom<=geometry.height+1,JSON.stringify(geometry));assert.ok(geometry.scrollWidth<=geometry.clientWidth+1,JSON.stringify(geometry));
  const close=detail(page).locator('[data-close-work-detail]');await close.scrollIntoViewIfNeeded();const hit=await close.evaluate(node=>{const r=node.getBoundingClientRect();return node.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2));});assert.equal(hit,true,'close button must be reachable above page content');
 }
-async function screenshot(page,name){await page.screenshot({path:path.join(artifacts,name),fullPage:await page.locator('dialog[open]').count()===0});screenshots.push(name);}
+async function screenshot(page,name,element=null){
+ const cdp=await page.context().newCDPSession(page),full=await page.locator('dialog[open]').count()===0;
+ try{
+  const metrics=await cdp.send('Page.getLayoutMetrics');let clip;
+  if(element){const box=await element.evaluate(n=>{const r=n.getBoundingClientRect();return {x:(r.left+scrollX)*devicePixelRatio,y:(r.top+scrollY)*devicePixelRatio,width:r.width*devicePixelRatio,height:r.height*devicePixelRatio,scale:1};});clip=box;}
+  else if(full)clip={...metrics.contentSize,scale:1};
+  const result=await cdp.send('Page.captureScreenshot',{format:'png',fromSurface:true,captureBeyondViewport:!!clip,...(clip?{clip}:{})});
+  fs.writeFileSync(path.join(artifacts,name),Buffer.from(result.data,'base64'));screenshots.push(name);
+ }finally{await cdp.detach();}
+}
 function snapshot(){return {jobs:DB.raw.prepare('SELECT * FROM v2_ops_jobs ORDER BY id').all(),workers:DB.raw.prepare('SELECT * FROM v2_ops_job_workers ORDER BY id').all(),results:DB.raw.prepare('SELECT * FROM v2_ops_job_results ORDER BY id').all(),events:DB.raw.prepare('SELECT * FROM sop_events ORDER BY request_id').all(),attendance:DB.raw.prepare('SELECT * FROM ck_attendance_days ORDER BY id').all(),attendanceEvents:DB.raw.prepare('SELECT * FROM ck_attendance_events ORDER BY id').all()};}
+// Native browser zoom is set through Chromium's settings API in a disposable
+// profile. The CSS viewport and devicePixelRatio are asserted; CSS transforms,
+// screenshot resizing and pinch zoom are not substitutes for browser zoom.
+async function visualMatrix(){
+ const longName='合成·跨境订单运营负责人 김하늘가나다라마바사',longDepartment='跨境电商订单与客户服务支持 / 해외 전자상거래 주문·고객 지원';
+ const person=(await office('sop_attendance_employee_register',{employeeNo:'EWD-LONG-20261012',name:longName,department:'order_processing'})).person;
+ person.record=(await office('sop_attendance_checkin',{badge:person.badgeId})).record;
+ const label='SYNTH-LONG-20261012-跨境电商多渠道订单复核与出库交接-해외주문검수출고인계-ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+ const job=(await start(field,label,[person])).job_id;
+ // Stress a legacy/free-text department only in this in-memory fixture; the
+ // normal registration form still requires its existing department choices.
+ DB.raw.prepare('UPDATE ck_attendance_days SET agency=? WHERE person_id=?').run(longDepartment,person.id);
+ const before=snapshot();
+ const cases=[{width:1440,zoom:1},{width:1280,zoom:1},{width:1440,zoom:1.25},{width:1280,zoom:1.25},{width:1440,zoom:1.5},{width:1280,zoom:1.5},{width:390,zoom:1},{width:320,zoom:1}];
+ for(const spec of cases){
+  const profile=fs.mkdtempSync(path.join(tmpdir(),'ck-employee-visual-'));
+  const context=await chromium.launchPersistentContext(profile,{executablePath:process.env.CK_BROWSER_EXECUTABLE||'/usr/bin/chromium',headless:true,viewport:{width:spec.width,height:spec.width<=390?844:1000},args:['--no-sandbox']});
+  try{
+   const settings=await context.newPage();await settings.goto('chrome://settings/appearance');await settings.evaluate(zoom=>new Promise(resolve=>chrome.settingsPrivate.setDefaultZoom(zoom,resolve)),spec.zoom);await settings.close();
+   const page=await pageFor('manager',spec.width,context),tag=`${spec.width}-${Math.round(spec.zoom*100)}`;
+   await row(page,person).waitFor();await frames(page);
+   const metrics=await dashboard(page).evaluate(root=>{
+    const table=root.querySelector('.ck-employee-attendance-table'),mode=getComputedStyle(table.querySelector('tbody')).display;
+    const rectangles=nodes=>[...nodes].map(n=>{const b=n.getBoundingClientRect();return {left:b.left,right:b.right,top:b.top,bottom:b.bottom,width:b.width,height:b.height,text:n.textContent};});
+    const buttons=[...root.querySelectorAll('[data-work-detail-open],[data-correct]')].map(n=>({label:n.textContent,width:n.clientWidth,scroll:n.scrollWidth,height:n.getBoundingClientRect().height,lines:[...n.querySelectorAll('[lang]')].map(span=>{const range=document.createRange();range.selectNodeContents(span);return {text:span.textContent,lines:range.getClientRects().length};})}));
+    const aligns=mode==='table-row-group'?[...table.querySelectorAll('.ck-employee-stat-head>.ck-employee-bi')].map((h,i)=>{const cell=table.querySelector(`tbody tr .ck-employee-stat:nth-child(${i+1})`);return Math.abs((h.getBoundingClientRect().left+h.getBoundingClientRect().right-cell.getBoundingClientRect().left-cell.getBoundingClientRect().right)/2);}):[];
+    const heading=root.querySelector('.ck-section-heading>div:first-child'),last=heading.lastElementChild;const headingBlank=heading.getBoundingClientRect().bottom-last.getBoundingClientRect().bottom;
+    return {headingBlank,cssWidth:innerWidth,dpr:devicePixelRatio,pageWidth:document.documentElement.scrollWidth,mode,rows:rectangles(table.querySelectorAll('tbody tr')),buttons,aligns,tableOverflow:root.querySelector('[data-table]').scrollWidth-root.querySelector('[data-table]').clientWidth};
+   });
+   assert.ok(Math.abs(metrics.cssWidth-spec.width/spec.zoom)<=1,JSON.stringify(metrics));assert.ok(Math.abs(metrics.dpr-spec.zoom)<.01,JSON.stringify(metrics));assert.ok(metrics.pageWidth<=metrics.cssWidth+1,JSON.stringify(metrics));assert.ok(metrics.tableOverflow<=1,JSON.stringify(metrics));
+   assert.ok(metrics.headingBlank<=12,'heading must not reserve empty mobile height: '+JSON.stringify(metrics));
+   assert.ok(metrics.aligns.every(delta=>delta<=1),'metric headings align with numeric columns');
+   for(const button of metrics.buttons){assert.ok(button.scroll<=button.width+1,JSON.stringify(button));assert.ok(button.height>=44,JSON.stringify(button));assert.ok(button.lines.every(x=>x.lines===1),'no button caption wraps: '+JSON.stringify(button));}
+   if(metrics.mode==='table-row-group')assert.ok(metrics.rows.slice(0,3).every(row=>row.height<90),'ordinary desktop rows must stay compact');
+   await screenshot(page,`visual-list-${tag}.png`);
+   await screenshot(page,`visual-rows-${tag}.png`,dashboard(page).locator('[data-table]'));
+   const result=await openDetail(page,person);assert.equal(result.sections.own.some(j=>j.job_id===job),true);await assertModalFits(page);assert.match(await detail(page).locator('[data-workday-own]').innerText(),/ABCDEFGHIJKLMNOPQRSTUVWXYZ/);
+   await screenshot(page,`visual-detail-${tag}.png`);
+   await detail(page).locator('[data-workday-own]').scrollIntoViewIfNeeded();await screenshot(page,`visual-detail-tasks-${tag}.png`);
+   await detail(page).locator('.ck-employee-coverage summary').click();assert.match(await detail(page).locator('.ck-employee-coverage').innerText(),/不代表个人产量/);await assertModalFits(page);await closeDetail(page);
+   await row(page,person).locator('[data-correct]').click();const editor=dashboard(page).locator('dialog.ck-editor');await editor.waitFor({state:'visible'});assert.equal(await editor.locator('[name=reason]').isEditable(),true);await editor.locator('[data-cancel]').click();await editor.waitFor({state:'hidden'});
+   visualResults.push({...spec,...metrics,detailAndCorrectionClicked:true});record(`native visual ${tag}: compact alignment, unbroken bilingual actions, long text, detail and correction`);
+  }finally{await context.close();fs.rmSync(profile,{recursive:true,force:true});}
+ }
+ assert.deepEqual(snapshot(),before);fs.writeFileSync(path.join(artifacts,'visual-matrix.json'),JSON.stringify({ok:true,cases:visualResults,longName,longDepartment,longTaskLabel:label},null,2));
+}
 const businessBefore=snapshot();
 try{
  const summary=await office('sop_attendance_summary',{date:day,scope:'employee'});
@@ -122,13 +177,13 @@ try{
  assert.equal(sameItem.workday.dispatched.total,0);assert.equal(sameItem.workday.own.participated,0);
  record('real Worker separates exact dispatcher identity from own task counts, unique rejoin periods, and same-name shared-office labels');
  const desktop=await pageFor('manager'),dispatchRow=row(desktop,dispatcher),ownRow=row(desktop,participant);
- assert.match(await dispatchRow.locator('.ck-employee-work-summary').innerText(),/派工.*2 单/);assert.match(await dispatchRow.locator('.ck-employee-work-summary').innerText(),/本人参与.*0 单/);assert.match(await ownRow.locator('.ck-employee-work-summary').innerText(),/本人参与.*2 单/);assert.match(await ownRow.locator('.ck-employee-work-summary').innerText(),/现已完成.*1 单/);
- assert.equal(await dispatchRow.locator('[data-status]').getAttribute('data-status'),'unassigned');assert.match(await dispatchRow.locator('.ck-employee-work-status').innerText(),/当前无现场作业/);assert.match(await dashboard(desktop).locator('[data-note]').innerText(),/不代表没有派工/);
+ assert.equal(await dispatchRow.locator('[data-work-metric="dispatched"] strong').innerText(),'2');assert.equal(await dispatchRow.locator('[data-work-metric="participated"] strong').innerText(),'0');assert.equal(await ownRow.locator('[data-work-metric="participated"] strong').innerText(),'2');assert.equal(await ownRow.locator('[data-work-metric="completed"] strong').innerText(),'1');
+ assert.equal(await dispatchRow.locator('[data-status]').getAttribute('data-status'),'unassigned');assert.match(await dispatchRow.locator('.ck-employee-work-status').innerText(),/无现场任务/);assert.match(await dashboard(desktop).locator('[data-workday-scope]').innerText(),/非个人产量/);
  await dashboard(desktop).locator('[data-work-status-filter]').selectOption('unassigned');assert.equal(await row(desktop,dispatcher).count(),1);assert.equal(await row(desktop,participant).count(),0);assert.equal(await row(desktop,sameName).count(),1);await dashboard(desktop).locator('[data-work-status-filter]').selectOption('');
  await screenshot(desktop,'employee-workday-desktop.png');record('actual desktop employee entry displays separate dispatch and own totals and explains the unassigned filter for management-only activity');
 
  const dispatchedDetail=await openDetail(desktop,dispatcher);assert.equal(dispatchedDetail.sections.dispatched.length,2);assert.equal(dispatchedDetail.sections.own.length,0);
- assert.match(await detail(desktop).locator('[data-workday-dispatched]').innerText(),/SYNTHETIC-OWN-COMPLETE/);assert.match(await detail(desktop).locator('[data-workday-dispatched]').innerText(),/SYNTHETIC-OWN-ACTIVE/);assert.doesNotMatch(await detail(desktop).innerText(),/SYNTHETIC-OFFICE-UNMAPPED/);assert.match(await detail(desktop).innerText(),/共用办公室账号/);
+ assert.match(await detail(desktop).locator('[data-workday-dispatched]').innerText(),/SYNTHETIC-OWN-COMPLETE/);assert.match(await detail(desktop).locator('[data-workday-dispatched]').innerText(),/SYNTHETIC-OWN-ACTIVE/);assert.doesNotMatch(await detail(desktop).innerText(),/SYNTHETIC-OFFICE-UNMAPPED/);assert.equal(await detail(desktop).locator('.ck-employee-coverage').getAttribute('open'),null);await detail(desktop).locator('.ck-employee-coverage summary').click();assert.match(await detail(desktop).innerText(),/共用办公室账号/);await detail(desktop).locator('.ck-employee-coverage summary').click();
  await assertModalFits(desktop);await screenshot(desktop,'employee-dispatch-detail-desktop.png');await closeDetail(desktop);
  assert.equal(await desktop.evaluate(()=>document.activeElement?.hasAttribute('data-work-detail-open')),true,'closing restores focus to detail entry');
  record('desktop top-layer work detail shows only reliably attributed dispatched tasks and no false own work for a dispatcher');
@@ -136,7 +191,7 @@ try{
  const ownDetail=await openDetail(desktop,participant),ownJobs=ownDetail.sections.own;
  assert.equal(ownJobs.length,2);assert.equal(ownJobs.find(job=>(job.id||job.job_id)===completed).segments.length,2);assert.ok(Math.abs(ownJobs.find(job=>(job.id||job.job_id)===completed).minutes-20*unit/60000)<0.05);
  assert.equal(await detail(desktop).locator('[data-workday-own] .ck-workday-jobs > li').count(),2);assert.equal(await detail(desktop).locator('[data-workday-timeline] li').filter({hasText:'SYNTHETIC-OWN-COMPLETE'}).count(),2);assert.equal(await detail(desktop).locator('[data-workday-timeline] li').filter({hasText:'SYNTHETIC-OWN-ACTIVE'}).count(),1);
- assert.match(await detail(desktop).innerText(),/不代表个人产量/);await screenshot(desktop,'employee-own-timeline-desktop.png');await closeDetail(desktop);
+ await detail(desktop).locator('.ck-employee-coverage summary').click();assert.match(await detail(desktop).innerText(),/不代表个人产量/);await detail(desktop).locator('.ck-employee-coverage summary').click();await screenshot(desktop,'employee-own-timeline-desktop.png');await closeDetail(desktop);
  await ownRow.locator('[data-correct]').click();const editor=dashboard(desktop).locator('dialog.ck-editor');await editor.waitFor({state:'visible'});assert.equal(await editor.locator('[name=inAt]').isEditable(),true);assert.equal(await editor.locator('[name=reason]').isEditable(),true);await editor.locator('[data-cancel]').click();await editor.waitFor({state:'hidden'});
  record('own detail retains both participation periods in its chronological timeline while counting the rejoined task once; manager correction entry still opens');
 
@@ -172,9 +227,10 @@ try{
  assert.equal((await(await expiredRead).json()).ok,false);await viewerPage.getByText('登录已结束，请重新扫码 / 로그인이 종료되었습니다',{exact:true}).waitFor();assert.equal(await viewerPage.evaluate(()=>CKSession.user),null);assert.equal(await dashboard(viewerPage).isVisible(),false);await screenshot(viewerPage,'employee-expired-session-lock-mobile.png');
  record('a genuinely expired viewer session receives a real 401 and locks the employee page behind login');
  assert.deepEqual(snapshot(),businessBefore);assert.deepEqual(errors,[]);
- fs.writeFileSync(path.join(artifacts,'acceptance.json'),JSON.stringify({ok:true,pageErrors:errors,dialogs,apiFailures,legacyResponses,scenarios,screenshots,identity:{dispatcher:dispatcher.id,participant:participant.id,sameName:sameName.id},jobs:{completed,active,unmapped},workday:{dispatcher:dispatchedItem.workday,own:ownItem.workday,sameName:sameItem.workday},limitations:['Read-role sessions are assigned their existing roles only in this isolated fixture database; production office login currently issues manager sessions.']},null,2));
+ if(process.env.CK_EMPLOYEE_VISUAL==='1')await visualMatrix();
+ fs.writeFileSync(path.join(artifacts,'acceptance.json'),JSON.stringify({ok:true,pageErrors:errors,dialogs,apiFailures,legacyResponses,scenarios,screenshots,visualResults,identity:{dispatcher:dispatcher.id,participant:participant.id,sameName:sameName.id},jobs:{completed,active,unmapped},workday:{dispatcher:dispatchedItem.workday,own:ownItem.workday,sameName:sameItem.workday},limitations:['Read-role sessions are assigned their existing roles only in this isolated fixture database; production office login currently issues manager sessions.']},null,2));
  console.log('PASS employee workday actual /shuju acceptance. Artifacts: '+artifacts);
 }catch(error){
  fs.writeFileSync(path.join(artifacts,'acceptance.json'),JSON.stringify({ok:false,error:error.stack,pageErrors:errors,dialogs,apiFailures,scenarios},null,2));console.error('PAGE ERRORS',errors);console.error('API FAILURES',apiFailures);
- for(const [index,page] of pages.entries()){console.error('PAGE '+index,await page.locator('body').innerText().catch(()=>''));await page.screenshot({path:path.join(artifacts,'failure-'+index+'.png'),fullPage:true}).catch(()=>{});}throw error;
+ for(const [index,page] of pages.entries()){if(page.isClosed())continue;console.error('PAGE '+index,await page.locator('body').innerText().catch(()=>''));await page.screenshot({path:path.join(artifacts,'failure-'+index+'.png'),fullPage:true}).catch(()=>{});}throw error;
 }finally{await browser.close();await new Promise(resolve=>server.close(resolve));DB.raw.close();}

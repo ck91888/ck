@@ -43,8 +43,8 @@ async function fixture(t,{kind='labor',handler}={}){
 for(const kind of ['labor','field','employee']){
  test(kind+': applies the next live summary after 15 seconds and reports exact KST asOf',domOptions,async t=>{
   const p=await fixture(t,{kind});assert.equal(p.reads,1);assert.match(p.$('[data-report-freshness]').textContent,/作业状态更新于 2026-10-08 10:00:00.123 KST \/ 작업 상태 갱신/);
-  p.current=[item('A','working',kind)];await p.time.advance(14999);assert.equal(p.reads,1);assert.match(p.rows.textContent,kind==='employee'?/当前无现场作业/:/未分配作业/);await p.time.advance(1);
-  assert.equal(p.reads,2);assert.match(p.rows.textContent,/作业中.*TASK-A/s);assert.match(p.$('[data-report-freshness]').textContent,/10:00:15.123 KST/);assert.equal(p.$('[data-report-freshness]').dataset.freshness,'current');assert.deepEqual(p.errors,[]);
+  p.current=[item('A','working',kind)];await p.time.advance(14999);assert.equal(p.reads,1);assert.match(p.rows.textContent,kind==='employee'?/无现场任务/:/未分配作业/);await p.time.advance(1);
+  assert.equal(p.reads,2);assert.match(p.rows.textContent,kind==='employee'?/作业中/:/作业中.*TASK-A/s);assert.match(p.$('[data-report-freshness]').textContent,/10:00:15.123 KST/);assert.equal(p.$('[data-report-freshness]').dataset.freshness,'current');assert.deepEqual(p.errors,[]);
   if(kind==='field')assert.match(p.$('[data-peoplecards]').textContent,/作业中.*TASK-A/s);
   if(kind==='employee'){await p.time.advance(30000);assert.equal(p.calls.filter(c=>c.action==='sop_attendance_employee_people').length,1);assert.equal(p.calls.filter(c=>c.action==='sop_access_list').length,1);}
  });
@@ -64,7 +64,7 @@ for(const kind of ['labor','field','employee']){
  });
  test(kind+': failed refresh retains working jobs and the last successful timestamp, then recovers manually',domOptions,async t=>{
   let fail=false;const p=await fixture(t,{kind,handler:a=>a==='sop_attendance_summary'&&fail?Promise.reject(Error('Fixture offline')):undefined});p.current=[item('A','working',kind)];await p.controller.refresh();const before=p.rows.textContent,stamp=p.$('[data-report-freshness]').textContent;
-  fail=true;await p.time.advance(15000);assert.equal(p.rows.textContent,before);assert.match(p.rows.textContent,/TASK-A/);assert.match(p.$('[data-report-freshness]').textContent,/刷新失败.*状态可能已过时/s);assert.equal(p.$('[data-report-freshness]').dataset.freshness,'failed');assert.ok(p.$('[data-report-freshness]').textContent.startsWith(stamp));assert.equal(p.$('[data-refresh]').disabled,false);
+  fail=true;await p.time.advance(15000);assert.equal(p.rows.textContent,before);assert.match(p.rows.textContent,kind==='employee'?/作业中/:/TASK-A/);assert.match(p.$('[data-report-freshness]').textContent,/刷新失败.*状态可能已过时/s);assert.equal(p.$('[data-report-freshness]').dataset.freshness,'failed');assert.ok(p.$('[data-report-freshness]').textContent.startsWith(stamp));assert.equal(p.$('[data-refresh]').disabled,false);
   fail=false;p.current=[item('A','rest',kind)];p.$('[data-refresh]').click();await settle();assert.match(p.rows.textContent,/休息中/);assert.doesNotMatch(p.$('[data-report-freshness]').textContent,/刷新失败/);assert.equal(p.$('[data-report-freshness]').dataset.freshness,'current');assert.deepEqual(p.errors,[]);
  });
  test(kind+': interval/focus reads never overlap, while explicit newer dates supersede a pending response',domOptions,async t=>{
@@ -87,7 +87,7 @@ for(const kind of ['labor','field'])test(kind+': any open detail/editor pauses p
 });
 for(const kind of ['labor','employee'])test(kind+': a background response arriving during review is not applied and closing reads afresh',domOptions,async t=>{
  const pending=deferred();let slow=false;const p=await fixture(t,{kind,handler:a=>a==='sop_attendance_summary'&&slow?pending.promise:undefined});slow=true;await p.time.advance(15000);p.$(kind==='employee'?'[data-correct="A"]':'[data-person="A"]').click();const popup=p.$(kind==='employee'?'dialog':'[data-detail-dialog]'),html=popup.innerHTML;
- pending.resolve(p.report([item('A','working',kind)]));await settle();assert.equal(popup.open,true);assert.equal(popup.innerHTML,html);assert.match(p.rows.textContent,kind==='employee'?/当前无现场作业/:/未分配作业/);
+ pending.resolve(p.report([item('A','working',kind)]));await settle();assert.equal(popup.open,true);assert.equal(popup.innerHTML,html);assert.match(p.rows.textContent,kind==='employee'?/无现场任务/:/未分配作业/);
  slow=false;p.current=[item('A','rest',kind)];p.$(kind==='employee'?'[data-cancel]':'[data-close-detail]').click();await settle();assert.equal(p.reads,3);assert.match(p.rows.textContent,/休息中/);assert.equal(popup.open,false);assert.deepEqual(p.errors,[]);
 });
 test('employee editor and actual import panel pause/resume without discarding unsaved content',domOptions,async t=>{
