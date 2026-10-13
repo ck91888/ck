@@ -1,0 +1,17 @@
+body.ck-system[data-app="002"] #view-inbound .ck-inbound-filters{display:block;padding:16px;white-space:normal}
+.ck-inbound-filters [data-inbound-dates]{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;align-items:start}
+.ck-inbound-filters fieldset{margin:0;padding:12px;border:1px solid #D1DED8;min-width:0}
+.ck-inbound-filters legend{padding:0 4px;font-size:16px;color:#223C36;word-break:keep-all}
+.ck-inbound-filters legend small{display:block;font-size:13px;color:#52675f;font-weight:400}
+.ck-inbound-filters .ck-date-pair{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.ck-inbound-filters .ck-date-pair label{font-size:13px;min-width:0;color:#52675f;word-break:keep-all}
+body.ck-system[data-app="002"] #view-inbound .ck-inbound-filters input[type=date]{display:block;width:100%;min-width:0;max-width:100%;height:48px;min-height:48px;padding:8px;margin-top:4px;font-size:16px}
+body.ck-system[data-app="002"] #view-inbound .ck-inbound-filters [data-clear-arrival]{margin-top:10px;min-height:48px;width:100%;border:1px solid #9aafa5;border-radius:6px;background:white;color:#18564A;font:inherit;white-space:normal;word-break:keep-all;padding:8px}
+.ck-inbound-filters .ck-arrival-filter-note{font-size:13px;line-height:1.6;margin:12px 0;color:#52675f;word-break:keep-all;overflow-wrap:anywhere}
+.ck-inbound-filters .ck-arrival-filter-error{font-size:14px;color:#972f28}
+.ck-inbound-filters .ck-inbound-filter-tools{display:flex;flex-wrap:wrap;align-items:center;gap:10px}
+body.ck-system[data-app="002"] #view-inbound .ck-inbound-filter-tools input,body.ck-system[data-app="002"] #view-inbound .ck-inbound-filter-tools select{min-height:48px;height:48px;max-width:100%;min-width:0;margin:0}
+body.ck-system[data-app="002"] #view-inbound .ck-inbound-filter-tools button{min-height:48px;white-space:normal;word-break:keep-all}
+@media(max-width:1100px){.ck-inbound-filters [data-inbound-dates]{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:700px){body.ck-system[data-app="002"] #view-inbound .ck-inbound-filters{padding:12px}.ck-inbound-filters [data-inbound-dates]{grid-template-columns:1fr;gap:12px}.ck-inbound-filters .ck-inbound-filter-tools{display:grid;grid-template-columns:1fr}.ck-inbound-filter-tools .filter-label{margin:4px 0 -4px}.ck-inbound-filter-tools>*{width:100%}.ck-inbound-filters .ck-date-pair{gap:8px}}
+@media(max-width:400px){.ck-inbound-filters .ck-date-pair{grid-template-columns:1fr}}

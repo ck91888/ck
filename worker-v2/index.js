@@ -1,3 +1,4 @@
+import {inboundArrivalFilter} from './inbound-arrival-filter.js';
 import {dailyDispatchEnabled,dailyDispatchAdmin,guardDailyDispatch} from './daily-dispatch-permissions.js';
 import {checkWorkbenchEnabled,scanCheck,finishCheck} from './check-workbench.js';
 import {pickWorkloadContext,readPickWorkload} from './pick-workload.js';
@@ -4178,6 +4179,8 @@ route("v2_inbound_plan_list", async (body, env) => {
   // 软删除单：列表/导出永远排除（即便用户显式筛 cancelled 也不显示 deleted）
   let where = " WHERE source_type != 'return_session' AND COALESCE(is_deleted,0)=0";
   const binds = [];
+  let arrivalFilter;try{arrivalFilter=inboundArrivalFilter(body);}catch(e){return err(e.message,400);}
+  where += arrivalFilter.sql;binds.push(...arrivalFilter.binds);
   if (start) { where += " AND plan_date>=?"; binds.push(start); }
   if (end) { where += " AND plan_date<=?"; binds.push(end); }
   if (status) { where += " AND status=?"; binds.push(status); }
@@ -6547,6 +6550,8 @@ route("v2_inbound_plan_export", async (body, env) => {
 
   let sql = "SELECT * FROM v2_inbound_plans WHERE source_type != 'return_session' AND COALESCE(is_deleted,0)=0";
   const binds = [];
+  let arrivalFilter;try{arrivalFilter=inboundArrivalFilter(body);}catch(e){return err(e.message,400);}
+  sql += arrivalFilter.sql;binds.push(...arrivalFilter.binds);
   if (start) { sql += " AND plan_date>=?"; binds.push(start); }
   if (end) { sql += " AND plan_date<=?"; binds.push(end); }
   if (status) { sql += " AND status=?"; binds.push(status); }

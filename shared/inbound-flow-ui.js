@@ -66,6 +66,7 @@ window.CKInstallInboundFlow=function(app){
   const customerGroup=document.getElementById('ibc-customer').closest('.form-group'),arrivalGroup=document.getElementById('ibc-arrival').closest('.form-group');
   customerGroup.classList.add('ck-inbound-half');arrivalGroup.classList.add('ck-inbound-half');customerGroup.after(arrivalGroup);
   document.querySelector('#view-inbound .filter-label b').textContent='建单日期 / 등록일';
+  window.CKInboundArrivalFilter?.install();
   document.getElementById('ibFilterBizClass').add(new Option(CKInboundLabel('bulk_putaway'),'bulk_putaway'));
   for(const opt of document.getElementById('ibFilterBizClass').options)if(labels[opt.value]){if(window.CKPlanCopy)CKPlanCopy.bind(opt,labels[opt.value][0]);else opt.textContent=CKInboundLabel(opt.value);}
   const edit=window.openInboundEditForm;window.openInboundEditForm=function(){edit();document.getElementById('ib-edit-date').parentElement.hidden=true;const first=document.querySelector('#ibEditOverlay .ib-edit-biz');if(first)choices(first.closest('label').parentElement,'.ib-edit-biz','ck-ib-edit-external',window._currentInboundPlan||{});};
@@ -80,6 +81,7 @@ window.CKInstallInboundFlow=function(app){
   const original=window.api;window.api=async function(body){
    const fields={v2_inbound_plan_create:'ck-ibc-external',v2_inbound_plan_update:'ck-ib-edit-external',v2_feedback_finalize_to_inbound:'ck-fb-external',v2_feedback_convert_to_inbound:'ck-fb-external',v2_inbound_dynamic_finalize:'ck-dyn-external'};
    if(fields[body.action]&&!(body.action==='v2_inbound_plan_create'&&Object.hasOwn(body,'direct_external_inbound_no')&&Object.hasOwn(body,'bulk_external_inbound_no'))){const input=document.getElementById(fields[body.action]);if(input)Object.assign(body,fieldData(input.closest('.ck-external-field')));}
+   if(['v2_inbound_plan_list','v2_inbound_plan_export'].includes(body.action))Object.assign(body,window.CKInboundArrivalFilter?.params());
    const result=await original(body);
    return result;
   };
