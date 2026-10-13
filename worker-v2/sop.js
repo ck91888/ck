@@ -1,3 +1,4 @@
+import {workPlanListEnabled,workPlanFacts,filterWorkPlans} from './work-plan-list.js';
 import {canonicalDailyBadge,sameWorkerBadge} from '../shared/badge-identity.js';
 import {issueAccounting} from './issue-accounting.js';
 import {cargoReservations} from './cargo-reservations.js';
@@ -559,14 +560,14 @@ async function needGroups(env,u,b){
  if(b.need_id)items=items.filter(g=>g.items.some(x=>x.id===b.need_id));
  if(b.source_id)items=items.filter(g=>g.source_id===b.source_id&&(!b.source_type||g.source_type===b.source_type));
  if(b.group_key)items=items.filter(g=>g.key===b.group_key);
- const total=items.length,offset=Math.max(0,Math.floor(Number(b.offset)||0));items=items.slice(offset,offset+50);
+ const rich=workPlanListEnabled(env,u);let offset=Math.max(0,Math.floor(Number(b.offset)||0)),total=items.length;const limit=rich?Math.min(100,Math.max(1,Math.floor(Number(b.limit)||50))):50;if(!rich)items=items.slice(offset,offset+limit);
  const ibIds=[...new Set(items.filter(g=>g.source_type==='inbound'&&g.source_id).map(g=>g.source_id))];
- const obIds=[...new Set(items.filter(g=>g.source_type==='outbound'&&g.source_id).map(g=>g.source_id))];
+ const obIds=[...new Set(items.flatMap(g=>[...(g.source_type==='outbound'&&g.source_id?[g.source_id]:[]),...(rich?g.items.flatMap(n=>(n.links||[]).map(l=>l.outbound_id)):[])]))];
  const inClause=ids=>ids.map(()=>'?').join(',');
  const reads=await env.DB.batch([
-  stmt(env,'SELECT id,display_no,customer,plan_date,expected_arrival,cargo_summary,purpose,remark,status,is_deleted FROM v2_inbound_plans WHERE id IN (SELECT value FROM json_each(?))',JSON.stringify(ibIds)),
+  stmt(env,'SELECT * FROM v2_inbound_plans WHERE id IN (SELECT value FROM json_each(?))',JSON.stringify(ibIds)),
   stmt(env,'SELECT plan_id,unit_type,planned_qty,remark FROM v2_inbound_plan_lines WHERE plan_id IN (SELECT value FROM json_each(?)) ORDER BY line_no',JSON.stringify(ibIds)),
-  stmt(env,'SELECT id,display_no FROM v2_outbound_orders WHERE id IN (SELECT value FROM json_each(?))',JSON.stringify(obIds))]);
+  stmt(env,'SELECT * FROM v2_outbound_orders WHERE id IN (SELECT value FROM json_each(?))'+(rich?' OR source_inbound_plan_id IN (SELECT value FROM json_each(?))':''),JSON.stringify(obIds),...(rich?[JSON.stringify(ibIds)]:[]))]);
  const [plans,lines,outbounds]=reads.map(r=>r.results||[]);
  for(const g of items){
   if(g.source_type==='inbound'){const p=plans.find(p=>p.id===g.source_id);if(p){Object.assign(g,{plan:p,customer:p.customer||g.customer,display_no:p.display_no||'入库计划单号待补充',cargo_summary:p.cargo_summary,plan_date:p.plan_date,expected_arrival:p.expected_arrival});g.lines=lines.filter(l=>l.plan_id===g.source_id);}}
@@ -575,7 +576,8 @@ async function needGroups(env,u,b){
   const active=g.items.filter(x=>x.status!=='cancelled'&&!x.source_cancelled);g.completed=active.filter(x=>!!x.result||x.status==='closed').length;g.count=active.length;
   g.status=!active.length?'cancelled':g.completed===active.length?'completed':active.some(x=>x.status!=='pending')?'working':'pending';
  }
- return {ok:true,items,total,offset,more:offset+50<total};
+ if(rich){await workPlanFacts(env,items,plans,outbounds);items=filterWorkPlans(items,b);total=items.length;offset=Math.min(offset,Math.max(0,(Math.ceil(total/limit)-1)*limit));items=items.slice(offset,offset+limit);}
+ return {ok:true,items,total,offset,limit,more:offset+limit<total};
 }
 async function dashboard(env,u,b){
  const days=date(b.date||new Date(Date.now()+9*3600000).toISOString().slice(0,10));
