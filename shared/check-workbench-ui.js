@@ -100,9 +100,17 @@
    const id=$('vsBatchSelect').value;if(!id){$('vsEntryError').textContent='请选择核对批次 / 배치를 선택하세요';return;}
    button.disabled=true;$('vsEntryError').textContent='';
    try{
-    const list=await CKSession.request('sop_dispatch_list'),existing=list.items.find(j=>j.job_type==='verify_scan'&&j.related_doc_id===id);
-    if(existing){await CKOpenNativeJob(existing);return;}
-    const r=await api({action:'v2_verify_job_start',batch_id:id});if(!r?.ok)throw Error(r?.error||'派工失败 / 배정 실패');
+    const openExisting=async()=>{
+     const found=await CKSession.request('sop_verify_active',{batch_id:id}),job=found.active;
+     if(!job)return false;
+     if(job.can_takeover){
+      if(!confirm('原派审员已离岗或休息。确认接班此核对任务？原人员、工时和扫码记录保留；接班后请扫描当前在岗工牌调整人员。 / 기존 기록은 유지됩니다. 현재 작업자를 다시 배정하세요.'))return true;
+      await CKSession.request('sop_verify_takeover',{job_id:job.id,revision:job.revision,client_req_id:crypto.randomUUID()});
+     }else if(!job.can_manage)throw Error('此核对任务仍由原派审员管理，请联系本部门负责人 / 기존 담당자에게 문의하세요');
+     await CKOpenNativeJob({id:job.id,job_type:'verify_scan'});return true;
+    };
+    if(await openExisting())return;
+    const r=await api({action:'v2_verify_job_start',batch_id:id});if(!r?.ok){if(/已有在途任务/.test(r?.error||'')&&await openExisting())return;throw Error(r?.error||'派工失败 / 배정 실패');}
     saveActiveJob(r.job_id,r.worker_seg_id);_vsBatchId=id;await window.initVerifyScan();
    }catch(e){$('vsEntryError').textContent=e.message;}finally{button.disabled=false;}
   };

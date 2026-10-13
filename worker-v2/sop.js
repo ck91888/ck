@@ -19,6 +19,7 @@ import {completionDate} from './completion-date.js';
 import { workChainEnabled, chainOutboundStatements, chainAllocation, guardWorkChain, workMaterialRead, workMaterials, notifyMaterialChange, assertShippingResult, shippingBasisStatements } from './work-chain.js';
 import { workPlanStatements } from './sop-planning.js';
 import { dispatchAccess } from './dispatch-access.js';
+import {ensureDailyDispatch} from './daily-dispatch-permissions.js';
 import {sourceActiveWorkers} from './crew-borrow.js';
 import {effectiveResults} from './effective-results.js';
 /* SOP pilot: explicit opt-in, revision checked atomic mutations, immutable history.
@@ -109,12 +110,58 @@ async function verifySource(env, type, id, customer) {
  if(customer && doc.customer && doc.customer!==customer) fail('关联单据客户不一致');
  return doc;
 }
+async function verifyTakeoverAllowed(env,u,row,job){
+ if(!u||u.role!=='dispatcher'||u.scope!=='field'||!u.attendance_id||!job||!['pending','working','awaiting_close','paused'].includes(job.status))return false;
+ const departments=u.daily_dispatch?u.can_dispatch?u.dispatch_departments||[]:[]:u.departments||[];
+ if(!departments.includes(row.department))return false;
+ if(await stmt(env,"SELECT 1 FROM v2_ops_job_workers WHERE job_id=? AND left_at='' LIMIT 1",job.id).first())return false;
+ const actor=await stmt(env,"SELECT 1 FROM ck_attendance_days d WHERE d.id=? AND d.signed_out='' AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at='')",u.attendance_id).first();
+ if(!actor)return false;
+ const ownerId=JSON.parse(row.state).owner_id;if(!ownerId||ownerId===u.id)return false;
+ if(!await stmt(env,'SELECT 1 FROM ck_attendance_people WHERE id=?',ownerId).first())return false;
+ await ensureDailyDispatch(env);
+ const today=new Date(Date.now()+9*3600000).toISOString().slice(0,10);
+ const owner=await stmt(env,`SELECT d.signed_out,EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at='') AS resting FROM ck_attendance_days d WHERE d.day=? AND (d.person_id=? OR EXISTS(SELECT 1 FROM ck_daily_dispatch_links l WHERE l.permanent_person_id=? AND l.daily_person_id=d.person_id AND l.day=d.day)) ORDER BY d.signed_in DESC LIMIT 1`,today,ownerId,ownerId).first();
+ return !owner||!!owner.signed_out||!!owner.resting;
+}
+async function verifyActive(env,u,b){
+ const id=required(b.batch_id,'核对批次');
+ const jobs=await all(env,"SELECT j.id,j.status,j.job_type,j.related_doc_id,s.department,s.revision,s.state FROM v2_ops_jobs j JOIN sop_records s ON s.id=j.id AND s.kind='dispatch' WHERE j.related_doc_type='verify_batch' AND j.related_doc_id=? AND j.job_type='verify_scan' AND j.status IN ('pending','working','awaiting_close','paused') ORDER BY j.updated_at DESC LIMIT 2",id);
+ if(jobs.length>1)fail('批次有多个在途任务，请管理员核实 / 진행 작업을 확인하세요');
+ const job=jobs[0];if(!job)return {ok:true,active:null};permit(u,job.department,['manager','dispatcher']);
+ const access=dispatchAccess(u),canManage=!!await stmt(env,'SELECT 1 FROM sop_records s WHERE s.id=? AND '+access.sql,job.id,...access.args).first();
+ const data=JSON.parse(job.state),canTakeover=!canManage&&await verifyTakeoverAllowed(env,u,job,job);
+ return {ok:true,active:{id:job.id,status:job.status,revision:job.revision,owner:data.owner||'',can_manage:canManage,can_takeover:canTakeover}};
+}
+async function verifyTakeover(env,u,b){
+ const id=required(b.job_id,'原核对任务'),row=await read(env,id),job=await stmt(env,'SELECT * FROM v2_ops_jobs WHERE id=?',id).first();
+ if(!row||row.kind!=='dispatch'||job?.job_type!=='verify_scan'||job.related_doc_type!=='verify_batch')fail('原核对任务不存在');
+ permit(u,row.department,['manager','dispatcher']);
+ if(Number(b.revision)!==row.revision)fail('任务已变化，请刷新后重试 / 작업이 변경되었습니다');
+ if(!await verifyTakeoverAllowed(env,u,{...row,state:JSON.stringify(row.data)},job))fail('当前不能接班；请由原派审员或管理员处理 / 담당자에게 문의하세요');
+ const t=now(),old=row.data,next={...old,owner_id:u.id,owner:u.name,last_owner_transfer:{from_id:old.owner_id,from_name:old.owner||'',to_id:u.id,to_name:u.name,by_id:u.id,by_name:u.name,at:t,reason:'原负责人离岗，接续核对'}};
+ await stmt(env,`CREATE TRIGGER IF NOT EXISTS ck_verify_takeover_safe BEFORE INSERT ON sop_events WHEN NEW.action='sop_verify_takeover' BEGIN SELECT CASE WHEN NOT EXISTS(
+  SELECT 1 FROM v2_ops_jobs j JOIN sop_records s ON s.id=j.id
+  WHERE j.id=NEW.record_id AND s.kind='dispatch' AND s.state=NEW.before_json AND j.job_type='verify_scan'
+   AND j.status IN ('pending','working','awaiting_close','paused')
+   AND NOT EXISTS(SELECT 1 FROM v2_ops_job_workers w WHERE w.job_id=j.id AND w.left_at='')
+   AND EXISTS(SELECT 1 FROM ck_attendance_days d WHERE d.day=date(NEW.created_at,'+9 hours') AND d.signed_out='' AND d.signed_in<=NEW.created_at
+    AND (d.person_id=NEW.actor_id OR EXISTS(SELECT 1 FROM ck_daily_dispatch_links l WHERE l.permanent_person_id=NEW.actor_id AND l.daily_person_id=d.person_id AND l.day=d.day))
+    AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at=''))
+   AND NOT EXISTS(SELECT 1 FROM ck_attendance_days d WHERE d.day=date(NEW.created_at,'+9 hours') AND d.signed_out=''
+    AND (d.person_id=json_extract(NEW.before_json,'$.owner_id') OR EXISTS(SELECT 1 FROM ck_daily_dispatch_links l WHERE l.permanent_person_id=json_extract(NEW.before_json,'$.owner_id') AND l.daily_person_id=d.person_id AND l.day=d.day))
+    AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at=''))
+ ) THEN RAISE(ABORT,'verify_takeover_changed') END; END`).run();
+ return save(env,b,u,row,next);
+}
 export async function handleSop(b,env) {
  if(env.SOP_UPGRADE_ENABLED!=='true') return {ok:false,error:'新版尚未启用，原系统继续使用',disabled:true};
  const auth=env.SOP_REQUEST_USER ? {ok:true,user:env.SOP_REQUEST_USER} : authorization(b,env); if(!auth.ok) return auth;
  const u=auth.user;
  try {
   await ensureDocumentNumbers(env);
+  if(b.action==='sop_verify_active')return await verifyActive(env,u,b);
+  if(b.action==='sop_verify_takeover')return await verifyTakeover(env,u,b);
   if(b.action==='sop_need_print_request'){try{return await recordWorkNeedPrint(b,env,u,items=>recordNumbers(env,items));}catch(error){return {ok:false,error:String(error.message||error)};}}
   const cancelledDraft=await cancelCargoDraft(b,env,u);if(cancelledDraft)return cancelledDraft;
   const split=await cargoSplit(b,env,u);if(split)return split;

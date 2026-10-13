@@ -17,6 +17,25 @@ test('daily dispatch defaults off, grants only explicit departments and no admin
  assert.equal((await s.start(p,{labor_department:'import'})).ok,false);assert.equal((await s.start(p)).ok,true);
  const event=s.DB.raw.prepare('SELECT * FROM ck_daily_dispatch_events').get();assert.equal(event.actor_name,'合成权限管理员');assert.equal(JSON.parse(event.after_json).version,1);assert.equal(s.DB.raw.prepare('SELECT count(*) n FROM ck_daily_dispatch_checks').get().n,0);
 });
+test('verify takeover requires an on-duty department dispatcher and preserves the original task',async()=>{
+ const s=await setup(),a=await s.permanent('合成原派审员'),c=await s.permanent('合成接班派审员'),wrong=await s.permanent('合成跨部门派审员');
+ const dayA=await s.checkin(a),dayC=await s.checkin(c);await s.checkin(wrong);await s.grant(a);await s.grant(c);await s.grant(wrong,true,0,['direct_ship']);await s.login(a);const cookieA=s.cookies.field;
+ const check=await s.ok('office','sop_check_create',{ship_date:'2026-10-17'});await s.ok('office','sop_check_items',{id:check.id,revision:check.revision,items:[{barcode:'SYNTH-HANDOFF',customer:'合成',qty:2}]});
+ const start=await s.ok('field','sop_native_start',{payload:{action:'v2_verify_job_start',batch_id:check.id,client_req_id:crypto.randomUUID()},workers:[{id:a.badgeId,name:a.name}],lead_id:a.badgeId,estimated_minutes:10,labor_department:'bulk'});
+ const id=start.job_id,request={job_id:id,revision:1,client_req_id:'SYNTH-VERIFY-HANDOFF-1'};
+ await s.login(c);assert.equal((await s.ok('field','sop_verify_active',{batch_id:check.id})).active.can_takeover,false,'active original crew blocks takeover');assert.equal((await s.call('field','sop_verify_takeover',request)).ok,false);
+ await s.ok('office','sop_attendance_checkout',{id:dayA.id});assert.equal(s.DB.raw.prepare("SELECT COUNT(*) n FROM v2_ops_job_workers WHERE job_id=? AND left_at=''").get(id).n,0);
+ await s.login(wrong);assert.equal((await s.call('field','sop_verify_active',{batch_id:check.id})).ok,false);assert.equal((await s.call('field','sop_verify_takeover',request)).ok,false);
+ await s.login(c);const found=await s.ok('field','sop_verify_active',{batch_id:check.id});assert.equal(found.active.id,id);assert.equal(found.active.can_takeover,true);
+ const transfer=await s.ok('field','sop_verify_takeover',request);assert.equal(transfer.revision,2);assert.equal((await s.ok('field','sop_verify_takeover',request)).revision,2,'same request replays');assert.equal((await s.call('field','sop_verify_takeover',{...request,client_req_id:'SYNTH-VERIFY-HANDOFF-STALE'})).ok,false);
+ const state=JSON.parse(s.DB.raw.prepare('SELECT state FROM sop_records WHERE id=?').get(id).state);assert.equal(state.owner_id,c.id);assert.equal(state.last_owner_transfer.from_id,a.id);assert.equal(s.DB.raw.prepare("SELECT COUNT(*) n FROM sop_events WHERE record_id=? AND action='sop_verify_takeover'").get(id).n,1);assert.equal(s.DB.raw.prepare("SELECT COUNT(*) n FROM v2_ops_jobs WHERE related_doc_id=? AND job_type='verify_scan'").get(check.id).n,1);
+ assert.equal((await s.call('field','sop_native_people',{job_id:id,revision:2,workers:[{id:a.badgeId,name:a.name}],lead_id:a.badgeId})).ok,false,'signed-out badge cannot resume a work clock');
+ await s.ok('field','sop_native_people',{job_id:id,revision:2,workers:[{id:c.badgeId,name:c.name}],lead_id:c.badgeId});assert.equal(s.DB.raw.prepare("SELECT COUNT(*) n FROM v2_ops_job_workers WHERE job_id=? AND left_at=''").get(id).n,1);
+ await s.ok('office','sop_attendance_break_start',{id:dayC.id});assert.equal(s.DB.raw.prepare("SELECT COUNT(*) n FROM v2_ops_job_workers WHERE job_id=? AND left_at=''").get(id).n,0);
+ await s.grant(wrong,true,1,['bulk']);await s.login(wrong);const resting=await s.ok('field','sop_verify_active',{batch_id:check.id});assert.equal(resting.active.can_takeover,true);await s.ok('field','sop_verify_takeover',{job_id:id,revision:3});await s.ok('field','sop_native_people',{job_id:id,revision:4,workers:[{id:wrong.badgeId,name:wrong.name}],lead_id:wrong.badgeId});
+ await s.ok('office','sop_attendance_break_end',{id:dayC.id});assert.equal(s.DB.raw.prepare("SELECT COUNT(*) n FROM v2_ops_job_workers WHERE job_id=? AND worker_id=? AND left_at=''").get(id,c.badgeId).n,0,'removed resting owner cannot silently rejoin');assert.equal(s.DB.raw.prepare("SELECT COUNT(*) n FROM v2_ops_job_workers WHERE job_id=? AND worker_id=? AND left_at=''").get(id,wrong.badgeId).n,1);
+ assert.equal((await s.call('field','sop_verify_takeover',{job_id:id,revision:5},cookieA)).ok,false,'signed-out original session cannot take ownership back');
+});
 test('temporary badges require exact explicit stable identity, isolate same names and retain original history across days',async t=>{
  t.mock.timers.enable({apis:['Date'],now:new Date('2026-10-13T01:00:00Z')});const s=await setup(),p=await s.permanent(),other=await s.permanent();await s.grant(p);
  const d=(await s.ok('office','sop_attendance_checkin',{name:p.name,agency:'가온'})).record;assert.equal((await s.call('field','sop_login',{badge:d.badgeId})).ok,false);

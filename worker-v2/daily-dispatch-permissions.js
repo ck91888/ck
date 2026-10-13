@@ -91,6 +91,7 @@ export async function guardDailyDispatch(b,e){
  const u=e.SOP_REQUEST_USER;if(!dailyDispatchEnabled(e)||!u?.daily_dispatch)return;
  let needs=false,department='',record;
  if(b.action==='sop_native_start'){needs=true;department=b.labor_department||startDepartment(b.payload||{});}
+ else if(b.action==='sop_verify_takeover'){needs=true;}
  else if(b.action==='sop_task_dispatch'){needs=true;department=b.department;}
  else if(b.action==='sop_courier_receive'&&b.operation==='start'){needs=true;department='direct_ship';}
  else if(['sop_native_adopt','v2_pick_job_add_docs'].includes(b.action)){needs=true;}
