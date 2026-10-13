@@ -6,11 +6,11 @@ export function dispatchAccess(user) {
  const badge=user?.scope==='field'?user.badge||'':'';
  return {
   sql:`(?='manager' OR (?='dispatcher' AND (
-   json_extract(s.state,'$.owner_id')=? OR (?<>'' AND EXISTS(
+   json_extract(s.state,'$.owner_id')=? OR (?<>'' AND NOT EXISTS(SELECT 1 FROM sop_events e WHERE e.record_id=s.id AND e.action IN ('sop_verify_takeover','sop_owner_transfer') AND json_extract(e.before_json,'$.owner_id')=?) AND EXISTS(
     SELECT 1 FROM v2_ops_job_workers w
     WHERE w.job_id=s.id AND ${workerBadgeMatch('w.worker_id','?')} AND w.left_at=''
-   )) OR (?<>'' AND json_extract(s.state,'$.pause_actor_id')=? AND EXISTS(SELECT 1 FROM v2_ops_jobs j WHERE j.id=s.id AND j.status='paused') AND EXISTS(SELECT 1 FROM json_each(s.state,'$.workers') w WHERE ${workerBadgeMatch("json_extract(w.value,'$.id')",'?')}) AND NOT EXISTS(SELECT 1 FROM v2_ops_job_workers w WHERE ${workerBadgeMatch('w.worker_id','?')} AND w.left_at='' AND w.job_id!=s.id)))))`,
-  args:[user?.role||'',user?.role||'',user?.id||'',badge,badge,badge,user?.id||'',badge,badge]
+   )) OR (?<>'' AND NOT EXISTS(SELECT 1 FROM sop_events e WHERE e.record_id=s.id AND e.action IN ('sop_verify_takeover','sop_owner_transfer') AND json_extract(e.before_json,'$.owner_id')=?) AND json_extract(s.state,'$.pause_actor_id')=? AND EXISTS(SELECT 1 FROM v2_ops_jobs j WHERE j.id=s.id AND j.status='paused') AND EXISTS(SELECT 1 FROM json_each(s.state,'$.workers') w WHERE ${workerBadgeMatch("json_extract(w.value,'$.id')",'?')}) AND NOT EXISTS(SELECT 1 FROM v2_ops_job_workers w WHERE ${workerBadgeMatch('w.worker_id','?')} AND w.left_at='' AND w.job_id!=s.id)))))`,
+  args:[user?.role||'',user?.role||'',user?.id||'',badge,user?.id||'',badge,badge,user?.id||'',user?.id||'',badge,badge]
  };
 }
 

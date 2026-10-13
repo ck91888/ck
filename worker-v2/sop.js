@@ -19,7 +19,7 @@ import {completionDate} from './completion-date.js';
 import { workChainEnabled, chainOutboundStatements, chainAllocation, guardWorkChain, workMaterialRead, workMaterials, notifyMaterialChange, assertShippingResult, shippingBasisStatements } from './work-chain.js';
 import { workPlanStatements } from './sop-planning.js';
 import { dispatchAccess } from './dispatch-access.js';
-import {ensureDailyDispatch} from './daily-dispatch-permissions.js';
+import {ensureDailyDispatch,dispatchTransferTarget} from './daily-dispatch-permissions.js';
 import {sourceActiveWorkers} from './crew-borrow.js';
 import {effectiveResults} from './effective-results.js';
 /* SOP pilot: explicit opt-in, revision checked atomic mutations, immutable history.
@@ -124,6 +124,24 @@ async function verifyTakeoverAllowed(env,u,row,job){
  const owner=await stmt(env,`SELECT d.signed_out,EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at='') AS resting FROM ck_attendance_days d WHERE d.day=? AND (d.person_id=? OR EXISTS(SELECT 1 FROM ck_daily_dispatch_links l WHERE l.permanent_person_id=? AND l.daily_person_id=d.person_id AND l.day=d.day)) ORDER BY d.signed_in DESC LIMIT 1`,today,ownerId,ownerId).first();
  return !owner||!!owner.signed_out||!!owner.resting;
 }
+function transferState(old,target,actor,reason,t,mode='transfer'){
+ const transfer={from_id:old.owner_id,from_name:old.owner||'',to_id:target.id,to_name:target.name,by_id:actor.id,by_name:actor.name,by_scope:actor.scope||'field',at:t,reason,mode};
+ return {...old,original_owner_id:old.original_owner_id||old.owner_id,original_owner:old.original_owner||old.owner||'',owner_id:target.id,owner:target.name,last_owner_transfer:transfer,owner_transfers:[...(old.owner_transfers||[]),transfer]};
+}
+async function ownerAway(env,id){
+ if(!id||!await stmt(env,'SELECT 1 FROM ck_attendance_people WHERE id=?',id).first())return false;
+ await ensureDailyDispatch(env);const today=new Date(Date.now()+9*3600000).toISOString().slice(0,10);
+ return !await stmt(env,`SELECT 1 FROM ck_attendance_days d WHERE d.day=? AND d.signed_out=''
+  AND (d.person_id=? OR EXISTS(SELECT 1 FROM ck_daily_dispatch_links l WHERE l.permanent_person_id=? AND l.daily_person_id=d.person_id AND l.day=d.day))
+  AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at='') LIMIT 1`,today,id,id).first();
+}
+async function canClaimOwner(env,u,row){
+ if(u?.scope!=='field'||u.role!=='dispatcher'||!u.attendance_id||!row?.data?.owner_id||u.id===row.data.owner_id)return false;
+ const departments=u.daily_dispatch?u.can_dispatch?u.dispatch_departments||[]:[]:u.departments||[];
+ if(!departments.includes(row.department))return false;
+ if(!await stmt(env,"SELECT 1 FROM ck_attendance_days d WHERE d.id=? AND d.day=date(?,'+9 hours') AND d.signed_out='' AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at='')",u.attendance_id,now()).first())return false;
+ return ownerAway(env,row.data.owner_id);
+}
 async function verifyActive(env,u,b){
  const id=required(b.batch_id,'核对批次');
  const jobs=await all(env,"SELECT j.id,j.status,j.job_type,j.related_doc_id,s.department,s.revision,s.state FROM v2_ops_jobs j JOIN sop_records s ON s.id=j.id AND s.kind='dispatch' WHERE j.related_doc_type='verify_batch' AND j.related_doc_id=? AND j.job_type='verify_scan' AND j.status IN ('pending','working','awaiting_close','paused') ORDER BY j.updated_at DESC LIMIT 2",id);
@@ -131,7 +149,8 @@ async function verifyActive(env,u,b){
  const job=jobs[0];if(!job)return {ok:true,active:null};permit(u,job.department,['manager','dispatcher']);
  const access=dispatchAccess(u),canManage=!!await stmt(env,'SELECT 1 FROM sop_records s WHERE s.id=? AND '+access.sql,job.id,...access.args).first();
  const data=JSON.parse(job.state),canTakeover=!canManage&&await verifyTakeoverAllowed(env,u,job,job);
- return {ok:true,active:{id:job.id,status:job.status,revision:job.revision,owner:data.owner||'',can_manage:canManage,can_takeover:canTakeover}};
+ const canClaim=!canManage&&!canTakeover&&await canClaimOwner(env,u,{department:job.department,data});
+ return {ok:true,active:{id:job.id,status:job.status,revision:job.revision,owner_id:data.owner_id,owner:data.owner||'',can_manage:canManage,can_takeover:canTakeover,can_claim:canClaim}};
 }
 async function verifyTakeover(env,u,b){
  const id=required(b.job_id,'原核对任务'),row=await read(env,id),job=await stmt(env,'SELECT * FROM v2_ops_jobs WHERE id=?',id).first();
@@ -139,7 +158,7 @@ async function verifyTakeover(env,u,b){
  permit(u,row.department,['manager','dispatcher']);
  if(Number(b.revision)!==row.revision)fail('任务已变化，请刷新后重试 / 작업이 변경되었습니다');
  if(!await verifyTakeoverAllowed(env,u,{...row,state:JSON.stringify(row.data)},job))fail('当前不能接班；请由原派审员或管理员处理 / 담당자에게 문의하세요');
- const t=now(),old=row.data,next={...old,owner_id:u.id,owner:u.name,last_owner_transfer:{from_id:old.owner_id,from_name:old.owner||'',to_id:u.id,to_name:u.name,by_id:u.id,by_name:u.name,at:t,reason:'原负责人离岗，接续核对'}};
+ const t=now(),old=row.data,next=transferState(old,u,u,'原负责人离岗，接续核对',t);
  await stmt(env,`CREATE TRIGGER IF NOT EXISTS ck_verify_takeover_safe BEFORE INSERT ON sop_events WHEN NEW.action='sop_verify_takeover' BEGIN SELECT CASE WHEN NOT EXISTS(
   SELECT 1 FROM v2_ops_jobs j JOIN sop_records s ON s.id=j.id
   WHERE j.id=NEW.record_id AND s.kind='dispatch' AND s.state=NEW.before_json AND j.job_type='verify_scan'
@@ -162,6 +181,13 @@ export async function handleSop(b,env) {
   await ensureDocumentNumbers(env);
   if(b.action==='sop_verify_active')return await verifyActive(env,u,b);
   if(b.action==='sop_verify_takeover')return await verifyTakeover(env,u,b);
+  if(b.action==='sop_owner_transfer_options'){
+   const row=await read(env,required(b.id,'任务编号'));
+   if(!row||!['dispatch','task'].includes(row.kind))fail('派工任务不存在');permit(u,row.department,['manager','dispatcher']);
+   const job=await stmt(env,'SELECT status FROM v2_ops_jobs WHERE id=?',row.id).first();
+   const open=!!job&&['pending','working','paused','awaiting_close'].includes(job.status)&&!['completed','cancelled'].includes(row.data.status);
+   return {ok:true,id:row.id,revision:row.revision,owner_id:row.data.owner_id,owner:row.data.owner||'',can_claim:open&&await canClaimOwner(env,u,row),can_transfer:open&&(u.role==='manager'&&u.scope==='office'||u.role==='dispatcher'&&row.data.owner_id===u.id)};
+  }
   if(b.action==='sop_need_print_request'){try{return await recordWorkNeedPrint(b,env,u,items=>recordNumbers(env,items));}catch(error){return {ok:false,error:String(error.message||error)};}}
   const cancelledDraft=await cancelCargoDraft(b,env,u);if(cancelledDraft)return cancelledDraft;
   const split=await cargoSplit(b,env,u);if(split)return split;
@@ -226,7 +252,14 @@ export async function handleSop(b,env) {
   if(b.action==='sop_dispatch_list'){
    if(!['manager','dispatcher'].includes(u.role))fail('仅派审员可查看现场派工');
    const access=dispatchAccess(u),rest=restingDispatchAccess(u),externalCode=text(b.external_code);
-    const rows=await all(env,`SELECT COALESCE(s.kind,'legacy') AS task_kind,COALESCE(s.state,'{}') AS state,j.*,wn.display_no AS work_plan_no,n.state AS need_state,
+   let claimDepartments=u.scope==='field'&&u.role==='dispatcher'&&u.attendance_id?(u.daily_dispatch?u.can_dispatch?u.dispatch_departments||[]:[]:u.departments||[]):[];
+   if(claimDepartments.length){await ensureDailyDispatch(env);if(!await stmt(env,"SELECT 1 FROM ck_attendance_days d WHERE d.id=? AND d.day=date(?,'+9 hours') AND d.signed_out='' AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at='')",u.attendance_id,now()).first())claimDepartments=[];}
+   const claimSql=claimDepartments.length?`(s.kind='dispatch' AND s.department IN (SELECT value FROM json_each(?)) AND json_extract(s.state,'$.owner_id')<>?
+    AND EXISTS(SELECT 1 FROM ck_attendance_people p WHERE p.id=json_extract(s.state,'$.owner_id'))
+    AND NOT EXISTS(SELECT 1 FROM ck_attendance_days d WHERE d.day=date('now','+9 hours') AND d.signed_out=''
+     AND (d.person_id=json_extract(s.state,'$.owner_id') OR EXISTS(SELECT 1 FROM ck_daily_dispatch_links l WHERE l.permanent_person_id=json_extract(s.state,'$.owner_id') AND l.daily_person_id=d.person_id AND l.day=d.day))
+     AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at='')))`:'0';
+    const rows=await all(env,`SELECT COALESCE(s.kind,'legacy') AS task_kind,COALESCE(s.state,'{}') AS state,s.department AS dispatch_department,j.*,wn.display_no AS work_plan_no,n.state AS need_state,
     ib.display_no AS inbound_no,ib.customer AS inbound_customer,
     ob.display_no AS outbound_no,ob.wms_work_order_no AS outbound_external_no,ob.customer AS outbound_customer,
     fb.display_no AS feedback_no,
@@ -241,14 +274,15 @@ export async function handleSop(b,env) {
     LEFT JOIN v2_outbound_orders ob ON ob.id=CASE WHEN j.linked_outbound_order_id!='' THEN j.linked_outbound_order_id WHEN j.related_doc_type='outbound_order' THEN j.related_doc_id END
     LEFT JOIN v2_field_feedbacks fb ON j.related_doc_type='field_feedback' AND fb.id=j.related_doc_id
      WHERE j.status NOT IN ('completed','cancelled')
-     AND ((s.kind='dispatch' AND (${access.sql} OR ${rest.sql})) OR (s.kind='task' AND s.department='bulk' AND (?='manager' OR s.department IN (SELECT value FROM json_each(?)))) OR (s.id IS NULL AND j.job_type='load_outbound' AND j.related_doc_type='outbound_order' AND (?='manager' OR j.biz_class IN (SELECT value FROM json_each(?)))))
+     AND ((s.kind='dispatch' AND (${access.sql} OR ${rest.sql})) OR ${claimSql} OR (s.kind='task' AND s.department='bulk' AND (?='manager' OR s.department IN (SELECT value FROM json_each(?)))) OR (s.id IS NULL AND j.job_type='load_outbound' AND j.related_doc_type='outbound_order' AND (?='manager' OR j.biz_class IN (SELECT value FROM json_each(?)))))
     AND (?='' OR (s.kind='dispatch' AND j.job_type='bulk_op' AND (j.id=? OR j.related_doc_id=? OR j.display_no=? OR ob.display_no=? OR ob.wms_work_order_no=?)))
-     ORDER BY j.updated_at DESC LIMIT 200`,...access.args,...rest.args,u.role,JSON.stringify(u.departments||[]),u.role,JSON.stringify(u.departments||[]),...Array(6).fill(externalCode));
-   return {ok:true,items:(await jobNumbers(env,rows)).map(r=>{
+     ORDER BY j.updated_at DESC LIMIT 200`,...access.args,...rest.args,...(claimDepartments.length?[JSON.stringify(claimDepartments),u.id]:[]),u.role,JSON.stringify(u.departments||[]),u.role,JSON.stringify(u.departments||[]),...Array(6).fill(externalCode));
+   return {ok:true,items:await Promise.all((await jobNumbers(env,rows)).map(async r=>{
     const d=JSON.parse(r.state),plans=JSON.parse(r.unload_plans||'[]'),loads=JSON.parse(r.load_orders||'[]'),picks=JSON.parse(r.pick_numbers||'[]');
     const customer=[...new Set(loads.length?loads.map(o=>o.customer).filter(Boolean):plans.length?plans.map(p=>p.customer).filter(Boolean):[r.customer||r.inbound_customer||r.outbound_customer].filter(Boolean))].join('、');
-    return {id:r.id,...jobDisplayMetadata(r),task_no:r.task_no||'',task_kind:r.task_kind,job_type:r.job_type,title:r.task_kind==='task'?JSON.parse(r.need_state||'{}').title||d.title:loads.length?'本车装货 · '+loads.length+' 单':'',status:r.task_kind==='task'?d.status:r.status,source_type:r.related_doc_type,source_id:r.related_doc_id,lead_id:d.lead_id,last_lead:d.last_lead,display_no:r.display_no,business_no:r.business_no,customer,workers:JSON.parse(r.active_crew||'[]'),owner:d.owner,estimated_minutes:d.estimated_minutes};
-   })};
+    const canClaim=r.task_kind==='dispatch'&&claimDepartments.includes(r.dispatch_department)&&await canClaimOwner(env,u,{department:r.dispatch_department,data:d});
+    return {id:r.id,...jobDisplayMetadata(r),task_no:r.task_no||'',task_kind:r.task_kind,job_type:r.job_type,title:r.task_kind==='task'?JSON.parse(r.need_state||'{}').title||d.title:loads.length?'本车装货 · '+loads.length+' 单':'',status:r.task_kind==='task'?d.status:r.status,source_type:r.related_doc_type,source_id:r.related_doc_id,lead_id:d.lead_id,last_lead:d.last_lead,display_no:r.display_no,business_no:r.business_no,customer,workers:JSON.parse(r.active_crew||'[]'),owner:d.owner,can_claim:canClaim,estimated_minutes:d.estimated_minutes};
+   }))};
   }
   if(b.action==='sop_dashboard') return await dashboard(env,u,b);
   if(b.action==='sop_updates'){
@@ -341,12 +375,55 @@ export async function handleSop(b,env) {
   if(!row)fail('记录不存在');
   const d=structuredClone(row.data),extra=[];
   permit(u,row.department,roles);
+  if(b.action==='sop_owner_transfer'){
+   if(!['dispatch','task'].includes(row.kind))fail('仅未完成的派工任务可转移');
+   const job=await stmt(env,'SELECT status FROM v2_ops_jobs WHERE id=?',row.id).first();
+   if(!job||!['pending','working','paused','awaiting_close'].includes(job.status)||['completed','cancelled'].includes(d.status))fail('任务已结束，不能转移');
+   const manager=u.role==='manager'&&u.scope==='office',owner=u.role==='dispatcher'&&u.id===d.owner_id,claim=!owner&&!manager&&await canClaimOwner(env,u,row);
+   if(!owner&&!manager&&!claim)fail('仅当前负责人可移交；原负责人离岗时须由本部门在岗派审员接班');
+   if(u.scope==='field'&&(u.role!=='dispatcher'||!u.attendance_id||u.daily_dispatch&&!u.can_dispatch||!(u.daily_dispatch?u.dispatch_departments||[]:u.departments||[]).includes(row.department)
+    ||!await stmt(env,"SELECT 1 FROM ck_attendance_days d WHERE d.id=? AND d.signed_out='' AND d.day=date(?,'+9 hours') AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at='')",u.attendance_id,t).first()))fail('原派审员须在岗并有本部门派工权限');
+   const reason=required(b.reason,'转移原因');if(reason.length>500)fail('转移原因不能超过500字');
+   const target=await dispatchTransferTarget(env,required(b.target_badge,'新派审员工牌'),row.department);
+   if(claim&&target.id!==u.id)fail('接班人必须扫描本人工牌');
+   if(target.id===d.owner_id)fail('新派审员与当前负责人相同');
+   const next=transferState(d,target,u,reason,t,claim?'claim':'transfer');
+   if(!d.original_owner_id){const first=await stmt(env,"SELECT after_json FROM sop_events WHERE record_id=? AND expected_revision=0 ORDER BY created_at LIMIT 1",row.id).first();const original=first&&JSON.parse(first.after_json);if(original?.owner_id){next.original_owner_id=original.owner_id;next.original_owner=original.owner||'';}}
+   // Delegations from the old assignment do not survive an owner transfer.
+   if(row.kind==='task')next.delegates=[];
+   await stmt(env,`CREATE TRIGGER IF NOT EXISTS ck_owner_transfer_safe BEFORE INSERT ON sop_events WHEN NEW.action='sop_owner_transfer' BEGIN SELECT CASE WHEN NOT EXISTS(
+    SELECT 1 FROM sop_records s JOIN v2_ops_jobs j ON j.id=s.id JOIN ck_attendance_people p ON p.id=json_extract(NEW.after_json,'$.owner_id')
+    LEFT JOIN ck_daily_dispatch_grants g ON g.person_id=p.id
+    WHERE s.id=NEW.record_id AND s.state=NEW.before_json AND s.kind IN ('dispatch','task')
+     AND j.status IN ('pending','working','paused','awaiting_close')
+     AND p.enabled=1 AND ((g.enabled=1 AND EXISTS(SELECT 1 FROM json_each(g.departments) WHERE value=s.department))
+      OR (EXISTS(SELECT 1 FROM ck_employee_profiles employee WHERE employee.person_id=p.id)
+       AND COALESCE((SELECT enabled FROM ck_field_access a WHERE a.person_id=p.id),1)=1 AND s.department IN ('bulk','direct_ship','import','other')))
+     AND EXISTS(SELECT 1 FROM ck_attendance_days d JOIN ck_attendance_people a ON a.id=d.person_id
+      WHERE d.day=date(NEW.created_at,'+9 hours') AND d.signed_out='' AND d.signed_in<=NEW.created_at AND a.enabled=1
+       AND (d.person_id=p.id OR EXISTS(SELECT 1 FROM ck_daily_dispatch_links l WHERE l.daily_person_id=d.person_id AND l.permanent_person_id=p.id AND l.day=d.day))
+       AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at=''))
+     AND (json_extract(NEW.after_json,'$.last_owner_transfer.by_scope')='office' OR EXISTS(
+      SELECT 1 FROM ck_attendance_days actor JOIN ck_attendance_people actor_person ON actor_person.id=NEW.actor_id
+       WHERE actor.day=date(NEW.created_at,'+9 hours') AND actor.signed_out='' AND actor.signed_in<=NEW.created_at AND actor_person.enabled=1
+       AND (actor.person_id=NEW.actor_id OR EXISTS(SELECT 1 FROM ck_daily_dispatch_links l WHERE l.permanent_person_id=NEW.actor_id AND l.daily_person_id=actor.person_id AND l.day=actor.day))
+       AND (EXISTS(SELECT 1 FROM ck_daily_dispatch_grants grant_row WHERE grant_row.person_id=NEW.actor_id AND grant_row.enabled=1 AND EXISTS(SELECT 1 FROM json_each(grant_row.departments) WHERE value=s.department))
+        OR EXISTS(SELECT 1 FROM ck_employee_profiles employee WHERE employee.person_id=NEW.actor_id) AND COALESCE((SELECT enabled FROM ck_field_access access_row WHERE access_row.person_id=NEW.actor_id),1)=1)
+       AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=actor.id AND b.ended_at='')))
+     AND (json_extract(NEW.after_json,'$.last_owner_transfer.mode')<>'claim' OR (
+      json_extract(NEW.after_json,'$.owner_id')=NEW.actor_id AND NOT EXISTS(
+       SELECT 1 FROM ck_attendance_days absent WHERE absent.day=date(NEW.created_at,'+9 hours') AND absent.signed_out=''
+        AND (absent.person_id=json_extract(NEW.before_json,'$.owner_id') OR EXISTS(SELECT 1 FROM ck_daily_dispatch_links l WHERE l.permanent_person_id=json_extract(NEW.before_json,'$.owner_id') AND l.daily_person_id=absent.person_id AND l.day=absent.day))
+        AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=absent.id AND b.ended_at=''))))
+   ) THEN RAISE(ABORT,'owner_transfer_changed') END; END`).run();
+   return await save(env,b,u,row,next);
+  }
   if(b.action.startsWith('sop_task_')) {
    if(row.kind!=='task')fail('记录类型错误');
    permit(u,row.department,['manager','dispatcher','reviewer']);
    const groupedNeed=d.need_id?await read(env,d.need_id):null;
    if(groupedNeed?.data.cargo_groups&&['sop_task_finish','sop_task_complete_review','sop_task_review','sop_task_cancel'].includes(b.action))fail('此计划按资料组完成和审核，请使用分组操作；不得整单重复登记');
-   const allowedOwner=u.role==='manager'||d.owner_id===u.id||(d.delegates||[]).includes(u.id);
+   const allowedOwner=u.role==='manager'||d.owner_id===u.id||(d.delegates||[]).includes(u.id)&&!(d.owner_transfers||[]).some(x=>x.from_id===u.id);
    if(b.action!=='sop_task_review' && !allowedOwner)fail('仅本任务负责人或获授权人员可操作');
    if(b.action==='sop_task_start') {
     if(groupedNeed?.data.cargo_groups&&taskGroups(groupedNeed.data.cargo_groups,{id:row.id,data:d}).some(g=>g.ack_version!==(g.mapping_version||1)))fail('请先在资料分组中确认最新版本，再恢复作业');

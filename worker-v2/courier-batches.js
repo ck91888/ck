@@ -25,7 +25,7 @@ export async function courierBatchDetail(e,id){
  const batch=await q(e,`SELECT b.*,j.status,j.finished_at,s.revision,s.state FROM ck_courier_batches b JOIN v2_ops_jobs j ON j.id=b.id JOIN sop_records s ON s.id=b.id WHERE b.id=?`,String(id||'')).first();if(!batch)fail('快递批次不存在 / 택배 차수가 없습니다');
  const state=JSON.parse(batch.state);delete batch.state;
  const [counts,workers]=await Promise.all([rows(e,`SELECT r.owner,COUNT(*) AS count FROM ck_courier_batch_items i JOIN ck_courier_receipts r ON r.id=i.receipt_id WHERE i.batch_id=? GROUP BY r.owner`,id),rows(e,"SELECT worker_id AS id,worker_name AS name,joined_at,left_at FROM v2_ops_job_workers WHERE job_id=? ORDER BY joined_at,id",id)]);
- return {...(await jobNumbers(e,[batch]))[0],owner:state.owner,lead_id:state.lead_id,workers:workers.filter(w=>!w.left_at),segments:workers,counts:Object.fromEntries(counts.map(x=>[x.owner,x.count])),total:counts.reduce((n,x)=>n+x.count,0),can_manage:await nativeOwner({job_id:id},e)};
+ return {...(await jobNumbers(e,[batch]))[0],owner:state.owner,owner_id:state.owner_id,lead_id:state.lead_id,workers:workers.filter(w=>!w.left_at),segments:workers,counts:Object.fromEntries(counts.map(x=>[x.owner,x.count])),total:counts.reduce((n,x)=>n+x.count,0),can_manage:await nativeOwner({job_id:id},e)};
 }
 export async function courierBatchList(e,b={}){
  const args=[],where=['1=1'];

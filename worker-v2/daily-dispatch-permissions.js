@@ -41,6 +41,23 @@ export async function dailyFieldSession(e,s){
  const g=await q(e,'SELECT * FROM ck_daily_dispatch_grants WHERE person_id=?',p.id).first();
  return {id:p.id,name:p.name,role:'dispatcher',scope:'field',departments:[...new Set([...JSON.parse(s.departments),...JSON.parse(g?.departments||'[]')])],badge:d.worker_id,attendance_id:d.id,daily_dispatch:true,can_dispatch:!!g?.enabled&&await validAttendance(e,p,d,new Date().toISOString()),dispatch_departments:JSON.parse(g?.departments||'[]'),dispatch_version:g?.version||0};
 }
+// Resolve a handoff by the actual badge and today's attendance, never by a
+// name supplied by the caller. A target must be able to dispatch this department.
+export async function dispatchTransferTarget(e,badge,department){
+ if(!dailyDispatchEnabled(e))fail('派审员转移仅在现场权限启用后可用');
+ const code=String(badge||'').trim().split('|')[0].toUpperCase();
+ if(code.startsWith('EMP-')){
+  const p=await q(e,`SELECT p.id,p.name,d.id AS attendance_id FROM ck_attendance_people p JOIN ck_employee_profiles employee ON employee.person_id=p.id
+   LEFT JOIN ck_field_access a ON a.person_id=p.id JOIN ck_attendance_days d ON d.person_id=p.id
+   WHERE p.badge_id=? AND p.enabled=1 AND COALESCE(a.enabled,1)=1 AND d.day=? AND d.signed_out='' AND d.signed_in<=?
+    AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at='') LIMIT 1`,code,kstDay(new Date().toISOString()),new Date().toISOString()).first();
+  if(!p||!['bulk','direct_ship','import','other'].includes(department))fail('接收派审员未在岗、休息中或无本部门派工权限');
+  return {id:p.id,name:p.name,attendance_id:p.attendance_id,can_dispatch:true,departments:['bulk','direct_ship','import','other']};
+ }
+ const target=await dailyFieldLogin(e,badge);
+ if(!target.can_dispatch||!target.departments.includes(department))fail('接收派审员未在岗、休息中或无本部门派工权限');
+ return target;
+}
 async function temporary(e,b,p){
  const day=kstDay(new Date().toISOString()),found=await resolveDailyBadge(e,canonicalDailyBadge(String(b.daily_badge||'').trim().split('|')[0]),{day});
  if(!found.person||found.person.kind!=='daily'||!found.attendance)fail('请扫描当天实际临时工牌，不能按姓名关联 / 오늘 임시 명찰을 스캔하세요');
@@ -91,7 +108,7 @@ export async function guardDailyDispatch(b,e){
  const u=e.SOP_REQUEST_USER;if(!dailyDispatchEnabled(e)||!u?.daily_dispatch)return;
  let needs=false,department='',record;
  if(b.action==='sop_native_start'){needs=true;department=b.labor_department||startDepartment(b.payload||{});}
- else if(b.action==='sop_verify_takeover'){needs=true;}
+ else if(b.action==='sop_verify_takeover'||b.action==='sop_owner_transfer'&&u.scope==='field'){needs=true;}
  else if(b.action==='sop_task_dispatch'){needs=true;department=b.department;}
  else if(b.action==='sop_courier_receive'&&b.operation==='start'){needs=true;department='direct_ship';}
  else if(['sop_native_adopt','v2_pick_job_add_docs'].includes(b.action)){needs=true;}

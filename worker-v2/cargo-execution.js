@@ -8,7 +8,7 @@ export async function cargoTask(env,row,u,requested=''){
  const id=requested||row.data.task_id;if(requested&&!new Set([row.data.task_id,...(row.data.task_ids||[])]).has(requested))throw Error('任务不属于此计划');
  const task=id?await q(env,"SELECT * FROM sop_records WHERE id=? AND kind='task'",id).first():null;
  if(task){task.data=JSON.parse(task.state);if(task.data.need_id!==row.id)throw Error('任务不属于此计划');}
- const owner=!!task&&(u.role==='manager'||task.data.owner_id===u.id||(task.data.delegates||[]).includes(u.id));
+ const owner=!!task&&(u.role==='manager'||task.data.owner_id===u.id||(task.data.delegates||[]).includes(u.id)&&!(task.data.owner_transfers||[]).some(x=>x.from_id===u.id));
  return {task,can_complete:owner&&['manager','dispatcher','reviewer'].includes(u.role),can_review:!!task&&(['manager','reviewer'].includes(u.role)||u.role==='dispatcher'&&owner)};
 }
 export async function cargoExecution(b,env,u){

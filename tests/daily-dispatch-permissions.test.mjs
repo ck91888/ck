@@ -36,6 +36,88 @@ test('verify takeover requires an on-duty department dispatcher and preserves th
  await s.ok('office','sop_attendance_break_end',{id:dayC.id});assert.equal(s.DB.raw.prepare("SELECT COUNT(*) n FROM v2_ops_job_workers WHERE job_id=? AND worker_id=? AND left_at=''").get(id,c.badgeId).n,0,'removed resting owner cannot silently rejoin');assert.equal(s.DB.raw.prepare("SELECT COUNT(*) n FROM v2_ops_job_workers WHERE job_id=? AND worker_id=? AND left_at=''").get(id,wrong.badgeId).n,1);
  assert.equal((await s.call('field','sop_verify_takeover',{job_id:id,revision:5},cookieA)).ok,false,'signed-out original session cannot take ownership back');
 });
+test('explicit owner transfer keeps the native job and crew while moving management rights',async()=>{
+ const s=await setup(),old=await s.permanent('合成原负责人'),next=await s.permanent('合成新负责人'),wrong=await s.permanent('合成跨部门负责人'),member=await s.permanent('合成普通组员');
+ await s.checkin(old);await s.checkin(next);await s.checkin(wrong);await s.checkin(member);await s.grant(old);await s.grant(next);await s.grant(wrong,true,0,['direct_ship']);await s.grant(member);
+ await s.login(old);const oldCookie=s.cookies.field,started=await s.start(old,{workers:[{id:old.badgeId,name:old.name},{id:member.badgeId,name:member.name}]});assert.equal(started.ok,true,started.error);const id=started.job_id;
+ const request={id,revision:1,target_badge:next.badgeId+'|'+next.name,reason:'合成换班，明确交接',client_req_id:'SYNTH-OWNER-TRANSFER'};
+ await s.login(member);assert.equal((await s.call('field','sop_owner_transfer',{...request,client_req_id:'SYNTH-MEMBER-TAKEOVER'})).ok,false,'crew member cannot transfer ownership');await s.login(old);
+ assert.equal((await s.call('field','sop_owner_transfer',{...request,target_badge:wrong.badgeId,client_req_id:'SYNTH-WRONG-DEPT'})).ok,false);
+ assert.equal((await s.call('field','sop_owner_transfer',{...request,target_badge:old.badgeId,client_req_id:'SYNTH-SELF'})).ok,false);
+ const moved=await s.ok('field','sop_owner_transfer',request);assert.equal(moved.revision,2);
+ assert.equal((await s.ok('field','sop_owner_transfer',request)).revision,2,'same request replays');
+ assert.equal((await s.call('field','sop_owner_transfer',{...request,client_req_id:'SYNTH-STALE'})).ok,false);
+ let state=JSON.parse(s.DB.raw.prepare('SELECT state FROM sop_records WHERE id=?').get(id).state);
+ assert.equal(state.owner_id,next.id);assert.equal(state.original_owner_id,old.id);assert.equal(state.owner_transfers.length,1);
+ assert.equal(s.DB.raw.prepare("SELECT COUNT(*) n FROM v2_ops_job_workers WHERE job_id=? AND left_at=''").get(id).n,2,'active worker segments preserved');
+ assert.equal(s.DB.raw.prepare('SELECT COUNT(*) n FROM v2_ops_jobs WHERE id=?').get(id).n,1);
+ assert.equal((await s.ok('field','v2_ops_job_detail',{job_id:id})).can_manage_dispatch,false,'former owner is still a worker but cannot manage');
+ assert.equal((await s.call('field','sop_native_pause',{job_id:id,revision:2,reason:'旧负责人不得暂停'},oldCookie)).ok,false);
+ await s.login(next);assert.equal((await s.ok('field','v2_ops_job_detail',{job_id:id})).can_manage_dispatch,true);
+ assert.equal((await s.ok('field','sop_dispatch_list')).items.some(x=>x.id===id),true);
+ await s.ok('field','sop_native_pause',{job_id:id,revision:2,reason:'新负责人审核交接后暂停'});
+ assert.equal(s.DB.raw.prepare("SELECT COUNT(*) n FROM sop_events WHERE record_id=? AND action='sop_owner_transfer'").get(id).n,1);
+});
+test('authorized successor can explicitly claim an off-duty owner task while another worker remains active',async()=>{
+ const s=await setup(),old=await s.permanent('合成下班原派审员'),next=await s.permanent('合成在岗接班派审员'),member=await s.permanent('合成在岗普通组员'),wrong=await s.permanent('合成其他业务派审员');
+ const dayOld=await s.checkin(old);await s.checkin(next);await s.checkin(member);await s.checkin(wrong);await s.grant(old);await s.grant(next);await s.grant(wrong,true,0,['direct_ship']);
+ await s.login(old);const started=await s.start(old,{workers:[{id:old.badgeId,name:old.name},{id:member.badgeId,name:member.name}]});assert.equal(started.ok,true,started.error);const id=started.job_id;
+ await s.login(next);assert.equal((await s.ok('field','sop_owner_transfer_options',{id})).can_claim,false,'owner on duty blocks self claim');assert.equal((await s.call('field','sop_owner_transfer',{id,revision:1,target_badge:next.badgeId,reason:'尚未离岗'})).ok,false);
+ await s.ok('office','sop_attendance_checkout',{id:dayOld.id});assert.equal(s.DB.raw.prepare("SELECT COUNT(*) n FROM v2_ops_job_workers WHERE job_id=? AND left_at=''").get(id).n,1,'other worker still working');
+ assert.equal((await s.call('field','sop_login',{badge:member.badgeId})).ok,false,'ordinary worker has no dispatcher grant');
+ await s.login(wrong);assert.equal((await s.ok('field','sop_dispatch_list')).items.some(x=>x.id===id),false,'wrong business cannot see claim card');assert.equal((await s.call('field','sop_owner_transfer',{id,revision:1,target_badge:wrong.badgeId,reason:'其他业务'})).ok,false);
+ await s.login(next);const listed=(await s.ok('field','sop_dispatch_list')).items.find(x=>x.id===id);assert.equal(listed?.can_claim,true,'authorized successor sees original task');const option=await s.ok('field','sop_owner_transfer_options',{id});assert.equal(option.can_claim,true);
+ assert.equal((await s.call('field','sop_owner_transfer',{id,revision:1,target_badge:member.badgeId,reason:'不得指定普通成员'})).ok,false);
+ const moved=await s.ok('field','sop_owner_transfer',{id,revision:1,target_badge:next.badgeId,reason:'原派审员下班，本人明确接班'});assert.equal(moved.revision,2);
+ const state=JSON.parse(s.DB.raw.prepare('SELECT state FROM sop_records WHERE id=?').get(id).state);assert.equal(state.owner_id,next.id);assert.equal(state.original_owner_id,old.id);assert.equal(state.last_owner_transfer.mode,'claim');assert.equal(s.DB.raw.prepare("SELECT COUNT(*) n FROM v2_ops_job_workers WHERE job_id=? AND left_at=''").get(id).n,1);
+ assert.equal((await s.ok('field','v2_ops_job_detail',{job_id:id})).can_manage_dispatch,true);await s.ok('field','sop_native_pause',{job_id:id,revision:2,reason:'新派审员确认后暂停'});
+});
+test('a returning original owner racing self claim aborts the entire transfer',async()=>{
+ const s=await setup(),old=await s.permanent('合成临时离岗负责人'),next=await s.permanent('合成接班人');const day=await s.checkin(old);await s.checkin(next);await s.grant(old);await s.grant(next);await s.login(old);const started=await s.start(old);assert.equal(started.ok,true,started.error);await s.ok('office','sop_attendance_checkout',{id:day.id});await s.login(next);
+ const batch=s.DB.batch.bind(s.DB);let raced=false;s.DB.batch=async statements=>{if(!raced&&statements.some(x=>x.sql.includes('INSERT INTO sop_events'))){raced=true;s.DB.raw.prepare("UPDATE ck_attendance_days SET signed_out='' WHERE id=?").run(day.id);}return batch(statements);};
+ const r=await s.call('field','sop_owner_transfer',{id:started.job_id,revision:1,target_badge:next.badgeId,reason:'合成复岗竞态'});assert.equal(raced,true);assert.equal(r.ok,false);
+ assert.equal(JSON.parse(s.DB.raw.prepare('SELECT state FROM sop_records WHERE id=?').get(started.job_id).state).owner_id,old.id);assert.equal(s.DB.raw.prepare("SELECT COUNT(*) n FROM sop_events WHERE record_id=? AND action='sop_owner_transfer'").get(started.job_id).n,0);
+});
+test('explicit transfer of a planned task gives the new owner its finish and review',async()=>{
+ const s=await setup(),old=await s.permanent('合成计划原负责人'),next=await s.permanent('合成计划新负责人'),outsider=await s.permanent('合成普通参与人');
+ await s.checkin(old);await s.checkin(next);await s.checkin(outsider);await s.grant(old);await s.grant(next);await s.login(old);const oldCookie=s.cookies.field;
+ const need=await s.ok('office','sop_need_create',{department:'bulk',source_type:'inventory',supply_chain_no:'SYNTH-TRANSFER-STOCK',title:'合成计划任务',customer:'合成',instructions:'合成',owner:'合成'});
+ const task=await s.ok('field','sop_task_dispatch',{need_id:need.id,department:'bulk',title:'合成计划任务',job_type:'bulk_op',workers:[{id:old.badgeId,name:old.name}],lead_id:old.badgeId,estimated_minutes:15});
+ await s.login(next);assert.equal((await s.call('field','sop_owner_transfer',{id:task.id,revision:1,target_badge:next.badgeId,reason:'普通组员不得接管'})).ok,false);
+ await s.login(old);await s.ok('field','sop_owner_transfer',{id:task.id,revision:1,target_badge:next.badgeId,reason:'合成移交计划任务'});
+ assert.equal((await s.call('field','sop_task_complete_review',{id:task.id,revision:2,decision:'pass',reason:'旧负责人无审核权',result:{quantity:2,unit:'托',pallet_count:2,operated_box_count:20}},oldCookie)).ok,false);
+ await s.login(next);await s.ok('field','sop_task_complete_review',{id:task.id,revision:2,decision:'pass',reason:'新负责人审核',result:{quantity:2,unit:'托',pallet_count:2,operated_box_count:20}});
+ const state=JSON.parse(s.DB.raw.prepare('SELECT state FROM sop_records WHERE id=?').get(task.id).state);assert.equal(state.status,'completed');assert.equal(state.owner_id,next.id);assert.equal(state.original_owner_id,old.id);assert.equal(state.review.by,next.name);
+});
+test('off-duty planned-task owner can hand off review to an authorized successor with crew still working',async()=>{
+ const s=await setup(),old=await s.permanent('合成计划下班负责人'),next=await s.permanent('合成计划接班负责人'),crew=await s.permanent('合成计划在岗组员');const day=await s.checkin(old);await s.checkin(next);await s.checkin(crew);await s.grant(old);await s.grant(next);await s.login(old);
+ const need=await s.ok('office','sop_need_create',{department:'bulk',source_type:'inventory',supply_chain_no:'SYNTH-CLAIM-STOCK',title:'合成计划',customer:'合成',instructions:'合成',owner:'合成'});
+ const task=await s.ok('field','sop_task_dispatch',{need_id:need.id,department:'bulk',title:'合成计划',job_type:'bulk_op',workers:[{id:old.badgeId,name:old.name},{id:crew.badgeId,name:crew.name}],lead_id:old.badgeId,estimated_minutes:15});await s.ok('office','sop_attendance_checkout',{id:day.id});
+ await s.login(next);assert.equal(s.DB.raw.prepare("SELECT COUNT(*) n FROM v2_ops_job_workers WHERE job_id=? AND left_at=''").get(task.id).n,1);const option=await s.ok('field','sop_owner_transfer_options',{id:task.id});assert.equal(option.can_claim,true);
+ await s.ok('field','sop_owner_transfer',{id:task.id,revision:option.revision,target_badge:next.badgeId,reason:'原负责人下班，接续审核'});await s.ok('field','sop_task_complete_review',{id:task.id,revision:option.revision+1,decision:'pass',reason:'接班后核实成果',result:{quantity:2,unit:'托',pallet_count:2,operated_box_count:20}});
+ const state=JSON.parse(s.DB.raw.prepare('SELECT state FROM sop_records WHERE id=?').get(task.id).state);assert.equal(state.owner_id,next.id);assert.equal(state.review.by,next.name);assert.equal(state.status,'completed');
+});
+test('courier batch transfer keeps the batch and lets the new dispatcher finish',async()=>{
+ const s=await setup(),old=await s.permanent('合成快递原负责人'),next=await s.permanent('合成快递新负责人');await s.checkin(old);await s.checkin(next);await s.grant(old,true,0,['direct_ship']);await s.grant(next,true,0,['direct_ship']);await s.login(old);const oldCookie=s.cookies.field;
+ await s.ok('field','sop_courier_config');const start=await s.ok('field','sop_courier_receive',{operation:'start',workers:[{id:old.badgeId,name:old.name}],lead_id:old.badgeId}),id=start.batch.id;
+ await s.ok('field','sop_owner_transfer',{id,revision:start.batch.revision,target_badge:next.badgeId,reason:'合成快递换班'});
+ assert.equal((await s.call('field','sop_courier_receive',{operation:'finish',batch_id:id,revision:start.batch.revision+1},oldCookie)).ok,false);
+ await s.login(next);const active=await s.ok('field','sop_courier_config',{operation:'batches'});assert.equal(active.items.some(x=>x.id===id),true);const detail=await s.ok('field','sop_courier_detail',{batch_id:id});assert.equal(detail.batch.owner_id,next.id);
+ await s.ok('field','sop_courier_receive',{operation:'finish',batch_id:id,revision:detail.batch.revision});assert.equal(s.DB.raw.prepare('SELECT status FROM v2_ops_jobs WHERE id=?').get(id).status,'completed');
+});
+test('off-duty courier owner can be replaced by authorized in-department successor with crew still working',async()=>{
+ const s=await setup(),old=await s.permanent('合成快递下班负责人'),next=await s.permanent('合成快递接班负责人'),crew=await s.permanent('合成快递在岗组员');const day=await s.checkin(old);await s.checkin(next);await s.checkin(crew);await s.grant(old,true,0,['direct_ship']);await s.grant(next,true,0,['direct_ship']);await s.login(old);await s.ok('field','sop_courier_config');const start=await s.ok('field','sop_courier_receive',{operation:'start',workers:[{id:old.badgeId,name:old.name},{id:crew.badgeId,name:crew.name}],lead_id:old.badgeId});
+ await s.ok('office','sop_attendance_checkout',{id:day.id});await s.login(next);const id=start.batch.id;assert.equal(s.DB.raw.prepare("SELECT COUNT(*) n FROM v2_ops_job_workers WHERE job_id=? AND left_at=''").get(id).n,1);
+ assert.equal((await s.ok('field','sop_dispatch_list')).items.find(x=>x.id===id)?.can_claim,true);const option=await s.ok('field','sop_owner_transfer_options',{id});assert.equal(option.can_claim,true);
+ await s.ok('field','sop_owner_transfer',{id,revision:option.revision,target_badge:next.badgeId,reason:'原派审员下班，继续本批'});assert.equal((await s.ok('field','sop_courier_config',{operation:'batches'})).items.some(x=>x.id===id),true);
+ const detail=await s.ok('field','sop_courier_detail',{batch_id:id});assert.equal(detail.batch.owner_id,next.id);await s.ok('field','sop_courier_receive',{operation:'finish',batch_id:id,revision:detail.batch.revision});assert.equal(s.DB.raw.prepare('SELECT status FROM v2_ops_jobs WHERE id=?').get(id).status,'completed');
+});
+test('target losing its department grant during transfer cannot receive the task',async()=>{
+ const s=await setup(),old=await s.permanent('合成原负责人'),next=await s.permanent('合成待接负责人');await s.checkin(old);await s.checkin(next);await s.grant(old);await s.grant(next);await s.login(old);const started=await s.start(old);assert.equal(started.ok,true,started.error);
+ const batch=s.DB.batch.bind(s.DB);let raced=false;s.DB.batch=async statements=>{if(!raced&&statements.some(x=>x.sql.includes('INSERT INTO sop_events'))){raced=true;s.DB.raw.prepare('UPDATE ck_daily_dispatch_grants SET enabled=0,version=version+1 WHERE person_id=?').run(next.id);}return batch(statements);};
+ const r=await s.call('field','sop_owner_transfer',{id:started.job_id,revision:1,target_badge:next.badgeId,reason:'合成权限竞态'});assert.equal(raced,true);assert.equal(r.ok,false);assert.equal(JSON.parse(s.DB.raw.prepare('SELECT state FROM sop_records WHERE id=?').get(started.job_id).state).owner_id,old.id);
+ assert.equal(s.DB.raw.prepare("SELECT COUNT(*) n FROM sop_events WHERE record_id=? AND action='sop_owner_transfer'").get(started.job_id).n,0);
+});
 test('temporary badges require exact explicit stable identity, isolate same names and retain original history across days',async t=>{
  t.mock.timers.enable({apis:['Date'],now:new Date('2026-10-13T01:00:00Z')});const s=await setup(),p=await s.permanent(),other=await s.permanent();await s.grant(p);
  const d=(await s.ok('office','sop_attendance_checkin',{name:p.name,agency:'가온'})).record;assert.equal((await s.call('field','sop_login',{badge:d.badgeId})).ok,false);

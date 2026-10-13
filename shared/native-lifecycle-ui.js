@@ -1,5 +1,24 @@
 (function(){
  'use strict';
+ window.CKTransferOwner=async function(record,onSaved,claim=false){
+  if(!claim&&record?.owner_id!==CKSession.user?.id)throw Error('仅当前派审负责人可转移任务 / 현재 담당자만 이관할 수 있습니다');
+  const identity=claim?(await CKSession.request('sop_identity')).user:null;
+  if(claim&&!identity?.badge)throw Error('请先用本人授权工牌登录 / 본인 명찰로 로그인하세요');
+  const dialog=document.createElement('dialog');dialog.className='ck-workflow';
+  dialog.innerHTML='<form><h2>'+(claim?'接班并转移派审员 / 담당자 인계':'转移派审员 / 배정·검수 담당자 이관')+'</h2><p>'+(claim?'原负责人已离岗或休息。确认由本人接手原任务并负责后续审核；在岗组员及历史记录保留。 / 기존 작업과 기록을 유지하고 본인이 인계합니다.':'原任务、人员计时和历史保留。接收人须为本部门今天在岗且获授权的派审员；保存后由接收人审核并填写结束。 / 기존 작업과 기록은 유지됩니다.')+'</p>'+(claim?'<input name="target_badge" type="hidden">':'<label>扫描新派审员工牌 / 새 담당자 명찰<input name="target_badge" autocomplete="off" required placeholder="工号|姓名 / 사번|이름"></label>')+'<label>转移原因 / 이관 사유<textarea name="reason" required maxlength="500"></textarea></label><p role="alert"></p><div class="ck-buttons"><button type="submit">'+(claim?'确认本人接班 / 인계 확인':'确认转移 / 이관 확인')+'</button><button type="button" data-cancel>取消 / 취소</button></div></form>';
+  document.body.append(dialog);dialog.showModal();const form=dialog.querySelector('form'),badge=form.elements.target_badge,error=dialog.querySelector('[role=alert]');
+  if(claim)badge.value=identity.badge;
+  const camera=claim?null:window.CKAttendance?.badgeCamera?.(form,badge,{parseBadge:raw=>raw,recognizedMessage:'已识别新派审员工牌，请核对并确认转移 / 새 담당자 명찰을 확인하세요.'});
+  let busy=false,request=null;
+  const close=async()=>{if(busy)return;await camera?.destroy();dialog.close();dialog.remove();};
+  dialog.querySelector('[data-cancel]').onclick=close;dialog.oncancel=e=>{e.preventDefault();void close();};
+  form.onsubmit=async e=>{e.preventDefault();if(busy)return;busy=true;const button=form.querySelector('[type=submit]');button.disabled=true;
+   try{const target_badge=badge.value.trim(),reason=form.elements.reason.value.trim(),signature=target_badge+'|'+reason;
+    if(!request||request.signature!==signature)request={signature,body:{id:record.id,revision:record.revision,target_badge,reason,client_req_id:crypto.randomUUID()}};
+    const result=await CKSession.request('sop_owner_transfer',request.body);busy=false;await close();await onSaved?.(result);
+   }catch(x){error.textContent=x.message;}finally{busy=false;button.disabled=false;}};
+ };
+ window.CKClaimOwner=(record,onSaved)=>CKTransferOwner(record,onSaved,true);
  window.CKToggleNativePause=async function(detail,onSaved){
   if(!detail?.can_manage_dispatch)throw Error('请由本任务派审员操作 / 담당자가 처리하세요');
   const state=JSON.parse(detail.dispatch.state),paused=detail.job.status==='paused',id=detail.job.id;
@@ -18,12 +37,14 @@
   const $=id=>document.getElementById(id),leaveNames=['unloadLeave','inboundLeave','inboundReturnLeave','leaveImportDelivery','handleIssueLeave','bulkLeave','leaveGenericJob','leaveVerifyScan'];
   let current=null,editing=false,finishedJob=null;
   const bar=document.createElement('section');bar.className='ck-dispatch-controls';bar.hidden=true;
-  bar.innerHTML='<div><b>派审员管理 / 담당자 관리</b><p data-job></p><p data-crew></p></div><div class="ck-buttons"><button type="button" data-people>调整人员 / 인원 변경</button><button type="button" data-rest>个人休息／恢复 / 개인 휴식·복귀</button><button type="button" data-pause>暂停整个任务 / 전체 작업 중지</button><button type="button" data-home>返回首页，任务继续 / 작업 유지·홈으로</button></div>';
+  bar.innerHTML='<div><b>派审员管理 / 담당자 관리</b><p data-job></p><p data-crew></p></div><div class="ck-buttons"><button type="button" data-people>调整人员 / 인원 변경</button><button type="button" data-transfer>转移派审员 / 담당자 이관</button><button type="button" data-rest>个人休息／恢复 / 개인 휴식·복귀</button><button type="button" data-pause>暂停整个任务 / 전체 작업 중지</button><button type="button" data-home>返回首页，任务继续 / 작업 유지·홈으로</button></div>';
   bar.querySelector('[data-pause]').onclick=async()=>{try{await CKToggleNativePause(await detail(),()=>detail());}catch(e){alert(e.message);}};bar.querySelector('[data-people]').onclick=()=>editPeople();bar.querySelector('[data-rest]').onclick=()=>CKOpenFieldLabor();bar.querySelector('[data-home]').onclick=()=>goPage('home');
+  bar.querySelector('[data-transfer]').onclick=async()=>{try{const r=await detail(),state=JSON.parse(r.dispatch.state);await CKTransferOwner({id:r.job.id,revision:r.dispatch.revision,owner_id:state.owner_id},()=>goPage('home'));}catch(e){alert(e.message);}};
   function accept(r){
    if(!r?.can_manage_dispatch||r.job?.id!==window._activeJobId)return;
    current=r;const page=$('page-'+window._currentPage);if(!page||!['pending','working','awaiting_close','paused'].includes(r.job.status))return;
    const state=JSON.parse(r.dispatch?.state||'{}');
+   bar.querySelector('[data-transfer]').hidden=state.owner_id!==CKSession.user?.id||CKSession.user?.can_dispatch===false;
    bar.querySelector('[data-pause]').textContent=r.job.status==='paused'?'恢复整个任务 / 전체 작업 재개':'暂停整个任务 / 전체 작업 중지';bar.querySelector('[data-people]').disabled=r.job.status==='paused';window.CKSetNativeLead?.(state.workers?.find(w=>w.id===state.lead_id)||state.last_lead);
    if(bar.parentElement!==page){const top=page.querySelector('.topbar');if(top)top.after(bar);else page.prepend(bar);}bar.hidden=false;
    bar.querySelector('[data-job]').textContent=window.CKDocumentLabels.jobSummary(r)+(r.job.status==='paused'?' · 已暂停 / 중지: '+(state.pause_reason||''):'');
