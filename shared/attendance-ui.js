@@ -94,32 +94,32 @@ function preserveReportView(root,render){
  if(window.scrollX!==x||window.scrollY!==y)window.scrollTo(x,y);
 }
 let activeBadgeCamera=null,badgeCameraSerial=0;
-function badgeCamera(form,input,{employee=false,permanent=false,onScan}={}){
+function badgeCamera(form,input,{employee=false,permanent=false,onScan,parseBadge,recognizedMessage}={}){
  const controls=document.createElement('div');controls.className='ck-badge-camera';controls.innerHTML='<button type="button" class="secondary" data-camera-start>手机相机扫码 / 휴대폰 카메라 스캔</button><div data-camera-panel hidden><div data-camera-reader></div><button type="button" class="secondary" data-camera-close>关闭相机 / 카메라 닫기</button></div><p class="soft-note" data-camera-status role="status" aria-live="polite"></p>';input.after(controls);
  const startButton=controls.querySelector('[data-camera-start]'),panel=controls.querySelector('[data-camera-panel]'),reader=controls.querySelector('[data-camera-reader]'),status=controls.querySelector('[data-camera-status]');reader.id='ck-badge-camera-'+(++badgeCameraSerial);
  let generation=0,scanner=null,opening=null,closing=null,disposed=false,reading=false,starting=false;
- const visible=()=>{if(disposed||!form.isConnected||!input.isConnected||document.hidden)return false;for(let node=form;node&&node.nodeType===1;node=node.parentElement)if(node.hidden||node.style.display==='none'||node.classList.contains('hidden'))return false;return true;};
+ const visible=()=>{if(disposed||!form.isConnected||!input.isConnected||document.hidden)return false;for(let node=form;node&&node.nodeType===1;node=node.parentElement)if(node.hidden||node.style.display==='none'||node.classList.contains('hidden')||node.tagName==='DIALOG'&&!node.open)return false;return true;};
  async function release(current){if(!current)return;try{await current.stop();}catch{}try{current.clear();}catch{}}
  async function stop(){generation++;reading=false;if(closing)return closing;const current=scanner,pending=opening;scanner=null;opening=null;panel.hidden=true;startButton.disabled=true;closing=(async()=>{if(pending)await pending.catch(()=>{});await release(current);})();try{await closing;}finally{closing=null;startButton.disabled=input.disabled;if(activeBadgeCamera===controller)activeBadgeCamera=null;}}
- const controller={stop,destroy(){if(disposed)return;disposed=true;observer.disconnect();window.removeEventListener('pagehide',leave);document.removeEventListener('visibilitychange',leave);form.removeEventListener('submit',submitted);void stop();}};
+ const controller={stop,destroy(){if(disposed)return closing;disposed=true;observer.disconnect();window.removeEventListener('pagehide',leave);document.removeEventListener('visibilitychange',leave);form.removeEventListener('submit',submitted);return stop();}};
  const leave=event=>{if(event?.type==='pagehide'||document.hidden||!visible())void stop();},submitted=()=>void stop();
- const observer=new MutationObserver(()=>{if(!form.isConnected){controller.destroy();return;}if(!visible())void stop();});for(let node=form;node&&node.nodeType===1;node=node.parentElement)observer.observe(node,{attributes:true,attributeFilter:['hidden','style','class'],childList:true});
+ const observer=new MutationObserver(()=>{if(!form.isConnected){controller.destroy();return;}if(!visible())void stop();for(const video of reader.querySelectorAll('video')){video.playsInline=true;video.setAttribute('playsinline','');video.setAttribute('webkit-playsinline','');video.muted=true;}});for(let node=form;node&&node.nodeType===1;node=node.parentElement)observer.observe(node,{attributes:true,attributeFilter:['hidden','style','class','open'],childList:true});observer.observe(reader,{childList:true,subtree:true});
  window.addEventListener('pagehide',leave);document.addEventListener('visibilitychange',leave);form.addEventListener('submit',submitted);
  controls.querySelector('[data-camera-close]').onclick=()=>{void stop();status.textContent='相机已关闭，可输入工牌或使用扫码枪 / 카메라를 닫았습니다. 명찰 번호 입력 또는 스캐너를 이용하세요.';input.focus();};
  startButton.onclick=async()=>{
   if(starting||opening||closing||scanner||!visible()||input.disabled)return;
   if(!window.isSecureContext||!navigator.mediaDevices?.getUserMedia||!window.Html5Qrcode){status.textContent='当前浏览器不支持相机扫码，请输入工牌或使用扫码枪 / 카메라 스캔을 지원하지 않습니다. 번호 입력 또는 스캐너를 이용하세요.';return;}
   const token=++generation;starting=true;startButton.disabled=true;if(activeBadgeCamera&&activeBadgeCamera!==controller)await activeBadgeCamera.stop();if(token!==generation||!visible()){starting=false;startButton.disabled=input.disabled;return;}
-  activeBadgeCamera=controller;startButton.disabled=true;panel.hidden=false;status.textContent='请允许相机权限，并将工牌二维码对准镜头 / 카메라 권한을 허용하고 명찰 QR 코드를 비추세요.';
+  activeBadgeCamera=controller;input.blur();startButton.disabled=true;panel.hidden=false;status.textContent='请允许相机权限，并将工牌二维码对准镜头 / 카메라 권한을 허용하고 명찰 QR 코드를 비추세요.';
   let current;
   try{
    current=new Html5Qrcode(reader.id);scanner=current;
    opening=current.start({facingMode:'environment'},{fps:8,qrbox:{width:220,height:220}},async raw=>{
     if(reading||token!==generation||scanner!==current||!visible()||input.disabled)return;
-    const code=String(raw||'').trim().split('|')[0].trim();
-    if(!(employee?/^EMP-[A-Za-z0-9_-]{1,60}$/:permanent?/^DAF-[A-Za-z0-9_-]{1,60}$/:/^(?:DA|DAF)-[A-Za-z0-9_-]{1,60}$/).test(code)){status.textContent=employee?'请扫描职员工牌（EMP），也可手动输入 / 직원 명찰(EMP)을 스캔하거나 번호를 입력하세요.':permanent?'请扫描长期日当工牌（DAF），也可手动输入 / 고정 일용직 명찰(DAF)을 스캔하거나 번호를 입력하세요.':'请扫描日当工牌（DA / DAF），也可手动输入 / 일용직 명찰(DA / DAF)을 스캔하거나 번호를 입력하세요.';return;}
+    let code;if(parseBadge){try{code=parseBadge(raw);}catch(error){status.textContent=error.message;return;}}else{code=String(raw||'').trim().split('|')[0].trim();
+    if(!(employee?/^EMP-[A-Za-z0-9_-]{1,60}$/:permanent?/^DAF-[A-Za-z0-9_-]{1,60}$/:/^(?:DA|DAF)-[A-Za-z0-9_-]{1,60}$/).test(code)){status.textContent=employee?'请扫描职员工牌（EMP），也可手动输入 / 직원 명찰(EMP)을 스캔하거나 번호를 입력하세요.':permanent?'请扫描长期日当工牌（DAF），也可手动输入 / 고정 일용직 명찰(DAF)을 스캔하거나 번호를 입력하세요.':'请扫描日当工牌（DA / DAF），也可手动输入 / 일용직 명찰(DA / DAF)을 스캔하거나 번호를 입력하세요.';return;}}
     reading=true;await stop();if(!visible()||token+1!==generation||input.disabled)return;
-    input.value=code;input.dispatchEvent(new Event('input',{bubbles:true}));status.textContent='已识别工牌，请核对后点击确认按钮；尚未打卡 / 명찰을 인식했습니다. 확인 버튼을 눌러 등록하세요. 아직 출퇴근 기록은 변경되지 않았습니다.';input.focus();onScan?.(code);
+    input.value=code;input.dispatchEvent(new Event('input',{bubbles:true}));status.textContent=recognizedMessage||'已识别工牌，请核对后点击确认按钮；尚未打卡 / 명찰을 인식했습니다. 확인 버튼을 눌러 등록하세요. 아직 출퇴근 기록은 변경되지 않았습니다.';input.focus();onScan?.(code);
    },()=>{});
    await opening;if(token!==generation||!visible()){if(scanner===current)await stop();return;}opening=null;
   }catch(error){if(token!==generation)return;await stop();if(!visible()||token+1!==generation)return;const message=String(error?.name||'')+' '+String(error?.message||error);
