@@ -1,3 +1,4 @@
+import {dailyDispatchEnabled,dailyDispatchAdmin,guardDailyDispatch} from './daily-dispatch-permissions.js';
 import {checkWorkbenchEnabled,scanCheck,finishCheck} from './check-workbench.js';
 import {pickWorkloadContext,readPickWorkload} from './pick-workload.js';
 import {uploadIssueDraft,cancelIssueDraft,removeIssueDraftFile,createIssueWithAttachments} from './issue-create.js';
@@ -12942,6 +12943,8 @@ export default {
     if(accessEnabled(env)){const adminAction=await accessAdminAction(body,env);if(adminAction)return adminAction;}
     // Resolve generated daily badge aliases before crew preparation and all admission guards.
     if(attendanceEnabled(env)){try{await ensureAttendance(env);await normalizeDailyBadgeRequest(env,body);}catch(e){return json({ok:false,error:e.message},409);}}
+    if(dailyDispatchEnabled(env)&&action.startsWith('sop_daily_dispatch_')){try{return json(await dailyDispatchAdmin(body,env));}catch(e){return json({ok:false,error:e.message},409);}}
+    try{await guardDailyDispatch(body,env);}catch(e){return json({ok:false,error:e.message},403);}
     if(action.startsWith('sop_feedback_link_')){
       if(action==='sop_feedback_link_save'&&(request.method!=='POST'||request.headers.get('Origin')&&request.headers.get('Origin')!==url.origin))return err('Invalid request origin',403);
       try{return json(action==='sop_feedback_link_create_preview'?await feedbackCreatePreview(env,body):await handleFeedbackLink(body,env,{ensureTasks:ensureInboundPlanBizTasks,recalc:recalcInboundPlanCompletion,syncCourier:syncCourierArrival}));}catch(e){return json({ok:false,error:e.message},409);}

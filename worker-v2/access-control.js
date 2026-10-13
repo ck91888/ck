@@ -1,3 +1,4 @@
+import {dailyDispatchEnabled,dailyFieldLogin,dailyFieldSession} from './daily-dispatch-permissions.js';
 import {ensureSchema} from './schema-ready.js';
 // Separate, revocable sessions for office, field dispatch and the fixed attendance terminal.
 // Raw session tokens and administrator codes are never stored in D1 or sent to assets.
@@ -66,6 +67,7 @@ export async function accessUser(request,env){
  const scope=accessScope(request),raw=rawToken(request,scope);if(!/^[a-f0-9]{64}$/.test(raw))return null;await ensureAccess(env);
  const s=await q(env,'SELECT * FROM ck_access_sessions WHERE token_hash=? AND scope=? AND expires_at>?',await digest(raw),scope,Date.now()).first();if(!s)return null;
  if(scope==='field'){
+  if(s.credential_hash==='daily-dispatch-v1'&&dailyDispatchEnabled(env))return dailyFieldSession(env,s);
   const row=await q(env,`SELECT p.name,p.badge_id FROM ck_attendance_people p JOIN ck_employee_profiles e ON e.person_id=p.id LEFT JOIN ck_field_access a ON a.person_id=p.id JOIN ck_attendance_days d ON d.person_id=p.id
    WHERE p.id=? AND p.enabled=1 AND COALESCE(a.enabled,1)=1 AND COALESCE(a.version,0)=? AND d.id=? AND d.day=? AND d.signed_out='' AND d.signed_in<=?`,s.user_id,s.grant_version,s.attendance_id,kstDay(new Date().toISOString()),new Date().toISOString()).first();
   if(!row){await q(env,'DELETE FROM ck_access_sessions WHERE token_hash=?',s.token_hash).run();return null;}
@@ -84,8 +86,11 @@ export async function accessSessionAction(b,env,request){
  if(attempt.attempts>30)return denied('尝试次数较多，请稍后再试 / 잠시 후 다시 시도하세요',429);
  let u,attendance='',version=0,credential='';
  if(scope==='field'){
-  const badge=String(b.badge||'').trim().split('|')[0].toUpperCase();
-  if(!/^EMP-[A-Z0-9_-]{1,32}$/.test(badge))return denied('请扫描已授权的职员工牌；日当工牌用于加入作业 / 권한이 있는 직원 명찰을 스캔하세요',403);
+  const rawBadge=String(b.badge||'').trim().split('|')[0],badge=rawBadge.toUpperCase();
+  if(dailyDispatchEnabled(env)&&!badge.startsWith('EMP-')){
+   try{u=await dailyFieldLogin(env,rawBadge);attendance=u.attendance_id;version=u.grant_version;credential='daily-dispatch-v1';}catch(e){return denied(e.message,403);}
+  }else{
+  if(!/^EMP-[A-Z0-9_-]{1,32}$/.test(badge))return denied('请扫描已授权工牌 / 권한이 있는 명찰을 스캔하세요',403);
   // Registered employees have field access by default. An explicit revocation
   // remains authoritative across edits, imports and deployments.
   const p=await q(env,`SELECT p.id,p.name,COALESCE(a.version,0) AS version FROM ck_attendance_people p JOIN ck_employee_profiles e ON e.person_id=p.id LEFT JOIN ck_field_access a ON a.person_id=p.id WHERE p.badge_id=? AND p.enabled=1 AND COALESCE(a.enabled,1)=1`,badge).first();
@@ -93,6 +98,7 @@ export async function accessSessionAction(b,env,request){
   const day=await q(env,"SELECT id FROM ck_attendance_days WHERE person_id=? AND day=? AND signed_out='' AND signed_in<=?",p.id,kstDay(new Date().toISOString()),new Date().toISOString()).first();
   if(!day)return denied('今天尚未上班签到或已经签退，请先在签到点打卡 / 오늘 출근 등록을 먼저 해주세요',403);
   u={id:p.id,name:p.name,role:'dispatcher',departments:['bulk','direct_ship','import','other']};attendance=day.id;version=p.version;
+  }
  }else{
    u=await adminByCode(b.sop_key,env);if(!u)return denied('管理员密码或授权码不正确 / 관리자 비밀번호 또는 인증 코드를 확인하세요',403);credential=u.hash;
  }
@@ -107,7 +113,7 @@ export async function accessSessionAction(b,env,request){
  }
  await env.DB.batch(statements);
  headers.set('Cache-Control','no-store');headers.set('Content-Type','application/json; charset=utf-8');
- return new Response(JSON.stringify({ok:true,user:safeUser(s)}),{headers});
+ return new Response(JSON.stringify({ok:true,user:{...safeUser(s),...(u.daily_dispatch?{daily_dispatch:true,can_dispatch:u.can_dispatch,dispatch_departments:u.departments}: {})}}),{headers});
 }
 
 // A field session has no office, employee-registration, import, reset or billing authority.
