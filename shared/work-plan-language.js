@@ -58,6 +58,7 @@ const pairs=[
   , ['移除','제거'],['恢复','복구'],['已移除资料（可恢复）','제거한 자료（복구 가능）']
   , ['核对上次提交结果','이전 제출 결과 확인']
  ];
+pairs.push(['打印未记录','인쇄 기록 없음'],['已发起打印','인쇄 요청됨'],['需重新打印','재인쇄 필요'],['部分已发起打印','일부 인쇄 요청'],['已取消','취소됨']);
 pairs.push(['作废问题','문제 무효 처리'],['作废原因','무효 사유']);
 const keys=new Map();pairs.forEach(([source,ko],i)=>{const key='ck_plan_'+i;keys.set(source,key);LANG.zh[key]=source.replace(/\s*(?:\/|·)\s*[가-힣].*$/u,'');LANG.ko[key]=ko;});
 const key=value=>keys.get(value),text=value=>key(value)?L(key(value)):value;

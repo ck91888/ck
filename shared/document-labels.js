@@ -63,24 +63,38 @@
   const sourceTitle=x.source_type==='inbound'?copy('来源入库计划','원본 입고 계획'):x.source_type==='outbound'?copy('来源出库计划','원본 출고 계획'):copy('货物来源','화물 출처');
   return `<section class="sheet"><header><div><h1>${copy('CK 仓库作业计划','CK 창고 작업 계획서')}</h1><p>${copy('客户','고객')}：${e(x.customer)}</p><p class="number">${copy('作业计划号','작업 계획번호')}：${e(number(x))}</p><span class="version">${copy('要求版本','요구사항 버전')} ${e(x.requirement_version||1)}</span></div>${qr}</header><p><b>${sourceTitle}：${e(source(x))}</b></p>${x.supply_chain_no?'<p>'+copy('供应链单号','공급망 번호')+'：'+e(x.supply_chain_no)+'</p>':''}<h2>${e(x.title)}</h2>${x.deadline?'<p>'+copy('要求完成日期','완료 예정일')+'：'+e(window.CKWorkDate?.day(x.deadline)||'—')+'</p>':''}<p>${copy('货物范围','화물 범위')}：${e(x.scope_text||copy('见要求','요구사항 참조'))}</p><pre>${e(x.instructions)}</pre><p>${copy('卸货时已完成的打托、分货，请交接说明，后续只执行剩余内容。','하차 중 완료한 팔레트·분류 작업은 인계하고 남은 작업만 진행하세요.')}</p><div class="line">${copy('派审员','담당자')}：________　${copy('操作人员','작업자')}：________________</div><div class="line">${copy('完成明细','완료 내역')}：____________________________________</div><div class="line">${copy('审核','검수')}：________　${copy('日期','날짜')}：________________</div></section>`;
  }
- function print(items,title){
+ function print(items,title,opened){
   if(!items.length)throw Error(copy('本批没有可打印的作业单','인쇄할 작업 계획서가 없습니다'));
   // Render before opening the window so an invalid record never leaves a blank print tab.
   const pages=items.map(page).join('');
-  const w=window.open('','_blank');if(!w)throw Error(copy('请允许浏览器打开打印窗口','인쇄 창을 허용하세요'));
-  const html=`<!doctype html><html lang="${ko()?'ko':'zh'}"><head><meta charset="utf-8"><title>${e(title)} ${copy('作业单','작업 계획서')}</title><style>@page{size:A4;margin:15mm}*{box-sizing:border-box}body{font:16px/1.7 'Microsoft YaHei','Malgun Gothic',sans-serif;color:#111;margin:0;background:#eef2f1}.sheet{width:210mm;min-height:297mm;margin:20px auto;padding:15mm;background:#fff;box-shadow:0 2px 12px #ccd4d0}header{display:flex;justify-content:space-between;align-items:center;border-bottom:3px solid #111;padding-bottom:14px;gap:16px}svg{width:38mm;height:38mm;flex-shrink:0}h1{font-size:25px}h2{font-size:22px}pre{font:inherit;white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid #aaa;padding:18px}.number{font-size:19px;font-weight:700}.version{font-size:13px;color:#444}.line{border-bottom:1px solid #aaa;padding:20px 0}@media print{body{background:#fff}.sheet{width:auto;min-height:0;margin:0;padding:0;box-shadow:none}.sheet:not(:last-child){break-after:page;page-break-after:always}header,pre{break-inside:avoid}}</style></head><body>${pages}</body></html>`;
+  const w=opened||window.open('','_blank');if(!w)throw Error(copy('请允许浏览器打开打印窗口','인쇄 창을 허용하세요'));
+  const html=`<!doctype html><html lang="${ko()?'ko':'zh'}"><head><meta charset="utf-8"><title>${e(title)} ${copy('作业单','작업 계획서')}</title><style>@page{size:A4;margin:15mm}*{box-sizing:border-box}body{font:16px/1.7 'Microsoft YaHei','Malgun Gothic',sans-serif;color:#111;margin:0;background:#eef2f1}.sheet{width:210mm;min-height:297mm;margin:20px auto;padding:15mm;background:#fff;box-shadow:0 2px 12px #ccd4d0}header{display:flex;justify-content:space-between;align-items:center;border-bottom:3px solid #111;padding-bottom:14px;gap:16px}svg{width:38mm;height:38mm;flex-shrink:0}h1{font-size:25px}h2{font-size:22px}pre{font:inherit;white-space:pre-wrap;overflow-wrap:anywhere;border:1px solid #aaa;padding:18px}.number{font-size:19px;font-weight:700}.version{font-size:13px;color:#444}.line{border-bottom:1px solid #aaa;padding:20px 0}@media screen and (max-width:700px){.sheet{width:100%;min-height:0;margin:0;padding:16px;box-shadow:none}header{flex-wrap:wrap}header>div{min-width:0;flex:1 1 100%}svg{width:130px;height:130px}h1{font-size:22px}.number{overflow-wrap:anywhere}}@media print{body{background:#fff}.sheet{width:auto;min-height:0;margin:0;padding:0;box-shadow:none}.sheet:not(:last-child){break-after:page;page-break-after:always}header,pre{break-inside:avoid}}</style></head><body>${pages}</body></html>`;
   w.document.write(html);w.document.close();w.focus();w.print();
  }
- window.CKNeedPrint=x=>window.CKSession?.request
-  ?window.CKSession.request('sop_get',{id:x.id}).then(r=>print([r.record],number(r.record)))
-  :print([x],number(x));
+ const jobs=new Map();
+ function requestedPrint(key,read){
+  const old=jobs.get(key);if(old?.busy)return old.busy;
+  // Open synchronously from the click, before refreshing data (Safari popup policy).
+  const retry=old?.pending;let w;if(!retry){w=window.open('','_blank');if(!w)return Promise.reject(Error(copy('请允许浏览器打开打印窗口','인쇄 창을 허용하세요')));}
+  const job=old||{};jobs.set(key,job);
+  job.busy=(async()=>{try{
+   if(!job.pending){const fresh=await read(),items=fresh.items.filter(x=>x.status!=='cancelled'&&!x.source_cancelled);if(!items.length)throw Error(copy('本批没有可打印的作业单','인쇄할 작업 계획서가 없습니다'));if(items.some(x=>!x.print_status?.document_key))throw Error(copy('打印版本未读取，请刷新后重试','인쇄 버전을 읽지 못했습니다. 새로고침하세요'));
+    print(items,fresh.title,w);job.pending={client_req_id:crypto.randomUUID(),items:items.map(x=>({id:x.id,revision:x.revision,document_key:x.print_status.document_key}))};
+   }
+   const result=await window.CKSession.request('sop_need_print_request',job.pending);job.pending=null;window.dispatchEvent(new CustomEvent('ck-work-printed',{detail:result}));return result;
+  }catch(error){if(job.pending&&!error.businessError){throw Error(copy('打印已发起，记录尚未确认；再点打印可重试登记，不会重复打开打印窗口。','인쇄 요청은 시작되었지만 기록이 확인되지 않았습니다. 다시 눌러 기록만 재시도하세요.'));}if(!job.pending||error.businessError){job.pending=null;try{w?.close();}catch{}}throw error;
+  }finally{job.busy=null;if(!job.pending)jobs.delete(key);}})();return job.busy;
+ }
+ window.CKNeedPrint=x=>window.CKSession?.request?requestedPrint('need:'+x.id,async()=>{const r=await window.CKSession.request('sop_get',{id:x.id});return{items:[r.record],title:number(r.record)};}):print([x],number(x));
  const printBatch=g=>print((g?.items||[]).filter(x=>x.status!=='cancelled'&&!x.source_cancelled),g?.display_no||copy('本批','이번 일괄'));
  window.CKNeedBatchPrint=g=>{
   if(!window.CKSession?.request)return printBatch(g);
   const query=g.key?{group_key:g.key}:g.source_type&&g.source_id?{source_type:g.source_type,source_id:g.source_id}:{need_id:g.items?.[0]?.id};
-  return window.CKSession.request('sop_need_groups',query).then(r=>{
-   const fresh=(r.items||[]).find(x=>g.key?x.key===g.key:x.items?.some(i=>i.id===g.items?.[0]?.id));
-   return printBatch(fresh);
-  });
+  return requestedPrint('batch:'+JSON.stringify(query),async()=>{const r=await window.CKSession.request('sop_need_groups',query),fresh=(r.items||[]).find(x=>g.key?x.key===g.key:x.items?.some(i=>i.id===g.items?.[0]?.id));return{items:fresh?.items||[],title:fresh?.display_no||copy('本批','이번 일괄')};});
+ };
+ const printLabels={unknown:['打印未记录','인쇄 기록 없음'],requested:['已发起打印','인쇄 요청됨'],reprint:['需重新打印','재인쇄 필요'],partial:['部分已发起打印','일부 인쇄 요청'],cancelled:['已取消','취소됨']};
+ window.CKNeedPrintStatus={
+  badge(x){const p=x?.print_status||{state:'unknown'},state=p.state||'unknown',label=copy(...(printLabels[state]||printLabels.unknown)),counts=Number.isInteger(p.count)?' '+p.requested+'/'+p.count:'';return '<span class="ck-print-badge ck-print-'+e(state)+'" data-work-print="'+e(state)+'">'+(window.CKPlanCopy?.html(printLabels[state]?.[0]||printLabels.unknown[0])||e(label))+e(counts)+'</span>';},
+  details(x,fold=false){const p=x?.print_status||{};return this.badge(x)+(fold?'<details class="ck-print-audit"><summary>'+copy('记录','기록')+'</summary>':'')+'<span class="ck-print-last">'+e(p.last_at?copy('最近请求','최근 요청')+' '+new Intl.DateTimeFormat(ko()?'ko-KR':'zh-CN',{timeZone:'Asia/Seoul',dateStyle:'short',timeStyle:'short',hour12:false}).format(new Date(p.last_at))+' KST · '+p.last_by+' · '+p.request_count+copy('次','회'):copy('历史没有可靠的打印请求记录','신뢰할 수 있는 과거 인쇄 요청 기록 없음'))+'</span>'+(fold?'</details>':'');}
  };
 })();

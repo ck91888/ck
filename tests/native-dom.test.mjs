@@ -77,7 +77,7 @@ test('issue workflow refresh updates the original field requirement and closed s
   const refresh=()=>p.d.querySelector('#issueDetailBody .ck-workflow #refresh').click();refresh();await until(()=>p.d.querySelector('#issueDetailBody .ck-workflow #detailBody')?.textContent.includes('QA updated green label'),p.errors);
   assert.ok([...p.d.querySelectorAll('#issueDetailBody .detail-section')].some(x=>x.textContent.includes('QA updated green label')),'original requirement section must refresh with latest workflow requirements');
   n=await f.get();await f.call('sop_issue_ack',{id:n.id,revision:n.revision,requirement_version:n.requirement_version});n=await f.get();await f.call('sop_issue_feedback',{id:n.id,revision:n.revision,message:'QA finished'});n=await f.get();await f.call('sop_issue_close',{id:n.id,revision:n.revision});refresh();await until(()=>p.d.querySelector('#issueDetailBody .ck-workflow .status')?.textContent==='已关闭',p.errors);
-  assert.match(p.d.querySelector('#issueDetailBody .detail-field .st')?.textContent||'',/完成/);assert.equal(p.d.querySelector('#issueDetailBody button[onclick*="handleIssueStart"]'),null);assert.deepEqual(p.errors,[]);
+  assert.equal(p.d.querySelectorAll('#issueDetailBody .ck-workflow').length,1);assert.equal(p.d.querySelector('#issueDetailBody .detail-field .st'),null,'only the authoritative issue status is shown');assert.ok(p.d.querySelector('#issueDetailBody .ck-workflow [data-issue-evidence]'));assert.equal(p.d.querySelector('#issueDetailBody button[onclick*="handleIssueStart"]'),null);assert.deepEqual(p.errors,[]);
  }finally{p.w.close();}
 });
 test('saving issue requirements from original office workflow refreshes retained original details',opts,async()=>{
@@ -411,5 +411,22 @@ test('one inbound instruction card contains every child and existing inbound pri
  const record=await call('sop_get',{id:added.id});const changed=await call('sop_need_update',{id:added.id,revision:record.record.revision,instructions:'最新要求：第81至100箱散箱，禁止打托',owner:'测试处理员'});assert.equal(changed.ok,true,changed.error);
  let printed='';p.w.open=()=>({document:{open(){printed='';},write(s){printed+=s;},close(){}},close(){},focus(){},print(){}});
  await p.w.printIbQr();assert.match(printed,/入库计划单/);assert.match(printed,/入库货物明细/);assert.match(printed,/本批作业要求及卸货分货依据/);assert.match(printed,/最新要求：第81至100箱散箱，禁止打托/);assert.match(printed,/class="inbound-cargo"/);assert.ok(!printed.includes('class="linked-ob-table"'));assert.deepEqual(p.errors,[]);
+ }finally{p.w.close();}
+});
+
+test('unified date check restores overview and evidence filters while current revisions control quantities and actions',opts,async()=>{
+ const f=await fixture(),call=async(action,data={})=>{const r=await(await f.request({action,client_req_id:crypto.randomUUID(),...data})).json();assert.equal(r.ok,true,r.error);return r;};
+ const check=await call('sop_check_create',{ship_date:'2030-10-13'}),get=async()=> (await call('sop_get',{id:check.id})).record;
+ const mutate=async(action,data={})=>{const x=await get();return call(action,{id:x.id,revision:x.revision,...data});};
+ await mutate('sop_check_items',{items:[{barcode:'0001',customer:'QA complete',qty:1},{barcode:'0002',customer:'QA short',qty:3},{barcode:'0003',customer:'QA unscanned',qty:2},{barcode:'0004',customer:'QA extra',qty:1},{barcode:'0005',customer:'QA recheck',qty:1},{barcode:'0006',customer:'QA removed',qty:1}]});
+ for(const barcode of ['0001','0002','0004','0004','0099','0005'])await mutate('sop_check_scan',{barcode,pallet:'QA-PALLET'});
+ await mutate('sop_check_items',{items:[{barcode:'0005',customer:'QA recheck',qty:4}],duplicate_mode:'replace',reason:'QA revised quantity'});
+ const remove=(await get()).items.find(it=>it.barcode==='0006');await mutate('sop_check_remove',{item_id:remove.id,reason:'QA remove'});
+ const p=await f.page('/002/');try{
+  p.w.openVerifyBatch(check.id);await until(()=>p.d.querySelector('[data-check-overview]'),p.errors);
+  const host=p.d.getElementById('checkDetailBody');assert.equal(host.querySelectorAll('.ck-workflow').length,1);assert.equal(host.querySelectorAll('[onclick*=updateVerifyBatch]').length,0);assert.equal(host.querySelectorAll('.ck-check-table thead th').length,9);assert.match(host.querySelector('[data-check-overview]').textContent,/2030-10-13/);
+  for(const [filter,barcode] of [['completed','0001'],['shortage','0002'],['not_scanned','0003'],['overflow','0004'],['recheck','0005'],['removed','0006'],['not_in_batch','0099']]){host.querySelector('[data-check-filter='+filter+']').click();await until(()=>host.querySelector('#items tr')?.firstElementChild.textContent===barcode,p.errors);assert.equal(host.querySelectorAll('#items tr').length,1);}
+  host.querySelector('[data-check-filter=recheck]').click();await until(()=>host.querySelector('#items tr')?.firstElementChild.textContent==='0005',p.errors);const cells=host.querySelector('#items tr').children;assert.equal(cells[2].textContent,'4');assert.equal(cells[3].textContent,'1有效核对 0','all historical scans are visible without reinstating current valid quantity');assert.match(cells[5].textContent,/QA-PALLET/);assert.notEqual(cells[6].textContent,'—');
+  assert.ok([...host.querySelectorAll('#actions button')].some(b=>b.textContent==='新增／修改条码'));assert.ok([...host.querySelectorAll('#actions button')].some(b=>b.textContent==='保存本轮核对'));assert.ok([...host.querySelectorAll('#actions button')].some(b=>b.textContent==='最终交接并关闭'));assert.deepEqual(p.errors,[]);
  }finally{p.w.close();}
 });

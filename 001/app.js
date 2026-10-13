@@ -3030,6 +3030,7 @@ async function loadIssueDetail() {
   var body = document.getElementById("issueDetailBody");
   if (!body || !_currentIssueId) return;
   var issueId=_currentIssueId,loadToken=body._legacyIssueLoad=(body._legacyIssueLoad||0)+1;
+  delete body._ckIssueEvidence;
   // 进入新 issue 时清掉旧 draft（保留同一 issue 内的草稿）
   if (_issueHandleDraft.issue_id && _issueHandleDraft.issue_id !== _currentIssueId) {
     _selectIssueDraft(issueId);
@@ -3148,7 +3149,8 @@ async function loadIssueDetail() {
     html += '</div>';
   }
 
-  body.innerHTML = html;
+  body._ckIssueEvidence={id:issueId,html:html};
+  if(!window.CK_SOP_ROLLOUT?.enabled)body.innerHTML = html;
 
   // 恢复本轮草稿：feedback_note 与本轮缩略图（避免上传后清空）
   // - 同一 issue：保持既有 draft

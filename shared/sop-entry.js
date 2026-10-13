@@ -11,14 +11,27 @@
  },true);
  const app=location.pathname.split('/').filter(Boolean)[0]||'home';
  const params=new URLSearchParams(location.search);const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
- let instance=null,activeRoot=null;
+ let instance=null,activeRoot=null;let navigationVersion=0;
+ function invalidateNavigation(){
+  navigationVersion++;
+  for(const id of ['issueDetailBody','checkDetailBody','inboundDetailBody','outboundDetailBody']){const body=document.getElementById(id);if(!body)continue;for(const key of ['_legacyIssueLoad','_legacyCheckLoad','_ckIssueLoad','_ckCheckLoad','_ckSourceLoad'])body[key]=(body[key]||0)+1;}
+  if(instance)instance.destroy();instance=null;activeRoot=null;
+ }
+ function detailActive(name){const view={loadIssueDetail:'issue_detail',loadVerifyDetail:'check_detail',loadInboundDetail:'inbound_detail',loadOutboundDetail:'outbound_detail'}[name];return !view||(app==='001'?window._currentPage===view:window._currentView===view);}
+
  const detailNeeds={};
  const request=(action,data={})=>CKSession.request(action,data);
  function mount(root,options){root._ckWorkflowOwner=(root._ckWorkflowOwner||0)+1;if(instance)instance.destroy();activeRoot=root;instance=CKWorkflow(root,options);return instance;}
  function button(label,fn){const b=document.createElement('button');b.type='button';b.className='btn btn-outline';b.textContent=label;b.onclick=async()=>{if(b.disabled)return;b.disabled=true;try{await fn();}catch(e){alert(e.message);}finally{b.disabled=false;}};return b;}
  function panel(parent){let el=parent.querySelector('[data-ck-workflow]');if(!el){el=document.createElement('div');el.dataset.ckWorkflow='true';parent.prepend(el);}return el;}
  function block(parent,text){let el=parent.querySelector('.ck-inline-heading');if(el)return el;el=document.createElement('div');el.className='ck-inline-heading';el.innerHTML='<b>'+esc(text)+'</b><div class="ck-buttons"></div>';parent.prepend(el);return el;}
- function wrap(name,after){const original=window[name];if(typeof original!=='function')return;window[name]=async function(...args){const key={loadIssueDetail:'_currentIssueId',loadVerifyDetail:'_currentVerifyBatchId',loadInboundDetail:'_currentInboundId',loadOutboundDetail:'_currentOutboundId'}[name],id=window[key];const out=await original.apply(this,args);if(key&&window[key]!==id)return out;await after(...args);return out;};}
+ function wrap(name,after){const original=window[name];if(typeof original!=='function')return;window[name]=async function(...args){
+  const key={loadIssueDetail:'_currentIssueId',loadVerifyDetail:'_currentVerifyBatchId',loadInboundDetail:'_currentInboundId',loadOutboundDetail:'_currentOutboundId'}[name],id=window[key],version=navigationVersion;
+  const body=document.getElementById(name==='loadIssueDetail'?'issueDetailBody':name==='loadVerifyDetail'?'checkDetailBody':'');
+  if(body&&activeRoot&&body.contains(activeRoot)){instance?.destroy();instance=null;activeRoot=null;}
+  try{const out=await original.apply(this,args);if(key&&(window[key]!==id||version!==navigationVersion||!detailActive(name)))return out;await after(...args);return out;}
+  catch(error){if(!body||window[key]!==id||version!==navigationVersion||!detailActive(name))return;body.replaceChildren();body.textContent='详情加载失败 / 상세 로딩 실패：'+error.message;body.append(button('重试加载 / 다시 시도',()=>window[name](...args)));}
+ };}
  async function sourcePanel(type,id,target){
   const body=document.getElementById(target);if(!body||!id)return;
   window.CKWorkChain?.hideFileControls(body,type);
@@ -48,30 +61,32 @@
   }
  }
  async function issuePanel(){
-  const id=window._currentIssueId,body=document.getElementById('issueDetailBody');if(!id||!body)return;
-  const token=body._ckIssueLoad=(body._ckIssueLoad||0)+1,host=panel(body);
+  const id=window._currentIssueId,body=document.getElementById('issueDetailBody');if(!id||!body||!detailActive('loadIssueDetail'))return;
+  if(body._ckIssueEvidence?.id!==id){body.append(button('重试加载 / 다시 시도',()=>window.loadIssueDetail()));return;}
+  const version=navigationVersion,token=body._ckIssueLoad=(body._ckIssueLoad||0)+1,host=body;
   host.textContent='正在加载问题操作 / 문제 작업 로딩 중';
   try{
    const r=await request('sop_issue_adopt',{legacy_id:id,native:true,client_req_id:crypto.randomUUID()});
-   if(window._currentIssueId!==id||body._ckIssueLoad!==token||!host.isConnected)return;
+   if(window._currentIssueId!==id||body._ckIssueLoad!==token||version!==navigationVersion||!detailActive('loadIssueDetail')||!host.isConnected)return;
    const refreshSource=()=>window._currentIssueId===id?window.loadIssueDetail():Promise.resolve();
-   mount(host,{tab:'issue',id:r.id,context:app==='001'?'field':'collab',back:()=>app==='001'?goPage('issue_list'):goTab('issue'),onRefresh:refreshSource,onSaved:refreshSource});
+   body.replaceChildren();mount(panel(body),{tab:'issue',id:r.id,issueEvidence:body._ckIssueEvidence.html,context:app==='001'?'field':'collab',back:()=>app==='001'?goPage('issue_list'):goTab('issue'),onRefresh:refreshSource,onSaved:refreshSource});
   }catch(error){
-   if(window._currentIssueId!==id||body._ckIssueLoad!==token||!host.isConnected)return;
+   if(window._currentIssueId!==id||body._ckIssueLoad!==token||version!==navigationVersion||!detailActive('loadIssueDetail')||!host.isConnected)return;
    host.textContent='问题操作加载失败 / 문제 작업 로딩 실패：'+error.message;
    host.append(button('重试加载 / 다시 시도',()=>window.loadIssueDetail()));
   }
  }
  async function checkPanel(){
-  const body=document.getElementById('checkDetailBody'),id=window._currentVerifyBatchId;if(!body||!id)return;
-  const token=body._ckCheckLoad=(body._ckCheckLoad||0)+1,host=panel(body);host.textContent='正在加载核对入口 / 검수 화면 로딩 중';
+  const body=document.getElementById('checkDetailBody'),id=window._currentVerifyBatchId;if(!body||!id||!detailActive('loadVerifyDetail'))return;
+  if(window._verifyDetailCache?.batch?.id!==id){body.append(button('重试加载 / 다시 시도',()=>window.loadVerifyDetail()));return;}
+  const version=navigationVersion,token=body._ckCheckLoad=(body._ckCheckLoad||0)+1,host=body;host.textContent='正在加载核对入口 / 검수 화면 로딩 중';
   try{
    const r=await request('sop_check_for_batch',{legacy_id:id});
-   if(window._currentVerifyBatchId!==id||body._ckCheckLoad!==token||!host.isConnected)return;
-   if(r.record){body.dataset.ckCheckMode='native';body.replaceChildren();mount(panel(body),{tab:'check',id:r.record.id,back:()=>goTab('check')});}
+   if(window._currentVerifyBatchId!==id||body._ckCheckLoad!==token||version!==navigationVersion||!detailActive('loadVerifyDetail')||!host.isConnected)return;
+   if(r.record){body.dataset.ckCheckMode='native';body.replaceChildren();mount(panel(body),{tab:'check',id:r.record.id,checkEvidence:window._verifyDetailCache,back:()=>goTab('check')});}
    else {body.dataset.ckLegacyCheck=id;body.dataset.ckCheckMode='legacy';renderVerifyDetail();const head=block(body,'按出库日期追加、撤销和分轮核对');head.querySelector('.ck-buttons').replaceChildren(button('设置出库日期并继续此批次',()=>{body.dataset.ckCheckMode='native';body.replaceChildren();mount(panel(body),{tab:'check',source:'check',source_id:id});}));}
   }catch(error){
-   if(window._currentVerifyBatchId!==id||body._ckCheckLoad!==token||!host.isConnected)return;
+   if(window._currentVerifyBatchId!==id||body._ckCheckLoad!==token||version!==navigationVersion||!detailActive('loadVerifyDetail')||!host.isConnected)return;
    host.textContent='核对入口加载失败 / 검수 화면 로딩 실패：'+error.message;host.append(button('重试加载 / 다시 시도',()=>window.loadVerifyDetail()));
   }
  }
@@ -126,10 +141,11 @@
    wrap('loadIssueDetail',issuePanel);wrap('loadVerifyDetail',checkPanel);
    wrap('loadVerifyList',async()=>{const view=document.getElementById('view-check');const head=block(view,'按出库日期管理总清单 · 11:00 / 13:00 / 16:00 分轮核对');if(!head.querySelector('button'))head.querySelector('.ck-buttons').append(button('打开日期清单／新建清单',()=>{const body=document.getElementById('checkListBody');mount(body,{tab:'check',context:'collab'});}));});
    document.getElementById('btnNewCheck').onclick=()=>{goView('check');mount(document.getElementById('checkListBody'),{tab:'check',context:'collab',create:'check'});};
-   const originalGoView=window.goView;window.goView=function(name){if(name!=='inbound_create'&&document.getElementById('view-inbound_create')?.style.display!=='none')window.CKInboundWorks?.clear();originalGoView(name);if(name==='outbound_create')outboundPicker().catch(e=>alert(e.message));};
+   const originalGoView=window.goView;window.goView=function(name){invalidateNavigation();if(name!=='inbound_create'&&document.getElementById('view-inbound_create')?.style.display!=='none')window.CKInboundWorks?.clear();originalGoView(name);if(name==='outbound_create')outboundPicker().catch(e=>alert(e.message));};
    const wh=document.createElement('section');wh.className='ck-inline-heading ck-workflow ck-work-plans';document.getElementById('ibc-remark').closest('.form-group').after(wh);window.CKInboundWorks=CKWorkFields(wh);CKConnectInboundOutbounds(wh);window.CKWorkChain?.installOffice();
    showMain();document.getElementById('userBadge').title='切换操作姓名 / 작업자 이름 변경';if(params.get('need')&&params.get('create_outbound'))goView('outbound_create');else if(params.get('need')){goTab('need');mount(v,{tab:'need',id:params.get('need'),individual:params.get('individual')==='1',context:'collab'});}else if(params.get('outbound'))openOutboundDetail(params.get('outbound'));else if(params.get('inbound'))openInboundDetail(params.get('inbound'));else if(params.get('issue'))openIssueDetail(params.get('issue'));else if(params.get('tab'))goTab(params.get('tab'));
   }else if(app==='001'){
+   const detailShowPage=window.showPage;window.showPage=function(name,...args){invalidateNavigation();return detailShowPage.call(this,name,...args);};
    window.CKInstallDispatch();
    if(window.CKWorkChain?.enabled()){
     const legacyStock=document.querySelector('#page-outbound_menu [onclick="goPage(\'outbound_stock_op\')"]');

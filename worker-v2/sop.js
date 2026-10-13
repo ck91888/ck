@@ -1,3 +1,5 @@
+import {checkScanEvidence,checkScanLogs} from './check-evidence.js';
+import {workNeedPrintFacts,workNeedPrintSummary,recordWorkNeedPrint} from './work-need-print.js';
 import {workPlanListEnabled,workPlanFacts,filterWorkPlans} from './work-plan-list.js';
 import {canonicalDailyBadge,sameWorkerBadge} from '../shared/badge-identity.js';
 import {issueAccounting} from './issue-accounting.js';
@@ -113,6 +115,7 @@ export async function handleSop(b,env) {
  const u=auth.user;
  try {
   await ensureDocumentNumbers(env);
+  if(b.action==='sop_need_print_request'){try{return await recordWorkNeedPrint(b,env,u,items=>recordNumbers(env,items));}catch(error){return {ok:false,error:String(error.message||error)};}}
   const cancelledDraft=await cancelCargoDraft(b,env,u);if(cancelledDraft)return cancelledDraft;
   const split=await cargoSplit(b,env,u);if(split)return split;
   const reservation=await cargoReservations(b,env,u);if(reservation)return reservation;
@@ -165,11 +168,13 @@ export async function handleSop(b,env) {
    const rows=await all(env,`SELECT * FROM ${table} ORDER BY created_at DESC LIMIT 200`);
    return {ok:true,items:rows.map(x=>({id:x.id,number:x.display_no||x.batch_no||'',label:(x.display_no||x.batch_no||'单号待补充')+' / '+(x.customer||x.customer_name||'')+' / '+(x.status||''),status:x.status})),limited:true};
   }
+  if(b.action==='sop_check_scan_logs'){const row=await read(env,b.id);if(!row||row.kind!=='check')fail('核对清单不存在');permit(u,row.department,roles);return {ok:true,...await checkScanLogs(env,row.data.legacy_id||row.id,b)};}
   if(b.action==='sop_get') {
    const row=await read(env,b.id); if(!row) fail('记录不存在'); permit(u,row.department,roles);
    if(row.kind==='issue'&&!b.version_only)row.data.accounting=await issueAccounting(env,row.data.legacy_id);
    const events=b.version_only?[]:await all(env,'SELECT action,actor_name,before_json,after_json,created_at FROM sop_events WHERE record_id=? ORDER BY created_at DESC LIMIT 100',row.id);
-   return {ok:true,record:b.version_only?publicState(row):(await recordNumbers(env,[publicState(row)]))[0],events};
+   const record=b.version_only?publicState(row):(await recordNumbers(env,[publicState(row)]))[0];if(!b.version_only&&row.kind==='need')await workNeedPrintFacts(env,[record]);if(!b.version_only&&row.kind==='check')record.scan_evidence=await checkScanEvidence(env,row.data.legacy_id||row.id);
+   return {ok:true,record,events};
   }
   if(b.action==='sop_dispatch_list'){
    if(!['manager','dispatcher'].includes(u.role))fail('仅派审员可查看现场派工');
@@ -550,7 +555,7 @@ async function needGroups(env,u,b){
  else if(b.need_id){scope=' AND '+groupExpr+'=(SELECT '+groupExpr+" FROM sop_records WHERE id=? AND kind='need')";scopeArgs=[b.need_id];}
  const rows=await all(env,`SELECT * FROM sop_records WHERE kind='need'${filter}${scope} ORDER BY updated_at DESC,id`,...departments,...scopeArgs);
  const groups=new Map();
- const numbered=await recordNumbers(env,rows.map(row=>publicState({...row,data:JSON.parse(row.state)})));
+ const numbered=await workNeedPrintFacts(env,await recordNumbers(env,rows.map(row=>publicState({...row,data:JSON.parse(row.state)}))));
  for(const x of numbered){
   const key=JSON.stringify([x.source_type||'standalone',x.source_id||x.supply_chain_no||x.id,x.source_type==='inbound'?'':x.customer]);
   if(!groups.has(key))groups.set(key,{key,source_type:x.source_type||'standalone',source_id:x.source_id||'',customer:x.customer,display_no:x.source_display_no||x.supply_chain_no||x.display_no||'未关联单据',updated_at:x.updated_at,items:[]});
@@ -574,6 +579,7 @@ async function needGroups(env,u,b){
   if(g.source_type==='outbound')g.display_no=outbounds.find(p=>p.id===g.source_id)?.display_no||'出库计划单号待补充';
   g.items.sort((a,b)=>(a.created_at||'').localeCompare(b.created_at||'')||(a.instruction_order||0)-(b.instruction_order||0)||a.title.localeCompare(b.title,'zh',{numeric:true}));
   const active=g.items.filter(x=>x.status!=='cancelled'&&!x.source_cancelled);g.completed=active.filter(x=>!!x.result||x.status==='closed').length;g.count=active.length;
+  g.print_status=workNeedPrintSummary(g.items);
   g.status=!active.length?'cancelled':g.completed===active.length?'completed':active.some(x=>x.status!=='pending')?'working':'pending';
  }
  if(rich){await workPlanFacts(env,items,plans,outbounds);items=filterWorkPlans(items,b);total=items.length;offset=Math.min(offset,Math.max(0,(Math.ceil(total/limit)-1)*limit));items=items.slice(offset,offset+limit);}

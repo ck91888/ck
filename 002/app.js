@@ -1207,6 +1207,7 @@ async function loadIssueDetail() {
   var body = document.getElementById("issueDetailBody");
   if (!body || !_currentIssueId) return;
   var issueId=_currentIssueId,loadToken=body._legacyIssueLoad=(body._legacyIssueLoad||0)+1;
+  delete body._ckIssueEvidence;
   body.innerHTML = '<div class="card muted">' + L("loading") + '</div>';
 
   var res = await api({ action: "v2_issue_detail", id: issueId });
@@ -1330,7 +1331,8 @@ async function loadIssueDetail() {
     html += '</div>';
   }
 
-  body.innerHTML = html;
+  body._ckIssueEvidence={id:issueId,html:html};
+  if(!window.CK_SOP_ROLLOUT?.enabled)body.innerHTML = html;
 }
 
 async function markIssueAccountingRequired(btnEl) {
@@ -5120,13 +5122,13 @@ async function loadVerifyDetail() {
   // 进入详情默认 "只看异常"
   _verifyBarcodeFilter = 'abnormal';
   _verifyPalletExpanded = {};
-  renderVerifyDetail();
+  if(!window.CK_SOP_ROLLOUT?.enabled)renderVerifyDetail();
 }
 
 function renderVerifyDetail() {
   var body = document.getElementById("checkDetailBody");
   if (!body || !_verifyDetailCache) return;
-  if(_verifyDetailCache.batch?.id!==_currentVerifyBatchId||window.CK_SOP_ROLLOUT?.enabled&&body.dataset.ckCheckMode==='native')return;
+  if(_verifyDetailCache.batch?.id!==_currentVerifyBatchId||window.CK_SOP_ROLLOUT?.enabled&&body.dataset.ckCheckMode!=='legacy')return;
   var res = _verifyDetailCache;
   var b = res.batch;
   var s = res.summary || {};
