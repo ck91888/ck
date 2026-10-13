@@ -12,6 +12,8 @@ var _activeJobId = null;   // current job id I'm participating in
 var _activeSegId = null;    // my current worker segment
 var _pollTimer = null;
 var _issueFilter = "pending";
+var _issueListPage = 0;
+var _issueListRequest = 0;
 var _currentIssueId = null;
 var _unloadPlanData = null;   // loaded plan detail (plan + lines)
 var _unloadScanner = null;
@@ -403,6 +405,7 @@ function goBack() {
 
 function showPage(name) {
   if(name!==_currentPage)stopAllManagedQrScanners();
+  if(name==='issue_list'&&_currentPage==='issue_detail')_issueListPage=0;
   // Stop polling
   if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
 
@@ -2955,39 +2958,19 @@ function _issueTitleText(it) {
 async function loadIssueList() {
   var body = document.getElementById("issueListBody");
   if (!body) return;
+  var token=++_issueListRequest;
   body.innerHTML = '<div class="card"><span class="muted">加载中.../로딩중...</span></div>';
-
-  var statusMap = { pending: "pending", processing: "processing", my: "", responded: "responded" };
+  var statusMap = { pending: "pending,rework_required", processing: "processing", my: "processing,responded,rework_required", responded: "responded" };
   var bizSel = document.getElementById("issueBizFilter");
   var bizVal = bizSel ? bizSel.value : "";
-
-  var items = [];
-  if (_issueFilter === "pending") {
-    // 现场视角下 rework_required 本质也是待再次处理，并入"待处理"列表（状态标签仍区分）
-    var pair = await Promise.all([
-      api({ action: "v2_issue_ops_list", status: "pending", biz_class: bizVal, sort: "oldest_first" }),
-      api({ action: "v2_issue_ops_list", status: "rework_required", biz_class: bizVal, sort: "oldest_first" })
-    ]);
-    var r1 = pair[0], r2 = pair[1];
-    if (!r1 || !r1.ok || !r2 || !r2.ok) {
-      body.innerHTML = '<div class="card"><span class="muted">加载失败/로딩 실패</span></div>';
-      return;
-    }
-    // FIFO：最早发布的最先处理；priority 字段已废弃，不参与排序
-    items = (r1.items || []).concat(r2.items || []);
-    items.sort(function(a, b) { return (a.created_at || 0) - (b.created_at || 0); });
-  } else {
-    var status = statusMap[_issueFilter] || "";
-    var res = await api({ action: "v2_issue_ops_list", status: status, biz_class: bizVal, sort: "oldest_first" });
-    if (!res || !res.ok) {
-      body.innerHTML = '<div class="card"><span class="muted">加载失败/로딩 실패</span></div>';
-      return;
-    }
-    items = res.items || [];
-    if (_issueFilter === "my") {
-      items = items.filter(function(it) { return it.status === "processing" || it.status === "responded" || it.status === "rework_required"; });
-    }
+  var res = await api({ action: "v2_issue_ops_list", status: statusMap[_issueFilter] || "", biz_class: bizVal, sort: "latest_activity", limit: 50, offset: _issueListPage*50 });
+  if(token!==_issueListRequest||_currentPage!=='issue_list')return;
+  if (!res || !res.ok) {
+    body.innerHTML = '<div class="card"><span class="muted">加载失败/로딩 실패</span></div>';
+    return;
   }
+  var items = res.items || [];
+  if(!items.length&&_issueListPage>0){_issueListPage=0;return loadIssueList();}
 
   if (items.length === 0) {
     body.innerHTML = '<div class="card"><span class="muted">暂无数据 / 데이터 없음</span></div>';
@@ -3009,10 +2992,18 @@ async function loadIssueList() {
     '</div>';
   });
   body.innerHTML = html;
+  if(Number(res.total)>50){
+    var nav=document.createElement('div');nav.className='ck-buttons';nav.style.padding='12px';
+    var prev=document.createElement('button'),next=document.createElement('button');prev.className=next.className='btn btn-outline btn-sm';prev.textContent='上一页 / 이전';next.textContent='下一页 / 다음';prev.disabled=_issueListPage===0;next.disabled=(_issueListPage+1)*50>=Number(res.total);
+    prev.onclick=function(){_issueListPage--;loadIssueList();};next.onclick=function(){_issueListPage++;loadIssueList();};
+    var label=document.createElement('span');label.textContent=(_issueListPage*50+1)+'–'+(_issueListPage*50+items.length)+' / '+res.total;
+    nav.append(prev,label,next);body.append(nav);
+  }
 }
 
 function filterIssues(filter, btn) {
   _issueFilter = filter;
+  _issueListPage = 0;
   var tabs = document.querySelectorAll("#page-issue_list .tab-bar button");
   for (var i = 0; i < tabs.length; i++) tabs[i].classList.remove("active");
   if (btn) btn.classList.add("active");
@@ -3149,7 +3140,7 @@ async function loadIssueDetail() {
     html += '</div>';
   }
 
-  body._ckIssueEvidence={id:issueId,html:html};
+  body._ckIssueEvidence={id:issueId,html:html,status:it.status,jobId:_myWorkingRun?.job_id||'',summary:{customer:it.customer,relatedDocNo:it.related_doc_no,submittedBy:it.submitted_by,createdAt:fmtTime(it.created_at),description:it.issue_description}};
   if(!window.CK_SOP_ROLLOUT?.enabled)body.innerHTML = html;
 
   // 恢复本轮草稿：feedback_note 与本轮缩略图（避免上传后清空）

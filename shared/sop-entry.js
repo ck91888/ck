@@ -69,7 +69,7 @@
    const r=await request('sop_issue_adopt',{legacy_id:id,native:true,client_req_id:crypto.randomUUID()});
    if(window._currentIssueId!==id||body._ckIssueLoad!==token||version!==navigationVersion||!detailActive('loadIssueDetail')||!host.isConnected)return;
    const refreshSource=()=>window._currentIssueId===id?window.loadIssueDetail():Promise.resolve();
-   body.replaceChildren();mount(panel(body),{tab:'issue',id:r.id,issueEvidence:body._ckIssueEvidence.html,context:app==='001'?'field':'collab',back:()=>app==='001'?goPage('issue_list'):goTab('issue'),onRefresh:refreshSource,onSaved:refreshSource});
+   body.replaceChildren();mount(panel(body),{tab:'issue',id:r.id,issueEvidence:body._ckIssueEvidence.html,issueStatus:body._ckIssueEvidence.status,issueJobId:body._ckIssueEvidence.jobId,issueSummary:body._ckIssueEvidence.summary,context:app==='001'?'field':'collab',back:()=>app==='001'?goPage('issue_list'):goTab('issue'),onRefresh:refreshSource,onSaved:refreshSource});
   }catch(error){
    if(window._currentIssueId!==id||body._ckIssueLoad!==token||version!==navigationVersion||!detailActive('loadIssueDetail')||!host.isConnected)return;
    host.textContent='问题操作加载失败 / 문제 작업 로딩 실패：'+error.message;

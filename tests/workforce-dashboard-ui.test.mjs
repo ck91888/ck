@@ -43,6 +43,20 @@ test('labor combines company, department and current-unassigned filters, ignorin
  p.change('[data-department-filter]','bulk');assert.match(p.$('[data-rows]').textContent,/暂无/);p.change('[data-status-filter]','');assert.match(p.$('[data-rows]').textContent,/Fixture B/);
  p.change('[data-company]','포레인');assert.match(p.$('[data-rows]').textContent,/暂无/);assert.deepEqual(p.errors,[]);
 });
+test('field labor filters daily assignment and employee profile department in one report',domOptions,async t=>{
+ const daily=item('DAILY','working','import'),importEmployee=item('STAFF','rest'),management=item('MANAGER','unassigned'),orders=item('ORDERS','out'),unknown=item('UNKNOWN','unassigned');
+ for(const [person,department] of [[importEmployee,'import'],[management,'management'],[orders,'order_processing'],[unknown,'']]){person.record.personType='employee';person.record.badgeId='EMP-'+person.record.id;person.record.employeeNo=person.record.id;person.record.department='bulk';person.record.profileDepartment=department;person.record.agency='bulk';}
+ const p=await fixture(t,{field:true,initial:report([daily,importEmployee,management,orders,unknown])});
+ assert.ok(p.all('[data-department-filter] option').some(x=>x.value==='management'));
+ assert.ok(p.all('[data-department-filter] option').some(x=>x.value==='order_processing'));
+ p.change('[data-department-filter]','import');assert.equal(p.all('[data-peoplecards] article').length,2);assert.equal(p.$('[data-summary] strong').textContent,'2 人');assert.match(p.$('[data-peoplecards]').textContent,/Fixture DAILY/);assert.match(p.$('[data-peoplecards]').textContent,/Fixture STAFF/);
+ p.change('[data-status-filter]','rest');assert.equal(p.all('[data-peoplecards] article').length,1);assert.match(p.$('[data-peoplecards]').textContent,/Fixture STAFF/);
+ p.change('[data-status-filter]','');p.change('[data-search]','STAFF');assert.equal(p.all('[data-peoplecards] article').length,1);
+ p.change('[data-search]','');p.change('[data-company]','가온');assert.equal(p.all('[data-peoplecards] article').length,1);assert.match(p.$('[data-peoplecards]').textContent,/Fixture DAILY/);
+ p.change('[data-company]','');p.change('[data-department-filter]','management');assert.match(p.$('[data-peoplecards]').textContent,/Fixture MANAGER/);p.change('[data-department-filter]','order_processing');assert.match(p.$('[data-peoplecards]').textContent,/Fixture ORDERS/);
+ p.change('[data-department-filter]','');assert.match(p.$('[data-peoplecards]').textContent,/Fixture UNKNOWN/);
+ assert.deepEqual(p.errors,[]);
+});
 test('orphan work is visible by raw badge and task without creating attendance rows or minutes',domOptions,async t=>{
  let fail=false;const warning={worker_id:'da-20261008-abcdef12',worker_name:'Synthetic <orphan>',job_id:'SYNTHETIC-JOB',job_label:'SYNTHETIC-PICK-01',reason:'没有当天有效签到 / 유효한 출근 없음'};
  const p=await fixture(t,{initial:{...report([]),identityWarnings:[warning]},handler:action=>action==='sop_attendance_summary'&&fail?Promise.reject(Error('Synthetic summary unavailable')):undefined});

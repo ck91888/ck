@@ -785,7 +785,7 @@
     <button onclick="filterIssues('responded',this)">已反馈/완료</button>
   </div>
   <div style="padding:8px 12px 0;">
-    <select id="issueBizFilter" onchange="loadIssueList()" style="width:100%;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:13px;">
+    <select id="issueBizFilter" onchange="_issueListPage=0;loadIssueList()" style="width:100%;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:13px;">
       <option value="">全部业务/전체 업무</option>
       <option value="direct_ship">代发/직배송</option>
       <option value="bulk">大货/대량화물</option>

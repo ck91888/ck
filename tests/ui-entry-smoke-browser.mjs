@@ -33,8 +33,11 @@ await seed('sop_login',{sop_key:'synthetic-entry-smoke-only'});
 await confirmOperation(seed,'合成入口验收管理员');
 const staff=(await seed('sop_attendance_employee_register',{employeeNo:'ENTRY-SMOKE',name:'合成入口派审员',department:'bulk'})).person;
 await seed('sop_attendance_checkin',{badge:staff.badgeId});
+const importStaff=(await seed('sop_attendance_employee_register',{employeeNo:'ENTRY-IMPORT',name:'合成进口职员',department:'import'})).person;
+await seed('sop_attendance_checkin',{badge:importStaff.badgeId});
 const permanent=(await seed('sop_attendance_register',{name:'合成长期入口',agency:'가온'})).person;
-await seed('sop_attendance_checkin',{name:'合成日当入口',agency:'가온'});
+const importDaily=(await seed('sop_attendance_checkin',{name:'合成日当入口',agency:'가온'})).record;
+await seed('sop_attendance_department',{id:importDaily.id,version:importDaily.version,department:'import'});
 const inbound=await seed('v2_inbound_plan_create',{customer:'合成入口入库',biz_classes:['bulk'],expected_arrival:'2026-10-13',cargo_summary:'入口核查合成货物'});
 const need=await seed('sop_need_create',{source_type:'inbound',source_id:inbound.id,department:'bulk',customer:'合成入口入库',title:'合成入口可继续作业',instructions:'只核查打开和返回，不提交作业',planned_quantity:10,planned_unit:'箱'});
 const task=await seed('sop_task_dispatch',{department:'bulk',title:'合成入口可继续作业',need_id:need.id,job_type:'bulk_op',workers:[{id:staff.badgeId,name:staff.name}],lead_id:staff.badgeId,estimated_minutes:30});
@@ -118,7 +121,7 @@ async function workflowRace(page,kind){
  }finally{h.release();await h.remove();}
 }
 try{
- for(const width of [1440,390]){
+ for(const width of (process.env.CK_SMOKE_WIDTHS?process.env.CK_SMOKE_WIDTHS.split(',').map(Number):[1440,390])){
   // Field/kiosk activation deliberately revokes a shared office browser session.
   // Each width starts with a fresh, explicitly confirmed synthetic office session.
   await seed('sop_login',{sop_key:'synthetic-entry-smoke-only'});await confirmOperation(seed,'合成入口验收管理员');
@@ -156,13 +159,14 @@ try{
    try{
     await field.goto(origin+'/001/');await field.locator('#ck-login-code').fill(staff.badgeId);await field.locator('#ck-auth-gate button[type=submit]').click();await field.locator('#page-home.active').waitFor();await field.locator('[data-dispatch-job="'+task.id+'"]').waitFor();await capture(field,'001-home-cold','#page-home');await field.reload();await field.locator('[data-dispatch-job="'+task.id+'"]').waitFor();await capture(field,'001-home-refresh','#page-home');
     assert.equal(await field.locator('[data-dispatch-tasks]').count(),1);await field.locator('[data-dispatch-job="'+task.id+'"]').click();await field.locator('#page-bulk_op.active .ck-work-sheet').first().waitFor();await capture(field,'001-continue-original-task','#page-bulk_op');await field.locator('#page-bulk_op [data-home]').click();await capture(field,'001-task-return','#page-home');
+    await field.getByRole('button',{name:/现场人员与休息/}).click();await field.locator('#ck-field-labor [data-peoplecards] article').first().waitFor();await field.locator('#ck-field-labor [data-department-filter]').selectOption('import');await field.waitForFunction(()=>document.querySelectorAll('#ck-field-labor [data-peoplecards] article').length===2);assert.match(await field.locator('#ck-field-labor [data-peoplecards]').innerText(),/合成进口职员/);assert.match(await field.locator('#ck-field-labor [data-peoplecards]').innerText(),/合成日当入口/);assert.match(await field.locator('#ck-field-labor [data-summary]').innerText(),/2 人/);await capture(field,'001-field-labor-import','#page-labor');await field.locator('#page-labor .back-btn').click();
     await field.locator('#page-home [onclick="goPage(\'issue_list\')"]').click();await field.locator('#issueListBody .list-item').filter({hasText:'合成入口问题点'}).waitFor();await capture(field,'001-issue-list','#page-issue_list');await field.locator('#issueListBody .list-item').filter({hasText:'合成入口问题点'}).click();await field.locator('#issueDetailBody #actions').waitFor();assert.equal(await field.locator('#issueDetailBody #actions').count(),1);await capture(field,'001-issue-detail','#page-issue_detail');await field.locator('#page-issue_detail .back-btn').click();await capture(field,'001-issue-return','#page-issue_list');await field.locator('#page-issue_list .back-btn').click();await capture(field,'001-home-return','#page-home');
    }finally{await fieldCtx.close();}
    console.log('PASS entrance lifecycle width '+width);
   }catch(error){await p.screenshot({path:path.join(out,'failure-'+width+'.png'),fullPage:false}).catch(()=>{});fs.writeFileSync(path.join(out,'failure-dom-'+width+'.txt'),await p.locator('body').innerText().catch(()=>''));throw error;}finally{await ctx.close();}
  }
  assert.deepEqual(errors,[]);assert.equal(snapshot(),before,'Read-only browser navigation must not change synthetic business rows');
- const result={ok:true,sourceRoot,sourceHashes,widths:[1440,390],coverage,checks,errors,requests,unchangedBusiness:true,limitations};
+ const result={ok:true,sourceRoot,sourceHashes,widths:process.env.CK_SMOKE_WIDTHS?process.env.CK_SMOKE_WIDTHS.split(',').map(Number):[1440,390],coverage,checks,errors,requests,unchangedBusiness:true,limitations};
  result.ok=checks.every(c=>c.ok);fs.writeFileSync(path.join(out,'result.json'),JSON.stringify(result,null,2));console.log(JSON.stringify({ok:result.ok,entries:coverage.length,delayedNavigation:checks.length,out}));assert.equal(result.ok,true,'Navigation race reproduced; see result.json and before/after screenshots');
 }catch(error){for(const ctx of browser.contexts())for(const page of ctx.pages())await page.screenshot({path:path.join(out,'failure-'+Date.now()+'.png'),fullPage:false}).catch(()=>{});fs.writeFileSync(path.join(out,'failure.json'),JSON.stringify({error:error.stack,sourceRoot,coverage,checks,errors,requests},null,2));throw error;}
 finally{await browser.close();await new Promise(resolve=>server.close(resolve));DB.raw.close();}

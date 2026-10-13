@@ -27,7 +27,7 @@ test('employee updates preserve historical attendance and require checkout befor
  const {call}=setup();const p=(await call('employee_register',registration)).person,r=(await call('checkin',{badge:p.badgeId})).record;
  await assert.rejects(call('employee_update',{id:p.id,version:1,name:p.name,department:'office',enabled:false}),/尚未签退/);
  const changed=await call('employee_update',{id:p.id,version:1,name:'更正姓名',department:'office',enabled:true});assert.equal(changed.person.version,2);assert.equal(changed.person.badgeId,p.badgeId);
- const saved=(await call('summary',{scope:'employee'})).items[0].record;assert.equal(saved.name,p.name);assert.equal(saved.department,'bulk');await assert.rejects(call('employee_update',{id:p.id,version:1,name:p.name,department:'office',enabled:true}),/已更新/);
+ const saved=(await call('summary',{scope:'employee'})).items[0].record;assert.equal(saved.name,p.name);assert.equal(saved.department,'bulk');assert.equal(saved.profileDepartment,'office');await assert.rejects(call('employee_update',{id:p.id,version:1,name:p.name,department:'office',enabled:true}),/已更新/);
  await call('checkout',{id:r.id});await call('employee_update',{id:p.id,version:2,name:'更正姓名',department:'office',enabled:false});assert.equal((await call('employee_search',{term:'CK001'})).items.length,0);await assert.rejects(call('checkin',{badge:p.badgeId}),/已停用/);assert.equal((await call('summary',{scope:'employee'})).items.length,1);
 });
 test('employee shifts enforce signed-in task participation, actual breaks and personal checkout closure',async()=>{

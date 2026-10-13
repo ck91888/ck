@@ -3,7 +3,7 @@ import {ensureSchema} from './schema-ready.js';
 import {workerBadgeMatch} from './daily-badge-identity.js';
 const q=(e,s,...a)=>e.DB.prepare(s).bind(...a);
 export const activeAttendanceSQL=alias=>`NOT EXISTS(SELECT 1 FROM ck_attendance_management m WHERE m.attendance_id=${alias}.id AND m.voided_at!='')`;
-export const attendanceDaySelect=`SELECT d.*,COALESCE(m.department,'') AS management_department,COALESCE(m.voided_at,'') AS voided_at,COALESCE(m.void_reason,'') AS void_reason FROM ck_attendance_days d LEFT JOIN ck_attendance_management m ON m.attendance_id=d.id`;
+export const attendanceDaySelect=`SELECT d.*,COALESCE(m.department,'') AS management_department,COALESCE(m.voided_at,'') AS voided_at,COALESCE(m.void_reason,'') AS void_reason,COALESCE(ep.department,'') AS employee_profile_department FROM ck_attendance_days d LEFT JOIN ck_attendance_management m ON m.attendance_id=d.id LEFT JOIN ck_employee_profiles ep ON ep.person_id=d.person_id`;
 // julianday handles canonical ISO strings and historical offsets consistently.
 const relatedWork=(w,d)=>`${workerBadgeMatch(w+'.worker_id',d+'.worker_id')} AND julianday(${w}.joined_at)<julianday(${d}.day,'+1 day','-9 hours') AND (${w}.left_at='' OR julianday(${w}.left_at)>=julianday(${d}.day,'-9 hours'))`;
 export const ATTENDANCE_MANAGEMENT_SCHEMA=[

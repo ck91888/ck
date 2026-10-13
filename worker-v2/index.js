@@ -2641,14 +2641,30 @@ route("v2_issue_ops_list", async (body, env) => {
   const status = String(body.status || "").trim();
   const biz_class = String(body.biz_class || "").trim();
   const sort = String(body.sort || "").trim();
-  let sql = "SELECT * FROM v2_issue_tickets WHERE 1=1";
+  let where = " WHERE 1=1";
   const binds = [];
-  if (status) { sql += " AND status=?"; binds.push(status); }
-  if (biz_class) { sql += " AND biz_class=?"; binds.push(biz_class); }
-  // 现场默认 oldest_first（FIFO，最早等待最先看到）；显式 newest_first 才反过来
-  sql += sort === "newest_first" ? " ORDER BY created_at DESC LIMIT 200" : " ORDER BY created_at ASC LIMIT 200";
-  const stmt = env.DB.prepare(sql);
-  const rs = binds.length > 0 ? await stmt.bind(...binds).all() : await stmt.all();
+  const statuses = sort === "latest_activity" ? status.split(",").filter(Boolean) : status ? [status] : [];
+  if (statuses.length === 1) { where += " AND t.status=?"; binds.push(statuses[0]); }
+  else if (statuses.length > 1) { where += " AND t.status IN (" + statuses.map(() => "?").join(",") + ")"; binds.push(...statuses); }
+  if (biz_class) { where += " AND t.biz_class=?"; binds.push(biz_class); }
+  if (sort === "latest_activity") {
+    // Only business events count. In particular, opening a ticket can create a
+    // sop_issue_adopt link, which must never move it to the top of this list.
+    const valid = col => `CASE WHEN julianday(${col}) IS NOT NULL THEN ${col} ELSE '' END`;
+    const latest = (table, date, condition) => `(SELECT MAX(${valid(date)}) FROM ${table} WHERE ${condition})`;
+    const runs = "SELECT id FROM v2_issue_handle_runs WHERE issue_id=t.id";
+    const jobs = "SELECT job_id FROM v2_issue_handle_runs WHERE issue_id=t.id";
+    const attachments = latest("v2_attachments a", "a.created_at", `((a.related_doc_type IN ('issue_ticket','issue','issue_handle') AND a.related_doc_id=t.id) OR (a.related_doc_type IN ('issue_handle_run','issue_handle') AND a.related_doc_id IN (${runs})) OR (a.related_doc_type IN ('ops_job','job','issue_ticket') AND a.related_doc_id IN (${jobs})))`);
+    const activity = `MAX(${valid('t.created_at')},${valid('t.updated_at')},COALESCE(${latest('sop_events e','e.created_at',"e.record_id='ISSUE-'||t.id AND e.action!='sop_issue_adopt'")},''),COALESCE(${latest('v2_issue_handle_runs r','r.started_at','r.issue_id=t.id')},''),COALESCE(${latest('v2_issue_handle_runs r','r.ended_at','r.issue_id=t.id')},''),COALESCE(${latest('v2_issue_rework_requests w','w.created_at','w.issue_id=t.id')},''),COALESCE(${latest('v2_issue_rework_requests w','w.resolved_at','w.issue_id=t.id')},''),COALESCE(${latest('v2_ops_jobs j','j.updated_at',`j.id IN (${jobs})`)},''),COALESCE(${attachments},''))`;
+    const {limit,offset}=pageParams(body);
+    const count=await env.DB.prepare('SELECT COUNT(*) AS c FROM v2_issue_tickets t'+where).bind(...binds).first();
+    const sql=`SELECT t.*, ${activity} AS last_business_at FROM v2_issue_tickets t${where} ORDER BY julianday(last_business_at) DESC, julianday(t.created_at) DESC, t.id DESC LIMIT ? OFFSET ?`;
+    const rs=await env.DB.prepare(sql).bind(...binds,limit,offset).all();
+    return json({ok:true,items:rs.results||[],...pageMeta(count?.c,limit,offset)});
+  }
+  // Preserve the legacy sort for other consumers.
+  const sql="SELECT t.* FROM v2_issue_tickets t"+where+(sort === "newest_first" ? " ORDER BY t.created_at DESC LIMIT 200" : " ORDER BY t.created_at ASC LIMIT 200");
+  const rs=await env.DB.prepare(sql).bind(...binds).all();
   return json({ ok: true, items: rs.results || [] });
 });
 
