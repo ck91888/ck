@@ -9,6 +9,18 @@
   const dispatcher=document.createElement('small');dispatcher.className='ck-task-dispatcher';dispatcher.textContent='派审员 / 배정·검수 담당자：'+window.CKDocumentLabels.jobDispatcher(job);b.append(title,info,dispatcher,crew);b.onclick=async()=>{b.disabled=true;try{await CKOpenNativeJob(job);}finally{b.disabled=false;}};return b;
  };
  const startActions=new Set(['v2_unload_job_start','v2_unplanned_unload_start','v2_inbound_job_start','v2_import_delivery_job_start','v2_outbound_load_start','v2_outbound_stock_op_start','v2_issue_handle_start','v2_pick_job_start','v2_pick_job_start_by_docs','v2_bulk_op_job_start','v2_ops_job_start','v2_verify_job_start']);
+ async function cloneStartBody(body){
+  if(typeof structuredClone==='function')return structuredClone(body);
+  // MessageChannel uses the browser's structured clone algorithm, including
+  // nested values and cycles. JSON serialization would change the payload.
+  if(typeof MessageChannel!=='function')throw Error('此设备浏览器不支持派工数据复制 / 이 기기에서 작업 데이터 복사를 지원하지 않습니다');
+  return new Promise((resolve,reject)=>{
+   const channel=new MessageChannel(),close=()=>{channel.port1.close();channel.port2.close();};
+   channel.port1.onmessage=event=>{close();resolve(event.data);};
+   channel.port1.onmessageerror=()=>{close();reject(Error('派工数据复制失败 / 작업 데이터 복사 실패'));};
+   try{channel.port2.postMessage(body);}catch(error){close();reject(error);}
+  });
+ }
  window.CKViewRestingJob=function(detail){
   const dialog=document.createElement('dialog');dialog.className='ck-workflow';dialog.innerHTML='<h2>本人休息中的任务 / 휴식 중인 내 작업</h2><p data-summary></p><p>查看不会恢复计时。结束本人休息后，仅在原任务仍允许且仍属本任务人员时恢复。整个任务暂停时仍须派审员恢复任务。 / 조회만으로 작업시간이 재개되지 않습니다.</p><p role="alert"></p><div class="ck-buttons"><button data-return>结束本人休息 / 내 휴식 종료</button><button data-close>关闭 / 닫기</button></div>';
   dialog.querySelector('[data-summary]').textContent=window.CKDocumentLabels.jobSummary(detail);document.body.append(dialog);dialog.showModal();
@@ -51,7 +63,7 @@
   window.api=async function(body){
    if(!startActions.has(body.action))return original(body);
    // Freeze document numbers before the staff camera can start.
-   body=structuredClone(body);
+   body=await cloneStartBody(body);
    const codes=[...(Array.isArray(body.pick_doc_nos)?body.pick_doc_nos:body.pick_doc_nos?String(body.pick_doc_nos).split(','):[]),body.external_inbound_no,body.work_order_no].filter(Boolean);
    const scanError=codes.map(x=>window.CKDocumentCode?.documentCodeError(x)).find(Boolean);
    if(scanError)return {ok:false,error:scanError};

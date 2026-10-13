@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';import vm from 'node:vm';import {readFileSync} from 'node:fs';
+import test from 'node:test';import assert from 'node:assert/strict';import vm from 'node:vm';import {readFileSync} from 'node:fs';import {MessageChannel} from 'node:worker_threads';
 const source=readFileSync(new URL('../shared/sop-dispatch-ui.js',import.meta.url),'utf8');
 function preview(detail){
  const storage=()=>{const m=new Map();return {getItem:k=>m.get(k)||null,setItem:(k,v)=>m.set(k,String(v)),removeItem:k=>m.delete(k)};};
@@ -43,4 +43,13 @@ test('old dispatch with no crew snapshot can use its actual historical segment o
  for(const changed of [{can_manage_dispatch:false},{job:{...d.job,status:'completed'}},{job:{...d.job,status:'cancelled'}}]){
   const blocked=preview({...d,...changed});await blocked.context.CKOpenNativeJob({id:d.job.id});assert.equal(blocked.navigated,0);assert.equal(blocked.opened.length,0);
  }
+});
+test('Chrome 88 dispatch fallback snapshots nested structured values before the staff dialog',async()=>{
+ const p=preview(live());let seen;
+ p.context.structuredClone=undefined;p.context.MessageChannel=MessageChannel;
+ p.context.CKDocumentCode={documentCodeError(value){seen=value;return 'synthetic stop';}};
+ const input={action:'v2_verify_job_start',external_inbound_no:{nested:[{count:2}],when:new Date('2026-10-13T00:00:00Z'),labels:new Map([['a','before']])}};
+ const result=p.context.api(input);input.external_inbound_no.nested[0].count=9;input.external_inbound_no.when.setUTCDate(14);input.external_inbound_no.labels.set('a','after');
+ assert.equal((await result).error,'synthetic stop');assert.equal(seen.nested[0].count,2);assert.equal(seen.when.toISOString(),'2026-10-13T00:00:00.000Z');assert.equal(seen.labels.get('a'),'before');
+ assert.equal(p.calls.length,0);
 });
