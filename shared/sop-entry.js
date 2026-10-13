@@ -166,12 +166,6 @@
    const laborButton=button('现场人员与休息 / 인원·휴식',window.CKOpenFieldLabor);laborButton.className='btn btn-outline';document.getElementById('page-home').prepend(laborButton);
    const switchFieldPage=window.showPage;window.showPage=function(name,...args){if(name!=='bulk_op'&&fieldWork){fieldWork.destroy();fieldWork=null;}return switchFieldPage(name,...args);};
    wrap('loadIssueDetail',issuePanel);
-   const verifyStart=window.startVerifyScan;window.startVerifyScan=async function(btn){
-    const id=document.getElementById('vsBatchSelect')?.value;if(!id)return verifyStart(btn);
-    try{const r=await request('sop_check_for_batch',{legacy_id:id});if(!r.record)return verifyStart(btn);
-     showPage('dispatch');mount(document.getElementById('ck-dispatch-body'),{tab:'check',id:r.record.id,context:'field',back:()=>goPage('verify_scan')});
-    }catch(e){alert(e.message);}
-   };
    showPage('home');
    if(params.get('task')||params.get('need')){goPage('bulk_op',{task:params.get('task')||params.get('need')});}
   }else if(app==='shuju'){
@@ -205,6 +199,7 @@
   if(app==='001')window.CKInstallNativeLifecycle?.();
   if(app==='001')window.CKInstallLoadTrip?.();
   if(app==='001')window.CKInstallCrewBorrowUI?.();
+  if(app==='001')window.CKInstallCheckWorkbench?.();
   if(app==='002'){
    const notices=document.createElement('div');notices.className='ck-updates';notices.hidden=true;nav.after(notices);
    let updating=false;const update=async()=>{if(document.hidden||updating)return;updating=true;try{const r=await request('sop_updates');notices.hidden=!r.items.length;notices.innerHTML=r.items.length?'<b>有 '+r.items.length+' 条最新要求待仓库确认</b> '+r.items.slice(0,5).map(x=>'<a href="/002/?issue='+encodeURIComponent(x.legacy_id)+'">'+esc(x.title.slice(0,36))+'</a>').join(' · '):'';}catch(e){notices.hidden=false;notices.textContent='消息同步失败，请刷新检查网络：'+e.message;}finally{updating=false;}};await update();setInterval(update,15000);window.addEventListener('focus',update);

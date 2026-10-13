@@ -56,7 +56,7 @@ export async function startNative(body,env,invoke,guard,helpers={}){
  if(!Object.hasOwn(departments,department))return {ok:false,error:'请选择本次用工部门 / 작업 부서를 선택하세요'};
  for(const w of workers){const busy=await env.DB.prepare(`SELECT job_id FROM v2_ops_job_workers WHERE ${workerBadgeMatch('worker_id','?')} AND left_at='' AND job_id!=? LIMIT 1`).bind(w.id,allowed||'').first();if(busy&&!env.SOP_CREW_BORROW?.plans.some(x=>sameWorkerBadge(x.worker.id,w.id)&&x.source.job_id===busy.job_id))return {ok:false,error:w.name+'仍在另一任务中，请先办理人员交接'};}
  p.worker_id=lead.id;p.worker_name=lead.name;p.handler_id=lead.id;p.handler_name=lead.name;
-  const blocked=await guard(p,env);if(blocked)return {ok:false,error:blocked};
+  const blocked=p.action==='v2_verify_job_start'?null:await guard(p,env);if(blocked)return {ok:false,error:blocked};
   await ensureDispatchStartGuard(env);
   if(p.action==='v2_unload_job_start')return {...await startUnloadTrip(env,{...p,plan_ids:p.plan_ids||[p.plan_id]},{workers,lead_id:lead.id,estimated_minutes:minutes,department}),lead,assigned_workers:workers};
   if(p.action==='v2_unplanned_unload_start'||p.action==='v2_outbound_load_start')return startBorrowableSimple(env,p,{workers,lead_id:lead.id,estimated_minutes:minutes,department,signature:dispatchSignature(env,p,{workers,lead_id:lead.id,estimated_minutes:minutes,department})},p.action==='v2_unplanned_unload_start'?await helpers.feedbackNumber():undefined);

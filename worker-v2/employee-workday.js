@@ -59,6 +59,7 @@ function resultFact(row){
  for(const [key,unit,label] of [['packed_box_count','箱','整任务打包'],['total_operated_box_count','箱','整任务操作'],['label_count','张','整任务贴标'],['repaired_box_count','箱','整任务修箱'],['reboxed_count','箱','整任务换箱']])quantities.push(quantity(result[key],unit,label));
  for(const output of Array.isArray(result.group_outputs)&&result.group_outputs.length?result.group_outputs:Array.isArray(result.process_results)?result.process_results:[])quantities.push(quantity(output.quantity,output.unit,'整任务分组成果'));
  if(result.quantity&&result.unit&&!quantities.some(x=>x?.unit===result.unit&&x.quantity===Number(result.quantity)))quantities.push(quantity(result.quantity,result.unit,'整任务成果'));
+ if(result.kind==='check_workbench')quantities.push(recordedQuantity(result.task_scanned_ok_count,'次','本次核对成功扫描（整任务）'));
  if(Array.isArray(result.pick_doc_nos))quantities.push(quantity(new Set(result.pick_doc_nos).size,'单','整趟拣货单'));
  return {id:row.id,at:row.created_at,scope:'whole_task',quantities:cleanQuantities(quantities),result_lines:lines,note:row.remark||result.description||result.result_note||''};
 }

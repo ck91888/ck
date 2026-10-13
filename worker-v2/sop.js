@@ -85,11 +85,11 @@ async function save(env,b,u,row,data,extra=[]) {
 function syncCheck(env,extra,row,data,u,t,b){
  const id=data.legacy_id||row.id;data.legacy_id=id;
  const total=checkSummary(data).planned;
- extra.push(stmt(env,`INSERT INTO v2_verify_batches(id,batch_no,planned_qty,status,remark,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET planned_qty=excluded.planned_qty,status=excluded.status,updated_at=excluded.updated_at`,id,'出库-'+data.ship_date,total,data.status==='closed'?'completed':'pending','按出库日期分轮核对',u.name,data.created_at,t));
+ extra.push(stmt(env,`INSERT INTO v2_verify_batches(id,batch_no,planned_qty,status,remark,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET planned_qty=excluded.planned_qty,status=CASE WHEN excluded.status='completed' THEN 'completed' WHEN EXISTS(SELECT 1 FROM v2_ops_jobs WHERE related_doc_type='verify_batch' AND related_doc_id=excluded.id AND status IN ('working','paused','awaiting_close')) THEN 'verifying' ELSE excluded.status END,updated_at=excluded.updated_at`,id,'出库-'+data.ship_date,total,data.status==='closed'?'completed':'pending','按出库日期分轮核对',u.name,data.created_at,t));
  extra.push(stmt(env,'DELETE FROM v2_verify_batch_items WHERE batch_id=?',id));
  for(const item of data.items.filter(x=>!x.removed))extra.push(stmt(env,'INSERT INTO v2_verify_batch_items(id,batch_id,barcode,planned_qty,planned_box_count,customer_name,created_at) VALUES(?,?,?,?,?,?,?)',item.id,id,item.barcode,item.qty,item.qty,item.customer,item.added_at||t));
  if(b.action==='sop_check_scan'){
-  const ex=data.exceptions.find(x=>x.at===t&&x.barcode===b.barcode);
+  const ex=data.exceptions.find(x=>x.id===b._scan_exception_id);
   extra.push(stmt(env,'INSERT INTO v2_verify_scan_logs(id,batch_id,worker_id,worker_name,pallet_no,barcode,scan_result,message,scanned_at) VALUES(?,?,?,?,?,?,?,?,?)',uid('SCAN'),id,u.id,u.name,b.pallet,b.barcode,ex?ex.type:'ok','按日期核对；当前有效数量以版本清单为准',t));
  }
 }
@@ -263,7 +263,7 @@ export async function handleSop(b,env) {
    if(b.action==='sop_check_adopt') {
     const legacy=await stmt(env,'SELECT * FROM v2_verify_batches WHERE id=?',required(b.legacy_id,'旧批次编号')).first();if(!legacy)fail('旧批次不存在');
     if(legacy.status==='cancelled')fail('已取消批次不能接入');
-    const active=await stmt(env,"SELECT id FROM v2_ops_jobs WHERE related_doc_id=? AND job_type='verify_scan' AND status IN ('pending','working','awaiting_close')",legacy.id).first();if(active)fail('旧批次尚有进行中任务，请先收尾后接入');
+    const active=await stmt(env,"SELECT id FROM v2_ops_jobs WHERE related_doc_id=? AND job_type='verify_scan' AND status IN ('pending','working','awaiting_close','paused')",legacy.id).first();if(active)fail('旧批次尚有进行中任务，请先收尾后接入');
     const taken=await stmt(env,"SELECT id FROM sop_records WHERE kind='check' AND json_extract(state,'$.legacy_id')=?",legacy.id).first();if(taken)fail('此批次已经接入，不可重复');
     const items=await all(env,'SELECT * FROM v2_verify_batch_items WHERE batch_id=?',legacy.id);
     const scans=await all(env,"SELECT barcode,COUNT(*) AS qty FROM v2_verify_scan_logs WHERE batch_id=? AND scan_result='ok' GROUP BY barcode",legacy.id);
@@ -449,9 +449,11 @@ export async function handleSop(b,env) {
     appendRelated(env,extra,key+'-target',u,target,td,b.action,t);
      syncCheck(env,extra,target,td,u,t,{action:'sop_check_move_target'});
     } else if(b.action==='sop_check_scan') {
+     b._scan_exception_id='';
+     if(u.scope==='field')fail('请从已派工的扫码核对工作台扫描 / 배정된 스캔 작업에서 진행하세요');
      permit(u,row.department,['manager','reviewer','dispatcher']);const barcode=required(b.barcode,'条码'),pallet=required(b.pallet,'托盘/散箱位置');
      const item=d.items.find(x=>x.barcode===barcode&&!x.removed);
-     if(!item||item.scanned>=item.qty)d.exceptions.push({id:uid('EX'),barcode,pallet,type:item?'overflow':'not_found',at:t,by:u.name,resolved:false});
+     if(!item||item.scanned>=item.qty){b._scan_exception_id=uid('EX');d.exceptions.push({id:b._scan_exception_id,barcode,pallet,type:item?'overflow':'not_found',at:t,by:u.name,resolved:false});}
      else {item.scanned++;item.pallets.push(pallet);item.recheck=item.scanned!==item.qty;}
     } else if(b.action==='sop_check_resolve') {
      permit(u,row.department,['manager','reviewer']);const ex=d.exceptions.find(x=>x.id===b.exception_id);if(!ex)fail('异常不存在');ex.resolved=true;ex.resolution=required(b.reason,'异常处理结果');ex.reviewed_by=u.name;ex.reviewed_at=t;
@@ -460,6 +462,8 @@ export async function handleSop(b,env) {
      d.rounds.push({slot:b.slot,at:t,by:u.name,summary:checkSummary(d),note:required(b.reason,'本轮交接说明')});
     } else if(b.action==='sop_check_close') {
      permit(u,row.department,['manager','reviewer']);const summary=checkSummary(d);if(!summary.planned||summary.pending||summary.unresolved)fail('存在待核对或未复核异常，不能关闭');
+     const active=await stmt(env,"SELECT id FROM v2_ops_jobs WHERE related_doc_type='verify_batch' AND related_doc_id=? AND status IN ('pending','working','awaiting_close','paused') LIMIT 1",d.legacy_id||row.id).first();if(active)fail('请先结束现场核对任务，再最终交接 / 현장 작업 종료 후 인계하세요');
+     extra.push(stmt(env,"UPDATE sop_records SET revision=CASE WHEN NOT EXISTS(SELECT 1 FROM v2_ops_jobs WHERE related_doc_type='verify_batch' AND related_doc_id=? AND status IN ('pending','working','awaiting_close','paused')) THEN revision ELSE NULL END WHERE id=?",d.legacy_id||row.id,row.id));
      d.handover=required(b.reason,'最终交接人及位置');d.status='closed';d.closed_at=t;
     } else fail('未知核对操作');
    }

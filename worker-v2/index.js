@@ -1,3 +1,4 @@
+import {checkWorkbenchEnabled,scanCheck,finishCheck} from './check-workbench.js';
 import {pickWorkloadContext,readPickWorkload} from './pick-workload.js';
 import {uploadIssueDraft,cancelIssueDraft,removeIssueDraftFile,createIssueWithAttachments} from './issue-create.js';
 import {uploadCargoDraft} from './cargo-create.js';
@@ -10299,6 +10300,7 @@ route("v2_verify_batch_detail", async (body, env) => {
   return json({
     ok: true,
     batch,
+    check:currentCheck,
     items,
     extra_items,
     scan_logs: enrichedLogs,
@@ -12978,6 +12980,9 @@ export default {
     if(action==='sop_native_start'){
       try{const result=await startNative(body,env,async input=>(await HANDLERS[input.action](input,env)).json(),guardLegacy,{feedbackNumber:()=>nextFeedbackDisplayNo(env,kstToday(),'XCXH'),inboundNumber:()=>nextDisplayNo(env,kstToday()),pickNumber:()=>nextPickTripNo(env),findOutbound:no=>findOutboundByWorkOrder(env,no),linkedNeeds:id=>linkedNeeds(env,id)});if(result.ok&&env.SOP_CREW_BORROW)result.has_crew_borrows=true;return json(result);}
       catch(e){return json({ok:false,error:e.message},400);}
+    }
+    if(checkWorkbenchEnabled(env)&&['v2_verify_scan_submit','v2_verify_job_finish'].includes(action)){
+      try{return json(await (action==='v2_verify_scan_submit'?scanCheck:finishCheck)(body,env));}catch(e){return json({ok:false,error:e.message},409);}
     }
     env.SOP_GROUP_FINISH = /_(finish|finalize)$/.test(action) && !body.leave_only && await nativeOwner(body,env);
     try{await validateNativeMutation(body,env);}catch(e){return json({ok:false,error:e.message},409);}
