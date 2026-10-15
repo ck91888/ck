@@ -65,3 +65,13 @@ test('bfcache suspension, remount and destroy never multiply the timer',opts,asy
  f.w.dispatchEvent(new f.w.PageTransitionEvent('pageshow',{persisted:true}));await settle();assert.equal(f.time.count,1);assert.equal(f.calls.length,count+1);
  f.controller.destroy();assert.equal(f.time.count,0);await f.time.advance(45000);f.w.dispatchEvent(new f.w.Event('focus'));await settle();assert.equal(f.calls.length,count+1);
 });
+test('identity changes clear old cards and reject a late response from the previous dispatcher',opts,async t=>{
+ const f=await fixture(t);f.w.CKSession={user:{id:'SYNTHETIC-A',scope:'field',attendance_id:'DAY-A'}};f.data=[{id:'JOB-A',name:'Synthetic owner A'}];await f.controller.refresh();assert.match(f.list.textContent,/owner A/);
+ const waiting=deferred();f.handler=()=>waiting.promise;const old=f.controller.refresh();await settle();
+ f.w.CKSession.user={id:'SYNTHETIC-B',scope:'field',attendance_id:'DAY-B'};f.w.dispatchEvent(new f.w.Event('focus'));await settle();assert.doesNotMatch(f.list.textContent,/owner A/);
+ f.handler=null;f.data=[{id:'JOB-B',name:'Synthetic owner B'}];waiting.resolve({viewer_id:'SYNTHETIC-A',items:[{id:'JOB-A',name:'Late owner A'}]});await old;await settle();assert.match(f.list.textContent,/owner B/);assert.doesNotMatch(f.list.textContent,/owner A/);
+ f.w.CKSession.user=null;f.d.documentElement.classList.add('ck-auth-pending');f.w.dispatchEvent(new f.w.Event('ck-field-session-change'));await settle();assert.equal(f.list.textContent,'');assert.equal(f.status.dataset.freshness,'loading');
+});
+test('a different server viewer cannot populate cached cards before the local identity heartbeat notices the cookie switch',opts,async t=>{
+ const f=await fixture(t);f.w.CKSession={user:{id:'SYNTHETIC-A',scope:'field',attendance_id:'DAY-A'}};f.handler=async()=>({viewer_id:'SYNTHETIC-B',items:[{id:'JOB-B',name:'Private B task'}]});assert.equal(await f.controller.refresh(),false);assert.doesNotMatch(f.list.textContent,/Private B task/);assert.equal(f.status.dataset.freshness,'failed');assert.match(f.status.textContent,/登录人员已变化/);
+});

@@ -32,7 +32,8 @@
   try{return ms?await Promise.race([run(),new Promise((_,reject)=>{timer=setTimeout(()=>{controller.abort();reject(transport('登录请求等待超时，后台结果尚未确认。请检查登录状态；无需反复提交密码。 / 로그인 대기 시간 초과·상태를 확인하세요.'));},ms);})]):await run();}finally{clearTimeout(timer);}
  }
  async function stopCamera(){if(scanner){const old=scanner;scanner=null;try{await old.stop();old.clear();}catch{}}}
- function lock(){if(locked)return;locked=true;user=null;document.documentElement.classList.add('ck-auth-pending');document.querySelectorAll('dialog[open]').forEach(d=>d.close());showGate('登录已结束，请重新扫码 / 로그인이 종료되었습니다');}
+ const fieldIdentity=value=>JSON.stringify([value?.id||'',value?.attendance_id||'',value?.badge||'']);
+ function lock(message='登录已结束，请重新扫码 / 로그인이 종료되었습니다'){if(locked)return;locked=true;user=null;document.documentElement.classList.add('ck-auth-pending');document.querySelectorAll('dialog[open]').forEach(d=>d.close());if(scope==='field')window.dispatchEvent(new Event('ck-field-session-change'));showGate(message);}
  window.CKSession={ready,limits:authLimits,get user(){return user;},scope,request,changeOperator:()=>operatorForm(user,true),async logout(){window.CKPlanSave?.clear();await request('sop_logout');sessionStorage.removeItem('ck_operation_context');sessionStorage.removeItem('ck_operation_reconfirm');sessionStorage.removeItem('ck_test_active_lead');location.reload();}};
  function showGate(message=''){
   gate?.remove();gate=document.createElement('section');gate.id='ck-auth-gate';gate.className='ck-access-gate';
@@ -67,7 +68,7 @@
   const banner=document.createElement('div');banner.className='ck-stage-banner';banner.innerHTML='<b>CK · 测试环境 / 테스트</b><span>'+(scope==='field'?'现场执行专用 / 현장 전용':scope==='kiosk'?'上下班签到点 / 출퇴근 등록':'办公室管理 / 사무실 관리')+'</span>';document.body.prepend(banner);
   showGate();const probe=authAttempt;try{const identity=await request('sop_identity');if(probe===authAttempt)await accept(identity);}catch(e){if(probe===authAttempt&&!e.unauthorized){const message=gate?.querySelector('[role=alert]');if(message)message.textContent=e.message;const check=gate?.querySelector('[data-login-check]');if(check)check.hidden=false;}}
   let checking=false;
-  const check=async()=>{if(!completed||locked||document.hidden||checking)return;checking=true;try{const r=await request('sop_identity');if(scope==='office'&&r.user.operation_context?.id!==operationId)operationLock(r.user);if(scope==='field'){user=r.user;dailyStatus();}}catch(e){if(e.unauthorized)lock();}finally{checking=false;}};
+  const check=async()=>{if(!completed||locked||document.hidden||checking)return;checking=true;try{const r=await request('sop_identity');if(scope==='office'&&r.user.operation_context?.id!==operationId)operationLock(r.user);if(scope==='field'){if(user&&fieldIdentity(user)!==fieldIdentity(r.user)){lock('登录人员已变化，请重新扫码确认身份 / 로그인 사용자가 변경되었습니다. 명찰을 다시 스캔하세요.');return;}user=r.user;dailyStatus();}}catch(e){if(e.unauthorized)lock();}finally{checking=false;}};
   setInterval(check,15000);window.addEventListener('focus',check);document.addEventListener('visibilitychange',check);
   if(scope==='field'){
    const clean=()=>document.querySelectorAll('a[href]').forEach(a=>{const u=new URL(a.href,location.href);if(u.origin!==location.origin||!u.pathname.startsWith('/001/')){const span=document.createElement('span');span.textContent=a.textContent;span.className=a.className;a.replaceWith(span);}});

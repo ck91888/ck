@@ -226,7 +226,8 @@ export async function handleSop(b,env) {
    const offset=Math.max(0,Number(b.offset)||0),limit=50;
    const dep=u.role==='manager'?'':` AND department IN (${(u.departments||[]).map(()=>'?').join(',')||"''"})`;
    const args=u.role==='manager'?[]:u.departments||[];
-   const rows=await all(env,`SELECT * FROM sop_records WHERE kind=?${dep} ORDER BY updated_at DESC LIMIT ? OFFSET ?`,b.kind,...args,limit+1,offset);
+   const mine=b.view==='mine'&&b.kind==='task',owned=mine?" AND json_extract(state,'$.owner_id')=?":'';
+   const rows=await all(env,`SELECT * FROM sop_records WHERE kind=?${dep}${owned} ORDER BY updated_at DESC LIMIT ? OFFSET ?`,b.kind,...args,...(mine?[u.id]:[]),limit+1,offset);
    return {ok:true,items:await recordNumbers(env,rows.slice(0,limit).map(r=>publicState({...r,data:JSON.parse(r.state)}))),more:rows.length>limit,offset};
   }
   if(b.action==='sop_source_detail') {
@@ -257,6 +258,7 @@ export async function handleSop(b,env) {
   }
   if(b.action==='sop_dispatch_list'){
    if(!['manager','dispatcher'].includes(u.role))fail('仅派审员可查看现场派工');
+   const mine=b.view==='mine',owned=mine?" AND json_extract(s.state,'$.owner_id')=?":'';
    const access=dispatchAccess(u),rest=restingDispatchAccess(u),externalCode=text(b.external_code);
    let claimDepartments=u.scope==='field'&&u.role==='dispatcher'&&u.attendance_id?(u.daily_dispatch?u.can_dispatch?u.dispatch_departments||[]:[]:u.departments||[]):[];
    if(claimDepartments.length){await ensureDailyDispatch(env);if(!await stmt(env,"SELECT 1 FROM ck_attendance_days d WHERE d.id=? AND d.day=date(?,'+9 hours') AND d.signed_out='' AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at='')",u.attendance_id,now()).first())claimDepartments=[];}
@@ -281,9 +283,9 @@ export async function handleSop(b,env) {
     LEFT JOIN v2_field_feedbacks fb ON j.related_doc_type='field_feedback' AND fb.id=j.related_doc_id
      WHERE j.status NOT IN ('completed','cancelled')
      AND ((s.kind='dispatch' AND (${access.sql} OR ${rest.sql})) OR ${claimSql} OR (s.kind='task' AND s.department='bulk' AND (?='manager' OR s.department IN (SELECT value FROM json_each(?)))) OR (s.id IS NULL AND j.job_type='load_outbound' AND j.related_doc_type='outbound_order' AND (?='manager' OR j.biz_class IN (SELECT value FROM json_each(?)))))
-    AND (?='' OR (s.kind='dispatch' AND j.job_type='bulk_op' AND (j.id=? OR j.related_doc_id=? OR j.display_no=? OR ob.display_no=? OR ob.wms_work_order_no=?)))
-     ORDER BY j.updated_at DESC LIMIT 200`,...access.args,...rest.args,...(claimDepartments.length?[JSON.stringify(claimDepartments),u.id]:[]),u.role,JSON.stringify(u.departments||[]),u.role,JSON.stringify(u.departments||[]),...Array(6).fill(externalCode));
-   return {ok:true,items:await Promise.all((await jobNumbers(env,rows)).map(async r=>{
+    ${owned} AND (?='' OR (s.kind='dispatch' AND j.job_type='bulk_op' AND (j.id=? OR j.related_doc_id=? OR j.display_no=? OR ob.display_no=? OR ob.wms_work_order_no=?)))
+     ORDER BY j.updated_at DESC LIMIT 200`,...access.args,...rest.args,...(claimDepartments.length?[JSON.stringify(claimDepartments),u.id]:[]),u.role,JSON.stringify(u.departments||[]),u.role,JSON.stringify(u.departments||[]),...(mine?[u.id]:[]),...Array(6).fill(externalCode));
+   return {ok:true,...(mine?{view:'mine',viewer_id:u.id}:{}),items:await Promise.all((await jobNumbers(env,rows)).map(async r=>{
     const d=JSON.parse(r.state),plans=JSON.parse(r.unload_plans||'[]'),loads=JSON.parse(r.load_orders||'[]'),picks=JSON.parse(r.pick_numbers||'[]');
     const customer=[...new Set(loads.length?loads.map(o=>o.customer).filter(Boolean):plans.length?plans.map(p=>p.customer).filter(Boolean):[r.customer||r.inbound_customer||r.outbound_customer].filter(Boolean))].join('、');
     const canClaim=(r.task_kind==='dispatch'||!!d.bulk_batch_id)&&claimDepartments.includes(r.dispatch_department)&&await canClaimOwner(env,u,{department:r.dispatch_department,data:d});

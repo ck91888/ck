@@ -4,8 +4,11 @@ window.CKDispatchHome=function(root,{page,read,render}){
  root.__ckDispatchHome?.destroy();
  const list=root.querySelector('[data-dispatch-tasks]'),status=root.querySelector('[data-dispatch-freshness]'),button=root.querySelector('[data-dispatch-refresh]');
  let disposed=false,suspended=false,active=false,generation=0,pending=null,due=false,timer=null,lastRead=0,failure='',focusRefresh=false;
+ const identityKey=()=>{const u=window.CKSession?.user;return u?JSON.stringify([u.scope||'',u.id,u.attendance_id||'',u.badge||'']):'';};
+ let identity=identityKey();
+ function syncIdentity(){const next=identityKey();if(next===identity)return;identity=next;generation++;lastRead=0;failure='';due=true;list.replaceChildren();delete list.dataset.snapshot;}
  const alive=()=>!disposed&&root.isConnected&&root.__ckDispatchHome===controller;
- const visible=()=>alive()&&!suspended&&!document.hidden&&page.classList.contains('active')&&!page.hidden&&page.style.display!=='none';
+ const visible=()=>alive()&&!suspended&&!document.hidden&&!document.documentElement.classList.contains('ck-auth-pending')&&page.classList.contains('active')&&!page.hidden&&page.style.display!=='none';
  const paused=()=>!!document.querySelector('dialog[open]');
  const usable=()=>active&&visible()&&!paused();
  function paint(){
@@ -33,14 +36,16 @@ window.CKDispatchHome=function(root,{page,read,render}){
  }
  async function refresh(){
   if(!alive())return false;
+  syncIdentity();
   if(!usable()){due=true;paint();return false;}
   if(pending)return pending;
   const token=generation;due=false;
   const operation=(async()=>{
    try{
-    const result=await read();
+    const result=await read();syncIdentity();
     if(token!==generation||!usable()){due=true;return false;}
     if(!result||!Array.isArray(result.items))throw Error('任务列表读取失败 / 작업 목록을 확인하세요');
+    if(Object.hasOwn(result,'viewer_id')&&result.viewer_id!==window.CKSession?.user?.id){draw([]);lastRead=0;throw Error('登录人员已变化，请重新扫码确认身份 / 로그인 사용자가 변경되었습니다.');}
     draw(result.items);lastRead=Date.now();failure='';return true;
    }catch(error){if(token===generation&&usable())failure=error.message||'网络连接失败 / 네트워크 오류';return false;}
   })();
@@ -52,19 +57,20 @@ window.CKDispatchHome=function(root,{page,read,render}){
  function enter(){if(!alive())return Promise.resolve(false);active=true;generation++;due=true;return refresh();}
  function check(force=false){
   if(!alive()){controller.destroy();return;}
+  syncIdentity();
   if(!visible()){if(active)leave();return;}
   if(!active){void enter();return;}
   paint();if(paused()){due=true;return;}if(!pending&&(force||due)){due=false;void refresh();}
  }
- const returned=()=>check(true),hidden=()=>{if(document.hidden)leave();else check(true);};
+ const returned=()=>check(true),hidden=()=>{if(document.hidden)leave();else check(true);},sessionChanged=()=>{syncIdentity();paint();};
  const pagehide=()=>{suspended=true;leave();clearInterval(timer);timer=null;};
  const pageshow=()=>{suspended=false;if(!timer)timer=setInterval(()=>check(true),15000);check(true);};
  const observer=new MutationObserver(()=>check());
- const controller={enter,leave,refresh,destroy(){if(disposed)return;disposed=true;generation++;clearInterval(timer);observer.disconnect();window.removeEventListener('focus',returned);document.removeEventListener('visibilitychange',hidden);window.removeEventListener('pagehide',pagehide);window.removeEventListener('pageshow',pageshow);button.onclick=null;}};
+ const controller={enter,leave,refresh,destroy(){if(disposed)return;disposed=true;generation++;clearInterval(timer);observer.disconnect();window.removeEventListener('focus',returned);document.removeEventListener('visibilitychange',hidden);window.removeEventListener('pagehide',pagehide);window.removeEventListener('pageshow',pageshow);window.removeEventListener('ck-field-session-change',sessionChanged);button.onclick=null;}};
  root.__ckDispatchHome=controller;button.onclick=()=>refresh();
  observer.observe(page,{attributes:true,attributeFilter:['class','hidden','style']});
  observer.observe(document.body,{subtree:true,childList:true,attributes:true,attributeFilter:['open']});
- window.addEventListener('focus',returned);document.addEventListener('visibilitychange',hidden);window.addEventListener('pagehide',pagehide);window.addEventListener('pageshow',pageshow);
+ window.addEventListener('focus',returned);document.addEventListener('visibilitychange',hidden);window.addEventListener('pagehide',pagehide);window.addEventListener('pageshow',pageshow);window.addEventListener('ck-field-session-change',sessionChanged);
  timer=setInterval(()=>check(true),15000);paint();return controller;
 };
 })();
