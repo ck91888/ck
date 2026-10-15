@@ -6,19 +6,40 @@ import {chainNeed,chainEvent,workMaterials,workChainEnabled} from './work-chain.
 const q=(env,sql,...args)=>env.DB.prepare(sql).bind(...args);
 const text=v=>String(v??'').trim();
 const positive=v=>{const n=Number(v);if(!Number.isSafeInteger(n)||n<1)throw Error('请明确填写正整数箱数 / 박스 수량을 입력하세요');return n;};
+const markEndpoint=value=>text(value).match(/^([\p{L}\p{N}_.:-]*?)(\d+)$/u);
+function markRange(token){
+ const explicit=token.split(/\s*[~～–—]\s*/);
+ if(explicit.length>1){
+  if(explicit.length!==2)throw Error('箱唛范围存在歧义，请用一个 ~ 分隔完整起止箱唛：'+token);
+  const a=markEndpoint(explicit[0]),b=markEndpoint(explicit[1]);
+  if(!a||!b||b[1]&&b[1]!==a[1])throw Error('范围两端须为相同前缀和数字，请核对完整起止箱唛：'+token);
+  return [a,b];
+ }
+ // A dash can belong to the mark itself. Only numeric endpoint pairs with
+ // matching prefixes (or an explicitly shortened final number) form a range.
+ const candidates=[];let numericPairs=0;
+ for(let i=0;i<token.length;i++)if(token[i]==='-'){
+  const a=markEndpoint(token.slice(0,i)),b=markEndpoint(token.slice(i+1));
+  if(!a||!b)continue;numericPairs++;
+  if(!b[1]||b[1]===a[1])candidates.push([a,b]);
+ }
+ if(candidates.length>1)throw Error('箱唛范围存在歧义，请用 ~ 分隔完整起止箱唛：'+token);
+ if(!candidates.length&&numericPairs)throw Error('范围前缀须一致；含连字符时请用 ~ 分隔完整起止箱唛：'+token);
+ return candidates[0]||null;
+}
 // Expand only bounded, explicit numeric ranges. Never infer grouping from notes or filenames.
 export function expandMarks(value){
  const input=text(value);if(!input||input.length>20000)throw Error('请填写有效箱唛范围 / 박스 표시 범위를 입력하세요');
  const result=[],seen=new Set();let previousPrefix='';
  for(const token of input.split(/[，,;；\n]+/).map(text).filter(Boolean)){
-  const range=token.match(/^([^\s~～–—]+?)\s*[~～–—-]\s*([^\s~～–—]+)$/);
+  const range=markRange(token);
   let marks;
   if(range){
-   const a=range[1].match(/^(.*?)(\d+)$/),b=range[2].match(/^(.*?)(\d+)$/);
-   if(!a||!b||b[1]&&b[1]!==a[1]||a[2].length!==b[2].length)throw Error('范围前缀和数字位数须一致：'+token);
+   const [a,b]=range,padded=/^0\d/.test(a[2])||/^0\d/.test(b[2]);
+   if(padded&&a[2].length!==b[2].length)throw Error('范围含前导零，起止数字位数须一致；请保留相同补零格式，例如 LU-01~LU-55：'+token);
    const start=Number(a[2]),end=Number(b[2]);if(!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||end<start||end-start>50000)throw Error('范围无效或过大：'+token);
    const prefix=a[1]||previousPrefix;previousPrefix=prefix;
-   marks=Array.from({length:end-start+1},(_,i)=>prefix+String(start+i).padStart(a[2].length,'0'));
+   marks=Array.from({length:end-start+1},(_,i)=>prefix+String(start+i).padStart(padded?a[2].length:0,'0'));
   }else{if(!/^[\p{L}\p{N}_.:-]+$/u.test(token))throw Error('箱唛格式无效：'+token);const m=token.match(/^(.*?)(\d+)$/);const mark=m&&!m[1]&&previousPrefix?previousPrefix+token:token;if(m?.[1])previousPrefix=m[1];marks=[mark];}
   for(const mark of marks){if(seen.has(mark))throw Error('同组箱唛重复：'+mark);seen.add(mark);result.push(mark);if(result.length>50000)throw Error('每次最多 50000 个箱唛');}
  }
