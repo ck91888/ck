@@ -13002,7 +13002,7 @@ export default {
     if(action==='sop_native_resume'){try{return json(await nativePeople(body,env,{resume:true}));}catch(e){return json({ok:false,error:e.message},409);}}
     if(action==='sop_native_people'){try{const allowed=await canCrewDestination(env,body),result=await nativePeople(body,env);if(allowed){try{result.crew_returns=await reconcileCrewReturns(env,body.job_id);}catch{result.crew_return_error='人员已调整，归还暂未完成，请重试归还';}}return json(result);}catch(e){return json({ok:false,error:e.message},409);}}
     if(action==='sop_native_start'){
-      try{const result=await startNative(body,env,async input=>(await HANDLERS[input.action](input,env)).json(),guardLegacy,{feedbackNumber:()=>nextFeedbackDisplayNo(env,kstToday(),'XCXH'),inboundNumber:()=>nextDisplayNo(env,kstToday()),pickNumber:()=>nextPickTripNo(env),findOutbound:no=>findOutboundByWorkOrder(env,no),linkedNeeds:id=>linkedNeeds(env,id)});if(result.ok&&env.SOP_CREW_BORROW)result.has_crew_borrows=true;return json(result);}
+      try{const result=await startNative(body,env,async input=>(await HANDLERS[input.action](input,env)).json(),guardLegacy,{feedbackNumber:()=>nextFeedbackDisplayNo(env,kstToday(),'XCXH'),inboundNumber:()=>nextDisplayNo(env,kstToday()),pickNumber:()=>nextPickTripNo(env),findOutbound:no=>findOutboundByWorkOrder(env,no),linkedNeeds:id=>linkedNeeds(env,id)});if(result.ok&&env.SOP_CREW_BORROW)result.has_crew_borrows=true;if(result.ok&&env.SOP_COMPLETED_CLOCK_REPAIRS?.length)result.completed_clock_repair_count=env.SOP_COMPLETED_CLOCK_REPAIRS.length;return json(result);}
       catch(e){return json({ok:false,error:e.message},400);}
     }
     if(checkWorkbenchEnabled(env)&&['v2_verify_scan_submit','v2_verify_job_finish'].includes(action)){
