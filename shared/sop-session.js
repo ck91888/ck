@@ -4,36 +4,48 @@
  document.documentElement.classList.add('ck-auth-pending');
  const scope=location.pathname.startsWith('/001/')?'field':location.pathname.startsWith('/attendance/')?'kiosk':'office';
  const endpoint=window.SOP_API||'/api';let user=null,resolveReady,gate,scanner,locked=false,completed=false,operationId='';
- const ready=new Promise(r=>resolveReady=r);
+ // A slow body can still finish successfully; show progress before the hard deadline.
+ const ready=new Promise(r=>resolveReady=r),authLimits={loginMs:60000,identityMs:60000,operatorMs:60000,logoutMs:60000,slowMs:8000};let authAttempt=0;
  const rawFetch=window.fetch.bind(window);
  // Share only identical in-flight reads. No response cache, mutation retry, or cross-login data.
  const reads=new Set('sop_bulk_batch_get sop_bulk_batch_candidates sop_identity sop_get sop_list sop_need_groups sop_linked sop_updates sop_work_materials sop_batch_work_materials sop_work_need_search sop_dispatch_list v2_inbound_plan_detail v2_outbound_order_detail v2_ops_job_detail v2_attachment_list sop_attendance_summary'.split(' '));
  const inFlight=new Map();let generation=0;
  window.fetch=async function(input,init){
   const url=new URL(typeof input==='string'?input:input.url,location.href),local=url.origin===location.origin&&url.pathname===new URL(endpoint,location.href).pathname;
-  let key='',body;
+  let key='',body;const authEpoch=authAttempt;
   if(local){const headers=new Headers(init?.headers||(typeof input==='object'?input.headers:undefined));if(scope==='office'&&operationId)headers.set('X-CK-Operation-Context',operationId);init={...init,headers};try{body=JSON.parse(init?.body);}catch{}if(reads.has(body?.action)&&!init?.signal)key=generation+':'+JSON.stringify(body);else{generation++;inFlight.clear();}}
   let pending=key&&inFlight.get(key);
   if(!pending){pending=rawFetch(input,init);if(key){inFlight.set(key,pending);pending.finally(()=>{if(inFlight.get(key)===pending)inFlight.delete(key);}).catch(()=>{});}}
   const original=await pending,r=key?original.clone():original;
-  if(completed&&r.status===401&&local)lock();
-  if(local&&scope==='office'&&r.status===409){const out=await r.clone().json().catch(()=>({}));if(out.operator_context_changed)operationLock();}
+  if(completed&&r.status===401&&local&&authEpoch===authAttempt)lock();
+  if(local&&scope==='office'&&r.status===409&&authEpoch===authAttempt){const out=await r.clone().json().catch(()=>({}));if(out.operator_context_changed)operationLock();}
   return r;
  };
 
  async function request(action,data={}){
-  const r=await fetch(endpoint,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({...data,action})});
-  const out=await r.json();if(!r.ok||!out.ok){const error=Error(out.error||out.message||'请求失败');error.businessError=true;error.unauthorized=r.status===401;error.operatorContextChanged=!!out.operator_context_changed;throw error;}if(out.has_crew_borrows||out.crew_returns||out.crew_return_error)window.dispatchEvent(new CustomEvent('ck-crew-returns',{detail:{job_id:data.job_id,...out}}));return out;
+  const ms=({sop_login:authLimits.loginMs,sop_identity:authLimits.identityMs,sop_operator_confirm:authLimits.operatorMs,sop_logout:authLimits.logoutMs})[action],controller=ms?new AbortController():null;let timer;
+  const transport=(message)=>{const error=Error(message);error.transportError=true;return error;};
+  const run=async()=>{let r;try{r=await fetch(endpoint,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({...data,action}),...(controller?{signal:controller.signal}:{})});}catch(x){if(!ms)throw x;throw transport('登录连接未收到完整响应，请检查登录状态或重试。 / 로그인 연결 응답을 받지 못했습니다.');}
+   let out;try{out=await r.json();}catch(x){if(!ms)throw x;throw transport('登录服务响应未完整收到'+(r.status?'（HTTP '+r.status+'）':'')+'，请检查登录状态。 / 로그인 응답이 완전하지 않습니다.');}
+   if(!r.ok||!out.ok){const error=Error(out.error||out.message||'请求失败');error.businessError=!ms||r.status<500;error.unauthorized=r.status===401;error.operatorContextChanged=!!out.operator_context_changed;if(ms&&r.status>=500){error.message='登录服务暂未正常响应（HTTP '+r.status+'），请稍后检查登录状态或重试。 / 로그인 서비스 응답 지연';error.transportError=true;}throw error;}if(out.has_crew_borrows||out.crew_returns||out.crew_return_error)window.dispatchEvent(new CustomEvent('ck-crew-returns',{detail:{job_id:data.job_id,...out}}));return out;
+  };
+  try{return ms?await Promise.race([run(),new Promise((_,reject)=>{timer=setTimeout(()=>{controller.abort();reject(transport('登录请求等待超时，后台结果尚未确认。请检查登录状态；无需反复提交密码。 / 로그인 대기 시간 초과·상태를 확인하세요.'));},ms);})]):await run();}finally{clearTimeout(timer);}
  }
  async function stopCamera(){if(scanner){const old=scanner;scanner=null;try{await old.stop();old.clear();}catch{}}}
  function lock(){if(locked)return;locked=true;user=null;document.documentElement.classList.add('ck-auth-pending');document.querySelectorAll('dialog[open]').forEach(d=>d.close());showGate('登录已结束，请重新扫码 / 로그인이 종료되었습니다');}
- window.CKSession={ready,get user(){return user;},scope,request,changeOperator:()=>operatorForm(user,true),async logout(){window.CKPlanSave?.clear();await request('sop_logout');sessionStorage.removeItem('ck_operation_context');sessionStorage.removeItem('ck_operation_reconfirm');sessionStorage.removeItem('ck_test_active_lead');location.reload();}};
+ window.CKSession={ready,limits:authLimits,get user(){return user;},scope,request,changeOperator:()=>operatorForm(user,true),async logout(){window.CKPlanSave?.clear();await request('sop_logout');sessionStorage.removeItem('ck_operation_context');sessionStorage.removeItem('ck_operation_reconfirm');sessionStorage.removeItem('ck_test_active_lead');location.reload();}};
  function showGate(message=''){
   gate?.remove();gate=document.createElement('section');gate.id='ck-auth-gate';gate.className='ck-access-gate';
   const field=scope==='field',kiosk=scope==='kiosk';
   gate.innerHTML='<form><div class="ck-login-mark" aria-hidden="true">CK</div><h1>'+(field?'现场执行':kiosk?'签到点启用':'办公室登录')+'</h1><p class="ck-login-ko">'+(field?'현장 실행 로그인':kiosk?'출퇴근 등록 단말 활성화':'사무실 로그인')+'</p><p class="ck-login-hint">'+(field?'先完成当天签到，再扫描已授权工牌。<br>당일 출근 후 권한이 있는 명찰을 스캔하세요.':kiosk?'由管理员在这台签到电脑上启用一次。管理员密码为5至128个字符。<br>관리자가 이 단말을 활성화해 주세요. 비밀번호는 5–128자입니다.':'使用管理员密码进入协同中心、耗材和看板。密码为5至128个字符；尚未配置密码时可使用原授权码。<br>관리자 비밀번호로 로그인하세요. 비밀번호는 5–128자입니다. 설정 전에는 기존 인증 코드를 사용할 수 있습니다.')+'</p><label for="ck-login-code">'+(field?'已授权工牌 / 승인 명찰':'管理员密码 / 관리자 비밀번호')+'</label><input id="ck-login-code" name="code" type="'+(field?'text':'password')+'" autocomplete="off" spellcheck="false" maxlength="256" required placeholder="'+(field?'扫描工牌 / 명찰 스캔':'输入管理员密码 / 비밀번호 입력')+'"><button type="submit" class="ck-login-submit">'+(field?'进入现场系统 / 로그인':kiosk?'启用签到点 / 활성화':'登录 / 로그인')+'</button>'+(field?'<button type="button" class="ck-camera-button">相机扫工牌 / 카메라 스캔</button><div id="ck-login-reader"></div><p class="ck-login-foot">日当需管理员授权长期档案；临时牌须先明确关联本人档案。<br>일용직은 고정 기록 권한이 필요하며 임시 명찰은 본인 기록에 연결해야 합니다.</p>':'')+'<p role="alert" aria-live="polite"></p></form>';
   document.body.append(gate);const form=gate.querySelector('form'),input=form.elements.code,messageEl=gate.querySelector('[role=alert]');messageEl.textContent=message;
-  form.onsubmit=async e=>{e.preventDefault();const button=form.querySelector('[type=submit]');if(button.disabled)return;button.disabled=true;messageEl.textContent='正在核验 / 확인 중';try{const r=await request('sop_login',field?{badge:input.value}:{sop_key:input.value});input.value='';await stopCamera();if(completed){sessionStorage.removeItem('ck_operation_context');sessionStorage.setItem('ck_operation_reconfirm','1');location.reload();return;}await accept(r);}catch(x){messageEl.textContent=x.message;input.select();}finally{button.disabled=false;}};
+  const check=scope==='office'?document.createElement('button'):null;if(check){check.type='button';check.dataset.loginCheck='';check.className='light';check.textContent='检查是否已登录 / 로그인 상태 확인';check.hidden=true;messageEl.before(check);}
+  const waiting=(text,ms)=>{const start=Date.now(),render=()=>{const elapsed=Date.now()-start;messageEl.textContent=(elapsed>=authLimits.slowMs?'连接较慢，正在等待完整响应 / 연결이 느립니다. 응답을 기다리는 중':text)+' · '+Math.floor(elapsed/1000)+'秒 / 초（最长 '+Math.ceil(ms/1000)+'秒）';};render();return setInterval(render,1000);};
+  form.onsubmit=async e=>{e.preventDefault();const button=form.querySelector('[type=submit]');if(button.disabled)return;const attempt=++authAttempt;button.disabled=true;if(check)check.disabled=true;let heartbeat=waiting('正在核验 / 확인 중',authLimits.loginMs);
+   try{const r=await request('sop_login',field?{badge:input.value}:{sop_key:input.value});if(attempt!==authAttempt)return;input.value='';clearInterval(heartbeat);heartbeat=waiting('核验已返回，正在读取登录状态 / 로그인 상태 확인 중',authLimits.identityMs);await stopCamera();if(completed){sessionStorage.removeItem('ck_operation_context');sessionStorage.setItem('ck_operation_reconfirm','1');location.reload();return;}await accept(r);if(check)check.hidden=true;
+   }catch(x){if(attempt!==authAttempt)return;messageEl.textContent=x.message;if(check)check.hidden=!x.transportError;if(input.value)input.select();}finally{clearInterval(heartbeat);button.disabled=false;if(check)check.disabled=false;}
+  };
+  if(check)check.onclick=async()=>{if(check.disabled)return;const attempt=++authAttempt,button=form.querySelector('[type=submit]');check.disabled=true;button.disabled=true;const heartbeat=waiting('正在检查当前登录状态 / 로그인 상태 확인 중',authLimits.identityMs);try{const r=await request('sop_identity');if(attempt!==authAttempt)return;input.value='';await accept(r);check.hidden=true;}catch(x){if(attempt!==authAttempt)return;messageEl.textContent=x.unauthorized?'当前未检测到有效登录，可重试原密码；这不是密码校验结果。 / 로그인되지 않았습니다. 다시 시도하세요.':x.message;check.hidden=false;}finally{clearInterval(heartbeat);check.disabled=false;button.disabled=false;}};
   const camera=gate.querySelector('.ck-camera-button');if(camera)camera.onclick=async()=>{camera.disabled=true;try{if(!window.Html5Qrcode)throw Error('相机未就绪，可使用扫码枪 / 스캐너를 사용하세요');scanner=new Html5Qrcode('ck-login-reader');await scanner.start({facingMode:'environment'},{fps:10,qrbox:{width:220,height:220}},async code=>{input.value=code;await stopCamera();form.requestSubmit();});}catch(x){messageEl.textContent='相机无法打开，请使用扫码枪 / 카메라를 열 수 없습니다';camera.disabled=false;}};
   input.focus();
  }
@@ -53,7 +65,7 @@
  function complete(r){user=r.user;locked=false;completed=true;gate?.remove();document.documentElement.classList.remove('ck-auth-pending');const banner=document.querySelector('.ck-stage-banner');const label=document.createElement('span');label.dataset.sessionName='true';label.textContent=scope==='kiosk'?'签到点已启用 / 등록 단말 활성화':user.name;banner.append(label);const out=document.createElement('button');out.type='button';out.textContent=scope==='field'?'退出 / 切换人员 · 로그아웃':scope==='kiosk'?'停用本机 / 단말 로그아웃':'退出';out.onclick=()=>CKSession.logout().catch(e=>alert(e.message));banner.append(out);dailyStatus();resolveReady(user);}
  document.addEventListener('DOMContentLoaded',async()=>{
   const banner=document.createElement('div');banner.className='ck-stage-banner';banner.innerHTML='<b>CK · 测试环境 / 테스트</b><span>'+(scope==='field'?'现场执行专用 / 현장 전용':scope==='kiosk'?'上下班签到点 / 출퇴근 등록':'办公室管理 / 사무실 관리')+'</span>';document.body.prepend(banner);
-  showGate();try{await accept(await request('sop_identity'));}catch(e){if(!e.unauthorized)gate.querySelector('[role=alert]').textContent=e.message;}
+  showGate();const probe=authAttempt;try{const identity=await request('sop_identity');if(probe===authAttempt)await accept(identity);}catch(e){if(probe===authAttempt&&!e.unauthorized){const message=gate?.querySelector('[role=alert]');if(message)message.textContent=e.message;const check=gate?.querySelector('[data-login-check]');if(check)check.hidden=false;}}
   let checking=false;
   const check=async()=>{if(!completed||locked||document.hidden||checking)return;checking=true;try{const r=await request('sop_identity');if(scope==='office'&&r.user.operation_context?.id!==operationId)operationLock(r.user);if(scope==='field'){user=r.user;dailyStatus();}}catch(e){if(e.unauthorized)lock();}finally{checking=false;}};
   setInterval(check,15000);window.addEventListener('focus',check);document.addEventListener('visibilitychange',check);
