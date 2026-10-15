@@ -1,4 +1,5 @@
 import {checkScanEvidence,checkScanLogs} from './check-evidence.js';
+import {needCreateReceiptMeta,needCreateReplay,needCreateStatus} from './need-create-receipt.js';
 import {workNeedPrintFacts,workNeedPrintSummary,recordWorkNeedPrint} from './work-need-print.js';
 import {workPlanListEnabled,workPlanFacts,filterWorkPlans} from './work-plan-list.js';
 import {canonicalDailyBadge,sameWorkerBadge} from '../shared/badge-identity.js';
@@ -78,11 +79,11 @@ async function save(env,b,u,row,data,extra=[]) {
  const request=required(b.client_req_id,'请求编号');
  const t=now(), revision=(row?.revision||0)+1;
  const id=row.id, kind=row.kind, department=row.department;
- const result={ok:true,id,revision};
+ const result={ok:true,id,revision},eventResult={...result,...await needCreateReceiptMeta(b,env,u)};
  if(row.kind==='check')syncCheck(env,extra,row,data,u,t,b);
  const before=JSON.stringify(row.data||{}),after=JSON.stringify(data);
  const statements=[
-  stmt(env,`INSERT INTO sop_events VALUES(?,?,?,?,?,?,?,?,?,?)`,request,id,revision-1,b.action,u.id,u.name,before,after,JSON.stringify(result),t),
+  stmt(env,`INSERT INTO sop_events VALUES(?,?,?,?,?,?,?,?,?,?)`,request,id,revision-1,b.action,u.id,u.name,before,after,JSON.stringify(eventResult),t),
   stmt(env,`INSERT INTO sop_records VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,state=excluded.state,updated_at=excluded.updated_at`,id,kind,revision,department,after,t),...extra
  ];
  await env.DB.batch(statements);
@@ -180,6 +181,7 @@ export async function handleSop(b,env) {
  const auth=env.SOP_REQUEST_USER ? {ok:true,user:env.SOP_REQUEST_USER} : authorization(b,env); if(!auth.ok) return auth;
  const u=auth.user;
  try {
+  const receipt=await needCreateStatus(b,env,u)||await needCreateReplay(b,env,u);if(receipt)return receipt;
   await ensureDocumentNumbers(env);
   if(b.action==='sop_verify_active')return await verifyActive(env,u,b);
   if(b.action==='sop_verify_takeover')return await verifyTakeover(env,u,b);
@@ -659,7 +661,7 @@ export async function handleSop(b,env) {
   return await save(env,b,u,row,d,extra);
  }catch(e){
   // A lost response retried with the same request id never applies the mutation twice.
-  if(b.client_req_id){const cached=await stmt(env,'SELECT actor_id,action,result_json FROM sop_events WHERE request_id=?',b.client_req_id).first();if(cached&&cached.actor_id===u.id&&cached.action===b.action)return JSON.parse(cached.result_json);}
+  if(b.client_req_id){const cached=await stmt(env,'SELECT actor_id,action,result_json FROM sop_events WHERE request_id=?',b.client_req_id).first();if(cached&&cached.actor_id===u.id&&cached.action===b.action){const saved=JSON.parse(cached.result_json);if(b.action==='sop_need_create'&&saved._create_signature){try{return await needCreateReplay(b,env,u);}catch(error){return {ok:false,error:error.message};}}return saved;}}
   return {ok:false,error:/revision_conflict/.test(e.message)?'记录已更新，请刷新后再操作':e.message};
  }
 }

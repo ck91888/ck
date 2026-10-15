@@ -163,12 +163,12 @@ test('work completion-date editor, detail and print share the Korean day while h
   let printed='';p.w.open=()=>({document:{write(h){printed=h;},close(){}},focus(){},print(){}});await p.w.CKNeedPrint({id:created.id});assert.match(printed,/要求完成日期：2026-10-05/);assert.ok(!printed.includes('15:00:01'));assert.deepEqual(p.errors,[]);
  }finally{p.w.close();}
 });
-test('inventory-plan editor keeps unbooked work independent, defers crew assignment and clears cancelled drafts',opts,async()=>{
+test('inventory-plan editor keeps unbooked work independent, defers crew assignment and explicitly discards unwanted drafts',opts,async()=>{
  const f=await fixture();f.env.SOP_WORK_CHAIN_ENABLED='true';const p=await f.page('/002/?tab=need');
  try{await until(()=>p.d.querySelector('.ck-needs-tools'),p.errors);p.d.querySelector('.ck-needs-tools button:nth-child(2)').click();await until(()=>p.d.querySelector('dialog[open] [name=title]'),p.errors);const editor=p.d.querySelector('#editor');
   assert.equal(editor.querySelector('[name=owner],[name=status],[name=source_id],[name=reason]'),null);assert.equal(editor.elements.source_type.value,'inventory');assert.equal(editor.elements.supply_chain_no.required,true);assert.equal(editor.elements.planned_unit.value,'');assert.equal(editor.elements.planned_quantity.required,false);
   editor.elements.operation_kind.value='direct_forward';editor.elements.operation_kind.dispatchEvent(new p.w.Event('change',{bubbles:true}));assert.equal(editor.elements.planned_quantity.required,true);assert.equal(editor.elements.planned_unit.required,true);assert.equal(editor.checkValidity(),false);
-  p.d.querySelector('#cancel').click();await until(()=>!p.d.querySelector('dialog[open]'));p.d.querySelector('.ck-needs-tools button:nth-child(2)').click();await until(()=>p.d.querySelector('dialog[open]'),p.errors);assert.equal(editor.elements.operation_kind.value,'operation');assert.equal(editor.elements.planned_quantity.value,'');
+  p.d.querySelector('[data-plan-discard]').click();await until(()=>!p.d.querySelector('dialog[open]'));p.d.querySelector('.ck-needs-tools button:nth-child(2)').click();await until(()=>p.d.querySelector('dialog[open]'),p.errors);assert.equal(editor.elements.operation_kind.value,'operation');assert.equal(editor.elements.planned_quantity.value,'');
   for(const [name,value]of Object.entries({title:'QA-DOM库存无预约',customer:'QA-DOM合成客户',supply_chain_no:'QA-DOM-STOCK-01',instructions:'整理后反馈，等客户预约'}))editor.elements[name].value=value;
   editor.requestSubmit();await until(()=>!p.d.querySelector('dialog[open]'),p.errors);const row=f.env.DB.raw.prepare("SELECT state FROM sop_records WHERE kind='need' AND json_extract(state,'$.title')='QA-DOM库存无预约'").get();assert.ok(row);const data=JSON.parse(row.state);assert.equal(data.status,'pending');assert.equal(data.source_type,'inventory');assert.deepEqual(data.links,[]);assert.equal(data.created_by,'测试负责人');assert.deepEqual(p.errors,[]);
  }finally{p.w.close();}
@@ -184,11 +184,11 @@ test('inventory booking quantity uses its labelled plan unit; excess allocations
   editor.querySelector('[data-ob=quantity]').value='2';editor.requestSubmit();await until(()=>!p.d.querySelector('dialog[open]'),p.errors);const n=JSON.parse(f.env.DB.raw.prepare("SELECT state FROM sop_records WHERE kind='need' AND json_extract(state,'$.title')='QA-DOM库存预约'").get().state);assert.equal(n.links.length,1);assert.equal(n.links[0].unit,'托');const ob=f.env.DB.raw.prepare('SELECT * FROM v2_outbound_orders WHERE id=?').get(n.links[0].outbound_id);assert.equal(ob.planned_pallet_count,2);assert.equal(ob.planned_box_count,0);assert.equal(ob.instruction,n.instructions);assert.deepEqual(p.errors,[]);
  }finally{p.w.close();}
 });
-test('inventory-plan duplicate submit and lost-response retry create one requirement with one request id',opts,async()=>{
+test('inventory-plan duplicate submit and lost-response lookup recover one requirement without resubmitting',opts,async()=>{
  const f=await fixture();f.env.SOP_WORK_CHAIN_ENABLED='true';const p=await f.page('/002/?tab=need');
  try{await until(()=>p.d.querySelector('.ck-needs-tools'),p.errors);p.d.querySelector('.ck-needs-tools button:nth-child(2)').click();await until(()=>p.d.querySelector('dialog[open] [name=title]'),p.errors);const editor=p.d.querySelector('#editor');for(const [name,value]of Object.entries({title:'QA-DOM库存重试',customer:'QA-DOM合成客户',supply_chain_no:'QA-DOM-STOCK-03',instructions:'整理库存'}))editor.elements[name].value=value;
   const original=p.w.fetch,ids=[];let lost=true;p.w.fetch=async(url,options)=>{const b=JSON.parse(options.body);if(b.action==='sop_need_create'){ids.push(b.client_req_id);await new Promise(r=>setTimeout(r,10));}const response=await original(url,options);if(b.action==='sop_need_create'&&lost){lost=false;throw new p.w.TypeError('QA lost response');}return response;};
-  editor.requestSubmit();editor.requestSubmit();await until(()=>p.d.querySelector('#formError').textContent,p.errors);assert.equal(ids.length,1);assert.equal(editor.elements.title.value,'QA-DOM库存重试');editor.requestSubmit();await until(()=>!p.d.querySelector('dialog[open]'),p.errors);assert.equal(ids.length,2);assert.equal(ids[0],ids[1]);assert.equal(f.env.DB.raw.prepare("SELECT count(*) n FROM sop_records WHERE kind='need' AND json_extract(state,'$.title')='QA-DOM库存重试'").get().n,1);assert.deepEqual(p.errors,[]);
+  editor.requestSubmit();editor.requestSubmit();await until(()=>!p.d.querySelector('dialog[open]'),p.errors);assert.equal(ids.length,1);assert.equal(f.env.DB.raw.prepare("SELECT count(*) n FROM sop_records WHERE kind='need' AND json_extract(state,'$.title')='QA-DOM库存重试'").get().n,1);assert.deepEqual(p.errors,[]);
  }finally{p.w.close();}
 });
 async function loadOrders(f,{extra=false}={}){

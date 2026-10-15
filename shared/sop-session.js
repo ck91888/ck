@@ -27,7 +27,7 @@
  }
  async function stopCamera(){if(scanner){const old=scanner;scanner=null;try{await old.stop();old.clear();}catch{}}}
  function lock(){if(locked)return;locked=true;user=null;document.documentElement.classList.add('ck-auth-pending');document.querySelectorAll('dialog[open]').forEach(d=>d.close());showGate('登录已结束，请重新扫码 / 로그인이 종료되었습니다');}
- window.CKSession={ready,get user(){return user;},scope,request,changeOperator:()=>operatorForm(user,true),async logout(){await request('sop_logout');sessionStorage.removeItem('ck_operation_context');sessionStorage.removeItem('ck_operation_reconfirm');sessionStorage.removeItem('ck_test_active_lead');location.reload();}};
+ window.CKSession={ready,get user(){return user;},scope,request,changeOperator:()=>operatorForm(user,true),async logout(){window.CKPlanSave?.clear();await request('sop_logout');sessionStorage.removeItem('ck_operation_context');sessionStorage.removeItem('ck_operation_reconfirm');sessionStorage.removeItem('ck_test_active_lead');location.reload();}};
  function showGate(message=''){
   gate?.remove();gate=document.createElement('section');gate.id='ck-auth-gate';gate.className='ck-access-gate';
   const field=scope==='field',kiosk=scope==='kiosk';
