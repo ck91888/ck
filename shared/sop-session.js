@@ -7,7 +7,7 @@
  const ready=new Promise(r=>resolveReady=r);
  const rawFetch=window.fetch.bind(window);
  // Share only identical in-flight reads. No response cache, mutation retry, or cross-login data.
- const reads=new Set('sop_identity sop_get sop_list sop_need_groups sop_linked sop_updates sop_work_materials sop_batch_work_materials sop_work_need_search sop_dispatch_list v2_inbound_plan_detail v2_outbound_order_detail v2_ops_job_detail v2_attachment_list sop_attendance_summary'.split(' '));
+ const reads=new Set('sop_bulk_batch_get sop_bulk_batch_candidates sop_identity sop_get sop_list sop_need_groups sop_linked sop_updates sop_work_materials sop_batch_work_materials sop_work_need_search sop_dispatch_list v2_inbound_plan_detail v2_outbound_order_detail v2_ops_job_detail v2_attachment_list sop_attendance_summary'.split(' '));
  const inFlight=new Map();let generation=0;
  window.fetch=async function(input,init){
   const url=new URL(typeof input==='string'?input:input.url,location.href),local=url.origin===location.origin&&url.pathname===new URL(endpoint,location.href).pathname;

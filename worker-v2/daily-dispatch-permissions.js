@@ -107,7 +107,8 @@ export async function dailyDispatchAdmin(b,e){
 export async function guardDailyDispatch(b,e){
  const u=e.SOP_REQUEST_USER;if(!dailyDispatchEnabled(e)||!u?.daily_dispatch)return;
  let needs=false,department='',record;
- if(b.action==='sop_native_start'){needs=true;department=b.labor_department||startDepartment(b.payload||{});}
+ if(['sop_bulk_batch_create','sop_bulk_batch_people'].includes(b.action)){needs=true;department='bulk';}
+ else if(b.action==='sop_native_start'){needs=true;department=b.labor_department||startDepartment(b.payload||{});}
  else if(b.action==='sop_verify_takeover'||b.action==='sop_owner_transfer'&&u.scope==='field'){needs=true;}
  else if(b.action==='sop_task_dispatch'){needs=true;department=b.department;}
  else if(b.action==='sop_courier_receive'&&b.operation==='start'){needs=true;department='direct_ship';}

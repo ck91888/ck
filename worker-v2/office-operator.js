@@ -37,11 +37,11 @@ export async function confirmOfficeOperator(body,env,request){
 }
 // Only coordination/business writes require the label. Attendance registration,
 // account administration and consumables keep their existing policies.
-const reads=new Set('sop_need_create_status sop_login sop_identity sop_logout sop_operator_confirm sop_get sop_list sop_linked sop_updates sop_source_detail sop_need_groups sop_batch_work_materials sop_work_materials sop_work_need_search sop_dispatch_list sop_field_resolve sop_check_for_batch sop_check_scan_logs sop_courier_config sop_courier_list sop_courier_detail sop_courier_lookup sop_crew_availability sop_crew_status'.split(' '));
+const reads=new Set('sop_need_create_status sop_bulk_batch_candidates sop_bulk_batch_get sop_login sop_identity sop_logout sop_operator_confirm sop_get sop_list sop_linked sop_updates sop_source_detail sop_need_groups sop_batch_work_materials sop_work_materials sop_work_need_search sop_dispatch_list sop_field_resolve sop_check_for_batch sop_check_scan_logs sop_courier_config sop_courier_list sop_courier_detail sop_courier_lookup sop_crew_availability sop_crew_status'.split(' '));
 export function officeOperationGuard(body,env,request){
  if(!env.SOP_OPERATION_CONTEXT)return null;
  const action=String(body.action||'').trim();
- const business=/^sop_daily_dispatch_(?:update|link)$/.test(action)||/^sop_attendance_(?:department|void|restore|permanent_update)$/.test(action)||/^v2_(?:inbound|outbound|ops|issue|verify|pick|bulk|unload|unplanned|import_delivery|attachment|correction)_/.test(action)||/^sop_(?:need|task|issue|check|native|courier|work_material|batch|demo|crew_return)/.test(action);
+ const business=/^sop_daily_dispatch_(?:update|link)$/.test(action)||/^sop_attendance_(?:department|void|restore|permanent_update)$/.test(action)||/^v2_(?:inbound|outbound|ops|issue|verify|pick|bulk|unload|unplanned|import_delivery|attachment|correction)_/.test(action)||/^sop_(?:bulk_batch|need|task|issue|check|native|courier|work_material|batch|demo|crew_return)/.test(action);
  const read=reads.has(action)||/_(?:list|detail|list_upcoming|ops_candidates|find_by_code|resolve_code|resolve|export|diag_date_mismatch|lookup|active_list|docs_list|my_active_job|get)$/.test(action);
  if(business&&!read&&(!env.SOP_OPERATION_CONTEXT.operator_name||request.headers.get('X-CK-Operation-Context')!==env.SOP_OPERATION_CONTEXT.context_id))return conflict();
  if(env.SOP_OPERATION_CONTEXT.operator_name){

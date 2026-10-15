@@ -1,3 +1,4 @@
+import {handleBulkBatch,guardBulkBatchMutation} from './bulk-work-batch.js';
 import {inboundArrivalFilter} from './inbound-arrival-filter.js';
 import {dailyDispatchEnabled,dailyDispatchAdmin,guardDailyDispatch} from './daily-dispatch-permissions.js';
 import {checkWorkbenchEnabled,scanCheck,finishCheck} from './check-workbench.js';
@@ -12997,6 +12998,8 @@ export default {
     if(action==='v2_issue_handle_finish'&&body.run_id){const run=await env.DB.prepare('SELECT job_id FROM v2_issue_handle_runs WHERE id=?').bind(body.run_id).first();if(run?.job_id){if(body.job_id&&body.job_id!==run.job_id)return err('任务与处理轮次不一致',409);body.job_id=run.job_id;}}
     if(action==='v2_ops_job_resume'&&body.parent_job_id)body.job_id=body.parent_job_id;
     try{const attendanceBlock=await guardAttendance(body,env);if(attendanceBlock)return json({ok:false,error:attendanceBlock},409);}catch(e){return json({ok:false,error:e.message},400);}
+    if(action.startsWith('sop_bulk_batch_')){try{return json(await handleBulkBatch(body,env,{findOutbound:no=>findOutboundByWorkOrder(env,no),linkedNeeds:id=>linkedNeeds(env,id)}));}catch(e){return json({ok:false,error:e.message},409);}}
+    try{await guardBulkBatchMutation(body,env);}catch(e){return json({ok:false,error:e.message},409);}
     if(action==='sop_native_adopt'){try{return json(await adoptLegacyLoad(body,env));}catch(e){return json({ok:false,error:e.message},409);}}
     if(action==='sop_native_pause'){try{return json(await pauseNative(body,env));}catch(e){return json({ok:false,error:e.message},409);}}
     if(action==='sop_native_resume'){try{return json(await nativePeople(body,env,{resume:true}));}catch(e){return json({ok:false,error:e.message},409);}}

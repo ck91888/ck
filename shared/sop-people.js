@@ -26,7 +26,7 @@
  window.CKPeopleSelection.parseBadge=parse;
  window.CKPeopleFields=function(){return '<label>扫描工牌 / 명찰<input data-staff-badge placeholder="工号|姓名 / 사번|이름" autocomplete="off"></label><div class="toolbar"><button type="button" data-staff-add>添加工牌 / 명찰 추가</button><button type="button" data-staff-camera>相机扫码 / 카메라</button></div><div data-staff-scanner></div><p data-staff-count></p><p data-staff-status role="status" aria-live="polite"></p><div data-staff-people></div><label>主操作员 / 주 작업자<select name="lead_id" data-staff-lead required></select></label>';};
  let scannerSequence=0;
- window.CKPeoplePicker=function(root,{workers=[],leadId='',error,allowEmpty=false,borrowContext=null}={}){
+ window.CKPeoplePicker=function(root,{workers=[],leadId='',error,allowEmpty=false,borrowContext=null,maxPeople=50}={}){
   const find=s=>root.querySelector('[data-staff-'+s+']'),input=find('badge'),lead=find('lead'),status=find('status'),camera=find('camera'),model=selection(workers,leadId);
   const scannerBox=find('scanner');scannerBox.id='ck-staff-scanner-'+(++scannerSequence);
   let scanner=null,starting=false,closed=false,lastCamera='',lastCameraAt=0,queue=Promise.resolve(),checking=0;const confirmations=new Map();
@@ -37,7 +37,7 @@
    for(const p of model.people){const item=document.createElement('span');item.className='badge';item.textContent=p.name+' ('+p.id+') '+(p.borrowed?'· 已借出 / 지원 중 ':confirmations.has(p.id)?'· 已确认借调，开工时生效 / 시작 시 지원 ':'');const remove=document.createElement('button');remove.type='button';remove.className='light';remove.textContent='移除';remove.setAttribute('aria-label','移除 '+p.name+' ('+p.id+')');remove.onclick=()=>{model.select(lead.value);confirmations.delete(p.id);report(model.remove(p.id));if(error)error.textContent='';render();};item.append(remove);find('people').append(item);lead.add(new Option(p.name+' ('+p.id+')',p.id));}
    lead.required=!allowEmpty||model.people.length>0;lead.value=model.lead;find('count').textContent='已选 '+model.people.length+' 人 / 선택 '+model.people.length+'명';
   }
-  function add(raw){if(closed)return;input.value='';if(!borrowContext){try{model.select(lead.value);const result=model.add(raw);render();report(result.message);if(error)error.textContent='';input.focus();}catch(e){showError(e);}return;}checking++;queue=queue.then(async()=>{if(closed){checking--;return;}try{
+  function add(raw){if(closed)return;input.value='';if(!borrowContext){try{if(model.people.length>=maxPeople&&!model.people.some(p=>p.id===parse(raw)[0]))throw Error(maxPeople===1?'一人多单只能选择1名实际操作员 / 작업자는 한 명만 선택하세요':'操作人员数量已达上限');model.select(lead.value);const result=model.add(raw);render();report(result.message);if(error)error.textContent='';input.focus();}catch(e){showError(e);}return;}checking++;queue=queue.then(async()=>{if(closed){checking--;return;}try{
    const parts=parse(raw);
    if(borrowContext&&parts.length===2&&parts[0]&&parts[1]&&!model.people.some(p=>p.id===parts[0])){
     report('正在核对人员当前任务 / 현재 작업 확인 중');
@@ -48,7 +48,7 @@
      confirmations.set(parts[0],{worker_id:parts[0],source_job_id:a.source.job_id,source_segment_id:a.source.segment_id,source_revision:a.source.revision});
     }else if(!a.available&&!a.already_here)throw Error(a.reason||'该人当前不能借调');
    }
-   model.select(lead.value);const result=model.add(raw);render();report(result.message);if(error)error.textContent='';input.focus();
+   if(model.people.length>=maxPeople&&!model.people.some(p=>p.id===parse(raw)[0]))throw Error(maxPeople===1?'一人多单只能选择1名实际操作员 / 작업자는 한 명만 선택하세요':'操作人员数量已达上限');model.select(lead.value);const result=model.add(raw);render();report(result.message);if(error)error.textContent='';input.focus();
   }catch(e){showError(e);if(!closed)input.focus();}finally{checking--;}}).catch(e=>{checking--;showError(e);});}
   find('add').onclick=()=>add(input.value);input.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();add(input.value);}};lead.onchange=()=>{model.select(lead.value);if(error)error.textContent='';};
   async function stop(){const current=scanner;scanner=null;if(current)await current.stop().catch(()=>{});camera.textContent='相机扫码 / 카메라';}
@@ -60,6 +60,6 @@
    finally{starting=false;}
   };
   render();input.focus();
-  return {ready(){return queue;},read(){if(checking)throw Error('正在核对工牌，请稍后 / 명찰 확인 중');if(allowEmpty&&!model.people.length)return {workers:[],lead_id:''};model.select(lead.value);const staff=model.read();if(confirmations.size)staff.borrow_confirmations=[...confirmations.values()].filter(c=>staff.workers.some(w=>w.id===c.worker_id));return staff;},async destroy(){closed=true;await stop();}};
+  return {ready(){return queue;},read(){if(checking)throw Error('正在核对工牌，请稍后 / 명찰 확인 중');if(allowEmpty&&!model.people.length)return {workers:[],lead_id:''};model.select(maxPeople===1?model.people[0]?.id:lead.value);const staff=model.read();if(confirmations.size)staff.borrow_confirmations=[...confirmations.values()].filter(c=>staff.workers.some(w=>w.id===c.worker_id));return staff;},async destroy(){closed=true;await stop();}};
  };
 })();

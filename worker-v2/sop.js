@@ -1,3 +1,4 @@
+import {bulkOwnerTransferStatements} from './bulk-work-batch.js';
 import {checkScanEvidence,checkScanLogs} from './check-evidence.js';
 import {needCreateReceiptMeta,needCreateReplay,needCreateStatus} from './need-create-receipt.js';
 import {workNeedPrintFacts,workNeedPrintSummary,recordWorkNeedPrint} from './work-need-print.js';
@@ -284,8 +285,8 @@ export async function handleSop(b,env) {
    return {ok:true,items:await Promise.all((await jobNumbers(env,rows)).map(async r=>{
     const d=JSON.parse(r.state),plans=JSON.parse(r.unload_plans||'[]'),loads=JSON.parse(r.load_orders||'[]'),picks=JSON.parse(r.pick_numbers||'[]');
     const customer=[...new Set(loads.length?loads.map(o=>o.customer).filter(Boolean):plans.length?plans.map(p=>p.customer).filter(Boolean):[r.customer||r.inbound_customer||r.outbound_customer].filter(Boolean))].join('、');
-    const canClaim=r.task_kind==='dispatch'&&claimDepartments.includes(r.dispatch_department)&&await canClaimOwner(env,u,{department:r.dispatch_department,data:d});
-    return {id:r.id,...jobDisplayMetadata(r),task_no:r.task_no||'',task_kind:r.task_kind,job_type:r.job_type,title:r.task_kind==='task'?JSON.parse(r.need_state||'{}').title||d.title:loads.length?'本车装货 · '+loads.length+' 单':'',status:r.task_kind==='task'?d.status:r.status,source_type:r.related_doc_type,source_id:r.related_doc_id,lead_id:d.lead_id,last_lead:d.last_lead,display_no:r.display_no,business_no:r.business_no,customer,workers:JSON.parse(r.active_crew||'[]'),owner:d.owner,can_claim:canClaim,estimated_minutes:d.estimated_minutes};
+    const canClaim=(r.task_kind==='dispatch'||!!d.bulk_batch_id)&&claimDepartments.includes(r.dispatch_department)&&await canClaimOwner(env,u,{department:r.dispatch_department,data:d});
+    return {id:r.id,bulk_batch_id:d.bulk_batch_id||'',assigned_workers:d.workers||[],...jobDisplayMetadata(r),task_no:r.task_no||'',task_kind:r.task_kind,job_type:r.job_type,title:r.task_kind==='task'?JSON.parse(r.need_state||'{}').title||d.title:loads.length?'本车装货 · '+loads.length+' 单':'',status:r.task_kind==='task'?d.status:r.status,source_type:r.related_doc_type,source_id:r.related_doc_id,lead_id:d.lead_id,last_lead:d.last_lead,display_no:r.display_no,business_no:r.business_no,customer,workers:JSON.parse(r.active_crew||'[]'),owner:d.owner,can_claim:canClaim,estimated_minutes:d.estimated_minutes};
    }))};
   }
   if(b.action==='sop_dashboard') return await dashboard(env,u,b);
@@ -380,6 +381,7 @@ export async function handleSop(b,env) {
   const d=structuredClone(row.data),extra=[];
   permit(u,row.department,roles);
   if(b.action==='sop_owner_transfer'){
+   await ensureDailyDispatch(env);
    if(!['dispatch','task'].includes(row.kind))fail('仅未完成的派工任务可转移');
    const job=await stmt(env,'SELECT status FROM v2_ops_jobs WHERE id=?',row.id).first();
    if(!job||!['pending','working','paused','awaiting_close'].includes(job.status)||['completed','cancelled'].includes(d.status))fail('任务已结束，不能转移');
@@ -420,7 +422,7 @@ export async function handleSop(b,env) {
         AND (absent.person_id=json_extract(NEW.before_json,'$.owner_id') OR EXISTS(SELECT 1 FROM ck_daily_dispatch_links l WHERE l.permanent_person_id=json_extract(NEW.before_json,'$.owner_id') AND l.daily_person_id=absent.person_id AND l.day=absent.day))
         AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=absent.id AND b.ended_at=''))))
    ) THEN RAISE(ABORT,'owner_transfer_changed') END; END`).run();
-   return await save(env,b,u,row,next);
+   return await save(env,b,u,row,next,await bulkOwnerTransferStatements(env,row,next,u,b,t));
   }
   if(b.action.startsWith('sop_task_')) {
    if(row.kind!=='task')fail('记录类型错误');
