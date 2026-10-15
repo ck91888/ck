@@ -8,8 +8,8 @@
  window.CKFieldWork=function(root,initial='',options={}){
   root.className='ck-bulk';
   const external=!!options.external,api=(action,data={})=>CKSession.request(action,data),$=name=>root.querySelector('[data-'+name+']');
-  let picker=null,scan=null,cargoDispatch=null,current=null,closed=false,loadSequence=0,requestId='',requestSignature='';
-  async function cleanup(){if(cargoDispatch){await cargoDispatch.destroy();cargoDispatch=null;}if(picker){await picker.destroy();picker=null;}if(scan){const old=scan;scan=null;await old.stop().catch(()=>{});}}
+  let picker=null,scan=null,cargoDispatch=null,orderSelection=null,current=null,closed=false,loadSequence=0,requestId='',requestSignature='';
+  async function cleanup(){orderSelection?.destroy();orderSelection=null;if(cargoDispatch){await cargoDispatch.destroy();cargoDispatch=null;}if(picker){await picker.destroy();picker=null;}if(scan){const old=scan;scan=null;await old.stop().catch(()=>{});}}
   function error(x){if(!closed&&$('error')){$('error').textContent=x.message;$('error').hidden=false;}}
   function complete(){if(closed)return;current=null;options.onChange?.(null);if(options.onComplete)options.onComplete();else window.goPage('home');}
   async function write(action,data){
@@ -26,7 +26,7 @@
    if(result)result={...result,packed_count:result.packed_box_count,operated_box_count:result.total_operated_box_count,description:result.description||saved.remark||''};
    return {external:true,native:r,need:{display_no:jobLabel(j),title:'外部作业 / 외부 작업',customer:j.customer||'',instructions:'按纸质作业单核对本次操作要求。 / 인쇄된 작업서를 확인하세요.'},
     source:j.outbound_plan_no?{number:j.outbound_plan_no}:null,segments:r.workers,
-    task:{...j,bulk_batch_id:d.bulk_batch_id||'',id:j.id,kind:'dispatch',dispatcher_name:Object.hasOwn(j,'dispatcher_name')?j.dispatcher_name:d.dispatcher_name||d.owner||'',revision:r.dispatch.revision,status:j.status,lead_id:d.lead_id,workers:live.map(w=>({id:w.worker_id,name:w.worker_name})),borrowed_out:r.borrowed_out||[],owner_id:d.owner_id,owner:d.owner,started_at:j.started_at||j.created_at,result,location:''},last_lead:d.last_lead||(d.workers||[]).find(w=>w.id===d.lead_id)};
+    task:{...j,bulk_batch_id:d.bulk_batch_id||'',id:j.id,kind:'dispatch',dispatcher_name:Object.hasOwn(j,'dispatcher_name')?j.dispatcher_name:d.dispatcher_name||d.owner||'',revision:r.dispatch.revision,status:j.status,lead_id:d.lead_id,workers:d.bulk_batch_id?d.workers||[]:live.map(w=>({id:w.worker_id,name:w.worker_name})),borrowed_out:r.borrowed_out||[],owner_id:d.owner_id,owner:d.owner,started_at:j.started_at||j.created_at,result,location:''},last_lead:d.last_lead||(d.workers||[]).find(w=>w.id===d.lead_id)};
   }
   async function resolve(code,detail){
    if(closed)return;
@@ -57,7 +57,7 @@
     try{scan=new Html5Qrcode('ck-work-camera');let reading=false;await scan.start({facingMode:'environment'},{fps:8,qrbox:220},async code=>{if(reading)return;reading=true;try{await resolve(code);}catch(x){error(x);reading=false;}},()=>{});$('camera').textContent='停止扫码 / 스캔 중지';}
     catch(x){error(Error('无法打开相机，请使用扫码枪或输入编号 / 카메라 사용 불가'));}
    };
-   if(options.onBatch){const bulk=document.createElement('button');bulk.type='button';bulk.className='ck-primary';bulk.textContent='多选作业单 · 一次派给一人 / 여러 작업·한 명 배정';bulk.onclick=()=>options.onBatch('new');$('scanform').after(bulk);}$('code').focus();await loadTasks();
+   $('code').focus();await loadTasks();
   }
   async function loadTasks(){
    const sequence=loadSequence,host=$('tasks');if(!host)return;
@@ -73,9 +73,9 @@
   function draw(){
    const {need:n,task:t,source,segments,changed}=current,title=n?.title||t?.title||'',state=t?.status||n?.status||'pending',live=segments.filter(s=>!s.left_at);
    root.innerHTML=`<div class="ck-actions"><button data-back class="ck-small">← 扫描其他作业单 / 다른 작업</button><button data-refresh class="ck-small">刷新 / 새로고침</button><button data-home class="ck-small">返回首页，任务继续 / 작업 유지·홈으로</button></div><section class="ck-work-sheet"><span class="ck-state">${states[state]||esc(state)}</span><p class="ck-work-number">作业单号 / 작업 번호：<b>${esc(t?jobLabel({...t,business_no:n?.display_no||t.work_plan_no||t.business_no}):n?.display_no||'单号待补充')}</b></p>${t?`<p class="ck-work-dispatcher">派审员 / 배정·검수 담당자：${esc(jobDispatcher(t))}</p>`:''}<h2>${esc(jobText(title,t))}</h2><div class="ck-work-meta"><div>客户 / 고객<b>${esc(n?.customer||source?.customer||'—')}</b></div><div>货物来源 / 화물 출처<b>${esc(source?.number||(external?'外部作业单 / 외부 작업서':window.CKDocumentLabels.source(n)))}</b></div><div>货物范围 / 화물 범위<b>${esc(n?.scope_text||'见作业要求')}</b></div><div>作业位置 / 작업 위치<b>${esc(t?.location||n?.location||'待确认')}</b></div></div><div class="ck-instructions">${esc(n?.instructions||title)}</div>${changed?'<p class="ck-warning">纸单版本已更新，请按本页最新要求核对后派工。</p>':''}</section><div data-content></div><p data-error class="ck-error" role="alert" hidden></p>`;
-   if(!external&&n?.id&&window.CKCargoGroups&&(!options.batchChild||n.cargo_groups)){const materials=document.createElement('section');materials.className='ck-work-sheet';$('content').before(materials);CKCargoGroups.field(materials,n,{taskId:t?.id||'',onChange:()=>resolve(t?.id||n.id)}).catch(error);}
+   if(!external&&n?.id&&window.CKCargoGroups&&(!options.batchChild||n.cargo_groups)){const materials=document.createElement('section');materials.className='ck-work-sheet';$('content').before(materials);CKCargoGroups.field(materials,n,{taskId:t?.id||'',onChange:async()=>{await resolve(t?.id||n.id);options.onBatchChange?.();}}).catch(error);}
    $('back').hidden=!!options.batchChild;$('back').onclick=()=>home().catch(error);$('refresh').onclick=()=>resolve(t?.id||n.id||n.display_no).catch(error);$('home').onclick=()=>window.goPage('home');
-   if(!options.batchChild&&!external&&n?.cargo_groups&&window.CKCargoGroups.dispatch){const tasks=document.createElement('section');tasks.className='ck-work-sheet';root.querySelector('.cargo-field')?.before(tasks);if(!tasks.isConnected)$('content').before(tasks);cargoDispatch=CKCargoGroups.dispatch(tasks,n,{tasks:current.tasks||[],currentTask:t?.id,onOpen:id=>resolve(id),onStarted:id=>resolve(id)});if(!t)return;}
+   if(!options.batchChild&&!external&&n?.cargo_groups&&window.CKCargoGroups.dispatch){const tasks=document.createElement('section');tasks.className='ck-work-sheet';root.querySelector('.cargo-field')?.before(tasks);if(!tasks.isConnected)$('content').before(tasks);cargoDispatch=CKCargoGroups.dispatch(tasks,n,{tasks:current.tasks||[],currentTask:t?.id,onOpen:id=>resolve(id),onStarted:id=>resolve(id),multiOrder:!t&&options.onBatch?{onStarted:options.onBatch}:null});if(!t)return;}
    if(external&&!t){
     people('派工并开始 / 배정 및 시작',[],async staff=>{
      const r=await write('sop_native_start',{payload:{action:'v2_bulk_op_job_start',work_order_no:n.display_no,customer:$('people').elements.customer.value.trim()},...staff,labor_department:'bulk',estimated_minutes:Number($('people').elements.minutes.value)});
@@ -88,7 +88,7 @@
    }
    if(!t&&n?.status==='pending'){people('派工并开始 / 배정 및 시작',[],async staff=>{const r=await write('sop_task_dispatch',{department:n.department,title:n.title,need_id:n.id,job_type:'bulk_op',estimated_minutes:30,location:n.location||'',...staff});await resolve(r.id);});return;}
    if(!t){$('content').innerHTML='<p class="ck-muted">此作业已完成或暂不能派工，请联系订单处理组核对。</p>';return;}
-   $('content').innerHTML=`<section class="ck-work-sheet"><span class="ck-step">02 / PEOPLE & EXECUTION</span><h3>参与人员 / 참여 인원</h3><p>${live.length?live.map(w=>esc(w.worker_name)).join(' · '):'当前无人计时 / 현재 작업 인원 없음'}</p><p class="ck-muted">${t.started_at?'开始 '+CKAttendance.at(t.started_at):'人员到位后开始记录工时'} · 派审员 / 배정·검수 담당자：${esc(jobDispatcher(t))}</p><div class="ck-actions" data-actions></div><div data-editor></div></section>`;
+   $('content').innerHTML=`<section class="ck-work-sheet"><span class="ck-step">02 / PEOPLE & EXECUTION</span><h3>参与人员 / 참여 인원</h3><p>${options.batchChild?(t.workers||[]).map(w=>esc(w.name)).join(' · ')+' · 批次统一记录工时 / 일괄 시간 기록':live.length?live.map(w=>esc(w.worker_name)).join(' · '):'当前无人计时 / 현재 작업 인원 없음'}</p><p class="ck-muted">${t.started_at?'开始 '+CKAttendance.at(t.started_at):'人员到位后开始记录工时'} · 派审员 / 배정·검수 담당자：${esc(jobDispatcher(t))}</p><div class="ck-actions" data-actions></div><div data-editor></div></section>`;
    const action=(label,fn)=>{if(options.batchChild&&/调整人员|核对人员并开始|暂停整个|恢复整个|暂停作业|转移派审员|个人休息/.test(label))return;const b=document.createElement('button');b.className='ck-small';b.textContent=label;b.onclick=async()=>{b.disabled=true;try{await fn();}catch(x){error(x);}finally{b.disabled=false;}};$('actions').append(b);};
    if(['assigned','pending','working','paused','awaiting_close','awaiting_review','rework'].includes(t.status)&&t.owner_id===CKSession.user?.id&&CKSession.user?.can_dispatch!==false)action('转移派审员 / 담당자 이관',()=>CKTransferOwner(t,()=>options.batchChild?options.onTransferred?.():home()));
    if(!external&&t.owner_id!==CKSession.user?.id&&['assigned','working','paused','awaiting_review','rework'].includes(t.status)){
@@ -117,7 +117,8 @@
    if(picker)picker.destroy();const host=$('editor')||$('content');
    host.innerHTML=`<form data-people class="ck-work-sheet"><span class="ck-step">02 / SCAN STAFF</span><h3>扫描操作员工牌 / 작업자 명찰</h3>${fields}${CKPeopleFields()}${adjust?'<label>调整原因 / 변경 사유<input data-reason required></label>':''}<button class="ck-primary" type="submit">${label}</button></form>`;
    picker=CKPeoplePicker($('people'),{workers,leadId:current.task?.lead_id,error:$('error'),allowEmpty:external&&adjust});
-   $('people').onsubmit=async ev=>{ev.preventDefault();const submit=ev.submitter||ev.target.querySelector('button[type=submit],button:not([type])');if(submit.disabled)return;submit.disabled=true;try{await save(picker.read());}catch(x){error(x);submit.disabled=false;}};
+   if(!adjust&&!current.task&&options.onBatch&&window.CKBulkOrderSelection){const selectionHost=document.createElement('div');$('people').prepend(selectionHost);orderSelection=CKBulkOrderSelection(selectionHost,{need:current.need,external,picker,customer:()=>$('people').elements.customer?.value.trim()||current.need.customer||''});}
+   $('people').onsubmit=async ev=>{ev.preventDefault();const submit=ev.submitter||ev.target.querySelector('button[type=submit],button:not([type])');if(submit.disabled)return;submit.disabled=true;try{const staff=picker.read(),items=orderSelection?.read();if(items){const r=await write('sop_bulk_batch_create',{items,...staff});await options.onBatch(r.batch_id);}else await save(staff);}catch(x){error(x);submit.disabled=false;}};
   }
   function pause(t){
    if(picker){picker.destroy();picker=null;}

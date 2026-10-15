@@ -1,3 +1,4 @@
+import {dashboardBatches,simultaneous} from './bulk-batch-labor.js';
 import {bulkOwnerTransferStatements} from './bulk-work-batch.js';
 import {checkScanEvidence,checkScanLogs} from './check-evidence.js';
 import {needCreateReceiptMeta,needCreateReplay,needCreateStatus} from './need-create-receipt.js';
@@ -473,8 +474,9 @@ export async function handleSop(b,env) {
     if(!['pass','return'].includes(b.decision))fail('审核结论无效');
     if(b.action==='sop_task_review'&&b.decision==='pass'&&d.need_id){const need=await read(env,d.need_id);assertShippingResult(d.result,workChainEnabled(env)?(await chainAllocation(env,need.data)).links:(need?.data.links||[]));}
     const reason=required(b.reason,'审核说明');d.review={decision:b.decision,reason,by:u.name,at:t,round:d.round};
-    d.status=b.decision==='pass'?'completed':'rework';if(b.decision==='return')d.round++;
-    extra.push(stmt(env,"UPDATE v2_ops_jobs SET status=?,updated_at=?,finished_at=?,result_summary=? WHERE id=?",b.decision==='pass'?'completed':'pending',t,b.decision==='pass'?t:'',JSON.stringify(d.result),row.id));
+    const batch=d.bulk_batch_id?await read(env,d.bulk_batch_id):null,batchWork=simultaneous(batch?.data);
+    d.status=b.decision==='pass'?'completed':batchWork?'working':'rework';if(b.decision==='return')d.round++;
+    extra.push(stmt(env,"UPDATE v2_ops_jobs SET status=?,updated_at=?,finished_at=?,result_summary=? WHERE id=?",b.decision==='pass'?'completed':batchWork?'working':'pending',t,b.decision==='pass'?t:'',JSON.stringify(d.result),row.id));
     if(b.decision==='pass')extra.push(stmt(env,"INSERT INTO v2_ops_job_results(id,job_id,box_count,pallet_count,remark,result_json,created_by,created_at) VALUES(?,?,?,?,?,?,?,?)",uid('RES'),row.id,d.result.unit==='箱'?d.result.quantity:d.result.operated_box_count||0,d.result.unit==='托'?d.result.quantity:d.result.pallet_count||0,d.result.description,JSON.stringify({...d.result,job_type:d.job_type}),u.name,t));
     if(d.need_id){const need=await read(env,d.need_id);if(need){const nd={...need.data,status:b.decision==='pass'?'waiting_customer':'assigned',result:b.decision==='pass'?d.result:null};
       if(b.decision==='pass'&&need.data.source_type==='outbound'){
@@ -749,8 +751,9 @@ async function dashboard(env,u,b){
  const ranked=[...ranking.values()].sort((a,b)=>b.quantity-a.quantity);
  const roster=[...new Map(allSegments.map(s=>[s.worker_id,{worker_id:s.worker_id,worker_name:s.worker_name}])).values()].map(w=>{const active=allSegments.find(s=>s.worker_id===w.worker_id&&!s.left_at);const task=records.find(r=>r.id===active?.job_id);return {...w,current_job_id:active?.job_id||'',current_task:task?.title||'',status:active?'作业中':'无进行中记录（不等于空闲）'};});
  const numberedRoster=await jobNumbers(env,roster,'current_job_id');
- return {ok:true,date:days,scope:'整单完成后更新产量；多人按该任务实际参与人数均分（分配产量，不是个人扫描实测）。按业务、作业、指标及单位分别排名。已登记人员无任务不等于空闲；外部系统Excel尚未导入的成果不包含在内。',roster:numberedRoster,rankings:ranked,reported_outputs:[...reported.values()],
-  working:tasks.filter(r=>r.status==='working').length+nativeJobs.filter(x=>x.status==='working').length,
+ const simultaneousIds=new Set(records.filter(r=>r.kind==='bulk_batch'&&simultaneous(r)).map(r=>r.id)),recordMap=new Map(records.map(r=>[r.id,r]));
+ return {ok:true,bulk_batches:await dashboardBatches(env,records,{start,end}),date:days,scope:'整单完成后更新产量；多人按该任务实际参与人数均分（分配产量，不是个人扫描实测）。按业务、作业、指标及单位分别排名。已登记人员无任务不等于空闲；外部系统Excel尚未导入的成果不包含在内。',roster:numberedRoster,rankings:ranked,reported_outputs:[...reported.values()],
+  working:tasks.filter(r=>r.status==='working'&&!simultaneousIds.has(r.bulk_batch_id)).length+nativeJobs.filter(x=>x.status==='working'&&!simultaneousIds.has(recordMap.get(x.id)?.bulk_batch_id)).length+records.filter(r=>simultaneousIds.has(r.id)&&r.status==='working').length,
   active_people:new Set(segments.filter(s=>!s.left_at).map(s=>s.worker_id)).size,
   live:await jobNumbers(env,segments.filter(s=>!s.left_at).map(s=>({worker_id:s.worker_id,worker_name:s.worker_name,job_id:s.job_id,joined_at:s.joined_at})),'job_id'),completed:completed.length,person_hours:Math.round(minutes/6)/10,outputs,
   alerts:await recordNumbers(env,alerts.map(r=>({id:r.id,kind:r.kind,title:r.title,status:r.status,department:r.department,owner:r.owner||'',updated_at:r.updated_at,revision:r.revision}))),

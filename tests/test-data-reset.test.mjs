@@ -9,8 +9,10 @@ import entry from '../worker-v2/staging-entry.js';
 import {ACCESS_SCHEMA} from '../worker-v2/access-control.js';
 import {LOAD_SCHEMA} from '../worker-v2/outbound-load-trip.js';
 import {CREW_BORROW_SCHEMA} from '../worker-v2/crew-borrow.js';
+import {BULK_BATCH_ITEMS_TABLE_SQL} from '../worker-v2/bulk-work-batch.js';
+import {BULK_LABOR_FINISH_TABLE_SQL} from '../worker-v2/bulk-batch-labor.js';
 const manager={id:'test-manager',role:'manager'};
-function setup(){const DB=database();for(const s of [...COURIER_BATCH_SCHEMA,COURIER_CLAIM_HISTORY_SQL,...ATTENDANCE_SCHEMA,...ATTENDANCE_MANAGEMENT_SCHEMA,...PERMANENT_BADGE_SCHEMA,...ACCESS_SCHEMA,...LOAD_SCHEMA,...CREW_BORROW_SCHEMA])DB.raw.exec(s);
+function setup(){const DB=database();for(const s of [BULK_BATCH_ITEMS_TABLE_SQL,BULK_LABOR_FINISH_TABLE_SQL,...COURIER_BATCH_SCHEMA,COURIER_CLAIM_HISTORY_SQL,...ATTENDANCE_SCHEMA,...ATTENDANCE_MANAGEMENT_SCHEMA,...PERMANENT_BADGE_SCHEMA,...ACCESS_SCHEMA,...LOAD_SCHEMA,...CREW_BORROW_SCHEMA])DB.raw.exec(s);
  DB.raw.exec("CREATE TABLE v2_schema_meta(key TEXT PRIMARY KEY,value TEXT); INSERT INTO v2_schema_meta VALUES('version','keep'); INSERT INTO v2_003_locations(id,location_name) VALUES('KEEP','location'); INSERT INTO v2_inbound_plans(id,customer,status) VALUES('TEST','fixture','pending'); INSERT INTO v2_idempotency_keys(idem_key,action,response_json,created_at) VALUES('old','test','{}','');");
  const prepare=DB.prepare;let queries=0;
  DB.prepare=sql=>{queries++;assert.ok(!/UNION/i.test(sql),'avoid D1 compound-select limit');return prepare(sql);};
@@ -50,6 +52,9 @@ test('courier history bootstrap upgrades an existing schema without changing leg
  assert.deepEqual(tables.map(table=>db.prepare('SELECT * FROM '+table).all()),before);
  assert.equal(db.prepare('SELECT COUNT(*) n FROM ck_courier_plan_item_history').get().n,0,'bootstrap must not release or rewrite historical claims');
  assert.equal(db.prepare("SELECT COUNT(*) n FROM sqlite_master WHERE type='trigger' AND name='ck_courier_history_delete_guard'").get().n,1);
+});
+test('reset archives batch membership and its unique labor cutoff before clearing them',async()=>{
+ const env=setup(),db=env.DB.raw;db.prepare('INSERT INTO ck_bulk_work_batch_items VALUES(?,?,?,?,?)').run('FIXTURE-JOB','FIXTURE-BATCH',0,'need','FIXTURE-NEED');db.prepare('INSERT INTO ck_bulk_labor_finishes VALUES(?,?,?,?,?)').run('FIXTURE-BATCH','FIXTURE-JOB','FIXTURE-NEED','2026-10-15T01:00:00.000Z','first_order_reviewed');const member=db.prepare('SELECT * FROM ck_bulk_work_batch_items').get(),cutoff=db.prepare('SELECT * FROM ck_bulk_labor_finishes').get(),{run}=await act(env,'start',input());await complete(env,run.id);assert.deepEqual(db.prepare(`SELECT * FROM ck_backup_${run.id}_ck_bulk_work_batch_items`).get(),member);assert.deepEqual(db.prepare(`SELECT * FROM ck_backup_${run.id}_ck_bulk_labor_finishes`).get(),cutoff);assert.equal(db.prepare('SELECT count(*) n FROM ck_bulk_work_batch_items').get().n,0);assert.equal(db.prepare('SELECT count(*) n FROM ck_bulk_labor_finishes').get().n,0);
 });
 test('reset archives released courier receipt snapshots before clearing their protected historical plans',async()=>{
  const env=setup(),db=env.DB.raw,code='301000000201';

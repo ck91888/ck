@@ -167,12 +167,12 @@
    const dispatch=document.createElement('div');dispatch.id='page-dispatch';dispatch.className='page';dispatch.innerHTML='<button class="nav-back" type="button">← 现场首页</button><div id="ck-dispatch-body"></div>';document.body.append(dispatch);dispatch.querySelector('button').onclick=()=>showPage('home');
    let fieldWork=null;
    const bulkPage=document.getElementById('page-bulk_op'),bulkHost=document.createElement('div');bulkPage.append(bulkHost);
-   const modes=document.createElement('div');modes.className='ck-bulk-modes';modes.innerHTML='<button type="button" data-mode="need">需求作业单 / 작업 계획서</button><button type="button" data-mode="external">外部作业单 / 외부 작업서</button><button type="button" data-mode="batch">一人多单 / 한 명·여러 작업</button>';bulkPage.querySelector('.topbar').after(modes);
-   modes.querySelectorAll('button').forEach(b=>b.onclick=()=>goPage('bulk_op',b.dataset.mode==='batch'?{bulk_batch:'new',external:!!window._pageParams?.external}:{external:b.dataset.mode==='external'}));
+   const modes=document.createElement('div');modes.className='ck-bulk-modes';modes.innerHTML='<button type="button" data-mode="need">需求作业单 / 작업 계획서</button><button type="button" data-mode="external">外部作业单 / 외부 작업서</button>';bulkPage.querySelector('.topbar').after(modes);
+   modes.querySelectorAll('button').forEach(b=>b.onclick=()=>goPage('bulk_op',{external:b.dataset.mode==='external'}));
    const menu=document.querySelector('#page-order_op_menu .btn:last-child');menu.after(button('外部作业单 / 외부 작업서',()=>goPage('bulk_op',{external:true})));
    window.initBulkOp=function(){
     const external=!!window._pageParams?.external||!!(window._activeJobId&&!String(window._activeJobId).startsWith('SOPJOB-'));
-    modes.querySelectorAll('button').forEach(b=>{b.setAttribute('aria-pressed',String(b.dataset.mode===(window._pageParams?.bulk_batch?'batch':external?'external':'need')));b.disabled=!!window._activeJobId;});
+    modes.querySelectorAll('button').forEach(b=>{b.setAttribute('aria-pressed',String(b.dataset.mode===(external?'external':'need')));b.disabled=!!window._activeJobId;});
     if(fieldWork){fieldWork.destroy();fieldWork=null;}window.stopBulkScan?.();window._bulkStopElapsedTimer?.();
     for(const node of ['bulkStateIdle','bulkStateWorking'])document.getElementById(node).style.display='none';
     bulkHost.hidden=false;

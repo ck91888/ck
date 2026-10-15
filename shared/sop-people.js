@@ -60,6 +60,6 @@
    finally{starting=false;}
   };
   render();input.focus();
-  return {ready(){return queue;},read(){if(checking)throw Error('正在核对工牌，请稍后 / 명찰 확인 중');if(allowEmpty&&!model.people.length)return {workers:[],lead_id:''};model.select(maxPeople===1?model.people[0]?.id:lead.value);const staff=model.read();if(confirmations.size)staff.borrow_confirmations=[...confirmations.values()].filter(c=>staff.workers.some(w=>w.id===c.worker_id));return staff;},async destroy(){closed=true;await stop();}};
+  return {setMaxPeople(value){maxPeople=value;lead.closest('label').hidden=value===1;},ready(){return queue;},read(){if(model.people.length>maxPeople)throw Error('多单只能选择1名实际操作员，请移除多余人员 / 작업자는 한 명만 선택하세요');if(checking)throw Error('正在核对工牌，请稍后 / 명찰 확인 중');if(allowEmpty&&!model.people.length)return {workers:[],lead_id:''};model.select(maxPeople===1?model.people[0]?.id:lead.value);const staff=model.read();if(confirmations.size)staff.borrow_confirmations=[...confirmations.values()].filter(c=>staff.workers.some(w=>w.id===c.worker_id));return staff;},async destroy(){closed=true;await stop();}};
  };
 })();
