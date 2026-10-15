@@ -4,6 +4,7 @@ import {jobNumbers,jobDisplayMetadata} from './document-numbers.js';
 import {ensureAttendanceManagement,ensureAttendanceLoanGuard,attendanceDaySelect,activeAttendanceSQL,attendanceVoidBlockers,attendanceManagementStatement} from './attendance-management.js';
 // Attendance is enabled only in the isolated staging rollout. Production routes stay unchanged.
 import { attendanceReport, kstDay } from './attendance-time.js';
+import {shiftAttendanceReport,shiftPolicyEnabled} from './attendance-shift-policy.js';
 import { EMPLOYEE_SCHEMA, employeeDepartments, employeeAction, isEmployee } from './employee-attendance.js';
 import { laborDepartment } from '../shared/labor-department.js';
 import {sourceActiveWorkers,personHasPendingReturn} from './crew-borrow.js';
@@ -97,7 +98,7 @@ async function overview(env,date,t,scope='daily',detailPersonId=''){
   const events=history.filter(e=>e.record_id===d.id),decisions=new Map(own.filter(s=>!s.end).map(s=>[s.id,attendanceOpenSegment(record,s,events,t)]));
   const verifiedWindow=own.filter(s=>s.end||decisions.get(s.id)?.eligible);
   validSegments.set(d.person_id,identityConflict?[]:verifiedWindow);
-  const totals=attendanceReport(record,verifiedWindow,t,date);
+  const shiftEnabled=shiftPolicyEnabled(env,date),totals=shiftEnabled?shiftAttendanceReport(record,verifiedWindow,t,date,{needsWorkVerification:identityConflict||[...decisions.values()].some(s=>!s.eligible)}):attendanceReport(record,verifiedWindow,t,date);
   if(identityConflict){totals.bulk=totals.direct_ship=totals.import=totals.other=totals.unassigned=0;totals.conflict=Math.max(0,totals.presence-totals.rest);totals.flags.push('工牌大小写身份或活动记录冲突，工时待核实 / 명찰·작업 기록 충돌');}
   if(own.some(s=>s.department==='other'))totals.flags.push('有作业尚未确认用工部门');
   if([...decisions.values()].some(s=>s.reason==='previous_shift'))totals.flags.push('上个班次任务未退出，本日不计入');
@@ -110,7 +111,7 @@ async function overview(env,date,t,scope='daily',detailPersonId=''){
  const stale=await rows(env,"SELECT d.id,d.worker_id,d.name,d.agency,d.day,d.signed_in FROM ck_attendance_days d WHERE d.day<? AND d.signed_out='' AND "+activeAttendanceSQL('d')+filter+" ORDER BY d.day DESC LIMIT 100",date);
  const identityWarnings=segments.filter(w=>isAttendanceBadge(w.worker_id)&&(scope!=='employee'||/^EMP-/i.test(w.worker_id))&&(scope==='employee'||scope==='all'||!/^EMP-/i.test(w.worker_id))).flatMap(w=>{const candidates=days.filter(d=>sameWorkerBadge(d.worker_id,w.worker_id));const d=candidates[0],reason=candidates.length!==1||!d?'作业工牌没有唯一的当天签到，待负责人核实':identities.get(d.id)?.conflict?'工牌身份记录冲突，待负责人核实':d.voided_at?'作业关联已删除签到，待负责人核实':'';return reason?[{worker_id:w.worker_id,worker_name:w.worker_name,job_id:w.job_id,job_label:w.display_business_no||w.job_label||w.display_no||w.job_id,reason}]:[];});
  if(scope==='employee'){const details=await employeeWorkdays(env,{date,asOf:t,items:detailPersonId?output.filter(item=>item.record.personId===detailPersonId):output,validSegments,detailPersonId});if(detailPersonId){const detail=details.get(detailPersonId);if(!detail)fail('没有该职员当天的签到记录 / 해당 직원의 당일 출근 기록이 없습니다');return detail;}}
- return {ok:true,date,asOf:t,agencies,identityWarnings,items:output,deletedItems:env.SOP_REQUEST_USER?.role==='manager'?deletedItems:[],stale,publicTest:!!env.SOP_REQUEST_USER?.public_test};
+ return {ok:true,date,asOf:t,agencies,identityWarnings,items:output,deletedItems:env.SOP_REQUEST_USER?.role==='manager'?deletedItems:[],stale,publicTest:!!env.SOP_REQUEST_USER?.public_test,...(shiftPolicyEnabled(env,date)?{attendancePolicy:{version:'shift-accounting-v1',dateScope:'all',timeZone:'Asia/Seoul',restCutoff:'12:00',restTargets:{morning:90,afternoon:40},outsideWindowStart:'actual_checkin'}}:{})};
 }
 export async function handleAttendance(b,env){
  if(!attendanceEnabled(env))return {ok:false,error:'签到尚未启用'};

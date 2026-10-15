@@ -23,6 +23,8 @@ SOP_AUTO_OUTBOUND = "true"
 SOP_ROLLOUT_DEPARTMENTS = "bulk"
 SOP_ENVIRONMENT = "staging"
 SOP_ATTENDANCE_ENABLED = "true"
+# Recalculate all attendance dates on reads; preserve original punch/work/rest rows.
+SOP_ATTENDANCE_SHIFT_ACCOUNTING = "true"
 # Explicitly authorized public, fictional-data acceptance environment only.
 SOP_PUBLIC_TEST_ACCESS = "false"
 SOP_ACCESS_CONTROL = "true"
