@@ -19,7 +19,7 @@ export async function cargoSplit(b,env,u){
  if(!Array.isArray(b.children)||b.children.length<2||b.children.length>50)throw Error('请填写2至50个可识别的实际货物范围');
  const t=new Date().toISOString();let children=b.children.map(c=>({name:text(c.name),range:c.range,box_count:c.box_count,identifier:c.identifier,one_mark_one_box:c.one_mark_one_box===undefined?parent.one_mark_one_box:c.one_mark_one_box,process_names:parent.process_names,instructions:parent.instructions,attachment_ids:parent.attachment_ids,no_documents_reason:parent.no_documents_reason}));
  const normalized=normalizeCargoGroups({total_range:parent.range,groups:children});children=normalized.groups;
- if(normalized.box_count!==parent.box_count||normalized.coverage.unassigned.length)throw Error('拆组范围和输入箱数必须完整覆盖原组，不得遗漏或重复实物');
+ if(normalized.coverage.unassigned.length)throw Error('拆组请保留原组来源箱唛；预计作业箱数可分别填写');
  if(output?.status==='approved'){
   const quantities=b.children.map(c=>Number(c.quantity));if(quantities.some(n=>!Number.isSafeInteger(n)||n<1)||quantities.reduce((a,b)=>a+b,0)!==output.quantity||b.children.some(c=>c.unit&&c.unit!==output.unit))throw Error('逐组填写实际成果数量，合计和单位须与原审核成果一致');
   children=children.map((g,i)=>{const o={...structuredClone(output),id:'CGOUT-'+crypto.randomUUID(),version:1,status:'awaiting_review',quantity:quantities[i],input_box_count:g.box_count,range:g.range,marks:g.marks,identifier:g.identifier,mapping_version:1,review:null,parent_output:{id:output.id,version:output.version,review:output.review},split_by:u.name,split_at:t};return {...g,outputs:[o],current_output_id:o.id,status:'awaiting_review'};});

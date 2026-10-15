@@ -19,3 +19,5 @@ body.ck-system[data-app="002"] #view-need .ck-plan-empty{word-break:keep-all;ove
 
 .ck-print-audit summary{cursor:pointer;font-size:12px;min-height:26px;color:#18564A;word-break:keep-all}.ck-print-audit .ck-print-last{max-width:240px}
 @media(max-width:700px){#view-need #groupTable .ck-work-table{min-width:760px}#view-need #groupTable{overflow-x:auto}.ck-print-audit summary{min-height:48px;display:flex;align-items:center}}
+
+.ck-plan-creator{font-size:12px;color:#526477;overflow-wrap:anywhere;white-space:normal;line-height:1.5}.ck-plan-brief p.ck-plan-creator{margin:3px 0}

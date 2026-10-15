@@ -34,11 +34,11 @@ function quantityFields(value,group){
  if(quantity!==null&&(!Number.isSafeInteger(quantity)||quantity<1)||!['','箱','托'].includes(unit))throw Error('本次数量须为正整数；未知请留空待确认');
  const shipping_range=text(value.shipping_range),shipping_marks=shipping_range?expandMarks(shipping_range):[];
  if(shipping_marks.some(m=>!group.marks.includes(m)))throw Error('本次箱唛子范围超出本组');
- if(group.one_mark_one_box&&unit==='箱'&&quantity!==null&&shipping_marks.length&&quantity!==shipping_marks.length)throw Error('一唛一箱时，本次数量须与子范围一致');
  return {schema:2,quantity,unit,shipping_range,shipping_marks};
 }
 const ordersFor=async(env,data)=>(data.links||[]).length?(await q(env,'SELECT * FROM v2_outbound_orders WHERE id IN (SELECT value FROM json_each(?))',JSON.stringify(data.links.map(l=>l.outbound_id))).all()).results:[];
 export async function createGroupReservation(env,data,department,group,value,actor,t){
+ if(value.schema!==2&&!Object.hasOwn(value,'quantity')&&(data.links||[]).some(l=>l.cargo_reservation&&l.cargo_reservation.schema!==2&&l.cargo_reservation.status!=='cancelled'&&l.cargo_reservation.groups.some(g=>g.group_id===group.id)))throw Error('本组已有整组预约，请修改原预约或明确填写本次数量');
  const fields=reservationFields(value),id='OB-'+crypto.randomUUID(),display_no=await nextOutboundDisplayNo(env,data.customer,fields.expected_ship_at);
  const reservation={...fields,...(value.schema===2||Object.hasOwn(value,'quantity')?quantityFields(value,group):{}),status:'waiting_work',groups:[groupSnapshot(group)]};
  (data.links||=[]).push({outbound_id:id,display_no,quantity:1,unit:'组',phase:'planned',cargo_reservation:reservation,by:actor.name,actor_id:actor.id,at:t});
@@ -58,7 +58,7 @@ export async function syncGroupReservations(env,data,t,actor,{confirmId='',expec
   if(confirmId===link.outbound_id){if(!ready)throw Error('本组尚未完成全部审核');if(JSON.stringify(outputs.map(o=>({id:o.id,version:o.version})))!==JSON.stringify(expectedOutputs))throw Error('成果版本已变化，请重新核对');if(allocations.some(a=>!a))throw Error('请按实际成果填写本次数量及单位后确认');validateCargoCapacity(data,orders);}
   if(!ready){r.status='waiting_work';r.proposed_outputs=[];statements.push(q(env,'UPDATE v2_outbound_orders SET instruction=?,updated_at=? WHERE id=?','待作业完成/审核 · '+groups.map(g=>g.name+' · '+(r.shipping_range||g.range)).join(' / ')+' · 本次 '+(r.schema===2?(r.quantity==null?'数量待确认':r.quantity+(r.unit||'（单位待确认）')):'原整组预约'),t,link.outbound_id));continue;}
   r.proposed_outputs=groups.map((g,i)=>({...groupSnapshot(g),output_id:outputs[i].id,output_version:outputs[i].version,quantity:outputs[i].quantity,unit:outputs[i].unit}));
-  const changed=allocations.some(a=>!a)||groups.some(g=>{const c=ledger.find(c=>c.group_id===g.id),o=approvedOutput(g);return c.overbooked||c.overlap||o.unit!=='箱'||o.quantity!==g.box_count||r.outbound_mode==='milk_pallet'&&o.unit!=='托';});
+  const changed=allocations.some(a=>!a)||groups.some(g=>{const c=ledger.find(c=>c.group_id===g.id),o=approvedOutput(g);return c.overbooked||c.overlap||o.unit!=='箱'||r.outbound_mode==='milk_pallet'&&o.unit!=='托';});
   if(changed&&confirmId!==link.outbound_id){r.status='needs_confirmation';statements.push(q(env,'UPDATE v2_outbound_orders SET instruction=?,updated_at=? WHERE id=?','待确认本次分配 · 本组成果 '+outputs.map(o=>o.quantity+o.unit).join(' / ')+' · 本次 '+(r.quantity==null?'待填写':r.quantity+(r.unit||'（单位待确认）')),t,link.outbound_id));continue;}
   link.cargo_allocations=allocations;link.phase='confirmed';r.status='ready';r.confirmed_by=actor.name;r.confirmed_at=t;r.automatic=confirmId!==link.outbound_id;
   const boxes=allocations.filter(a=>a.unit==='箱').reduce((n,a)=>n+a.quantity,0),pallets=allocations.filter(a=>a.unit==='托').reduce((n,a)=>n+a.quantity,0);

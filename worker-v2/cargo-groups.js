@@ -32,7 +32,9 @@ export function normalizeCargoGroups(input){
   const marks=expandMarks(g.range);expanded+=marks.length;if(expanded>50000)throw Error('每个计划最多50000个箱唛定位');const identifier=text(g.identifier),one=g.one_mark_one_box===true,box_count=positive(g.box_count);
   if(one&&box_count!==marks.length)throw Error('已确认一唛一箱，箱数须与范围数量一致：'+(i+1));
   if(identifier.length>120)throw Error('区分标记过长');
-  for(const mark of marks){const previous=all.get(mark)||[];if(previous.some(p=>one||p.one||!identifier||!p.identifier||p.identifier===identifier))throw Error('箱唛范围交叉，请拆分或明确不同实物标记：'+mark);previous.push({identifier,one});all.set(mark,previous);}
+  // A source carton may feed several work groups. Marks locate the source;
+  // outbound deduplication belongs to each independently reviewed output.
+  for(const mark of marks)all.set(mark,true);
   const instructions=text(g.instructions),name=text(g.name)||'组 '+(i+1);if(instructions.length>4000)throw Error('第'+(i+1)+'组备注最多4000字');if(name.length>120)throw Error('第'+(i+1)+'组的其他设置：组名最多120字');
   const attachment_ids=[...new Set((g.attachment_ids||[]).map(text))];if(attachment_ids.length>200)throw Error('每组最多200份资料');
   count+=box_count;return {id,name,process_names:processNames(Array.isArray(g.process_names)&&!g.process_names.length?undefined:g.process_names),range:text(g.range),marks,identifier,one_mark_one_box:one,box_count,instructions,attachment_ids,no_documents_reason:text(g.no_documents_reason).slice(0,400)};
@@ -60,7 +62,6 @@ export async function cargoGroups(b,env,u){
  if(Number(b.revision)!==row.revision)throw Error('作业计划已更新，请刷新后核对 / 작업 계획이 변경되었습니다');
  if(['closed','cancelled'].includes(row.data.status))throw Error('作业计划已关闭');
  const normalized=normalizeCargoGroups(b);
- if(row.data.planned_unit==='箱'&&normalized.box_count!==Number(row.data.planned_quantity))throw Error('分组箱数合计须等于计划箱数：'+row.data.planned_quantity);
  const previousIds=new Set(current?.groups.map(g=>g.id)||[]);for(const g of b.groups)if(g.id&&!previousIds.has(g.id))throw Error('资料组不属于此计划');
  const files=await workMaterials(env,[row]),byId=new Map(files.map(f=>[f.id,f]));
  const snapshot=id=>{const f=byId.get(id);if(!f)throw Error('资料不存在、已撤下或不属于此计划');return {id:f.id,file_key:f.file_key,file_name:f.file_name,created_at:f.created_at,uploaded_by:f.uploaded_by};};

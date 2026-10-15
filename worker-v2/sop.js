@@ -12,7 +12,8 @@ import {cargoShipping} from './cargo-shipping.js';
 import {cargoExecution} from './cargo-execution.js';
 import {cargoGroups} from './cargo-groups.js';
 import {restingDispatchAccess} from './dispatch-access.js';
-import {ensureDocumentNumbers,recordNumbers,resolveRecordId,jobNumbers,jobDisplayMetadata} from './document-numbers.js';
+import {ensureDocumentNumbers,recordNumbers as documentRecordNumbers,resolveRecordId,jobNumbers,jobDisplayMetadata} from './document-numbers.js';
+import {workNeedCreators} from './work-need-creator.js';
 import {loadTripEnabled} from './outbound-load-trip.js';
 import {readBatchMaterials,changeBatchMaterial} from './batch-work-materials.js';
 import {completionDate} from './completion-date.js';
@@ -25,6 +26,7 @@ import {effectiveResults} from './effective-results.js';
 /* SOP pilot: explicit opt-in, revision checked atomic mutations, immutable history.
  * No production migration or legacy job conversion on request paths.
  */
+const recordNumbers=async(env,records)=>workNeedCreators(env,await documentRecordNumbers(env,records));
 const kinds = ['need','task','check','issue'];
 const roles = ['manager','dispatcher','reviewer','service','viewer'];
 const text = (v, max=4000) => String(v ?? '').trim().slice(0,max);
