@@ -1,3 +1,4 @@
+import {withInboundCreateReceipt,inboundCreateStatus,inboundReceiptStatements} from './inbound-create-receipt.js';
 import {handleBulkBatch,guardBulkBatchMutation} from './bulk-work-batch.js';
 import {inboundArrivalFilter} from './inbound-arrival-filter.js';
 import {dailyDispatchEnabled,dailyDispatchAdmin,guardDailyDispatch} from './daily-dispatch-permissions.js';
@@ -3781,7 +3782,9 @@ route("v2_outbound_stock_op_finish", async (body, env) => {
 // =====================================================
 // INBOUND PLANS — Collab side
 // =====================================================
-route("v2_inbound_plan_create", async (body, env) => {
+route("v2_inbound_plan_create_status", (body,env)=>inboundCreateStatus(body,env));
+route("v2_inbound_plan_create", (body,env)=>withInboundCreateReceipt(body,env,receipt=>createInboundPlan(body,env,receipt)));
+async function createInboundPlan(body, env, receipt=null) {
   const fromFeedback=body.feedback_context!==undefined;
   if(fromFeedback){feedbackLinkActor(env);if(!String(body.customer||'').trim())return err('请客服确认并填写客户 / 고객을 확인해 입력하세요');}
   else if (!isAuth(body, env)) return err("unauthorized", 401);
@@ -3880,10 +3883,11 @@ route("v2_inbound_plan_create", async (body, env) => {
       workBundle=await workPlanStatements(env,body.work_requests,{type:'inbound',id,customer},env.SOP_REQUEST_USER||{id:'service',name:created_by},t);
     }
     const result={ ok: true, id, display_no, outbound_id, outbound_display_no, needs:workBundle.needs.map(n=>({id:n.id,title:n.title})), outbounds:workBundle.outbounds,...(feedback?{inbound_plan_id:id,feedback_id:feedback.src.fb.id,job_id:feedback.src.job.id}:{}) };
-    const grouped=body.work_requests?.some(n=>n.cargo_groups||n.plan_materials),claim=[];if(grouped||feedback){if(!body.client_req_id)throw Error('缺少创建请求编号');claim.push(env.DB.prepare('INSERT INTO v2_idempotency_keys(idem_key,action,response_json,created_at) VALUES(?,?,?,?)').bind(body.client_req_id,'v2_inbound_plan_create',JSON.stringify(result),t));}
+    const grouped=body.work_requests?.some(n=>n.cargo_groups||n.plan_materials),claim=[];if(grouped||feedback||receipt){if(!body.client_req_id)throw Error('缺少创建请求编号');claim.push(env.DB.prepare('INSERT INTO v2_idempotency_keys(idem_key,action,response_json,created_at) VALUES(?,?,?,?)').bind(body.client_req_id,'v2_inbound_plan_create',JSON.stringify(result),t));}
     const linking=feedback?feedbackCreateStatements(env,feedback,{id,display_no,plan_date,customer,biz_class,biz_classes_json,status:'pending',updated_at:t,external_inbound_no:externalNo,bulk_external_inbound_no:bulkExternalNo},savedLines,t):[];
-    try{await env.DB.batch([...claim,...inboundStatements,...workBundle.statements,...linking,...planAuditStatements(env,'inbound',id,'create',t)]);}catch(error){
-      if(grouped||feedback){const old=await env.DB.prepare('SELECT response_json FROM v2_idempotency_keys WHERE idem_key=? AND action=?').bind(body.client_req_id,'v2_inbound_plan_create').first();if(old){const cached=JSON.parse(old.response_json);if(feedback&&cached.feedback_id!==feedback.src.fb.id)throw Error('请求编号已用于其他操作，请重新打开表单');return cached;}}
+    const receiptCommit=inboundReceiptStatements(env,receipt,result);
+    try{await env.DB.batch([...receiptCommit.before,...claim,...inboundStatements,...workBundle.statements,...linking,...planAuditStatements(env,'inbound',id,'create',t),...receiptCommit.after]);}catch(error){
+      if(grouped||feedback||receipt){const old=await env.DB.prepare('SELECT response_json FROM v2_idempotency_keys WHERE idem_key=? AND action=?').bind(body.client_req_id,'v2_inbound_plan_create').first();if(old){const cached=JSON.parse(old.response_json);if(feedback&&cached.feedback_id!==feedback.src.fb.id)throw Error('请求编号已用于其他操作，请重新打开表单');return cached;}}
       if(feedback){const existing=await existingFeedbackPlan(env,feedback.src.fb.id);if(existing)return feedbackExistingResult(existing);}
       throw error;
     }
@@ -3895,7 +3899,7 @@ route("v2_inbound_plan_create", async (body, env) => {
     if(saved.ok){const linked=await existingFeedbackPlan(env,body.feedback_context.feedback_id);if(linked?.canonical&&linked.plan_id===saved.id){const reconciled=await reconcileFeedbackLink(env,linked,{ensureTasks:ensureInboundPlanBizTasks,recalc:recalcInboundPlanCompletion,syncCourier:syncCourierArrival});return json({...saved,status:reconciled.status});}}
   }
   return response;
-});
+}
 
 // ===== Helper: check if an inbound plan is fully completed =====
 // Returns { allDone: bool, unloadDone: bool, putawayDone: bool }

@@ -94,7 +94,7 @@ test('issue workflow buttons follow the same existing roles as backend without e
 test('inbound work-plan add button keeps its action and caption through language changes',opts,async()=>{
  const f=await fixture(),p=await f.page('/002/?tab=inbound');
  try{
-  p.w.goTab('inbound_create');await until(()=>p.d.querySelector('[data-add-work]'),p.errors);
+  p.w.goTab('inbound_create');await until(()=>p.d.querySelector('[data-add-work]')&&!p.d.querySelector('[data-add-work]').disabled,p.errors);
   const button=p.d.querySelector('[data-add-work]'),list=button.parentElement.querySelector('[data-work-list]');
   p.w.applyLang();assert.equal(button.textContent,'新增');
   button.click();assert.equal(list.children.length,1);button.click();assert.equal(list.children.length,2);
@@ -394,7 +394,7 @@ test('external scanner creates a crew once, resumes by external number and pause
 });
 test('inbound work rows and inventory need optional outbound fields use original forms',opts,async()=>{
  const f=await fixture(),p=await f.page('/002/');try{
- p.w.goView('inbound_create');p.d.querySelector('[data-add-work]').click();
+ p.w.goView('inbound_create');await until(()=>!p.d.querySelector('[data-add-work]').disabled,p.errors);p.d.querySelector('[data-add-work]').click();
  const row=p.d.querySelector('[data-work-row]');row.querySelector('[data-work=title]').value='虚拟打托';row.querySelector('[data-work=instructions]').value='1–15打托';row.querySelector('[data-work=planned_quantity]').value='15';row.querySelector('[data-add-ob]').click();row.querySelector('[data-ob=expected_ship_at]').value='2026-09-25';row.querySelector('[data-ob=quantity]').value='15';row.querySelector('[data-ob=outbound_mode]').value='customer_pickup';row.querySelector('[data-ob=po_no]').value='PO-FIXTURE';
  const data=p.w.CKInboundWorks.read();assert.equal(data.length,1);assert.equal(data[0].outbounds[0].quantity,'15');
  p.d.querySelector('[data-tab=need]').click();await until(()=>p.d.querySelector('#view-need .ck-needs-tools button:nth-child(2)'),p.errors);p.d.querySelector('#view-need .ck-needs-tools button:nth-child(2)').click();await until(()=>p.d.querySelector('#view-need dialog').open,p.errors);

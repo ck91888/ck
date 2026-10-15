@@ -37,7 +37,7 @@ export async function confirmOfficeOperator(body,env,request){
 }
 // Only coordination/business writes require the label. Attendance registration,
 // account administration and consumables keep their existing policies.
-const reads=new Set('sop_need_create_status sop_bulk_batch_candidates sop_bulk_batch_get sop_login sop_identity sop_logout sop_operator_confirm sop_get sop_list sop_linked sop_updates sop_source_detail sop_need_groups sop_batch_work_materials sop_work_materials sop_work_need_search sop_dispatch_list sop_field_resolve sop_check_for_batch sop_check_scan_logs sop_courier_config sop_courier_list sop_courier_detail sop_courier_lookup sop_crew_availability sop_crew_status'.split(' '));
+const reads=new Set('v2_inbound_plan_create_status sop_need_create_status sop_bulk_batch_candidates sop_bulk_batch_get sop_login sop_identity sop_logout sop_operator_confirm sop_get sop_list sop_linked sop_updates sop_source_detail sop_need_groups sop_batch_work_materials sop_work_materials sop_work_need_search sop_dispatch_list sop_field_resolve sop_check_for_batch sop_check_scan_logs sop_courier_config sop_courier_list sop_courier_detail sop_courier_lookup sop_crew_availability sop_crew_status'.split(' '));
 export function officeOperationGuard(body,env,request){
  if(!env.SOP_OPERATION_CONTEXT)return null;
  const action=String(body.action||'').trim();

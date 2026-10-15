@@ -10,9 +10,10 @@ window.CKInstallFeedbackLink=function(app){
  const createView=document.getElementById('view-inbound_create'),customerInput=document.getElementById('ibc-customer'),customerPlaceholder=customerInput.placeholder;
  let createGeneration=0,createSource=null,detailGeneration=0;
  function clearSource(){createGeneration++;createSource=null;createView.querySelector('[data-feedback-create-source]')?.remove();customerInput.placeholder=customerPlaceholder;}
- function newForm(){clearSource();window.resetInboundCreateForm();if(window._createSubmissionIntents)delete window._createSubmissionIntents.v2_inbound_plan_create;}
+ function newForm(){if(window.CKInboundSave?.keepWorkDom())return;clearSource();window.resetInboundCreateForm();if(window._createSubmissionIntents)delete window._createSubmissionIntents.v2_inbound_plan_create;}
  const currentCreate=snapshot=>snapshot.generation===createGeneration&&createView.style.display!=='none';
  window.CKInboundCreate={
+  exportSource(){return createSource;},restoreSource(value){clearSource();createSource=value||null;if(createSource)showSource(createSource);},
   capture(){return {generation:createGeneration,references:window.CKInboundCreateReferences?.()||{},feedback_context:createSource?{feedback_id:createSource.feedback_id,feedback_version:createSource.feedback_version,job_version:createSource.job_version}:null};},
   isCurrent:currentCreate,
   complete(snapshot,id){if(!currentCreate(snapshot))return;const linked=!!snapshot.feedback_context;newForm();if(linked)openInboundDetail(id);else goTab('inbound');}
@@ -20,6 +21,12 @@ window.CKInstallFeedbackLink=function(app){
  const previousView=window.goView;window.goView=function(name,...args){if(name==='inbound_create')newForm();else if(createView.style.display!=='none')clearSource();return previousView(name,...args);};
  const cancelCreate=()=>{const id=createSource?.feedback_id;newForm();if(id)openFeedbackDetail(id);else goTab('inbound');};
  createView.querySelector('.nav-back').onclick=cancelCreate;
+ function showSource(source){
+  customerInput.placeholder='请核实并填写客户 / 고객을 확인하고 입력하세요';
+  const banner=document.createElement('section');banner.className='ck-feedback-create-source';banner.dataset.feedbackCreateSource='';
+  banner.innerHTML='<div><strong>来自计划外卸货 / 현장 하차에서 생성</strong><b>'+esc(source.display_no||source.feedback_id)+'</b></div><p>原卸货实收 / 기존 실제 하차: '+esc(source.actual_totals.map(x=>label(x.unit_type)+' '+qty(x.actual_qty)).join(' · '))+'</p>'+(source.completed_at?'<p>原完成时间 / 기존 완료 시간: '+esc(window.fmtTime?fmtTime(source.completed_at):source.completed_at)+'</p>':'')+'<p>请核实客户并选择业务分类。原客户／唛头等文字保留在备注；原卸货人员、工时、实收和照片随保存关联。 / 고객·입고 유형을 확인하세요. 고객·마크 원문은 비고에 보존하며 기존 작업 기록과 사진을 연결합니다.</p><button type="button" class="btn btn-outline" data-feedback-create-cancel>取消建单，返回原卸货 / 취소·원래 하차로</button>';
+  banner.querySelector('button').onclick=cancelCreate;createView.querySelector('.card').prepend(banner);customerInput.focus();
+ }
  async function createFromFeedback(fb,button,canApply,error){
   if(button.disabled||!office())return;button.disabled=true;error.textContent='正在读取原卸货记录 / 원래 하차 기록 확인 중…';
   try{
@@ -27,15 +34,12 @@ window.CKInstallFeedbackLink=function(app){
    if(r.existing_link){openInboundDetail(r.existing_link.plan_id);return;}
    const source=r.source,units=['container_large','container_small','pallet','carton','cbm'];
    if(!source||source.feedback_id!==fb.id||!source.feedback_version||!source.job_version||!Array.isArray(source.actual_totals)||!source.actual_totals.some(x=>Number(x.actual_qty)>0)||source.actual_totals.some(x=>!units.includes(x.unit_type)||!Number.isFinite(x.actual_qty)||x.actual_qty<0))throw Error('原卸货数量或单位需先核实 / 원래 수량·단위를 먼저 확인하세요');
-   goView('inbound_create');createSource=source;
+   if(window.CKInboundSave)await CKInboundSave.openNew();else goView('inbound_create');createSource=source;
    const tbody=document.getElementById('ibcLinesBody');tbody.replaceChildren();
    for(const line of source.actual_totals){addIbcLine();const row=tbody.lastElementChild;row.querySelector('.ibc-line-type').value=line.unit_type;row.querySelector('.ibc-line-qty').value=line.actual_qty;}
    document.getElementById('ibc-cargo').value=source.cargo_summary||source.actual_totals.map(x=>label(x.unit_type)+' '+qty(x.actual_qty)).join(' / ');
    document.getElementById('ibc-remark').value=[source.content,source.remark].filter((value,index,list)=>value&&list.indexOf(value)===index).join('\n');
-   customerInput.placeholder='请核实并填写客户 / 고객을 확인하고 입력하세요';
-   const banner=document.createElement('section');banner.className='ck-feedback-create-source';banner.dataset.feedbackCreateSource='';
-   banner.innerHTML='<div><strong>来自计划外卸货 / 현장 하차에서 생성</strong><b>'+esc(source.display_no||fb.display_no||fb.id)+'</b></div><p>原卸货实收 / 기존 실제 하차: '+esc(source.actual_totals.map(x=>label(x.unit_type)+' '+qty(x.actual_qty)).join(' · '))+'</p>'+(source.completed_at?'<p>原完成时间 / 기존 완료 시간: '+esc(window.fmtTime?fmtTime(source.completed_at):source.completed_at)+'</p>':'')+'<p>请核实客户并选择业务分类。原客户／唛头等文字保留在备注；原卸货人员、工时、实收和照片随保存关联。 / 고객·입고 유형을 확인하세요. 고객·마크 원문은 비고에 보존하며 기존 작업 기록과 사진을 연결합니다.</p><button type="button" class="btn btn-outline" data-feedback-create-cancel>取消建单，返回原卸货 / 취소·원래 하차로</button>';
-   banner.querySelector('button').onclick=cancelCreate;createView.querySelector('.card').prepend(banner);customerInput.focus();
+   showSource(source);
   }catch(e){if(canApply())error.textContent=e.message;}
   finally{if(canApply())button.disabled=false;}
  }

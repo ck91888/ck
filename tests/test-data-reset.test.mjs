@@ -1,3 +1,4 @@
+import {INBOUND_CREATE_RECEIPT_SQL} from '../worker-v2/inbound-create-receipt.js';
 import test from 'node:test';import assert from 'node:assert/strict';
 import {ATTENDANCE_MANAGEMENT_SCHEMA} from '../worker-v2/attendance-management.js';
 import {PERMANENT_BADGE_SCHEMA} from '../worker-v2/permanent-badges.js';
@@ -12,7 +13,7 @@ import {CREW_BORROW_SCHEMA} from '../worker-v2/crew-borrow.js';
 import {BULK_BATCH_ITEMS_TABLE_SQL} from '../worker-v2/bulk-work-batch.js';
 import {BULK_LABOR_FINISH_TABLE_SQL} from '../worker-v2/bulk-batch-labor.js';
 const manager={id:'test-manager',role:'manager'};
-function setup(){const DB=database();for(const s of [BULK_BATCH_ITEMS_TABLE_SQL,BULK_LABOR_FINISH_TABLE_SQL,...COURIER_BATCH_SCHEMA,COURIER_CLAIM_HISTORY_SQL,...ATTENDANCE_SCHEMA,...ATTENDANCE_MANAGEMENT_SCHEMA,...PERMANENT_BADGE_SCHEMA,...ACCESS_SCHEMA,...LOAD_SCHEMA,...CREW_BORROW_SCHEMA])DB.raw.exec(s);
+function setup(){const DB=database();for(const s of [INBOUND_CREATE_RECEIPT_SQL,BULK_BATCH_ITEMS_TABLE_SQL,BULK_LABOR_FINISH_TABLE_SQL,...COURIER_BATCH_SCHEMA,COURIER_CLAIM_HISTORY_SQL,...ATTENDANCE_SCHEMA,...ATTENDANCE_MANAGEMENT_SCHEMA,...PERMANENT_BADGE_SCHEMA,...ACCESS_SCHEMA,...LOAD_SCHEMA,...CREW_BORROW_SCHEMA])DB.raw.exec(s);
  DB.raw.exec("CREATE TABLE v2_schema_meta(key TEXT PRIMARY KEY,value TEXT); INSERT INTO v2_schema_meta VALUES('version','keep'); INSERT INTO v2_003_locations(id,location_name) VALUES('KEEP','location'); INSERT INTO v2_inbound_plans(id,customer,status) VALUES('TEST','fixture','pending'); INSERT INTO v2_idempotency_keys(idem_key,action,response_json,created_at) VALUES('old','test','{}','');");
  const prepare=DB.prepare;let queries=0;
  DB.prepare=sql=>{queries++;assert.ok(!/UNION/i.test(sql),'avoid D1 compound-select limit');return prepare(sql);};

@@ -26,7 +26,7 @@ function withActionLock(key, btnEl, pendingText, fn) {
   try {
     var result = fn();
     if (result && typeof result.then === 'function') {
-      result.then(restore, restore);
+      return result.then(function(value) { restore(); return value; }, function() { restore(); });
     } else {
       restore();
     }
@@ -2732,6 +2732,7 @@ async function submitInbound(btnEl) {
   var linkOb = document.getElementById("ibc-link-ob");
   var linkObOn = !!(linkOb && linkOb.checked);
   var linkObRows = linkObOn ? getIbcLinkObRows() : [];
+  if(window.CKInboundSave?.resumingMaterials())linkObRows=[];
   // Optional outbound rows left at their defaults do not constitute a shipping plan.
   if(window.CKHasStandaloneOutbound){
     linkObRows=linkObRows.filter(CKHasStandaloneOutbound);
@@ -2751,7 +2752,7 @@ async function submitInbound(btnEl) {
   try { createSession = window.CKInboundCreate ? CKInboundCreate.capture() : null; }
   catch(error) { alert(error.message); return; }
   var currentCreate = function() { return !createSession || CKInboundCreate.isCurrent(createSession); };
-  withActionLock('submitInbound', btnEl || null, '提交中.../저장중...', async function() {
+  return withActionLock('submitInbound', btnEl || null, '提交中.../저장중...', async function() {
     var date = document.getElementById("ibc-date").value || kstToday();
     var biz_classes = bizArr;
     var biz = biz_classes[0]; // 兼容旧字段
@@ -2808,7 +2809,9 @@ async function submitInbound(btnEl) {
     if (matFiles.length > 0 && planId) {
       for (var mi = 0; mi < matFiles.length; mi++) {
         try {
+          if(window.CKInboundSave?.materialSaved(matFiles[mi]))continue;
           var mr = await uploadInboundMaterial(planId, matFiles[mi]);
+          window.CKInboundSave?.materialResult(matFiles[mi],mr);
           if (!(mr && mr.ok)) {
             matFailed.push((matFiles[mi].name || '?') + (mr && mr.message ? ' - ' + mr.message : ''));
           }

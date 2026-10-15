@@ -58,6 +58,7 @@ for(const role of ['manager','dispatcher'])test(role+' can set and clear only th
 });
 
 test('management labels do not relabel actual work or mutate clocks, breaks, jobs, or totals',async t=>{
+ t.mock.timers.enable({apis:['Date'],now:Date.parse('2026-10-15T12:00:00+09:00')});
  const f=await fixture(t),r=await f.person();f.job();
  const begin=r.day+'T08:00:00+09:00',end=r.day+'T09:00:00+09:00';
  f.DB.raw.prepare('UPDATE ck_attendance_days SET signed_in=?,signed_out=? WHERE id=?').run(begin,end,r.id);

@@ -88,7 +88,7 @@ async function openFeedback(s){
 }
 async function fromFeedback(s){await openFeedback(s);await page.locator('[data-feedback-create]').click();await page.locator('#view-inbound_create').waitFor({state:'visible'});await banner.waitFor({state:'visible'});await page.waitForFunction(()=>document.querySelector('#ibcLinesBody .ibc-line-type')?.value==='pallet');}
 async function ordinary(customer,biz='bulk'){
- await page.locator('#mainTabs [data-tab=inbound]').click();await page.locator('#btnNewInbound').click();
+ await page.locator('#mainTabs [data-tab=inbound]').click();await page.locator('#btnNewInbound').click();await page.waitForFunction(()=>!!window.CKInboundSave.getState()&&!document.querySelector('[data-inbound-new]').disabled);const oldId=await page.evaluate(()=>CKInboundSave.getState().id);await page.locator('[data-inbound-new]').click();await page.waitForFunction(id=>CKInboundSave.getState().id!==id,oldId);
  await page.locator('#ibc-customer').fill(customer);await page.locator('.ibc-biz-chk[value='+biz+']').check();
  await page.locator('#ibcLinesBody .ibc-line-type').first().selectOption('carton');await page.locator('#ibcLinesBody .ibc-line-qty').first().fill('5');
 }
@@ -166,11 +166,11 @@ try{
  const lostHandler=async route=>{const body=requestBody(route.request());if(!dropped&&body?.action==='v2_inbound_plan_create'&&body.customer==='Synthetic lost response'){dropped=true;const response=await route.fetch();committed=await response.json();await route.abort('failed');return;}return route.continue();};
  await page.route('**/api',lostHandler);const retryBefore=count('v2_inbound_plans');await submit.click();await page.waitForFunction(()=>!window._actionLocks?.submitInbound);assert.equal(dropped,true);assert.equal(committed.ok,true);assert.equal(count('v2_inbound_plans'),retryBefore+1);assert.equal(await page.locator('#ibc-customer').inputValue(),'Synthetic lost response');assert.equal(await banner.isVisible(),true);
  assert.match(await page.locator('[data-work-row] [data-plan-bound]').innerText(),/Synthetic-retry-material.csv/);assert.equal(DB.raw.prepare("SELECT count(*) n FROM sop_records WHERE kind='need'").get().n,1);
- await page.unroute('**/api',lostHandler);const retry=await save();assert.equal(retry.ok,true,JSON.stringify(retry));assert.equal(retry.id,committed.id);assert.ok(!retry.already_linked);assert.equal(count('v2_inbound_plans'),retryBefore+1);immutable(sources.retry);
- const retriedRequests=requests.filter(r=>r.action==='v2_inbound_plan_create'&&r.customer==='Synthetic lost response');assert.equal(retriedRequests.length,2);assert.equal(retriedRequests[0].client_req_id,retriedRequests[1].client_req_id);
+ await page.unroute('**/api',lostHandler);await page.locator('[data-inbound-check]').click();await page.waitForFunction(()=>!!CKInboundSave.getState().result&&!CKInboundSave.getState().busy);const retry=await page.evaluate(()=>CKInboundSave.getState().result);await page.locator('[data-inbound-open]').click();assert.equal(retry.ok,true,JSON.stringify(retry));assert.equal(retry.id,committed.id);assert.ok(!retry.already_linked);assert.equal(count('v2_inbound_plans'),retryBefore+1);immutable(sources.retry);
+ const retriedRequests=requests.filter(r=>r.action==='v2_inbound_plan_create'&&r.customer==='Synthetic lost response');assert.equal(retriedRequests.length,1,'read-only receipt recovery sends no business replay');
  const retryDetail=await call('v2_inbound_plan_detail',{id:retry.id});assert.equal(retryDetail.inbound_materials.length,1);assert.equal(retryDetail.inbound_materials[0].file_name,'Synthetic-retry-material.csv');assert.deepEqual(Buffer.from(objects.get(retryDetail.inbound_materials[0].file_key).body),material);
  assert.equal(DB.raw.prepare("SELECT count(*) n FROM sop_records WHERE kind='need'").get().n,1);
- record('lost successful response preserves draft and work materials; same-intent retry returns the same plan, one work request and exact original material bytes');
+ record('lost successful response preserves draft and work materials; read-only result recovery returns the same plan, one work request and exact original material bytes');
 
  await fromFeedback(sources.race);await valid('Synthetic losing create');const rival=await call('v2_inbound_plan_create',{customer:'Synthetic concurrent existing',biz_classes:['bulk'],lines:[{unit_type:'pallet',planned_qty:1}]});
  const link=await call('sop_feedback_link_preview',{feedback_id:sources.race.feedback_id,plan_id:rival.id});
