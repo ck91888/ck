@@ -498,3 +498,5 @@ label {
   margin: 6px 0 4px 0;
   font-size: 12px;
 }
+
+.issue-document-download{display:block;max-width:100%;padding:10px 0;font-size:14px;overflow-wrap:anywhere;}

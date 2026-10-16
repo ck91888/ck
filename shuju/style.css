@@ -35,6 +35,11 @@ body {
 .app-header h1 { font-size: 17px; font-weight: 700; }
 .app-header .header-right { display: flex; align-items: center; gap: 12px; font-size: 13px; color: #666; }
 .app-header .header-right a { color: #1677ff; text-decoration: none; font-size: 13px; }
+/* Wrapped office identity/time controls must not cover the job tabs on phones. */
+@media (max-width: 700px) {
+  .app-header { height: auto; min-height: 56px; flex-wrap: wrap; gap: 10px; }
+  .app-header .header-right { flex-wrap: wrap; gap: 8px 12px; max-width: 100%; }
+}
 .header-btn { background: none; border: 1px solid #d9d9d9; border-radius: 4px; padding: 4px 10px; font-size: 12px; cursor: pointer; color: #555; }
 .header-btn:hover { border-color: #1677ff; color: #1677ff; }
 

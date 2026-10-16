@@ -1,0 +1,90 @@
+/* CK warehouse: compact instructions, shared documents, explicit shipping allocation. */
+.ck-system [hidden],.ck-workflow [hidden]{display:none!important}
+.chain-need{border-top:1px solid #cfddd8;margin-top:16px}
+.chain-need h3,.chain-picker h3{font-size:17px;margin:0 0 10px;color:#17464b}
+.chain-materials,.chain-schedule,.chain-forward{padding:18px 0;border-bottom:1px solid #cfddd8}
+.chain-material-group{background:#fff;border:1px solid #cfddd8;border-radius:8px;padding:16px;margin:0 0 14px}.chain-material-group[data-direction=field]{border-left:4px solid #bb8740}.chain-material-group[data-direction=office]{border-left:4px solid #17584b}.chain-material-group h3{margin:0 0 5px}.chain-material-group>.muted{font-size:13px;margin:0 0 12px}.chain-material-group[data-direction=field] .chain-upload{grid-template-columns:minmax(180px,1fr) auto}
+.chain-files{width:100%;border-collapse:collapse;font-size:13px}
+.chain-files td,.chain-files th{text-align:left;vertical-align:top;padding:9px 10px;border-bottom:1px solid #dce6e2}
+.chain-files th{background:#edf4f1;font-weight:600}
+.chain-files small{display:block;color:#607871;font-size:12px;margin-top:3px}
+.chain-files td:first-child{max-width:360px;overflow-wrap:anywhere}
+.chain-files button{padding:4px 8px;margin-left:8px;font-size:12px}
+.chain-scroll{overflow-x:auto}
+.chain-upload{display:grid;grid-template-columns:210px minmax(180px,1fr) auto;gap:10px;align-items:end;margin-top:14px}
+.chain-upload label{margin:0!important;font-size:13px}
+.chain-upload p{grid-column:1/-1;margin:0;font-size:12px}
+.chain-upload input,.chain-upload select{margin:5px 0 0!important;min-width:0}
+.chain-upload input[type=file]{padding:6px}
+.chain-upload button{min-height:38px}
+.chain-picker{padding:14px 0 18px;border-bottom:1px solid #cfddd8;margin-bottom:16px}
+.chain-search{display:flex;gap:8px;align-items:center;margin:12px 0}
+.chain-search input{flex:1;min-width:0;margin:0!important}
+.chain-search button{flex-shrink:0}
+.chain-choice{display:block!important;text-align:left!important;width:100%;margin:5px 0;padding:11px 12px!important;background:white!important;color:#17464b!important;border:1px solid #cfddd8!important}
+.chain-choice:hover{background:#edf4f1!important}
+.chain-selected{border-left:3px solid #17584b;padding:8px 14px;background:#edf4f1;margin:12px 0}
+.chain-selected a{float:right;font-size:13px}
+.chain-selected p{white-space:pre-wrap;line-height:1.6;margin:8px 0}
+.chain-selected small{overflow-wrap:anywhere}
+.chain-picker #ck-link-quantity,.chain-forward input{max-width:240px;display:block}
+.chain-forward{background:#f5f8f7;padding:14px}
+.chain-forward button{margin-top:10px}
+.chain-forward p{font-size:13px}
+.chain-schedule p{overflow-wrap:anywhere}
+.chain-basis{margin-top:16px;padding:14px;border:1px solid #cfddd8;border-radius:8px}
+.chain-basis summary{cursor:pointer;font-weight:600;color:#17584b}
+.chain-basis-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.chain-basis label{display:block;margin:12px 0}.chain-basis input,.chain-basis select{width:100%;box-sizing:border-box;min-width:0}
+.chain-basis .chain-booking{overflow-wrap:anywhere}
+@media(max-width:650px){.chain-upload,.chain-material-group[data-direction=field] .chain-upload{grid-template-columns:1fr}.chain-upload p{grid-column:1}.chain-selected a{float:none;display:block;margin-top:8px}.chain-files th:nth-child(2),.chain-files td:nth-child(2){display:none}.chain-files td{padding:8px 5px}.chain-files td:last-child{min-width:90px}.chain-search button{font-size:13px}}
+
+.cargo-groups {margin-top:20px;padding:16px;border:1px solid var(--border,#d5dfda);border-radius:12px;background:var(--surface,#fff)}
+.cargo-groups fieldset {min-width:0;margin:16px 0;padding:14px;border:1px solid #ccd8d1;border-radius:10px}
+.cargo-groups label {display:block;margin:8px 0}.cargo-groups input:not([type=checkbox]),.cargo-groups textarea {box-sizing:border-box;width:100%;padding:10px;min-height:44px}
+.cargo-groups button {min-height:44px;margin:6px 8px 6px 0}.cargo-grid {display:grid;grid-template-columns:1fr 2fr 1fr 1fr;gap:12px}
+.cargo-groups .cargo-file {display:flex;gap:8px;align-items:start;padding:6px}.cargo-file small {display:block;color:#58645e;overflow-wrap:anywhere}
+.cargo-groups details {margin:10px 0}.cargo-groups details>div {max-height:300px;overflow:auto}.cargo-groups [role=status] {white-space:pre-wrap;overflow-wrap:anywhere}
+@media(max-width:700px){.cargo-grid{grid-template-columns:1fr}.cargo-groups{padding:10px}.cargo-groups fieldset{padding:10px}}
+.cargo-field {margin:18px 0}.cargo-field-group {border:1px solid #cad8ce;border-radius:10px;padding:14px;margin:14px 0;background:#fff;overflow-wrap:anywhere}.cargo-field-group h4 {margin:0 0 12px;font-size:18px}.cargo-field label {display:block;margin:8px 0}.cargo-field input:not([type=checkbox]),.cargo-field select,.cargo-field textarea {box-sizing:border-box;width:100%;min-height:44px;padding:10px;font:inherit}.cargo-field button {min-height:44px;margin:6px;padding:8px 12px}.cargo-field small {color:#58645e}.cargo-field-group a {display:inline-block;min-height:32px}.cargo-field [role=alert] {color:#a12620}
+.cargo-shipping {margin:20px 0;padding:14px;border:1px solid #cad8ce;border-radius:12px}.cargo-shipping label{display:block;margin:10px 0}.cargo-shipping fieldset{min-width:0;padding:12px;margin:12px 0;border:1px solid #cad8ce}.cargo-shipping input:not([type=checkbox]),.cargo-shipping textarea,.cargo-shipping select{box-sizing:border-box;width:100%;min-height:44px;padding:10px;font:inherit}.cargo-shipping button{min-height:44px;padding:8px 12px;margin:6px}.cargo-shipping small{display:block;color:#53695d;overflow-wrap:anywhere}.cargo-shipping [role=alert]{overflow-wrap:anywhere}.cargo-shipping details{margin-top:16px}
+
+[data-cargo-dispatch] [data-process-groups] label{display:flex;align-items:center;gap:10px;padding:8px 0;overflow-wrap:anywhere}[data-cargo-dispatch] [data-process-group]{width:18px;min-width:18px;height:18px;margin:0;flex:none}
+
+.cargo-groups input[type=checkbox],.cargo-field input[type=checkbox],.cargo-shipping input[type=checkbox]{width:18px;min-width:18px;height:18px;margin:0 8px 0 0;vertical-align:middle}
+
+/* Group editors must not inherit the parent work-card's two-column fieldset grid. */
+.cargo-groups{container-type:inline-size}
+.cargo-groups fieldset.cargo-group-editor{display:block;padding:18px;min-width:0}
+.cargo-group-editor .cargo-identity,.cargo-group-editor .cargo-operation-fields{display:grid;grid-template-columns:minmax(150px,1fr) minmax(0,2fr);gap:16px 24px;align-items:start}
+.cargo-group-editor .cargo-identity>*,.cargo-group-editor .cargo-operation-fields>*,.cargo-group-editor .cargo-document-fields{min-width:0}
+.cargo-groups .cargo-group-editor label{margin:0;font-weight:600}
+.cargo-groups .cargo-group-editor input:not([type=checkbox]),.cargo-groups .cargo-group-editor textarea{display:block;margin-top:6px;font:inherit;font-weight:400;min-width:0;max-width:100%}
+.cargo-groups .cargo-group-editor textarea[data-range]{min-height:76px;resize:vertical}
+.cargo-groups .cargo-group-editor textarea[data-instructions]{min-height:100px;resize:vertical}
+.cargo-group-editor .cargo-operation-fields,.cargo-group-editor .cargo-document-fields{margin-top:20px;padding-top:20px;border-top:1px solid #dce5df}
+.cargo-groups .cargo-group-editor .cargo-checkbox-note{display:flex;align-items:flex-start;gap:8px;margin-top:10px;font-size:13px;font-weight:400;line-height:1.5}
+.cargo-groups .cargo-checkbox-note input[type=checkbox]{flex:none;margin:2px 0 0}
+.cargo-group-editor .cargo-help{display:block;margin-top:6px;color:#586b61;font-weight:400;font-size:13px;line-height:1.5}
+.cargo-group-editor .cargo-document-fields details{margin:0}
+.cargo-group-editor .cargo-document-fields summary{font-weight:600;cursor:pointer;padding:4px 0}
+.cargo-group-editor .cargo-selected-files{margin:8px 0 16px;font-size:13px;line-height:1.6;overflow-wrap:anywhere}
+.cargo-groups .cargo-file span{min-width:0;overflow-wrap:anywhere}
+.cargo-groups .cargo-file input[type=checkbox]{flex:none}
+.cargo-group-editor .cargo-group-footer{display:flex;justify-content:flex-end;margin-top:18px;padding-top:12px;border-top:1px solid #dce5df}
+.cargo-groups .cargo-group-editor button.cargo-remove-group{width:auto;min-width:0;margin:0;padding:8px 16px;background:#fff;color:#9c3835;border:1px solid #dcb8b5;box-shadow:none;flex:none}
+@container(max-width:560px){.cargo-groups fieldset.cargo-group-editor{padding:12px}.cargo-group-editor .cargo-identity,.cargo-group-editor .cargo-operation-fields{grid-template-columns:minmax(0,1fr);gap:16px}.cargo-group-editor .cargo-operation-fields,.cargo-group-editor .cargo-document-fields{margin-top:16px;padding-top:16px}}
+@media(max-width:600px){.ck-work-plans [data-work-row]{padding:10px}.ck-work-plans [data-work-row]>.cargo-groups{padding:8px}.cargo-groups .chain-upload>*{min-width:0}.cargo-groups input[type=file]{max-width:100%}}
+@media(max-width:380px){#view-inbound_create #ibcLinesTable{table-layout:fixed;width:100%}#view-inbound_create #ibcLinesTable th,#view-inbound_create #ibcLinesTable td{padding:6px 3px;overflow-wrap:anywhere}#view-inbound_create #ibcLinesTable input,#view-inbound_create #ibcLinesTable select{width:100%!important;min-width:0;box-sizing:border-box}}
+#view-need .cargo-groups .cargo-group-editor button.cargo-remove-group{color:#9c3835;border-color:#dcb8b5;min-height:44px;background:#fff}
+#view-need .cargo-groups .cargo-group-editor input:not([type=checkbox]){min-height:44px}
+@media(max-width:600px){#view-inbound_create .ck-inline-heading.ck-work-plans{margin:12px 0!important;padding:0!important}}
+.cargo-groups .cargo-advanced{margin:8px 0 16px;padding:8px 0;border-bottom:1px solid #dce5df}.cargo-advanced>summary,.cargo-group-advanced>summary{font-size:13px;color:#586b61;cursor:pointer}
+.cargo-groups .cargo-simple-basics{display:grid;grid-template-columns:minmax(0,3fr) minmax(100px,1fr);gap:16px;align-items:start}.cargo-simple-basics>*{min-width:0}
+.cargo-groups .cargo-simple-note{display:block;margin-top:14px!important}.cargo-groups .cargo-simple-note textarea{min-height:76px!important}
+.cargo-direct-files{margin-top:16px}.cargo-direct-files input[type=file]{max-width:100%;width:100%;min-width:0}.cargo-direct-files ul{list-style:none;padding:0;margin:8px 0}.cargo-direct-files li{display:flex;align-items:start;gap:12px;padding:6px 0;border-bottom:1px solid #eef2ef;overflow-wrap:anywhere}.cargo-direct-files li span{min-width:0;flex:1}.cargo-direct-files li button{flex:none;width:auto;min-height:32px;margin:0;padding:4px 8px;background:white;color:#7e4540;border:1px solid #d7c9c7;font-size:12px}.cargo-direct-files [role=status]{font-size:13px;color:#52675f}
+.cargo-simple-group .cargo-group-advanced{margin-top:12px}.cargo-simple-group .cargo-group-advanced>label,.cargo-simple-group .cargo-group-advanced>details{margin-top:12px!important}.cargo-simple-group .cargo-group-footer{margin-top:12px;padding-top:8px}
+.cargo-groups .cargo-add-bottom{display:block;width:100%;margin:12px 0 18px;padding:12px;background:#f1f7f4;color:#18564a;border:1px dashed #8da99a;border-radius:8px}
+@container(max-width:420px){.cargo-groups .cargo-simple-basics{grid-template-columns:minmax(0,1fr);gap:12px}}
+/* Reservation fields are short optional forms, not scrollable legacy file pools. */
+.cargo-groups .cargo-group-reservation>div{max-height:none;overflow:visible}.cargo-group-reservation .cargo-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.cargo-group-reservation label{display:block;margin:10px 0}.cargo-group-reservation input,.cargo-group-reservation select,.cargo-group-reservation textarea{max-width:100%;width:100%;box-sizing:border-box}.cargo-plan-materials ul{list-style:none;padding:0}.cargo-plan-materials li{display:flex;align-items:center;justify-content:space-between;gap:12px;overflow-wrap:anywhere;padding:6px 0;border-bottom:1px solid #dce5df}.cargo-plan-materials button{width:auto;flex:none;padding:6px 12px}.cargo-plan-materials input[type=file]{max-width:100%}.cargo-reserved-order{padding:16px;border:1px solid #dce5df;border-radius:8px;margin:12px 0}.cargo-reserved-order p{overflow-wrap:anywhere}@media(max-width:600px){.cargo-group-reservation .cargo-grid{grid-template-columns:1fr}}
