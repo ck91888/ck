@@ -37,8 +37,8 @@ function issuePanel(host,p){
 window.CKInboundRecordPrintIssue=async p=>{if(!p.issue_state||p.issue_state.state==='cancelled')throw Error(copy('当前计划不能打印下发，请刷新后重试','현재 계획은 인쇄·배포할 수 없습니다. 새로고침 후 다시 시도하세요.'));const key=p.id+':'+p.issue_state.revision;if(!issueRequests.has(key))issueRequests.set(key,crypto.randomUUID());return CKSession.request('v2_inbound_plan_confirm_issue',{id:p.id,revision:p.issue_state.revision,client_req_id:issueRequests.get(key)});};
 window.CKInboundPrintIssued=async(p,result)=>{if(window._currentInboundId!==p.id)return;const host=document.getElementById('view-inbound_detail');if(host?.style.display!=='none'){if(window._currentInboundPlan?.id===p.id)window._currentInboundPlan.issue_state=result.issue_state;await loadInboundDetail();}else if(document.getElementById('view-inbound')?.style.display!=='none')await loadInboundList();};
  function progressHtml(p){const progress=p?.inbound_progress,notice=referenceNotice(p);if(!progress?.total)return notice;
- const state={pending:copy('待理货','대기'),working:copy('理货中','작업 중'),completed:copy('已入库','완료')};
-  return notice+'<div class="ck-inbound-progress"><strong>'+copy('外部单理货进度','입고 진행')+'：'+progress.completed+' / '+progress.total+'</strong><table class="line-table"><thead><tr><th>'+copy('理货部门','입고 부서')+'</th><th>'+copy('外部入库单号','입고번호')+'</th><th>'+copy('状态','상태')+'</th></tr></thead><tbody>'+progress.items.map(x=>'<tr><td>'+esc(CKInboundLabel(x.biz_class||'direct_ship'))+'</td><td>'+esc(x.external_no)+'</td><td>'+state[x.status]+'</td></tr>').join('')+'</tbody></table></div>';
+ const state={pending:copy('待理货','대기'),working:copy('理货中','작업 중'),tallied_pending_putaway:copy('理货完成待上架','검수 완료 · 적치 대기'),putting_away:copy('上架中','적치 중'),completed:copy('已入库','완료')};
+  return notice+'<div class="ck-inbound-progress"><strong>'+copy('外部单入库进度','입고 진행')+'：'+progress.completed+' / '+progress.total+'</strong><table class="line-table"><thead><tr><th>'+copy('理货部门','입고 부서')+'</th><th>'+copy('外部入库单号','입고번호')+'</th><th>'+copy('状态','상태')+'</th></tr></thead><tbody>'+progress.items.map(x=>'<tr><td>'+esc(CKInboundLabel(x.biz_class||'direct_ship'))+'</td><td>'+esc(x.external_no)+'</td><td>'+state[x.status]+'</td></tr>').join('')+'</tbody></table></div>';
 }
 function choices(host,selector,id,p={}){
  if(!host)return;host.classList.add('ck-inbound-choices');
@@ -56,7 +56,8 @@ window.CKInstallInboundFlow=function(app){
  if(!window.CK_SOP_ROLLOUT?.staging)return;
  if(app==='002'){
   window.inboundBizTaskLabel=window.CKInboundLabel;
-  const statusLabel=window.inboundStatusLabel;window.inboundStatusLabel=status=>status==='completed'?'已入库 / 입고 완료':statusLabel(status);
+  const statusLabel=window.inboundStatusLabel;window.inboundStatusLabel=status=>({completed:'已入库 / 입고 완료',tallied_pending_putaway:'理货完成待上架 / 검수 완료 · 적치 대기',direct_putting_away:'上架中 / 적치 중'}[status]||statusLabel(status));
+  for(const [value,label] of [['tallied_pending_putaway','理货完成待上架 / 검수 완료 · 적치 대기'],['direct_putting_away','上架中 / 적치 중']])document.getElementById('ibFilterStatus').add(new Option(label,value));
   document.querySelector('#ibFilterStatus option[value="completed"]').textContent='已入库 / 입고 완료';
   choices(document.getElementById('ibc-biz-classes'),'.ibc-biz-chk','ck-ibc-external');
   const note=document.getElementById('ibc-biz-classes').nextElementSibling.nextElementSibling;
@@ -88,14 +89,43 @@ window.CKInstallInboundFlow=function(app){
   window.CKInboundCreateReferences=()=>fieldData(document.getElementById('ck-ibc-external').closest('.ck-external-field'));
  }else if(app==='001'){
   JOB_TYPE_LABEL.inbound_direct=CKInboundLabel('direct_ship');JOB_TYPE_LABEL.inbound_bulk=CKInboundLabel('bulk_putaway');
-  for(const button of document.querySelectorAll('#page-inbound_menu button')){const action=button.getAttribute('onclick')||'';if(action.includes('inbound_change_order'))button.remove();else if(action.includes('inbound_direct'))button.textContent=CKInboundLabel('direct_ship');else if(action.includes('inbound_bulk'))button.textContent=CKInboundLabel('bulk_putaway');}
+  JOB_TYPE_LABEL.inbound_direct_tally='代发理货 / 출고대행 검수';JOB_TYPE_LABEL.inbound_direct_putaway='代发上架 / 출고대행 적치';
+  for(const button of document.querySelectorAll('#page-inbound_menu button')){const action=button.getAttribute('onclick')||'';if(action.includes('inbound_change_order'))button.remove();else if(action.includes('inbound_direct')){
+   button.textContent='理货 / 검수';button.setAttribute('onclick',action.replace('inbound_direct','inbound_direct_tally'));
+   const putaway=button.cloneNode(true);putaway.textContent='上架 / 적치';putaway.setAttribute('onclick',action.replace('inbound_direct','inbound_direct_putaway'));button.after(putaway);
+  }else if(action.includes('inbound_bulk'))button.textContent=CKInboundLabel('bulk_putaway');}
+  const stageType=()=>window._pageParams?.job_type||'';
+  const putawayForm=document.createElement('div');putawayForm.id='ck-putaway-workload';putawayForm.hidden=true;
+  putawayForm.innerHTML='<p>上架完成时填写本单实际工作量 / 완료 시 실제 작업량 입력</p><label for="ck-putaway-locations">货位数 / 적치 위치 수</label><input id="ck-putaway-locations" type="number" min="0" max="100000000" step="1" inputmode="numeric" placeholder="必填，0 或正整数 / 필수"><fieldset><legend>是否使用叉车 / 지게차 사용 여부</legend><label><input type="radio" name="ck-putaway-forklift" value="yes"> 是 / 예</label> <label><input type="radio" name="ck-putaway-forklift" value="no"> 否 / 아니요</label></fieldset><p role="alert"></p>';
+  document.getElementById('inboundResultLines').before(putawayForm);
+  window.CKRenderInboundStage=function(job,rendered){
+    const isPutaway=job?.job_type==='inbound_direct_putaway';
+    if(job?.job_type)window._pageParams.job_type=job.job_type;
+    putawayForm.hidden=!isPutaway;
+    putawayForm.parentElement.querySelector('.card-title').textContent=isPutaway?'上架结果 / 적치 결과':'入库结果 / 입고 결과';
+    if(putawayForm.dataset.jobId!==rendered.jobId){putawayForm.dataset.jobId=rendered.jobId;document.getElementById('ck-putaway-locations').value='';putawayForm.querySelectorAll('input[type=radio]').forEach(x=>x.checked=false);}
+    document.getElementById('inboundResultLines').hidden=isPutaway;
+    document.getElementById('inboundExtraSort').parentElement.parentElement.parentElement.hidden=isPutaway;
+    for(const id of ['inboundResultNote','inboundRemark']){const el=document.getElementById(id);el.hidden=isPutaway;el.previousElementSibling.hidden=isPutaway;}
+    const finish=document.querySelector('button[onclick="finishInbound(this)"]');if(finish)finish.textContent=isPutaway?'完成上架 / 적치 완료':job?.job_type==='inbound_direct_tally'?'完成理货 / 검수 완료':'完成入库 / 입고 완료';
+  };
+  const originalApi=window.api;window.api=async function(body){
+   if(body.action==='v2_inbound_job_finish'&&body.complete_job&&stageType()==='inbound_direct_putaway'){
+    const raw=document.getElementById('ck-putaway-locations').value,choice=document.querySelector('[name="ck-putaway-forklift"]:checked');
+    if(raw.trim()===''||!Number.isSafeInteger(Number(raw))||Number(raw)<0||Number(raw)>1e8)return {ok:false,error:'货位数必填，请填写 0–100000000 的整数 / 적치 위치 수를 입력하세요'};
+    if(!choice)return {ok:false,error:'请选择是否使用叉车：是或否 / 지게차 사용 여부를 선택하세요'};
+    body={...body,result_lines:[],extra_ops:{},location_count:Number(raw),used_forklift:choice.value==='yes'};
+   }
+   return originalApi(body);
+  };
   const code=document.getElementById('inboundCodeInput');code.placeholder='扫描外部系统入库单号 / 외부 입고번호 스캔';code.addEventListener('input',()=>{window._ibResolvedKind='';window._ibResolvedPlanId='';window._ibResolvedPlan=null;});
   document.querySelector('#inboundEntryCard>label').textContent='扫描外部系统入库单号 / 외부 입고번호 스캔';
-  const resolve=window.resolveInboundCode;window.resolveInboundCode=async function(...args){window._ibResolvedKind='';window._ibResolvedPlanId='';window._ibResolvedPlan=null;await resolve(...args);if(window._ibResolvedKind==='system'){const p=window._ibResolvedPlan;document.getElementById('ibResolveResult').innerHTML='<div class="ck-inbound-match"><strong>本次外部入库单 / 이번 입고번호：'+esc(p.selected_external_inbound_no||'—')+'</strong><div>已关联 '+esc(p.display_no||p.id)+' · '+esc(p.customer)+'</div><div>'+esc(p.cargo_summary||'')+'</div>'+progressHtml(p)+'</div>';}};
-  window.loadInboundCandidates=async function(){const sel=document.getElementById('inboundPlanSelect'),bc=_resolveBizClass();const r=await api({action:'v2_inbound_plan_ops_candidates',scene:'putaway',biz_class:bc,required_biz_class:bc});sel.innerHTML='<option value="">选择本次外部入库单 / 작업할 입고번호 선택</option>';for(const p of r?.items||[]){const refs=p.inbound_progress?.items||[{external_no:p.external_inbound_no||p.display_no||p.id,status:'pending'}];for(const ref of refs.filter(x=>x.status!=='completed')){const o=document.createElement('option');o.value=p.id+'::'+ref.external_no;o.dataset.code=ref.external_no;o.textContent=ref.external_no+' · '+p.customer+' · '+(p.display_no||p.id)+(ref.status==='working'?' · 理货中':'');sel.append(o);}}};
+  const resolve=window.resolveInboundCode;window.resolveInboundCode=async function(...args){window._ibResolvedKind='';window._ibResolvedPlanId='';window._ibResolvedPlan=null;await resolve(...args);if(window._ibResolvedKind==='system'){const p=window._ibResolvedPlan;const ref=p.inbound_progress?.items.find(x=>x.external_no===p.selected_external_inbound_no);if(stageType()==='inbound_direct_putaway'&&!['tallied_pending_putaway','putting_away'].includes(ref?.status)||stageType()==='inbound_direct_tally'&&['tallied_pending_putaway','putting_away'].includes(ref?.status)){window._ibResolvedKind='';document.getElementById('ibResolveResult').textContent=stageType()==='inbound_direct_putaway'?'本单理货尚未完成，不能开始上架 / 검수 완료 후 적치를 시작하세요':'本单理货已完成，请从上架入口派工 / 적치 메뉴에서 시작하세요';return;}document.getElementById('ibResolveResult').innerHTML='<div class="ck-inbound-match"><strong>本次外部入库单 / 이번 입고번호：'+esc(p.selected_external_inbound_no||'—')+'</strong><div>已关联 '+esc(p.display_no||p.id)+' · '+esc(p.customer)+'</div><div>'+esc(p.cargo_summary||'')+'</div>'+progressHtml(p)+'</div>';}};
+  window.loadInboundCandidates=async function(){const sel=document.getElementById('inboundPlanSelect'),bc=_resolveBizClass();const r=await api({action:'v2_inbound_plan_ops_candidates',scene:'putaway',biz_class:bc,required_biz_class:bc});sel.innerHTML='<option value="">选择本次外部入库单 / 작업할 입고번호 선택</option>';for(const p of r?.items||[]){const refs=p.inbound_progress?.items||[{external_no:p.external_inbound_no||p.display_no||p.id,status:'pending'}];for(const ref of refs.filter(x=>x.status!=='completed'&&(stageType()==='inbound_direct_putaway'?['tallied_pending_putaway','putting_away'].includes(x.status):stageType()==='inbound_direct_tally'?!['tallied_pending_putaway','putting_away'].includes(x.status):true))){const o=document.createElement('option');o.value=p.id+'::'+ref.external_no;o.dataset.code=ref.external_no;o.textContent=ref.external_no+' · '+p.customer+' · '+(p.display_no||p.id)+(ref.status==='working'?' · 理货中':'');sel.append(o);}}};
   window.onInboundCandidateSelect=function(){const s=document.getElementById('inboundPlanSelect');if(!s.value)return;code.value=s.selectedOptions[0].dataset.code;resolveInboundCode();};
    const planInfo=window.loadInboundPlanInfo;window.loadInboundPlanInfo=async function(...args){const rendered=await planInfo(...args);if(!rendered?.rendered||rendered.jobId!==window._activeJobId||rendered.data!==window._inboundPlanData)return rendered;const data=rendered.data,p=data.plan;const job=(data.jobs||[]).find(x=>x.id===window._activeJobId),current=job?.inbound_external_no||p.external_inbound_nos?.[0]||'';const box=document.createElement('section');box.className='ck-inbound-match';box.innerHTML='<strong>本次外部入库单 / 이번 입고번호：'+esc(current)+'</strong>'+progressHtml(p);document.getElementById('inboundPlanInfo').prepend(box);
    if(p.inbound_progress?.total>1){document.querySelectorAll('.ib-putaway-input').forEach(x=>{x.value='';x.placeholder='本单实际数';});const note=document.createElement('p');note.className='muted';note.textContent='以下填写本次外部入库单的实际数量，请勿重复填写整批数量 / 이번 입고번호의 실제 수량만 입력하세요';document.getElementById('inboundResultLines').prepend(note);}
+    window.CKRenderInboundStage?.(job,rendered);
     return rendered;
    };
  }

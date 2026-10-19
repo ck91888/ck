@@ -1,3 +1,4 @@
+import {validateInboundStage,stagedPlanStatement} from './inbound-stages.js';
 import {pickWorkloadContext,pickWorkloadSnapshot} from './pick-workload.js';
 import {staffedDispatchStatements} from './crew-borrow.js';
 import {ensureSchema} from './schema-ready.js';
@@ -6,9 +7,10 @@ import {documentCodeError} from '../shared/document-code.js';
 import {pickTeamStatements} from './native-lifecycle.js';
 const q=(e,s,...a)=>e.DB.prepare(s).bind(...a);
 export async function ensureDispatchStartGuard(e){
- await ensureSchema(e.DB,'native-start-atomic-pause-v2',()=>e.DB.batch([
+ await ensureSchema(e.DB,'native-start-atomic-pause-v3',()=>e.DB.batch([
   q(e,`CREATE TRIGGER IF NOT EXISTS ck_dispatch_worker_exclusive BEFORE INSERT ON v2_ops_job_workers WHEN NEW.left_at='' AND EXISTS(SELECT 1 FROM sop_records WHERE id=NEW.job_id AND kind IN ('dispatch','task')) BEGIN SELECT CASE WHEN EXISTS(SELECT 1 FROM v2_ops_job_workers w WHERE w.worker_id=NEW.worker_id AND w.left_at='') THEN RAISE(ABORT,'worker_has_active_job') END; END`),
-  q(e,`CREATE TRIGGER IF NOT EXISTS ck_dispatch_document_exclusive_pause_v2 BEFORE INSERT ON sop_records WHEN NEW.kind='dispatch' AND COALESCE(json_extract(NEW.state,'$.source_id'),'')!='' BEGIN SELECT CASE WHEN EXISTS(SELECT 1 FROM sop_records s JOIN v2_ops_jobs j ON j.id=s.id WHERE s.kind='dispatch' AND s.id!=NEW.id AND j.status IN ('pending','working','awaiting_close','paused') AND json_extract(s.state,'$.source_type')=json_extract(NEW.state,'$.source_type') AND json_extract(s.state,'$.source_id')=json_extract(NEW.state,'$.source_id') AND json_extract(s.state,'$.job_type')=json_extract(NEW.state,'$.job_type') AND (j.job_type NOT IN ('inbound_direct','inbound_bulk') OR COALESCE(j.inbound_external_no,'')=COALESCE((SELECT inbound_external_no FROM v2_ops_jobs WHERE id=NEW.id),''))) THEN RAISE(ABORT,'document_has_active_dispatch') END; END`),
+  q(e,'DROP TRIGGER IF EXISTS ck_dispatch_document_exclusive_pause_v2'),
+  q(e,`CREATE TRIGGER IF NOT EXISTS ck_dispatch_document_exclusive_pause_v3 BEFORE INSERT ON sop_records WHEN NEW.kind='dispatch' AND COALESCE(json_extract(NEW.state,'$.source_id'),'')!='' BEGIN SELECT CASE WHEN EXISTS(SELECT 1 FROM sop_records s JOIN v2_ops_jobs j ON j.id=s.id WHERE s.kind='dispatch' AND s.id!=NEW.id AND j.status IN ('pending','working','awaiting_close','paused') AND json_extract(s.state,'$.source_type')=json_extract(NEW.state,'$.source_type') AND json_extract(s.state,'$.source_id')=json_extract(NEW.state,'$.source_id') AND json_extract(s.state,'$.job_type')=json_extract(NEW.state,'$.job_type') AND (j.job_type NOT IN ('inbound_direct_tally','inbound_direct_putaway','inbound_direct','inbound_bulk') OR COALESCE(j.inbound_external_no,'')=COALESCE((SELECT inbound_external_no FROM v2_ops_jobs WHERE id=NEW.id),''))) THEN RAISE(ABORT,'document_has_active_dispatch') END; END`),
   q(e,`CREATE TRIGGER IF NOT EXISTS ck_dispatch_active_job BEFORE INSERT ON sop_records WHEN NEW.kind='dispatch' BEGIN SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM v2_ops_jobs WHERE id=NEW.id AND status IN ('pending','working','awaiting_close')) THEN RAISE(ABORT,'document_or_job_changed') END; END`),
   q(e,`CREATE TRIGGER IF NOT EXISTS ck_dispatch_pick_doc_exclusive_pause_v2 BEFORE INSERT ON v2_ops_job_pick_docs BEGIN SELECT CASE WHEN EXISTS(SELECT 1 FROM v2_ops_job_pick_docs d JOIN v2_ops_jobs j ON j.id=d.job_id WHERE d.pick_doc_no=NEW.pick_doc_no AND d.job_id!=NEW.job_id AND j.status IN ('pending','working','awaiting_close','paused')) THEN RAISE(ABORT,'pick_document_has_active_trip') END; END`)
  ]));
@@ -56,24 +58,24 @@ export async function startAtomicDocument(e,p,staff,pickNumber){
 export async function startAtomicInbound(e,p,staff,number){
  const id='JOB-'+crypto.randomUUID(),t=new Date().toISOString(),lead=staff.workers.find(w=>w.id===staff.lead_id),type=p.job_type||'inbound_direct',returned=type==='inbound_return',biz=String(p.biz_class||''),sql=[];let planId=String(p.plan_id||''),code='';
  if(type==='inbound_change_order')return {ok:false,error:'换单计划卸货后自动入库，无需再次理货'};
- if(!['inbound_direct','inbound_bulk','inbound_return'].includes(type)||(!returned&&biz!==(type==='inbound_bulk'?'bulk':'direct_ship'))||(returned&&biz&&biz!=='return'))return {ok:false,error:'入库业务类型不匹配'};
+ if(!['inbound_direct_tally','inbound_direct_putaway','inbound_direct','inbound_bulk','inbound_return'].includes(type)||(!returned&&biz!==(type==='inbound_bulk'?'bulk':'direct_ship'))||(returned&&biz&&biz!=='return'))return {ok:false,error:'入库业务类型不匹配'};
  if(returned&&!planId){planId='IB-'+crypto.randomUUID();const display=await number(),day=new Date(Date.now()+9*3600000).toISOString().slice(0,10);sql.push(q(e,`INSERT INTO v2_inbound_plans(id,plan_date,customer,biz_class,biz_classes_json,cargo_summary,purpose,remark,status,created_by,created_at,updated_at,display_no,source_type) VALUES(?,?,?,'return','["return"]','退件入库会话','',?,'putting_away',?,?,?,?,'return_session')`,planId,day,String(p.customer_name||'未指定'),String(p.start_remark||''),lead.id,t,t,display));}
  else{
   if(!planId){const found=await resolveInboundPlan(e,p.external_inbound_no,biz);if(found.kind!=='system')return {ok:false,error:found.message};planId=found.plan.id;}
   const plan=await q(e,'SELECT * FROM v2_inbound_plans WHERE id=?',planId).first();if(!plan||plan.is_deleted)return {ok:false,error:'入库计划不存在或已删除'};
   if(returned){if(plan.source_type!=='return_session'||plan.biz_class!=='return'||plan.status!=='putting_away')return {ok:false,error:'退件会话状态不允许开工'};}
   else{
-   if(!['unloading','unloading_putting_away','arrived_pending_putaway','putting_away','partially_completed'].includes(plan.status))return {ok:false,error:'当前计划状态不可开始理货'};
+   if(!['unloading','unloading_putting_away','arrived_pending_putaway','putting_away','tallied_pending_putaway','direct_putting_away','partially_completed'].includes(plan.status))return {ok:false,error:'当前计划状态不可开始理货'};
    const taskBiz=putawayTaskBiz(e,plan,biz);if(!taskBiz||!planClasses(plan).includes(taskBiz))return {ok:false,error:'此计划没有本部门的理货上架'};
-   code=await selectInboundReference(e,plan,p.external_inbound_no,taskBiz);const task=await q(e,'SELECT status FROM v2_inbound_plan_biz_tasks WHERE plan_id=? AND biz_class=?',planId,taskBiz).first();if(task?.status==='completed')return {ok:false,error:'本部门理货已完成'};
+   code=await selectInboundReference(e,plan,p.external_inbound_no,taskBiz);await validateInboundStage(e,plan,code,type);const task=await q(e,'SELECT status FROM v2_inbound_plan_biz_tasks WHERE plan_id=? AND biz_class=?',planId,taskBiz).first();if(task?.status==='completed')return {ok:false,error:'本部门理货已完成'};
    sql.push(q(e,`INSERT OR IGNORE INTO v2_inbound_plan_biz_tasks(id,plan_id,biz_class,job_type,status,created_at,updated_at) VALUES(?,?,?,?,'pending',?,?)`,'IBT-'+crypto.randomUUID(),planId,taskBiz,type,t,t));
    sql.push(q(e,"UPDATE v2_inbound_plans SET status=CASE WHEN status='unloading' THEN 'unloading_putting_away' WHEN status='arrived_pending_putaway' THEN 'putting_away' ELSE status END,updated_at=? WHERE id=?",t,planId));
   }
-  const active=await q(e,"SELECT id FROM v2_inbound_plan_jobs WHERE plan_id=? AND related_doc_type='inbound_plan' AND job_type IN ('inbound_direct','inbound_bulk','inbound_return') AND status IN ('pending','working','awaiting_close','paused') AND (?='' OR inbound_external_no=? OR COALESCE(inbound_external_no,'')='') LIMIT 1",planId,code,code).first();if(active)return {ok:false,error:'此单已有在途任务，请继续原任务并核对人员',active_job_id:active.id};
+  const active=await q(e,"SELECT id FROM v2_inbound_plan_jobs WHERE plan_id=? AND related_doc_type='inbound_plan' AND job_type IN ('inbound_direct_tally','inbound_direct_putaway','inbound_direct','inbound_bulk','inbound_return') AND status IN ('pending','working','awaiting_close','paused') AND (?='' OR inbound_external_no=? OR COALESCE(inbound_external_no,'')='') LIMIT 1",planId,code,code).first();if(active)return {ok:false,error:'此单已有在途任务，请继续原任务并核对人员',active_job_id:active.id};
  }
  if(returned)sql.push(q(e,`INSERT OR IGNORE INTO v2_inbound_plan_biz_tasks(id,plan_id,biz_class,job_type,status,created_at,updated_at) VALUES(?,?,'return','inbound_return','pending',?,?)`,'IBT-'+crypto.randomUUID(),planId,t,t));
  sql.push(q(e,`INSERT INTO v2_ops_jobs(id,flow_stage,biz_class,job_type,related_doc_type,related_doc_id,status,created_by,created_at,updated_at,active_worker_count,inbound_external_no) VALUES(?,'inbound',?,?,'inbound_plan',?,'working',?,?,?,?,?)`,id,biz,type,planId,lead.id,t,t,staff.workers.length,code));
- return commitPrepared(e,p,staff,{id,t,sql,jobType:type,sourceType:'inbound_plan',sourceId:planId,extra:{plan_id:planId,external_inbound_no:code}});
+ return commitPrepared(e,p,staff,{id,t,sql,jobType:type,sourceType:'inbound_plan',sourceId:planId,after:[stagedPlanStatement(e,planId,t)],extra:{plan_id:planId,external_inbound_no:code}});
 }
 export async function startAtomicBulk(e,p,staff,findOutbound,needs){
  const no=String(p.work_order_no||'').trim();if(!no||documentCodeError(no))return {ok:false,error:documentCodeError(no)||'缺少作业单号'};

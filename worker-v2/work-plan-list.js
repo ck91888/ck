@@ -22,7 +22,7 @@ export async function workPlanFacts(e,groups,knownPlans,orders){
     l.plan_id AS linked_plan_id,l.result_json AS linked_result,t.finished_at
     FROM v2_inbound_plan_jobs j LEFT JOIN v2_ops_job_results r ON r.job_id=j.id
     LEFT JOIN ck_unload_plan_links l ON l.job_id=j.id AND l.plan_id=j.plan_id LEFT JOIN ck_unload_trips t ON t.job_id=j.id
-    WHERE j.plan_id IN (SELECT value FROM json_each(?)) AND j.status='completed' AND j.job_type IN ('unload','inbound_direct','inbound_bulk')`,planIds),
+    WHERE j.plan_id IN (SELECT value FROM json_each(?)) AND j.status='completed' AND j.job_type IN ('unload','inbound_direct','inbound_bulk','inbound_direct_putaway')`,planIds),
   q(e,'SELECT plan_id,biz_class,status,completed_at,completion_source,completed_by,job_id FROM v2_inbound_plan_biz_tasks WHERE plan_id IN (SELECT value FROM json_each(?))',planIds)
  ]);
  const facts=new Map();for(const p of plans){
@@ -33,7 +33,7 @@ export async function workPlanFacts(e,groups,knownPlans,orders){
    const at=r.job_type==='unload'&&r.finished_at?r.finished_at:r.created_at,day=workPlanDay(at);
    const event={key:r.job_type==='unload'?r.job_id:r.result_id,job_id:r.job_id,result_id:r.result_id||'',plan_id:p.id,plan_no:p.display_no||p.id,at:at||'',day,reference:r.inbound_external_no||r.job_no||'',kind:r.job_type==='unload'?'unload_result':'putaway_result'};
    if(r.job_type==='unload'&&positive(lines,'actual_qty'))add(receipt,event);
-   if(r.job_type!=='unload'&&positive(lines,'putaway_qty'))add(putaway,event);
+   if(r.job_type==='inbound_direct_putaway'||r.job_type!=='unload'&&positive(lines,'putaway_qty'))add(putaway,event);
   }
   if(!receipt.length&&workPlanDay(p.unload_completed_at))add(receipt,{key:'plan:'+p.id,plan_id:p.id,plan_no:p.display_no||p.id,at:p.unload_completed_at,day:workPlanDay(p.unload_completed_at),kind:'plan_unload',reference:''});
   const parsedClasses=parse(p.biz_classes_json),classes=Array.isArray(parsedClasses)&&parsedClasses.length?parsedClasses:p.biz_class?[p.biz_class]:[],requires=classes.some(c=>['direct_ship','bulk_putaway'].includes(c))||putaway.length>0;

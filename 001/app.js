@@ -466,7 +466,7 @@ function resumeActiveOrHome() {
       var jt = res.job.job_type || "";
       if (jt === "unload") showPage("unload");
       else if (jt === "inbound_return") showPage("inbound_return");
-      else if (jt === "inbound_direct" || jt === "inbound_bulk" || jt === "inbound_change_order") { _pageParams = { job_type: jt, biz_class: res.job.biz_class || "" }; showPage("inbound"); }
+      else if (jt === "inbound_direct_tally" || jt === "inbound_direct_putaway" || jt === "inbound_direct" || jt === "inbound_bulk" || jt === "inbound_change_order") { _pageParams = { job_type: jt, biz_class: res.job.biz_class || "" }; showPage("inbound"); }
       else if (jt === "load_outbound") showPage("outbound_load");
       else if (jt === "outbound_stock_op") showPage("outbound_stock_op");
       else if (jt === "pick_direct") showPage("pick_direct");
@@ -1251,7 +1251,7 @@ function _resolveBizClass() {
   var bc = _pageParams.biz_class || '';
   if (!bc) {
     var jt = _pageParams.job_type || '';
-    if (jt === 'inbound_direct') bc = 'direct_ship';
+    if (['inbound_direct','inbound_direct_tally','inbound_direct_putaway'].includes(jt)) bc = 'direct_ship';
     else if (jt === 'inbound_bulk') bc = 'bulk';
     else if (jt === 'inbound_change_order') bc = 'change_order';
   }
@@ -1790,7 +1790,7 @@ async function initInbound() {
       goPage("home");
       return;
     }
-    if (res && res.ok && res.job && res.job.job_type && (res.job.job_type === 'inbound_direct' || res.job.job_type === 'inbound_bulk' || res.job.job_type === 'inbound_change_order') && (res.job.status === "working" || res.can_manage_dispatch && ['pending','awaiting_close','paused'].includes(res.job.status))) {
+    if (res && res.ok && res.job && res.job.job_type && (res.job.job_type === 'inbound_direct_tally' || res.job.job_type === 'inbound_direct_putaway' || res.job.job_type === 'inbound_direct' || res.job.job_type === 'inbound_bulk' || res.job.job_type === 'inbound_change_order') && (res.job.status === "working" || res.can_manage_dispatch && ['pending','awaiting_close','paused'].includes(res.job.status))) {
       document.getElementById("inboundEntryCard").style.display = "none";
       document.getElementById("inboundWorkingCard").style.display = "";
       loadInboundPlanInfo(res.job.related_doc_id);
@@ -2015,8 +2015,10 @@ async function finishInbound(btnEl) {
       try { planAfter = await api({ action: "v2_inbound_plan_detail", id: _inboundPlanData && _inboundPlanData.plan ? _inboundPlanData.plan.id : "" }); } catch(e) {}
       var planStatus = (planAfter && planAfter.ok && planAfter.plan) ? planAfter.plan.status : "";
       var referenceProgress = planAfter && planAfter.plan && planAfter.plan.inbound_progress;
-      if (referenceProgress && referenceProgress.completed < referenceProgress.total) {
-        alert("本次外部单理货已完成，本计划已完成 " + referenceProgress.completed + "/" + referenceProgress.total + "。\n待完成：" + referenceProgress.items.filter(function(x) { return x.status !== 'completed'; }).map(function(x) { return x.external_no; }).join('、') + "\n이번 입고 완료. 나머지 입고번호 작업을 계속해 주세요.");
+      if (_pageParams.job_type === 'inbound_direct_tally') {
+        alert('本单理货已完成，待上架。请从上架入口另行派工。 / 검수 완료 · 적치 대기');
+      } else if (referenceProgress && referenceProgress.completed < referenceProgress.total) {
+        alert("本次外部单任务已完成，本计划已完成 " + referenceProgress.completed + "/" + referenceProgress.total + "。\n待完成：" + referenceProgress.items.filter(function(x) { return x.status !== 'completed'; }).map(function(x) { return x.external_no; }).join('、') + "\n이번 입고 완료. 나머지 입고번호 작업을 계속해 주세요.");
       } else if (planStatus === "completed") {
         alert("入库已完成，状态已更新为\u201C已入库\u201D\n입고 완료, 상태가 \u201C입고완료\u201D로 변경됨");
       } else if (planStatus === "unloading" || planStatus === "unloading_putting_away") {

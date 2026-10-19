@@ -52,3 +52,8 @@ body.ck-stage-home{display:block;min-height:100vh}body.ck-stage-home .nav{max-wi
 .ck-plan-save-progress{overflow-wrap:anywhere;margin:8px 0;color:#29544b}.ck-plan-save-progress p{margin:5px 0}.ck-plan-save-progress progress{width:100%;height:12px}
 
 .ck-bulk-batch .ck-bulk-note{font-size:13px;color:#537168;line-height:1.5;margin:4px 0 12px}.ck-bulk-batch .ck-work-sheet{padding:16px;margin:12px 0}.ck-bulk-batch h2{margin:2px 0 8px;font-size:21px}.ck-bulk-batch [data-bulk-error]:empty{display:none}.ck-bulk-batch .ck-bulk-tools{flex-basis:100%;border-top:1px solid #dce4e1;padding-top:8px}.ck-bulk-tools summary{cursor:pointer;font-size:14px}.ck-bulk-tools button{margin:8px 6px 0 0}.ck-bulk-batch [data-bulk-detail]>.ck-actions{display:none}.ck-bulk-batch [data-bulk-top]>button{padding:7px 10px}.ck-bulk-batch .ck-bulk-order{padding:8px 0}.ck-bulk-batch .ck-bulk-order button{margin:0 4px 5px 0;font-size:13px}.ck-bulk-batch [data-bulk-top]>p{font-size:14px}
+
+/* Completion workload is shared by the putaway crew. Keep explicit choices touchable. */
+#ck-putaway-workload fieldset { margin:12px 0; border:1px solid #ccd9d5; border-radius:8px; padding:10px; }
+#ck-putaway-workload fieldset label { display:flex; align-items:center; gap:10px; min-height:44px; margin:0; cursor:pointer; }
+#ck-putaway-workload input[type=radio] { width:20px; min-width:20px; height:20px; min-height:20px; margin:0; }

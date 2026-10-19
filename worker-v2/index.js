@@ -1,3 +1,4 @@
+import {stagedInbound,putawayType,putawayMetrics,stagedPlanStatement} from './inbound-stages.js';
 import {executionDepartment} from './work-execution.js';
 import {withInboundCreateReceipt,inboundCreateStatus,inboundReceiptStatements} from './inbound-create-receipt.js';
 import {handleBulkBatch,guardBulkBatchMutation} from './bulk-work-batch.js';
@@ -222,6 +223,8 @@ async function batchSelectInGlobal(env, sqlTemplate, ids) {
 function parseOpsResultForExport(job_type, resultRows) {
   const out = {
     result_summary: '',
+    location_count_sum: 0,
+    putaway_forklift: null,
     result_notes: '',
     diff_notes: '',
     box_count_sum: 0,
@@ -343,6 +346,7 @@ function parseOpsResultForExport(job_type, resultRows) {
         const v = Number(rj[k]);
         if (Number.isFinite(v)) out[target] += v;
       };
+      if(job_type===putawayType&&rj.location_count!=null){out.location_count_sum+=Number(rj.location_count)||0;out.putaway_forklift=rj.used_forklift===true;}
       addNum('packed_sku_count', 'packed_sku_count_sum');
       addNum('packed_box_count', 'packed_box_count_sum');
       addNum('total_operated_box_count', 'total_operated_box_count_sum');
@@ -425,6 +429,7 @@ function parseOpsResultForExport(job_type, resultRows) {
 
   // 生成业务摘要
   const parts = [];
+  if(job_type===putawayType&&out.putaway_forklift!==null)parts.push('货位数 '+out.location_count_sum+' · 是否使用叉车 '+(out.putaway_forklift?'是':'否'));
   const isInboundJob = (job_type || '').indexOf('inbound') === 0; // inbound_direct / inbound_bulk / inbound_change_order / inbound_return
   if (job_type === 'pack_direct') {
     if (out.packed_sku_count_sum > 0) parts.push('打包SKU ' + out.packed_sku_count_sum);
@@ -790,7 +795,7 @@ const TIME_ONLY_JOB_TYPES = new Set([
 const RESULT_REQUIRED_JOB_TYPES = new Set([
   'unload', 'unplanned_unload',
   'load_outbound', 'outbound_stock_op',
-  'inbound_direct', 'inbound_bulk', 'inbound_change_order',
+  'inbound_direct_tally','inbound_direct_putaway','inbound_direct', 'inbound_bulk', 'inbound_change_order',
   'bulk_op', 'pick_direct',
   'load_import', 'pickup_delivery_import'
 ]);
@@ -885,7 +890,7 @@ async function repairInboundPlanWorkState(env, planId, reason) {
   const activePutaway = await env.DB.prepare(
     `SELECT id FROM v2_inbound_plan_jobs
        WHERE related_doc_type='inbound_plan' AND plan_id=?
-         AND job_type IN ('inbound_direct','inbound_bulk','inbound_change_order')
+         AND job_type IN ('inbound_direct_tally','inbound_direct_putaway','inbound_direct','inbound_bulk','inbound_change_order')
          AND status IN ('pending','working','awaiting_close')
        LIMIT 1`
   ).bind(planId).first();
@@ -898,7 +903,7 @@ async function repairInboundPlanWorkState(env, planId, reason) {
   const hasPutawayCompleted = await env.DB.prepare(
     `SELECT id FROM v2_inbound_plan_jobs
        WHERE related_doc_type='inbound_plan' AND plan_id=?
-         AND job_type IN ('inbound_direct','inbound_bulk','inbound_change_order')
+         AND job_type IN ('inbound_direct_tally','inbound_direct_putaway','inbound_direct','inbound_bulk','inbound_change_order')
          AND status='completed'
        LIMIT 1`
   ).bind(planId).first();
@@ -1350,6 +1355,41 @@ const MIGRATIONS = [
     AND EXISTS(SELECT 1 FROM v2_inbound_plans p WHERE p.id=NEW.related_doc_id AND COALESCE(p.bulk_external_inbound_no,'')!=''
       AND ((NEW.job_type='inbound_bulk') != (instr(char(10)||p.bulk_external_inbound_no||char(10),char(10)||NEW.inbound_external_no||char(10))>0)))
     BEGIN SELECT RAISE(ABORT,'inbound department changed; refresh before starting'); END`,
+
+  // Staged jobs have separate uniqueness; historical combined jobs remain intact.
+  `CREATE UNIQUE INDEX IF NOT EXISTS ck_inbound_stage_unique ON v2_ops_jobs(related_doc_id,inbound_external_no,job_type)
+    WHERE related_doc_type='inbound_plan' AND job_type IN ('inbound_direct_tally','inbound_direct_putaway') AND status!='cancelled'`,
+  `CREATE TRIGGER IF NOT EXISTS ck_inbound_stage_start BEFORE INSERT ON v2_ops_jobs
+    WHEN NEW.job_type IN ('inbound_direct_tally','inbound_direct_putaway') BEGIN
+    SELECT CASE WHEN NEW.related_doc_type!='inbound_plan' OR COALESCE(NEW.inbound_external_no,'')='' OR NOT EXISTS(
+      SELECT 1 FROM v2_inbound_plans p WHERE p.id=NEW.related_doc_id AND COALESCE(p.is_deleted,0)=0
+      AND p.status IN ('unloading','unloading_putting_away','arrived_pending_putaway','putting_away','tallied_pending_putaway','direct_putting_away','partially_completed')
+      AND instr(char(10)||COALESCE(p.external_inbound_no,'')||char(10),char(10)||NEW.inbound_external_no||char(10))>0
+      AND instr(char(10)||COALESCE(p.bulk_external_inbound_no,'')||char(10),char(10)||NEW.inbound_external_no||char(10))=0
+      AND (p.biz_class='direct_ship' OR EXISTS(SELECT 1 FROM json_each(p.biz_classes_json) WHERE value='direct_ship'))
+      AND NOT EXISTS(SELECT 1 FROM v2_inbound_plan_biz_tasks b WHERE b.plan_id=p.id AND b.biz_class='direct_ship' AND b.status='completed'))
+      THEN RAISE(ABORT,'inbound stage reference or plan changed') END;
+    SELECT CASE WHEN EXISTS(SELECT 1 FROM v2_ops_jobs j WHERE j.related_doc_type='inbound_plan' AND j.related_doc_id=NEW.related_doc_id
+      AND (j.inbound_external_no=NEW.inbound_external_no OR COALESCE(j.inbound_external_no,'')='') AND j.job_type='inbound_direct' AND j.status!='cancelled')
+      THEN RAISE(ABORT,'continue legacy combined inbound task') END;
+    SELECT CASE WHEN NEW.job_type='inbound_direct_putaway' AND NOT EXISTS(SELECT 1 FROM v2_ops_jobs j WHERE j.related_doc_type='inbound_plan' AND j.related_doc_id=NEW.related_doc_id AND j.inbound_external_no=NEW.inbound_external_no AND j.job_type='inbound_direct_tally' AND j.status='completed')
+      THEN RAISE(ABORT,'tally must finish before putaway') END;
+    END`,
+  `CREATE TRIGGER IF NOT EXISTS ck_inbound_legacy_after_stage BEFORE INSERT ON v2_ops_jobs
+    WHEN NEW.job_type='inbound_direct' AND EXISTS(SELECT 1 FROM v2_ops_jobs j WHERE j.related_doc_type='inbound_plan' AND j.related_doc_id=NEW.related_doc_id
+      AND (j.inbound_external_no=NEW.inbound_external_no OR COALESCE(NEW.inbound_external_no,'')='') AND j.job_type IN ('inbound_direct_tally','inbound_direct_putaway') AND j.status!='cancelled')
+    BEGIN SELECT RAISE(ABORT,'use staged inbound task'); END`,
+
+  `CREATE TRIGGER IF NOT EXISTS ck_inbound_stage_reference_locked BEFORE UPDATE OF external_inbound_no,bulk_external_inbound_no ON v2_inbound_plans
+    WHEN EXISTS(SELECT 1 FROM v2_ops_jobs j WHERE j.related_doc_type='inbound_plan' AND j.related_doc_id=OLD.id AND j.job_type IN ('inbound_direct_tally','inbound_direct_putaway') AND j.status!='cancelled'
+      AND (instr(char(10)||COALESCE(NEW.external_inbound_no,'')||char(10),char(10)||j.inbound_external_no||char(10))=0
+        OR instr(char(10)||COALESCE(NEW.bulk_external_inbound_no,'')||char(10),char(10)||j.inbound_external_no||char(10))>0))
+    BEGIN SELECT RAISE(ABORT,'staged inbound reference cannot change'); END`,
+
+  `CREATE TRIGGER IF NOT EXISTS ck_inbound_stage_completion_gate BEFORE UPDATE OF status ON v2_inbound_plans
+    WHEN NEW.status='completed' AND EXISTS(SELECT 1 FROM v2_ops_jobs t WHERE t.related_doc_type='inbound_plan' AND t.related_doc_id=NEW.id AND t.job_type='inbound_direct_tally' AND t.status!='cancelled'
+      AND NOT EXISTS(SELECT 1 FROM v2_ops_jobs p WHERE p.related_doc_type='inbound_plan' AND p.related_doc_id=t.related_doc_id AND p.inbound_external_no=t.inbound_external_no AND p.job_type='inbound_direct_putaway' AND p.status='completed'))
+    BEGIN SELECT RAISE(ABORT,'putaway stage is not complete'); END`,
 
   // ---- idempotency keys for create/start/convert class writes ----
   `CREATE TABLE IF NOT EXISTS v2_idempotency_keys (
@@ -2053,7 +2093,7 @@ const MIGRATIONS = [
 ];
 
 // 每次发布迁移变化时手动 +1（patch 段），冷启动只比对一次字符串即可跳过整段 MIGRATIONS
-const CURRENT_SCHEMA_VERSION = 'v2.20260930c';
+const CURRENT_SCHEMA_VERSION = 'v2.20261019-inbound-stages';
 
 const migratedDatabases = new WeakSet();
 async function ensureMigrated(db) {
@@ -2173,13 +2213,13 @@ route("v2_dashboard_summary", async (body, env) => {
       `SELECT COUNT(*) AS c FROM v2_inbound_plans
         WHERE source_type != 'return_session'
           AND COALESCE(is_deleted,0)=0
-          AND status IN ('pending','unloading','unloading_putting_away','arrived_pending_putaway','putting_away','partially_completed')`
+          AND status IN ('pending','unloading','unloading_putting_away','arrived_pending_putaway','putting_away','tallied_pending_putaway','direct_putting_away','partially_completed')`
     ).first(),
     env.DB.prepare(
       `SELECT * FROM v2_inbound_plans
         WHERE source_type != 'return_session'
           AND COALESCE(is_deleted,0)=0
-          AND status IN ('pending','unloading','unloading_putting_away','arrived_pending_putaway','putting_away','partially_completed')
+          AND status IN ('pending','unloading','unloading_putting_away','arrived_pending_putaway','putting_away','tallied_pending_putaway','direct_putting_away','partially_completed')
         ORDER BY plan_date ASC, created_at ASC LIMIT 3`
     ).all(),
 
@@ -3945,7 +3985,7 @@ const INBOUND_BIZ_TO_JOB_TYPE = {
   change_order: 'inbound_change_order'
 };
 const INBOUND_JOB_TYPE_TO_BIZ = {
-  inbound_direct: 'direct_ship',
+  inbound_direct_tally: 'direct_ship', inbound_direct_putaway: 'direct_ship', inbound_direct: 'direct_ship',
   inbound_bulk: 'bulk',
   inbound_return: 'return',
   inbound_change_order: 'change_order'
@@ -4116,10 +4156,10 @@ async function recalcInboundPlanCompletion(env, plan_id, t, opts) {
   if (plan.source_type === 'return_session') return plan.status;
 
   const activeUnload = await env.DB.prepare(
-    "SELECT id FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type='unload' AND status IN ('pending','working','awaiting_close') LIMIT 1"
+    "SELECT id FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type='unload' AND status IN ('pending','working','awaiting_close','paused') LIMIT 1"
   ).bind(plan_id).first();
   const otherInbound = await env.DB.prepare(
-    "SELECT id FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type IN ('inbound_direct','inbound_bulk','inbound_return','inbound_change_order') AND status IN ('pending','working','awaiting_close') LIMIT 1"
+    "SELECT id FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type IN ('inbound_direct_tally','inbound_direct_putaway','inbound_direct','inbound_bulk','inbound_return','inbound_change_order') AND status IN ('pending','working','awaiting_close','paused') LIMIT 1"
   ).bind(plan_id).first();
 
   // 卸货还在 → 不进入完成态。若仍有理货并行 → unloading_putting_away；否则 unloading
@@ -4163,7 +4203,8 @@ async function recalcInboundPlanCompletion(env, plan_id, t, opts) {
         "UPDATE v2_inbound_plans SET status=?, updated_at=? WHERE id=? AND status!='cancelled'"
       ).bind(next, ts, plan_id).run();
     }
-    return next;
+    await stagedPlanStatement(env,plan_id,ts).run();
+    return (await env.DB.prepare('SELECT status FROM v2_inbound_plans WHERE id=?').bind(plan_id).first()).status;
   }
 
   // 老数据无 biz_task：沿用 putaway_qty 口径
@@ -4305,7 +4346,7 @@ route("v2_inbound_plan_list", async (body, env) => {
       if (pending.indexOf(required_biz_class) === -1) continue;
     }
     // 卸货完成口径：(a) 有 completed unload job  或  (b) 整单 status 已越过卸货阶段
-    const postUnloadStatuses = ['arrived_pending_putaway','putting_away','partially_completed','completed'];
+    const postUnloadStatuses = ['arrived_pending_putaway','putting_away','tallied_pending_putaway','direct_putting_away','partially_completed','completed'];
     const unload_completed = unloadDoneByPlan[p.id]
       ? 1
       : (postUnloadStatuses.indexOf(p.status) !== -1 ? 1 : 0);
@@ -4389,11 +4430,13 @@ route("v2_inbound_plan_detail", async (body, env) => {
     if(ownUnload?.result_json){const own=JSON.parse(ownUnload.result_json);resultLines=own.result_lines||[];if(latestResult)latestResult.diff_note=own.diff_note||'';}
     let resultNote = "";
     let extraOps = null;
+    let putawayWorkload = null;
     let isReturnFlag = false;
     if (latestResult && latestResult.result_json) {
       try {
         const rj = JSON.parse(latestResult.result_json);
         resultNote = rj.result_note || "";
+        if(job.job_type===putawayType&&rj.location_count!=null)putawayWorkload={location_count:rj.location_count,used_forklift:rj.used_forklift};
         if (rj.extra_ops && typeof rj.extra_ops === 'object') extraOps = rj.extra_ops;
         if (rj.is_return === true) isReturnFlag = true;
       } catch(e) {}
@@ -4410,6 +4453,7 @@ route("v2_inbound_plan_detail", async (body, env) => {
       remark: (latestResult && latestResult.remark) || "",
       result_note: resultNote,
       extra_ops: extraOps,
+      putaway_workload: putawayWorkload,
       is_return: isReturnFlag || (job.job_type === 'inbound_return')
     });
   }
@@ -4521,7 +4565,7 @@ route("v2_inbound_plan_ops_candidates", async (body, env) => {
   let statusFilter;
   if (scene === 'putaway') {
     // partially_completed 也属于"还能继续入库"的状态
-    statusFilter = "('unloading','unloading_putting_away','arrived_pending_putaway','putting_away','partially_completed')";
+    statusFilter = "('unloading','unloading_putting_away','arrived_pending_putaway','putting_away','tallied_pending_putaway','direct_putting_away','partially_completed')";
   } else if (scene === 'unload') {
     statusFilter = "('pending','unloading','unloading_putting_away')";
   } else {
@@ -4654,7 +4698,7 @@ route("v2_inbound_resolve_code", async (body, env) => {
   }
 
   // Check status is putaway-able（partially_completed 也允许继续，因为还有未完成的 biz）
-  const putawayStatuses = ['unloading', 'unloading_putting_away', 'arrived_pending_putaway', 'putting_away', 'partially_completed'];
+  const putawayStatuses = ['unloading', 'unloading_putting_away', 'arrived_pending_putaway', 'putting_away', 'tallied_pending_putaway', 'direct_putting_away', 'partially_completed'];
   if (putawayStatuses.indexOf(plan.status) === -1) {
     return json({ ok: true, kind: 'status_not_allowed', plan: planEnriched, message: "该系统入库单当前状态（" + plan.status + "）不可开始入库" });
   }
@@ -5534,7 +5578,7 @@ route("v2_unload_job_start", async (body, env) => {
     const plan = await env.DB.prepare("SELECT status FROM v2_inbound_plans WHERE id=?").bind(plan_id).first();
     if (!plan) return { ok: false, error: "plan not found" };
     // 已经卸过货的状态：不允许再次创建卸货任务（除非管理员强制重开）
-    const unloadDoneStatuses = ['arrived_pending_putaway', 'putting_away', 'partially_completed', 'completed'];
+    const unloadDoneStatuses = ['arrived_pending_putaway', 'putting_away', 'tallied_pending_putaway', 'direct_putting_away', 'partially_completed', 'completed'];
     const forceReopen = body.force_reopen === true;
     if (unloadDoneStatuses.indexOf(plan.status) !== -1 && !forceReopen) {
       return {
@@ -5822,11 +5866,12 @@ route("v2_inbound_job_start", async (body, env) => {
   const start_remark = String(body.start_remark || "").trim();
   if (!worker_id) return err("missing worker_id");
 
-  const VALID_JOB_TYPES = ['inbound_direct', 'inbound_bulk', 'inbound_return', 'inbound_change_order'];
+  const VALID_JOB_TYPES = ['inbound_direct_tally','inbound_direct_putaway','inbound_direct', 'inbound_bulk', 'inbound_return', 'inbound_change_order'];
   if (VALID_JOB_TYPES.indexOf(job_type) === -1) return err("invalid job_type: " + job_type);
+  if(stagedInbound(job_type))return err('请从正常派工入口开始理货或上架 / 담당자가 배정하여 시작하세요');
   const isReturn = (job_type === 'inbound_return');
   // 入库换单（biz_class=change_order）走标准计划路径，与代发/大货同流程
-  const isStandard = (job_type === 'inbound_direct' || job_type === 'inbound_bulk' || job_type === 'inbound_change_order');
+  const isStandard = (job_type === 'inbound_direct_tally' || job_type === 'inbound_direct_putaway' || job_type === 'inbound_direct' || job_type === 'inbound_bulk' || job_type === 'inbound_change_order');
 
   if (isReturn && biz_class && biz_class !== 'return') {
     return err("biz_class mismatch for inbound_return: " + biz_class);
@@ -5854,7 +5899,7 @@ route("v2_inbound_job_start", async (body, env) => {
     if (plan_id && isStandard) {
       const plan = await env.DB.prepare("SELECT * FROM v2_inbound_plans WHERE id=?").bind(plan_id).first();
       if (!plan) return { ok: false, error: "plan not found" };
-      const inboundStartAllowed = ['unloading', 'unloading_putting_away', 'arrived_pending_putaway', 'putting_away', 'partially_completed'];
+      const inboundStartAllowed = ['unloading', 'unloading_putting_away', 'arrived_pending_putaway', 'putting_away', 'tallied_pending_putaway', 'direct_putting_away', 'partially_completed'];
       if (inboundStartAllowed.indexOf(plan.status) === -1) {
         return { ok: false, error: "plan_status_invalid", message: "当前状态不可开始理货 / 현재 상태에서 입고 불가, current: " + plan.status };
       }
@@ -6037,6 +6082,9 @@ route("v2_inbound_job_finish", async (body, env) => {
     const jobRow = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
     if (!jobRow) return { ok: false, error: "job not found" };
     const isReturnJob = (jobRow.job_type === 'inbound_return');
+    if(stagedInbound(jobRow.job_type)&&!await env.DB.prepare("SELECT id FROM sop_records WHERE id=? AND kind='dispatch'").bind(job_id).first())return {ok:false,error:'阶段任务派工信息缺失，请核实原任务'};
+    if(stagedInbound(jobRow.job_type)&&!leave_only&&!complete_job)return {ok:false,error:'请通过完成按钮提交本阶段实际产出'};
+    if(jobRow.job_type===putawayType&&!leave_only)putawayMetrics(body);
 
     if (complete_job && !leave_only && !isReturnJob) {
       if(jobRow.related_doc_id&&!await courierReady(env,jobRow.related_doc_id))return {ok:false,error:"courier_not_received",message:"关联快递尚未收齐，不能完成理货 / 택배 수령이 완료되지 않았습니다"};
@@ -6048,7 +6096,7 @@ route("v2_inbound_job_finish", async (body, env) => {
           return { ok: false, error: "unload_not_finished", message: "卸货未完成，无法完成理货 / 하차가 아직 완료되지 않아 입고 완료 처리할 수 없습니다" };
         }
         // partially_completed 也允许：还有别的 biz 未完成，但本 biz 自己可以完成
-        const inboundFinishAllowed = ['putting_away', 'partially_completed'];
+        const inboundFinishAllowed = ['putting_away', 'tallied_pending_putaway', 'direct_putting_away', 'partially_completed'];
         if (planCheck && inboundFinishAllowed.indexOf(planCheck.status) === -1) {
           return { ok: false, error: "inbound_plan_status_invalid", message: "当前入库计划状态不允许完成入库（当前: " + planCheck.status + "）" };
         }
@@ -6064,6 +6112,7 @@ route("v2_inbound_job_finish", async (body, env) => {
         return atomicNativeFinish(env,body,jobRow,{inbound:true,biz});
       }
     }
+    if(stagedInbound(jobRow.job_type)&&!leave_only)return {ok:false,error:'请由本任务派审员完成整组阶段任务'};
     await closeAllOpenSegs(env, job_id, worker_id, t, leave_only ? 'leave' : 'finished');
     const realCount = await recalcActiveCount(env, job_id, t);
 
@@ -6275,7 +6324,7 @@ route("v2_inbound_mark_completed", async (body, env) => {
 
     const plan = await env.DB.prepare("SELECT * FROM v2_inbound_plans WHERE id=?").bind(plan_id).first();
     if (!plan) return { ok: false, error: "plan not found" };
-    const markCompletedAllowed = ['arrived_pending_putaway', 'putting_away', 'partially_completed'];
+    const markCompletedAllowed = ['arrived_pending_putaway', 'putting_away', 'tallied_pending_putaway', 'direct_putting_away', 'partially_completed'];
     if(!await courierReady(env,plan_id))return {ok:false,error:'courier_not_received',message:'快递尚未收齐，不能完结 / 택배 미수령'};
     if (markCompletedAllowed.indexOf(plan.status) === -1) {
       return { ok: false, error: "status_invalid", message: "only arrived_pending_putaway/putting_away/partially_completed can be marked completed, current: " + plan.status };
@@ -6341,9 +6390,9 @@ route("v2_inbound_plan_force_complete", async (body, env) => {
     if(!await courierReady(env,id))return {ok:false,error:'courier_not_received',message:'快递尚未收齐，不能完结 / 택배 미수령'};
     const referenceProgress=await inboundCodeProgress(env,plan);
     if(referenceProgress?.missing_departments?.length)return {ok:false,error:'external_references_missing',message:'外部入库单号待补充，不能直接完结整张计划'};
-    if(referenceProgress?.total>1&&referenceProgress.completed<referenceProgress.total)return {ok:false,error:'external_inbounds_pending',message:'多个外部入库单须逐单完成：当前 '+referenceProgress.completed+'/'+referenceProgress.total+'，不能直接完结整张计划'};
+    if(referenceProgress?.items?.some(x=>x.tally_job_id&&x.status!=='completed')||referenceProgress?.total>1&&referenceProgress.completed<referenceProgress.total)return {ok:false,error:'external_inbounds_pending',message:'多个外部入库单须逐单完成：当前 '+referenceProgress.completed+'/'+referenceProgress.total+'，不能直接完结整张计划'};
 
-    const ALLOWED = ['pending', 'arrived_pending_putaway', 'putting_away', 'partially_completed'];
+    const ALLOWED = ['pending', 'arrived_pending_putaway', 'putting_away', 'tallied_pending_putaway', 'direct_putting_away', 'partially_completed'];
     if (ALLOWED.indexOf(plan.status) === -1) {
       return { ok: false, error: "status_invalid", message: "current status: " + plan.status };
     }
@@ -6359,7 +6408,7 @@ route("v2_inbound_plan_force_complete", async (body, env) => {
     const t = now();
     // The completion marker, quantities and tasks either all commit or none do.
     const statements=[env.DB.prepare(`UPDATE v2_inbound_plans SET status='completed', updated_at=?, force_completed=1, force_completed_by=?, force_completed_at=?, force_complete_reason=?, manual_completed_by=?, manual_completed_at=?
-      WHERE id=? AND updated_at=? AND status IN ('pending','arrived_pending_putaway','putting_away','partially_completed') AND COALESCE(is_deleted,0)=0
+      WHERE id=? AND updated_at=? AND status IN ('pending','arrived_pending_putaway','putting_away','tallied_pending_putaway','direct_putting_away','partially_completed') AND COALESCE(is_deleted,0)=0
       AND NOT EXISTS(SELECT 1 FROM v2_inbound_plan_jobs j WHERE j.plan_id=v2_inbound_plans.id AND j.status NOT IN ('completed','cancelled'))
       AND NOT EXISTS(SELECT 1 FROM ck_courier_plan_items ci WHERE ci.plan_id=v2_inbound_plans.id AND NOT EXISTS(SELECT 1 FROM ck_courier_receipts r WHERE r.tracking_no=ci.tracking_no))
     `).bind(t,operator,t,reason,operator,t,id,plan.updated_at)];
@@ -6535,7 +6584,7 @@ route("v2_admin_force_complete_partial_inbounds", async (body, env) => {
 const _STATUS_LABEL_ZH = {
   // inbound
   pending: '未到货', unloading: '卸货中', unloading_putting_away: '卸货中+理货中',
-  arrived_pending_putaway: '已到库待理货', putting_away: '理货中',
+  arrived_pending_putaway: '已到库待理货', putting_away: '理货中', tallied_pending_putaway:'理货完成待上架', direct_putting_away:'上架中',
   partially_completed: '部分入库完成', processing: '处理中', completed: '已完成',
   unloaded_pending_info: '已卸货·待补充信息',
   // outbound
@@ -6658,6 +6707,9 @@ route("v2_inbound_plan_export", async (body, env) => {
     };
   }
 
+  // Aggregate task results before any worker join: one shared workload per job.
+  const putawayRows=await batchSelectInGlobal(env,`SELECT j.related_doc_id AS plan_id,j.inbound_external_no,r.result_json FROM v2_ops_jobs j JOIN v2_ops_job_results r ON r.id='RES-FINAL-'||j.id WHERE j.related_doc_id IN (PLACEHOLDER) AND j.job_type='inbound_direct_putaway' AND j.status='completed'`,planIds);
+  const putawayByPlan=new Map();for(const r of putawayRows){const data=JSON.parse(r.result_json);if(!putawayByPlan.has(r.plan_id))putawayByPlan.set(r.plan_id,[]);putawayByPlan.get(r.plan_id).push({...data,external_no:r.inbound_external_no});}
   const out = rows.map(p => {
     const bizArr = extractPlanBizClasses(p);
     const tasks = tasksByPlan[p.id] || [];
@@ -6686,6 +6738,8 @@ route("v2_inbound_plan_export", async (body, env) => {
     return {
       入库单号: p.display_no || p.id,
       外部WMS单号: p.external_inbound_no || '',
+      上架货位数: putawayByPlan.has(p.id)?putawayByPlan.get(p.id).reduce((n,r)=>n+Number(r.location_count||0),0):'',
+      上架叉车使用明细: (putawayByPlan.get(p.id)||[]).map(r=>r.external_no+'：'+(r.used_forklift?'是':'否')).join('；'),
       计划日期: p.plan_date || '',
       客户: p.customer || '',
       状态: inboundFlowEnabled(env)&&p.status==='completed'?'已入库':_statusLabelZh(p.status),
@@ -9088,7 +9142,7 @@ route("v2_admin_dirty_data_diagnose", async (body, env) => {
     FROM v2_ops_job_workers w
     JOIN v2_ops_jobs j ON w.job_id = j.id
     WHERE w.left_at='' AND j.status IN ('working','awaiting_close','pending')
-      AND j.job_type IN ('bulk_op','inbound_direct','inbound_bulk','inbound_change_order','inbound_return','unload')
+      AND j.job_type IN ('bulk_op','inbound_direct_tally','inbound_direct_putaway','inbound_direct','inbound_bulk','inbound_change_order','inbound_return','unload')
     GROUP BY w.worker_id, j.job_type
     HAVING job_count > 1
   `).all();
@@ -9515,7 +9569,7 @@ route("v2_admin_cleanup_inbound_plan_states", async (body, env) => {
         `SELECT id FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type='unload' AND status IN ('pending','working','awaiting_close') LIMIT 1`
       ).bind(p.id).first();
       const hasActivePutaway = await env.DB.prepare(
-        `SELECT id FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type IN ('inbound_direct','inbound_bulk','inbound_change_order') AND status IN ('pending','working','awaiting_close') LIMIT 1`
+        `SELECT id FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type IN ('inbound_direct_tally','inbound_direct_putaway','inbound_direct','inbound_bulk','inbound_change_order') AND status IN ('pending','working','awaiting_close') LIMIT 1`
       ).bind(p.id).first();
       if (p.status === 'unloading' && !hasActiveUnload) {
         repaired++;
@@ -9584,7 +9638,7 @@ route("v2_admin_cleanup_inbound_unload_scope", async (body, env) => {
       "SELECT id FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type='unload' AND status IN ('pending','working','awaiting_close') LIMIT 1"
     ).bind(p.id).first();
     const activePutaway = await env.DB.prepare(
-      "SELECT id FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type IN ('inbound_direct','inbound_bulk','inbound_change_order') AND status IN ('pending','working','awaiting_close') LIMIT 1"
+      "SELECT id FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type IN ('inbound_direct_tally','inbound_direct_putaway','inbound_direct','inbound_bulk','inbound_change_order') AND status IN ('pending','working','awaiting_close') LIMIT 1"
     ).bind(p.id).first();
 
     // 确保 biz_task 行齐全
@@ -9599,7 +9653,7 @@ route("v2_admin_cleanup_inbound_unload_scope", async (body, env) => {
     let target = p.status;
     if (activeUnload) {
       target = activePutaway ? 'unloading_putting_away' : 'unloading';
-    } else if (unloadDone || ['arrived_pending_putaway','putting_away','partially_completed','completed'].indexOf(p.status) !== -1) {
+    } else if (unloadDone || ['arrived_pending_putaway','putting_away','tallied_pending_putaway','direct_putting_away','partially_completed','completed'].indexOf(p.status) !== -1) {
       // 物理卸货已完成
       if (allCompleted) target = 'completed';
       else if (someCompleted) target = 'partially_completed';
@@ -11317,7 +11371,7 @@ route("v2_dashboard_management_summary", async (body, env) => {
     change_order: ['change_order'],
     pack_direct: ['pack_direct'],
     pick_direct: ['pick_direct'],
-    inbound: ['inbound_direct', 'inbound_bulk', 'inbound_return', 'inbound_change_order'],
+    inbound: ['inbound_direct_tally','inbound_direct_putaway','inbound_direct', 'inbound_bulk', 'inbound_return', 'inbound_change_order'],
     outbound: ['load_outbound', 'verify_scan', 'bulk_op'],
   };
 

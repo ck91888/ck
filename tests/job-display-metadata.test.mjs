@@ -39,8 +39,12 @@ test('linked fields preserve external business codes, leading zeros and meaningf
 
 test('every known job type has a meaningful department/start fallback; missing dispatchers never borrow creator, lead or current identity',async t=>{
  const f=await fixture(t);
- for(const type of Object.keys(jobDefinitions)){f.job('J-'+type,type,{biz_class:'bulk'});}
- const rows=await jobNumbers(f.env,Object.keys(jobDefinitions).map(type=>({id:'J-'+type,owner:'客服计划人',created_by:'主操作员朴',dispatcher_name:'当前办公室李'})));
+ const types=Object.keys(jobDefinitions);
+ // Staged jobs require a real reference in storage; exercise their no-reference display fallback directly.
+ for(const type of types.filter(t=>['inbound_direct_tally','inbound_direct_putaway'].includes(t))){const row=jobDisplayMetadata({job_type:type,created_at:stamp});assert.ok(row.job_label);assert.match(row.job_label,/2026-10-08 00:07 KST/);assert.equal(row.dispatcher_id,'');assert.equal(row.has_business_reference,false);}
+ const persisted=types.filter(t=>!['inbound_direct_tally','inbound_direct_putaway'].includes(t));
+ for(const type of persisted){f.job('J-'+type,type,{biz_class:'bulk'});}
+ const rows=await jobNumbers(f.env,persisted.map(type=>({id:'J-'+type,owner:'客服计划人',created_by:'主操作员朴',dispatcher_name:'当前办公室李'})));
  for(const row of rows){assert.ok(row.job_label);assert.match(row.job_label,/2026-10-08 00:07 KST/);assert.equal(row.dispatcher_name,'');assert.equal(row.dispatcher_id,'');assert.equal(row.has_business_reference,false);}
  f.job('legacy','inventory');f.record('legacy','need',{owner:'客服计划人',owner_id:'SERVICE'});
  const legacy=(await jobNumbers(f.env,[{id:'legacy'}]))[0];assert.equal(legacy.dispatcher_name,'');assert.equal(legacy.dispatcher_id,'');

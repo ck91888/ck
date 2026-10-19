@@ -3171,7 +3171,7 @@ async function loadInboundDetail() {
     var needCheck = ['unloading','unloading_putting_away','putting_away'].indexOf(p.status) !== -1;
     if (!needCheck) return;
     var activeJobTypes = (p.status === 'putting_away')
-      ? ['inbound_direct','inbound_bulk','inbound_change_order']
+      ? ['inbound_direct_tally','inbound_direct_putaway','inbound_direct','inbound_bulk','inbound_change_order']
       : ['unload'];
     var hasActive = jobs.some(function(j) {
       return activeJobTypes.indexOf(j.job_type) !== -1
@@ -3246,6 +3246,7 @@ async function loadInboundDetail() {
           html += '<div>' + (isInboundJob ? '实际入库：' : '实际结果：') + '--</div>';
         }
       }
+      if(j.putaway_workload){html+='<div>货位数：'+esc(j.putaway_workload.location_count)+' · 是否使用叉车：'+(j.putaway_workload.used_forklift?'是':'否')+'</div>';}
       // Extra ops — standard inbound only
       if (!isReturnJob && isInboundJob && j.extra_ops) {
         var eo = j.extra_ops;

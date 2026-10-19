@@ -1,3 +1,4 @@
+import {tallyType,putawayType} from './inbound-stages.js';
 // Inbound dispositions use the existing storage keys for compatibility.
 // Cross-dock retains `bulk`; only `bulk_putaway` denotes bulk putaway.
 import {referenceWriteBatch} from './inbound-reference-history.js';
@@ -31,12 +32,16 @@ export async function inboundReferenceData(env,classes,body,plan={}){
 export async function inboundCodeProgress(env,plan,knownJobs,biz){
  if(!inboundFlowEnabled(env)||!plan||!needsPutaway(plan))return null;
  const codes=departmentCodes(plan,biz),allCodes=inboundCodes(plan.external_inbound_no);
- const jobs=knownJobs ? knownJobs.filter(j=>['inbound_direct','inbound_bulk'].includes(j.job_type)&&j.status!=='cancelled') : (await env.DB.prepare("SELECT id,job_type,status,inbound_external_no,created_at,updated_at FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type IN ('inbound_direct','inbound_bulk') AND status!='cancelled' ORDER BY created_at DESC").bind(plan.id).all()).results||[];
+ const jobs=knownJobs ? knownJobs.filter(j=>['inbound_direct','inbound_bulk',tallyType,putawayType].includes(j.job_type)&&j.status!=='cancelled') : (await env.DB.prepare("SELECT id,job_type,status,inbound_external_no,created_at,updated_at FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type IN ('inbound_direct','inbound_bulk','inbound_direct_tally','inbound_direct_putaway') AND status!='cancelled' ORDER BY created_at DESC").bind(plan.id).all()).results||[];
  const items=codes.map(code=>{
   const matches=jobs.filter(j=>j.inbound_external_no===code||(!j.inbound_external_no&&allCodes.length===1));
-  const job=matches.find(j=>j.status==='completed')||matches.find(j=>['pending','working','awaiting_close'].includes(j.status));
+  const final=matches.find(j=>j.job_type!==tallyType&&j.status==='completed');
+  const putaway=matches.find(j=>j.job_type===putawayType&&['pending','working','awaiting_close','paused'].includes(j.status));
+  const tally=matches.find(j=>j.job_type===tallyType&&j.status==='completed');
+  const job=final||putaway||matches.find(j=>['pending','working','awaiting_close','paused'].includes(j.status))||tally;
   const historicalComplete=codes.length===1&&plan.status==='completed';
-  return {external_no:code,biz_class:inboundCodes(plan.bulk_external_inbound_no).includes(code)?'bulk_putaway':'direct_ship',status:job?.status==='completed'||historicalComplete?'completed':job?'working':'pending',job_id:job?.id||'',completed_at:job?.status==='completed'?job.updated_at:historicalComplete?(plan.manual_completed_at||plan.updated_at||''):''};
+  const status=final||historicalComplete?'completed':putaway?'putting_away':tally?'tallied_pending_putaway':job?'working':'pending';
+  return {external_no:code,biz_class:inboundCodes(plan.bulk_external_inbound_no).includes(code)?'bulk_putaway':'direct_ship',status,job_id:job?.id||'',tally_job_id:tally?.id||'',completed_at:final?.updated_at||(historicalComplete?(plan.manual_completed_at||plan.updated_at||''):'')};
  });
  const missing_departments=planClasses(plan).filter(x=>putawayClasses.includes(x)&&(!biz||x===biz)&&!departmentCodes(plan,x).length);
  return {total:items.length,completed:items.filter(x=>x.status==='completed').length,items,missing_departments};
@@ -77,14 +82,14 @@ export async function resolveInboundPlan(env,value,biz){
  if(plan.status==='completed'||tasks.some(x=>x.biz_class===taskBiz&&x.status==='completed'))return {ok:true,kind:'biz_already_completed',plan,message:'该计划已完成入库，请勿重复开工 / 이미 입고 완료된 계획입니다'};
  const progress=await inboundCodeProgress(env,plan,undefined,taskBiz);let selected;
  try{selected=await selectInboundReference(env,plan,code,taskBiz);}catch(error){return progress?.items.some(x=>x.external_no===code&&x.status==='completed')?{ok:true,kind:'biz_already_completed',plan,message:error.message}:blocked(error.message);}
- if(!['unloading','unloading_putting_away','arrived_pending_putaway','putting_away','partially_completed'].includes(plan.status))return blocked('该计划尚未开始卸货，暂不能理货 / 하차 시작 후 입고 작업이 가능합니다');
+ if(!['unloading','unloading_putting_away','arrived_pending_putaway','putting_away','tallied_pending_putaway','direct_putting_away','partially_completed'].includes(plan.status))return blocked('该计划尚未开始卸货，暂不能理货 / 하차 시작 후 입고 작업이 가능합니다');
  return {ok:true,kind:'system',plan:{...plan,biz_classes:planClasses(plan),external_inbound_nos:departmentCodes(plan,taskBiz),selected_external_inbound_no:selected,inbound_progress:progress},biz_classes:planClasses(plan),pending_biz_classes:tasks.filter(x=>x.status!=='completed').map(x=>x.biz_class),completed_biz_classes:tasks.filter(x=>x.status==='completed').map(x=>x.biz_class)};
 }
 export async function completeUnloadedDispositions(env,planId,t){
  if(!inboundFlowEnabled(env))return;
  const plan=await env.DB.prepare('SELECT * FROM v2_inbound_plans WHERE id=?').bind(planId).first();
  if(!plan||['return_session','external_inbound'].includes(plan.source_type)||['pending','cancelled','completed'].includes(plan.status)||plan.is_deleted)return;
- const active=await env.DB.prepare("SELECT id FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type='unload' AND status IN ('pending','working','awaiting_close') LIMIT 1").bind(planId).first();
+ const active=await env.DB.prepare("SELECT id FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type='unload' AND status IN ('pending','working','awaiting_close','paused') LIMIT 1").bind(planId).first();
  if(active)return;
  const unloaded=await env.DB.prepare("SELECT id,updated_at FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type='unload' AND status='completed' ORDER BY updated_at DESC LIMIT 1").bind(planId).first();
  if(!plan.unload_completed_at&&!unloaded)return;
@@ -95,27 +100,27 @@ export async function completeUnloadedDispositions(env,planId,t){
  await env.DB.prepare(`UPDATE v2_inbound_plan_biz_tasks SET status='completed',completed_at=?,completed_by=?,completion_source='unload',completion_note='卸货完成后自动入库',updated_at=?
   WHERE plan_id=? AND biz_class IN ('bulk','return','change_order') AND status!='completed'
   AND EXISTS(SELECT 1 FROM v2_inbound_plans p WHERE p.id=v2_inbound_plan_biz_tasks.plan_id AND p.status!='cancelled' AND COALESCE(p.is_deleted,0)=0)
-  AND NOT EXISTS(SELECT 1 FROM v2_ops_jobs j WHERE j.related_doc_type='inbound_plan' AND j.related_doc_id=? AND j.job_type=v2_inbound_plan_biz_tasks.job_type AND j.status IN ('pending','working','awaiting_close')
+  AND NOT EXISTS(SELECT 1 FROM v2_ops_jobs j WHERE j.related_doc_type='inbound_plan' AND j.related_doc_id=? AND j.job_type=v2_inbound_plan_biz_tasks.job_type AND j.status IN ('pending','working','awaiting_close','paused')
     AND (?=0 OR v2_inbound_plan_biz_tasks.biz_class!='bulk'))`).bind(completedAt,plan.unload_completed_by||'',t,planId,planId,needsPutaway(plan)?1:0).run();
 }
 export async function bindInboundCode(env,body){
  const plan=await env.DB.prepare('SELECT * FROM v2_inbound_plans WHERE id=?').bind(String(body.id||'')).first();
  if(!plan||plan.is_deleted||['completed','cancelled'].includes(plan.status)||plan.source_type==='return_session')throw Error('此计划不能修改外部入库单号');
- const active=await env.DB.prepare("SELECT id FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type LIKE 'inbound%' AND status IN ('pending','working','awaiting_close') LIMIT 1").bind(plan.id).first();
+ const active=await env.DB.prepare("SELECT id FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type LIKE 'inbound%' AND status IN ('pending','working','awaiting_close','paused') LIMIT 1").bind(plan.id).first();
  if(active)throw Error('理货任务正在进行，不能更换关联单号 / 진행 중에는 입고번호를 변경할 수 없습니다');
  if(String(body.previous_code??'')!==String(plan.external_inbound_no||''))throw Error('单号已被其他人修改，请刷新 / 새로고침 후 다시 시도하세요');
  const {externalNo:code,bulkExternalNo}=await inboundReferenceData(env,planClasses(plan),body,plan),t=new Date().toISOString();
  if(body.previous_bulk_code!==undefined&&String(body.previous_bulk_code)!==String(plan.bulk_external_inbound_no||''))throw Error('单号归属已变化，请刷新后重试');
  const progress=await inboundCodeProgress(env,plan),nextCodes=inboundCodes(code);
- for(const item of progress?.items||[])if(item.status==='completed'&&(!nextCodes.includes(item.external_no)||(inboundCodes(bulkExternalNo).includes(item.external_no)!==(item.biz_class==='bulk_putaway'))))throw Error('已完成的外部入库单号不能删除、更换或调整部门：'+item.external_no);
+ for(const item of progress?.items||[])if((item.status==='completed'||item.tally_job_id)&&(!nextCodes.includes(item.external_no)||(inboundCodes(bulkExternalNo).includes(item.external_no)!==(item.biz_class==='bulk_putaway'))))throw Error('已完成的外部入库单号不能删除、更换或调整部门：'+item.external_no);
  const statements=[];
  // Attribute the one historical completed job before expanding a single-code plan.
  if(progress?.total===1&&progress.completed===1)statements.push(env.DB.prepare("UPDATE v2_ops_jobs SET inbound_external_no=? WHERE id=? AND COALESCE(inbound_external_no,'')='' AND EXISTS(SELECT 1 FROM v2_inbound_plans WHERE id=? AND COALESCE(external_inbound_no,'')=?)").bind(progress.items[0].external_no,progress.items[0].job_id,plan.id,plan.external_inbound_no||''));
  for(const biz of putawayClasses){
   const next=departmentCodes({...plan,external_inbound_no:code,bulk_external_inbound_no:bulkExternalNo},biz);
-  if(next.some(x=>!progress?.items.some(i=>i.external_no===x&&i.status==='completed')))statements.push(env.DB.prepare("UPDATE v2_inbound_plan_biz_tasks SET status='pending',completed_at='',completed_by='',updated_at=? WHERE plan_id=? AND biz_class=? AND EXISTS(SELECT 1 FROM v2_inbound_plans WHERE id=? AND COALESCE(external_inbound_no,'')=? AND COALESCE(bulk_external_inbound_no,'')=?) AND NOT EXISTS(SELECT 1 FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type LIKE 'inbound%' AND status IN ('pending','working','awaiting_close'))").bind(t,plan.id,biz,plan.id,plan.external_inbound_no||'',plan.bulk_external_inbound_no||'',plan.id));
+  if(next.some(x=>!progress?.items.some(i=>i.external_no===x&&i.status==='completed')))statements.push(env.DB.prepare("UPDATE v2_inbound_plan_biz_tasks SET status='pending',completed_at='',completed_by='',updated_at=? WHERE plan_id=? AND biz_class=? AND EXISTS(SELECT 1 FROM v2_inbound_plans WHERE id=? AND COALESCE(external_inbound_no,'')=? AND COALESCE(bulk_external_inbound_no,'')=?) AND NOT EXISTS(SELECT 1 FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type LIKE 'inbound%' AND status IN ('pending','working','awaiting_close','paused'))").bind(t,plan.id,biz,plan.id,plan.external_inbound_no||'',plan.bulk_external_inbound_no||'',plan.id));
  }
-  statements.push(env.DB.prepare("UPDATE v2_inbound_plans SET external_inbound_no=?,bulk_external_inbound_no=?,updated_at=? WHERE id=? AND COALESCE(external_inbound_no,'')=? AND COALESCE(bulk_external_inbound_no,'')=? AND NOT EXISTS(SELECT 1 FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type LIKE 'inbound%' AND status IN ('pending','working','awaiting_close')) RETURNING id").bind(code,bulkExternalNo,t,plan.id,plan.external_inbound_no||'',plan.bulk_external_inbound_no||'',plan.id));
+  statements.push(env.DB.prepare("UPDATE v2_inbound_plans SET external_inbound_no=?,bulk_external_inbound_no=?,updated_at=? WHERE id=? AND COALESCE(external_inbound_no,'')=? AND COALESCE(bulk_external_inbound_no,'')=? AND NOT EXISTS(SELECT 1 FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type LIKE 'inbound%' AND status IN ('pending','working','awaiting_close','paused')) RETURNING id").bind(code,bulkExternalNo,t,plan.id,plan.external_inbound_no||'',plan.bulk_external_inbound_no||'',plan.id));
  const results=await referenceWriteBatch(env,plan.id,statements),updated=results[results.length-1];
   if(!updated.results?.some(row=>row.id===plan.id))throw Error('记录已变化，请刷新后重试');
  return {ok:true,id:plan.id,external_inbound_no:code};

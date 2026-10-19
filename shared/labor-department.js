@@ -3,7 +3,7 @@
 export const departments={bulk:'大货 / 대량',direct_ship:'代发 / 출고대행',import:'进口 / 수입'};
 export const jobDefinitions={
  unload:['卸货','bulk'],unplanned_unload:['临时卸货','bulk'],
- inbound_direct:['代发入库','direct_ship'],inbound_bulk:['大货入库','bulk'],inbound_return:['退件入库','direct_ship'],
+ inbound_direct_tally:['代发理货','direct_ship'],inbound_direct_putaway:['代发上架','direct_ship'],inbound_direct:['代发入库','direct_ship'],inbound_bulk:['大货入库','bulk'],inbound_return:['退件入库','direct_ship'],
  inbound_change_order:['换单入库',''],pick_direct:['代发拣货','direct_ship'],bulk_op:['大货操作','bulk'],pack_direct:['代发打包 / 직배송 포장','direct_ship'],change_order:['换单操作','direct_ship'],
  load_outbound:['出库装货','bulk'],outbound_stock_op:['库内操作','bulk'],
  inventory:['盘点',''],disposal:['废弃处理',''],qc:['质检',''],issue_handle:['问题点处理',''],other_internal:['仓库整理',''],

@@ -8,7 +8,7 @@ import {borrowedOut,crewBorrowStatements} from './crew-borrow.js';
 const q=(e,s,...a)=>e.DB.prepare(s).bind(...a);
 const rows=async(e,s,...a)=>(await q(e,s,...a).all()).results||[];
 const fail=m=>{throw Error(m);};
-const types={v2_unload_job_finish:['unload'],v2_unplanned_unload_finish:['unload'],v2_inbound_job_finish:['inbound_direct','inbound_bulk','inbound_return','inbound_change_order'],v2_import_delivery_job_finish:['pickup_delivery_import'],v2_outbound_load_finish:['load_outbound'],v2_outbound_stock_op_finish:['outbound_stock_op'],v2_bulk_op_job_finish:['bulk_op'],v2_pick_job_finish:['pick_direct'],v2_pick_job_finalize:['pick_direct'],v2_verify_job_finish:['verify_scan']};
+const types={v2_unload_job_finish:['unload'],v2_unplanned_unload_finish:['unload'],v2_inbound_job_finish:['inbound_direct_tally','inbound_direct_putaway','inbound_direct','inbound_bulk','inbound_return','inbound_change_order'],v2_import_delivery_job_finish:['pickup_delivery_import'],v2_outbound_load_finish:['load_outbound'],v2_outbound_stock_op_finish:['outbound_stock_op'],v2_bulk_op_job_finish:['bulk_op'],v2_pick_job_finish:['pick_direct'],v2_pick_job_finalize:['pick_direct'],v2_verify_job_finish:['verify_scan']};
 const quantityKeys=['box_count','pallet_count','packed_sku_count','packed_box_count','used_carton_large_count','used_carton_small_count','repaired_box_count','reboxed_count','label_count','total_operated_box_count','forklift_location_count'];
 export async function validateNativeMutation(body,env){
  if(env.SOP_ENVIRONMENT!=='staging'||env.SOP_UPGRADE_ENABLED!=='true')return;
