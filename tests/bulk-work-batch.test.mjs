@@ -2,7 +2,7 @@
 import test from 'node:test';import assert from 'node:assert/strict';
 import worker from '../worker-v2/index.js';import {database} from './d1-adapter.mjs';
 import {historicalPickStart} from './pick-workload-fixture.mjs';
-const plan=()=>({product_quantity:137,sku_count:11,location_count:7,forklift:false});
+const plan=()=>({order_count:23,product_quantity:137,sku_count:11,location_count:7,forklift:false});
 async function fixture(t){
  const DB=database();t.after(()=>DB.raw.close());const env={DB,SOP_ENVIRONMENT:'staging',SOP_UPGRADE_ENABLED:'true',SOP_ATTENDANCE_ENABLED:'true',SOP_ACCESS_CONTROL:'true',SOP_ADMIN_PASSWORD:'Synthetic-Pick-Only',SOP_WORK_CHAIN_ENABLED:'true',SOP_ACCEPT_NEW:'true'};let cookie='',context='';
  const call=async(action,data={})=>{const r=await worker.fetch(new Request('https://pick.fixture.invalid/api',{method:'POST',headers:{'Content-Type':'application/json',Origin:'https://pick.fixture.invalid',Cookie:cookie,'X-CK-Operation-Context':context},body:JSON.stringify({action,client_req_id:crypto.randomUUID(),...data})}),env);if(action==='sop_login'&&r.ok)cookie=r.headers.get('set-cookie')?.split(';')[0]||'';const result=await r.json();if(result.user?.operation_context)context=result.user.operation_context.id;return result;};

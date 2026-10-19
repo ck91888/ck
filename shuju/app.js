@@ -740,6 +740,11 @@ async function exportOrders(btn) {
       使用小纸箱数: r.used_carton_small_count_sum || 0,
       核对OK数: r.verify_ok_count_sum || 0,
       核对NG数: r.verify_ng_count_sum || 0,
+      '拣货计划订单数量（整任务） / 피킹 계획 주문 수 (작업 전체)': r.planned_pick_workload?.order_count ?? '',
+      '拣货计划产品总件数（整任务） / 피킹 계획 상품 수량 (작업 전체)': r.planned_pick_workload?.product_quantity ?? '',
+      '拣货计划SKU种类数（整任务） / 피킹 계획 SKU 종류 수 (작업 전체)': r.planned_pick_workload?.sku_count ?? '',
+      '拣货计划涉及货位数（整任务） / 피킹 계획 로케이션 수 (작업 전체)': r.planned_pick_workload?.location_count ?? '',
+      '拣货计划叉车配货 / 피킹 계획 지게차 사용': typeof r.planned_pick_workload?.forklift === 'boolean' ? (r.planned_pick_workload.forklift ? '是 / 예' : '否 / 아니요') : '',
       拣货单号: r.pick_doc_nos || '',
       拣货人员明细: r.pick_worker_summary || '',
       结果提交人: r.result_submitters || '',
@@ -857,6 +862,8 @@ async function openOrderDetail(jobId) {
     html += '<tr><th>清理标记</th><td colspan="3" style="color:#888;font-size:11px;">' + esc(j.cleanup_note) + '</td></tr>';
   }
   html += '</table>';
+
+  if(j.job_type==='pick_direct'&&window.CKPickWorkload)html+=CKPickWorkload.summary(j.planned_pick_workload);
 
   // 入库手动完成标
   if (Number(res.inbound_force_completed || 0) === 1) {

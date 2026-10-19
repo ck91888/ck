@@ -10735,6 +10735,11 @@ route("v2_dashboard_order_detail", async (body, env) => {
     ).bind(job_id).all()
   ]);
 
+  if(job.job_type==='pick_direct'&&env.SOP_UPGRADE_ENABLED==='true'){
+    const dispatch=await env.DB.prepare("SELECT state FROM sop_records WHERE id=? AND kind='dispatch'").bind(job_id).first();
+    job.planned_pick_workload=readPickWorkload(JSON.parse(dispatch?.state||'{}').planned_pick_workload);
+  }
+
   const results = resultsRs.results || [];
   const parsed = parseOpsResultForExport(job.job_type, results);
 
@@ -10870,6 +10875,11 @@ route("v2_dashboard_order_export", async (body, env) => {
        FROM v2_outbound_orders WHERE id IN (PLACEHOLDER)`,
       outboundIds)
   ]);
+
+  // One plan per task, independent of document and participant counts.
+  const pickPlans=env.SOP_UPGRADE_ENABLED==='true'?await batchSelectInGlobal(env,
+    "SELECT id,state FROM sop_records WHERE kind='dispatch' AND id IN (PLACEHOLDER)",pickJobIds):[];
+  const pickPlanByJob=new Map(pickPlans.map(r=>[r.id,readPickWorkload(JSON.parse(r.state).planned_pick_workload)]));
 
   const workersByJob = {}, resultsByJob = {}, pickByJob = {};
   workersAll.forEach(w => { (workersByJob[w.job_id] = workersByJob[w.job_id] || []).push(w); });
@@ -11072,7 +11082,8 @@ route("v2_dashboard_order_export", async (body, env) => {
       inbound_completed_biz,
       inbound_pending_biz,
       // 代发拣货
-      pick_doc_nos, pick_worker_summary
+      pick_doc_nos, pick_worker_summary,
+      planned_pick_workload: pickPlanByJob.get(j.id)||null
     };
   });
 

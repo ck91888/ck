@@ -15,7 +15,7 @@ dialog.ck-workflow .ck-pick-inputs>label{display:flex;flex-direction:column;gap:
 .ck-pick-choices input{margin:0!important;min-height:auto!important;width:18px!important;height:18px!important;}
 .ck-pick-choices small{flex-basis:100%;text-align:center;}
 .ck-pick-plan{margin:10px 0;padding:12px;background:#f4f8f5;border:1px solid #d8e5dc;border-radius:8px;min-width:0;}
-.ck-pick-plan dl{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:12px 0;}
+.ck-pick-plan dl{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin:12px 0;}
 .ck-pick-plan dt{font-size:12px;line-height:1.5;}
 .ck-pick-plan dd{margin:4px 0 0;font-size:18px;font-weight:650;overflow-wrap:anywhere;font-variant-numeric:tabular-nums;}
 .ck-pick-plan h4 small{font-size:12px;}

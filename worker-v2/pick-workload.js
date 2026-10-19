@@ -1,7 +1,8 @@
 // A start-time plan belongs to one picking trip, never to each worker or result row.
-export function validatePickWorkload(value){
+function parsePickWorkload(value,requireOrderCount){
  const labels={product_quantity:'产品总件数 / 총 상품 수량',sku_count:'SKU种类数 / SKU 종류 수',location_count:'涉及货位数 / 피킹 로케이션 수'};
  if(!value||typeof value!=='object'||Array.isArray(value))throw Error('请填写本次拣货计划工作量 / 이번 피킹의 계획 작업량을 입력하세요');
+ if(requireOrderCount||value.order_count!=null)labels.order_count='订单数量 / 주문 수';
  const clean={};
  for(const [key,label] of Object.entries(labels)){
   if(typeof value[key]!=='number'||!Number.isSafeInteger(value[key])||value[key]<1)throw Error(label+'必须为正整数 / 양의 정수를 입력하세요');
@@ -10,8 +11,10 @@ export function validatePickWorkload(value){
  if(typeof value.forklift!=='boolean')throw Error('请选择是否叉车配货：是或否 / 지게차 사용 여부를 선택하세요');
  return {...clean,forklift:value.forklift};
 }
+export function validatePickWorkload(value){return parsePickWorkload(value,true);}
+// Before order count was introduced, the other recorded plan fields remain valid.
 export function readPickWorkload(value){
- try{return {...validatePickWorkload(value),basis:'planned_at_start',scope:'whole_task',pick_doc_nos:Array.isArray(value.pick_doc_nos)?value.pick_doc_nos:[],recorded_at:value.recorded_at||'',recorded_by:value.recorded_by||''};}catch{return null;}
+ try{return {...parsePickWorkload(value,false),basis:'planned_at_start',scope:'whole_task',pick_doc_nos:Array.isArray(value.pick_doc_nos)?value.pick_doc_nos:[],recorded_at:value.recorded_at||'',recorded_by:value.recorded_by||''};}catch{return null;}
 }
 export async function pickWorkloadContext(env,jobId){
  const record=await env.DB.prepare("SELECT state FROM sop_records WHERE id=? AND kind='dispatch'").bind(jobId).first();
