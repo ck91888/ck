@@ -84,7 +84,8 @@ function _genReqId(action) {
   return action + '_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
 }
 var _createSubmissionIntents = {};
-async function api(params) {
+var _issueListController = null, _issueDetailController = null;
+async function api(params, options) {
   var intentAction = params.action === 'v2_inbound_plan_create' || params.action === 'v2_outbound_order_create';
   if (intentAction && !params.client_req_id) {
     var intentData = Object.assign({}, params); delete intentData.k;
@@ -100,20 +101,32 @@ async function api(params) {
     var res = await fetch(V2_API, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(params)
+      body: JSON.stringify(params),
+      signal: options && options.signal
     });
     var result = await res.json();
     if (intentAction && result && result.ok && _createSubmissionIntents[params.action] === saved) delete _createSubmissionIntents[params.action];
     return result;
   } catch(e) {
-    // TypeError: Failed to fetch / NetworkError — 不是业务错误，是网络/域名问题
+    // Headers may have arrived before a body/JSON failure. Do not diagnose DNS here.
     return {
       ok: false,
       error: "network_error",
       network_error: true,
-      message: "接口连接失败（网络或域名问题），不是业务提交失败\n네트워크 오류 (서버 응답 없음)\n" + (e && e.message || e)
+      aborted: e && e.name === "AbortError",
+      status: res && res.status,
+      message: (res ? "接口响应未完整读取或格式异常（HTTP " + res.status + "） / 응답을 완전히 읽지 못했습니다" : "未收到接口响应，请检查连接后重试 / 서버 응답을 받지 못했습니다") + "\n" + (e && e.message || e)
     };
   }
+}
+
+// Read-only deadline and progress: failed reads remain failures, never empty lists.
+async function readIssue(params, host, controller) {
+  var timedOut=false, started=Date.now();
+  var progress=setInterval(function(){if(!controller.signal.aborted && Date.now()-started>=8000)host.innerHTML='<div class="card muted" role="status">连接较慢，正在等待完整响应 / 응답 대기 중 · '+Math.floor((Date.now()-started)/1000)+'秒 / 초</div>';},1000);
+  var timeout=setTimeout(function(){timedOut=true;controller.abort();},60000);
+  try {var result=await api(params,{signal:controller.signal});return timedOut?{ok:false,timed_out:true,message:'加载超时，请重试 / 로딩 시간 초과. 다시 시도하세요'}:result;}
+  finally {clearInterval(progress);clearTimeout(timeout);}
 }
 
 async function uploadFile(formData) {
@@ -728,6 +741,9 @@ function updateActionsBarByView(view) {
 }
 
 function goView(name) {
+  if(name!=="issue")_issueListController?.abort();
+  if(name!=="issue_detail")_issueDetailController?.abort();
+  window.CKIssueImages?.close();
   if (_currentView === 'issue_create' && name !== 'issue_create') {
     if (_issueCreateDraft && _issueCreateDraft.busy) return;
     clearIssueCreateDraft(true);
@@ -928,6 +944,8 @@ async function loadIssueList() {
   if (!body) return;
   body.innerHTML = '<div class="card muted">' + L("loading") + '</div>';
 
+  if (_issueListController) _issueListController.abort();
+  var controller = _issueListController = new AbortController();
   var status = document.getElementById("issueFilterStatus").value;
   var biz = document.getElementById("issueFilterBiz").value;
   var acctSel = document.getElementById("issueFilterAccounting");
@@ -935,19 +953,20 @@ async function loadIssueList() {
   var custQ = ((document.getElementById("issueFilterCustomer") || {}).value || "").trim();
   var relQ = ((document.getElementById("issueFilterRelatedDoc") || {}).value || "").trim();
   var _ibPager = getPager('issue');
-  var apiParams = { action: "v2_issue_list", status: status, biz_class: biz,
+  var apiParams = { action: "v2_issue_list", list_summary: true, status: status, biz_class: biz,
                     limit: _ibPager.limit, offset: getOffset('issue') };
   if (acct === 'required') apiParams.accounting_required = 1;
   else if (acct === 'unpaid') { apiParams.accounting_required = 1; apiParams.accounted = 0; }
   else if (acct === 'paid') apiParams.accounted = 1;
   if (custQ) apiParams.customer_q = custQ;
   if (relQ) apiParams.related_doc_q = relQ;
-  var res = await api(apiParams);
+  var res = await readIssue(apiParams, body, controller);
+  if (controller !== _issueListController || (controller.signal.aborted && !res.timed_out)) return;
 
   if (!res || !res.ok) {
     try { console.error('v2_issue_list failed', res); } catch (e) {}
     var errMsg = (res && (res.message || res.error || res.detail)) || 'unknown';
-    body.innerHTML = '<div class="card" style="color:#c62828;">加载失败 / 로딩 실패: ' + esc(String(errMsg)) + '</div>';
+    body.innerHTML = '<div class="card" style="color:#c62828;">加载失败 / 로딩 실패: ' + esc(String(errMsg)) + '<p><button type="button" class="btn btn-outline" onclick="loadIssueList()">重试加载 / 다시 시도</button></p></div>';
     return;
   }
 
@@ -1182,6 +1201,7 @@ function _renderIssueAttsHtml(atts) {
   atts.forEach(function(att) {
     var ct = att.content_type || '';
     var url = fileUrl(att.file_key);
+    if(window.CKIssueImages && (ct.indexOf('image/')===0 || /\.(jpe?g|png|webp|gif)$/i.test(att.file_name||''))) {html += CKIssueImages.html(att,url);return;}
     var who = (att.uploaded_by ? esc(att.uploaded_by) : '') + (att.created_at ? ' · ' + esc(fmtTime(att.created_at)) : '');
     if (ct.indexOf('image/') === 0) {
       html += '<div class="att-cell issue-photo-cell" style="text-align:center;">';
@@ -1281,10 +1301,12 @@ async function loadIssueDetail() {
   delete body._ckIssueEvidence;
   body.innerHTML = '<div class="card muted">' + L("loading") + '</div>';
 
-  var res = await api({ action: "v2_issue_detail", id: issueId });
-  if(_currentIssueId!==issueId||body._legacyIssueLoad!==loadToken)return;
+  if(_issueDetailController)_issueDetailController.abort();
+  var controller=_issueDetailController=new AbortController();
+  var res = await readIssue({ action: "v2_issue_detail", id: issueId }, body, controller);
+  if(_currentIssueId!==issueId||body._legacyIssueLoad!==loadToken||(controller.signal.aborted&&!res.timed_out))return;
   if (!res || !res.ok || !res.issue) {
-    body.innerHTML = '<div class="card muted">加载失败</div>';
+    body.innerHTML = '<div class="card muted">加载失败 / 로딩 실패：' + esc(res && (res.message || res.error) || 'unknown') + '</div>';
     return;
   }
 
@@ -4717,6 +4739,7 @@ async function handleFileUpload(input) {
 }
 
 function showLightbox(url) {
+  if(window.CKIssueImages)return CKIssueImages.open(url);
   document.getElementById("lightboxImg").src = url;
   document.getElementById("lightbox").classList.add("show");
 }

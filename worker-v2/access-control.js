@@ -178,6 +178,8 @@ export async function issueAttachmentAllowed(env,u,type,id){
  if(type==='issue_handle_run')issue=await q(env,'SELECT t.biz_class FROM v2_issue_handle_runs r JOIN v2_issue_tickets t ON t.id=r.issue_id WHERE r.id=?',id).first();
  else {
   issue=await q(env,'SELECT biz_class FROM v2_issue_tickets WHERE id=?',id).first();
+  // Legacy issue_handle may refer to the run itself, not the ticket.
+  if(!issue&&type==='issue_handle')issue=await q(env,'SELECT t.biz_class FROM v2_issue_handle_runs r JOIN v2_issue_tickets t ON t.id=r.issue_id WHERE r.id=?',id).first();
   // Historical clients sometimes attached originals to the handling job ID.
   if(!issue)issue=await q(env,'SELECT t.biz_class FROM v2_issue_handle_runs r JOIN v2_issue_tickets t ON t.id=r.issue_id WHERE r.job_id=?',id).first();
  }
@@ -189,6 +191,10 @@ export async function accessFileAllowed(request,env,key){
  // Draft blobs are never downloadable, including by another shared office session.
  if(key.startsWith('issue-drafts/')&&!a)return false;
  if(a&&['issue_ticket','issue','issue_handle','issue_handle_run'].includes(a.related_doc_type))return issueAttachmentAllowed(env,u,a.related_doc_type,a.related_doc_id);
+ if(a&&['ops_job','job'].includes(a.related_doc_type)){
+  const issue=await q(env,'SELECT t.biz_class FROM v2_issue_handle_runs r JOIN v2_issue_tickets t ON t.id=r.issue_id WHERE r.job_id=?',a.related_doc_id).first();
+  if(issue)return u.scope==='office'||(u.departments||[]).includes(issue.biz_class==='return'?'direct_ship':issue.biz_class);
+ }
  if(u.scope==='office')return true;
  return !!a&&['inbound_plan','outbound_order','field_feedback','ops_job','sop_task','sop_need'].includes(a.related_doc_type);
 }

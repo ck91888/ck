@@ -719,10 +719,10 @@ async function closeOpenWorkerSegmentsForJob(env, jobId, t, reason) {
 // - closed segment：直接用 minutes_worked；若为 0/缺失则用 left_at-joined_at 兜底
 // - open segment：用 fallbackEndAt - joined_at 计算（不写库）；如果传 closeOpen=true 则同步关闭
 // 返回 { total_minutes, worker_names, worker_count, segments }
-async function sumJobWorkerMinutes(env, jobId, fallbackEndAt, closeOpen) {
+async function sumJobWorkerMinutes(env, jobId, fallbackEndAt, closeOpen, prefetchedRows) {
   if (!jobId) return { total_minutes: 0, worker_names: '', worker_count: 0, segments: [] };
   const fallback = fallbackEndAt || now();
-  const rs = await env.DB.prepare(
+  const rs = prefetchedRows && !closeOpen ? {results:prefetchedRows} : await env.DB.prepare(
     "SELECT id, worker_id, worker_name, joined_at, left_at, minutes_worked, leave_reason FROM v2_ops_job_workers WHERE job_id=? ORDER BY joined_at ASC"
   ).bind(jobId).all();
   const rows = rs.results || [];
@@ -2334,15 +2334,21 @@ route("v2_issue_list", async (body, env) => {
     const kw = "%" + related_doc_q + "%";
     binds.push(kw, kw, kw);
   }
-  const orderBy = sort === "oldest_first" ? " ORDER BY created_at ASC" : " ORDER BY created_at DESC";
+  const direction = sort === "oldest_first" ? "ASC" : "DESC";
+  const orderBy = " ORDER BY created_at " + direction + ", id " + direction;
+  // The collaboration list displays a short title, never the full history/feedback.
+  // Opt in so legacy consumers retain their full response; search still uses full columns.
+  const columns = body.list_summary === true
+    ? "id,biz_class,customer,status,submitted_by,created_at,total_minutes_worked,accounting_required,accounted,substr(issue_description,1,512) AS issue_description,substr(issue_summary,1,512) AS issue_summary"
+    : "*";
   const countSql = "SELECT COUNT(*) AS c FROM v2_issue_tickets" + where;
-  const listSql = "SELECT * FROM v2_issue_tickets" + where + orderBy + " LIMIT ? OFFSET ?";
+  const listSql = "SELECT " + columns + " FROM v2_issue_tickets" + where + orderBy + " LIMIT ? OFFSET ?";
   try {
-    const countRow = binds.length > 0
-      ? await env.DB.prepare(countSql).bind(...binds).first()
-      : await env.DB.prepare(countSql).first();
-    const total = Number((countRow && countRow.c) || 0);
-    const rs = await env.DB.prepare(listSql).bind(...binds, limit, offset).all();
+    const [count, rs] = await env.DB.batch([
+      env.DB.prepare(countSql).bind(...binds),
+      env.DB.prepare(listSql).bind(...binds, limit, offset)
+    ]);
+    const total = Number(count.results?.[0]?.c || 0);
     return json({ ok: true, items: rs.results || [], ...pageMeta(total, limit, offset) });
   } catch (e) {
     // 让前端拿到真实错误而不是只看到"加载失败"
@@ -2362,50 +2368,25 @@ route("v2_issue_detail", async (body, env) => {
   if(accessEnabled(env)&&!await issueAttachmentAllowed(env,env.SOP_REQUEST_USER,"issue_ticket",String(body.id||"")))return err("无此问题权限 / 문제 접근 권한이 없습니다",403);
   const id = String(body.id || "").trim();
   if (!id) return err("missing id");
-  const row = await env.DB.prepare("SELECT * FROM v2_issue_tickets WHERE id=?").bind(id).first();
+  const [ticketRs, runsRs, rwksRs] = await env.DB.batch([
+    env.DB.prepare("SELECT * FROM v2_issue_tickets WHERE id=?").bind(id),
+    env.DB.prepare("SELECT * FROM v2_issue_handle_runs WHERE issue_id=? ORDER BY started_at ASC").bind(id),
+    env.DB.prepare("SELECT * FROM v2_issue_rework_requests WHERE issue_id=? ORDER BY created_at ASC").bind(id)
+  ]);
+  const row = ticketRs.results?.[0];
   if (!row) return err("not found", 404);
-
-  // 处理轮次（升序，便于 timeline；前端需要倒序时自己反转）
-  const runsRs = await env.DB.prepare(
-    "SELECT * FROM v2_issue_handle_runs WHERE issue_id=? ORDER BY started_at ASC"
-  ).bind(id).all();
-  const runs = runsRs.results || [];
-  const runIds = runs.map(r => r.id).filter(Boolean);
-  const jobIds = runs.map(r => r.job_id).filter(Boolean);
-
-  // 客服追加处理需求（升序）
-  const rwksRs = await env.DB.prepare(
-    "SELECT * FROM v2_issue_rework_requests WHERE issue_id=? ORDER BY created_at ASC"
-  ).bind(id).all();
-  const reworks = rwksRs.results || [];
-
-  // 三类附件查询（issue_ticket / issue_handle_run / ops_job）+ 旧数据兼容（issue / job / issue_handle）
-  // 注意：旧 BUG 把照片写到 related_doc_type='issue_ticket' related_doc_id=job_id，这里也要捞回来
-  const allAtts = [];
-  // 1) issue_ticket / issue / issue_handle 同 issue_id
-  {
-    const r = await env.DB.prepare(
-      "SELECT * FROM v2_attachments WHERE related_doc_type IN ('issue_ticket','issue','issue_handle') AND related_doc_id=?"
-    ).bind(id).all();
-    for (const a of (r.results || [])) allAtts.push(a);
-  }
-  // 2) issue_handle_run + run_ids
-  if (runIds.length > 0) {
-    const rows2 = await batchSelectInGlobal(env,
-      "SELECT * FROM v2_attachments WHERE related_doc_type IN ('issue_handle_run','issue_handle') AND related_doc_id IN (PLACEHOLDER)",
-      runIds);
-    for (const a of rows2) allAtts.push(a);
-  }
-  // 3) ops_job / job + job_ids（attachment_category='issue_handle_photo' 或 'issue_attachment'，为兼容老数据放宽）
-  if (jobIds.length > 0) {
-    const rows3 = await batchSelectInGlobal(env,
-      "SELECT * FROM v2_attachments WHERE related_doc_type IN ('ops_job','job','issue_ticket') AND related_doc_id IN (PLACEHOLDER)",
-      jobIds);
-    for (const a of rows3) {
-      // 旧 bug 路径：related_doc_type='issue_ticket' 且 related_doc_id=job_id（不会和 issue_id=ISS-xxx 冲突，因 job_id 是 JOB-xxx）
-      allAtts.push(a);
-    }
-  }
+  const runs = runsRs.results || [], reworks = rwksRs.results || [];
+  const runIds = [...new Set(runs.map(r=>r.id).filter(Boolean))];
+  const jobIds = [...new Set(runs.map(r=>r.job_id).filter(Boolean))];
+  // Two bounded round trips regardless of handling history. Each legacy relation
+  // uses the existing attachment index; JSON ID sets avoid D1 bind limits.
+  const reads = [env.DB.prepare("SELECT * FROM v2_attachments WHERE related_doc_type IN ('issue_ticket','issue','issue_handle') AND related_doc_id=?").bind(id)];
+  if(runIds.length) reads.push(env.DB.prepare("SELECT * FROM v2_attachments WHERE related_doc_type IN ('issue_handle_run','issue_handle') AND related_doc_id IN (SELECT value FROM json_each(?))").bind(JSON.stringify(runIds)));
+  if(jobIds.length) reads.push(env.DB.prepare("SELECT * FROM v2_attachments WHERE related_doc_type IN ('ops_job','job','issue_ticket') AND related_doc_id IN (SELECT value FROM json_each(?))").bind(JSON.stringify(jobIds)));
+  const attachmentReadCount=reads.length;
+  if(jobIds.length) reads.push(env.DB.prepare("SELECT job_id,id,worker_id,worker_name,joined_at,left_at,minutes_worked,leave_reason FROM v2_ops_job_workers WHERE job_id IN (SELECT value FROM json_each(?)) ORDER BY joined_at ASC").bind(JSON.stringify(jobIds)));
+  const results=await env.DB.batch(reads),allAtts=results.slice(0,attachmentReadCount).flatMap(r=>r.results||[]),segmentsByJob=new Map();
+  for(const segment of results[attachmentReadCount]?.results||[]){const list=segmentsByJob.get(segment.job_id)||[];list.push(segment);segmentsByJob.set(segment.job_id,list);}
   // 去重（按 id）
   const seenAtt = {};
   const attachmentsAll = [];
@@ -2455,7 +2436,7 @@ route("v2_issue_detail", async (body, env) => {
     let segments = [];
     let worker_names = r.handler_name || '';
     if (r.job_id) {
-      const sum = await sumJobWorkerMinutes(env, r.job_id, r.ended_at || now(), false);
+      const sum = await sumJobWorkerMinutes(env, r.job_id, r.ended_at || now(), false, segmentsByJob.get(r.job_id)||[]);
       segments = sum.segments;
       if (segments.length > 0) {
         actual_minutes = sum.total_minutes;

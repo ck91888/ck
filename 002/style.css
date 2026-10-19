@@ -618,3 +618,22 @@ select { cursor: pointer; }
 .issue-photo-cell {max-width:150px;min-width:0;}
 .issue-photo-name {font-size:12px;line-height:1.5;overflow-wrap:anywhere;margin:5px 0;}
 .ic-file-name,.ic-file-help,.ic-file-state,.ic-drop-title,.ic-drop-help,.ic-file-notice,.ic-file-error,#view-issue_create textarea {word-break:keep-all;overflow-wrap:anywhere;}
+
+/* Original photo preview: independent of business-card layout and image dimensions. */
+.issue-photo-cell[data-issue-image] {width:180px;max-width:100%;border:1px solid #d1ded8;border-radius:8px;padding:10px;display:flex;flex-direction:column;gap:6px;align-items:stretch;text-align:left;}
+.issue-photo-cell[data-issue-image] img {align-self:center;object-fit:contain;}
+.issue-photo-cell[data-issue-image] [hidden] {display:none!important;}
+.issue-photo-cell[data-issue-image] button,.issue-photo-cell[data-issue-image] a {min-height:44px;display:flex;align-items:center;justify-content:center;padding:8px;border:1px solid #d1ded8;border-radius:6px;background:#fff;color:#18564a;text-decoration:none;word-break:keep-all;}
+.issue-image-note {font-size:12px;line-height:1.5;overflow-wrap:anywhere;}
+.lightbox.ck-image-viewer {align-items:stretch;justify-content:stretch;cursor:default;padding:16px;grid-template-rows:auto minmax(0,1fr) auto;gap:12px;box-sizing:border-box;color:white;}
+.lightbox.ck-image-viewer.show {display:grid;}
+.ck-image-toolbar {display:flex;gap:12px;align-items:center;flex-wrap:wrap;min-width:0;}
+.ck-image-toolbar [data-view-name] {flex:1;min-width:100px;overflow-wrap:anywhere;}
+.ck-image-toolbar a,.ck-image-toolbar button,.ck-image-status button {font:inherit;min-height:44px;padding:10px;border:1px solid #b8c8c0;border-radius:6px;background:#fff;color:#18564a;text-decoration:none;cursor:pointer;word-break:keep-all;}
+.ck-image-stage {display:flex;min-width:0;min-height:0;align-items:center;justify-content:center;overflow:hidden;}
+.lightbox.ck-image-viewer img {display:block;width:auto;height:auto;max-width:100%;max-height:100%;object-fit:contain;flex:0 1 auto;min-width:0;min-height:0;}
+.lightbox.ck-image-viewer [hidden] {display:none!important;}
+.ck-image-status {display:flex;align-items:center;justify-content:center;gap:12px;flex-wrap:wrap;min-height:44px;overflow-wrap:anywhere;}
+@media(max-width:400px){.issue-photo-cell[data-issue-image]{width:100%;}.lightbox.ck-image-viewer{padding:10px;}.ck-image-toolbar{gap:8px;}.ck-image-toolbar [data-view-name]{flex-basis:100%;}}
+
+#issueDetailBody [data-issue-evidence] h3 {word-break:keep-all;overflow-wrap:anywhere;}
