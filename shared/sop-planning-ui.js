@@ -78,6 +78,7 @@ window.CKWorkNeedsTable=function(items){return '<table class="line-table ck-work
 window.CKDownloadWorkTemplate=function(){const a=document.createElement('a');a.href='/templates/pallet-details.xlsx';a.download='CK打托明细模板.xlsx';document.body.append(a);a.click();a.remove();};
 window.CKUploadWorkDetails=async function(need,file){
  if(!file||!/\.xlsx?$/i.test(file.name))throw Error('请选择打托明细 Excel 文件');if(file.size>20*1024*1024)throw Error('文件不能超过20MB');
+ if(window.CKEnsureExcel)await window.CKEnsureExcel();
  const book=XLSX.read(await file.arrayBuffer(),{type:'array'}),grid=XLSX.utils.sheet_to_json(book.Sheets[book.SheetNames[0]],{header:1,raw:false,defval:''});
  const header=grid.shift()||[];const expected=['托盘号','箱唛/条码','数量（箱唛时数量可不填默认1）','效期（非必填）','批次号（非必填）','备注（非必填）'];
  if(!expected.every((x,i)=>String(header[i]||'').trim()===x))throw Error('表头与打托明细模板不一致，请使用原模板');

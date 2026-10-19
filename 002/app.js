@@ -5463,7 +5463,10 @@ function renderVerifyDetail() {
 }
 
 // ===== Excel 模板下载 =====
-function downloadVerifyTemplate() {
+async function downloadVerifyTemplate() {
+  return withActionLock('verify-template', document.querySelector('[onclick="downloadVerifyTemplate()"]'), '正在准备模板… / 양식 준비 중…', async function() {
+  try { if (window.CKEnsureExcel) await window.CKEnsureExcel(); }
+  catch (e) { alert(e.message); return; }
   if (typeof XLSX === 'undefined') {
     alert("Excel 库未加载，请检查网络后刷新页面\nExcel 라이브러리 미로딩, 페이지 새로고침");
     return;
@@ -5484,10 +5487,12 @@ function downloadVerifyTemplate() {
   } catch (e) {
     alert("模板生成失败：" + (e && e.message || e));
   }
+  });
 }
 
 // ===== Excel 文件解析 + 预览 =====
 var _vcParsedRows = null; // [{ barcode, planned_box_count, customer_name, row_no }]
+var _vcFileVersion = 0;
 
 var _VC_HEADER_ALIASES = {
   barcode: ["条码", "出库条码", "barcode", "bar code"],
@@ -5505,7 +5510,8 @@ function _vcFindHeaderIdx(header, aliases) {
   return -1;
 }
 
-function onVerifyFilePick(input) {
+async function onVerifyFilePick(input) {
+  var version = ++_vcFileVersion;
   var submitBtn = document.getElementById("vc-submit-btn");
   if (submitBtn) submitBtn.disabled = true;
   _vcParsedRows = null;
@@ -5516,6 +5522,18 @@ function onVerifyFilePick(input) {
   var tblEl = document.getElementById("vc-preview-table");
   if (errEl) { errEl.style.display = "none"; errEl.innerHTML = ""; }
   if (!file) { if (previewBox) previewBox.style.display = "none"; return; }
+  if (previewBox) previewBox.style.display = "";
+  if (sumEl) sumEl.textContent = '正在读取表格… / 파일을 읽는 중…';
+  if (tblEl) tblEl.innerHTML = '';
+  try { if (window.CKEnsureExcel) await window.CKEnsureExcel(); }
+  catch (e) {
+    if (version !== _vcFileVersion) return;
+    if (errEl) { errEl.textContent = e.message; errEl.style.display = ""; }
+    if (sumEl) sumEl.textContent = '';
+    if (previewBox) previewBox.style.display = "";
+    return;
+  }
+  if (version !== _vcFileVersion) return;
   if (typeof XLSX === 'undefined') {
     alert("Excel 解析库未加载（SheetJS CDN 未就绪），请检查网络后刷新");
     return;
@@ -5523,6 +5541,7 @@ function onVerifyFilePick(input) {
 
   var reader = new FileReader();
   reader.onload = function(e) {
+    if (version !== _vcFileVersion) return;
     try {
       var data = new Uint8Array(e.target.result);
       var wb = XLSX.read(data, { type: 'array' });

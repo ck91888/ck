@@ -66,6 +66,8 @@ async function batchDetail(id,history=false,filters={}){
   exporting=true;exportButton.disabled=true;const token=++exportSeq,alive=()=>d.open&&token===exportSeq;
   exportButton.textContent='导出中… / 내보내는 중…';exportStatus.hidden=false;alertText(exportStatus,'正在读取本批全部明细… / 차수 전체 상세를 읽는 중…');
   try{
+   if(window.CKEnsureExcel)await window.CKEnsureExcel();
+   if(!alive())return;
    if(!window.XLSX?.utils||!window.XLSX?.writeFile)throw Error('Excel导出组件尚未加载，请重试 / Excel 구성 요소 로딩 후 다시 시도하세요');
    const items=[],seen=new Set();let snapshot='',total=null,batchNo='';
    const check=(r,pageOffset)=>{

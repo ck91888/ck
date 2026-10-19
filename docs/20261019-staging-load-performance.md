@@ -62,3 +62,33 @@ Release marker: `20261019-staging-load`. This document describes the tested cand
 On one affected mainland computer, retain the normal browser/session and record the full page URL and whether opening, navigation or a particular query is slow. Reload normally once, then repeat once to observe warm-cache behavior; do not enable “Disable cache” for this comparison. In Network, record the slow request's action **name only**, total time, Waiting/TTFB, Content Download and the new `Server-Timing` application duration. Screenshots may show only the Timing panel/header value with personal information cropped; no password, cookie, payload or HAR export is needed.
 
 If application duration is short but Waiting/download remains long, investigate the client/delivery path. If application duration dominates, identify that action and inspect its measured server/database work. A phone-hotspot comparison on the same computer/browser can distinguish an access-network contribution; it does not establish which upstream provider is responsible. Until this evidence exists, the domestic-loading root cause and real speedup remain unverified.
+
+## Follow-up: mainland collaboration-center loading
+
+The user clarified the affected module is `/002/`. This follow-up is based on `78ed4f81852173385b2f316e1ca765ebd4537207`; the earlier inbound-candidate N+1 finding is outside this fix. The executor still cannot reach the live custom domain (proxy CONNECT 403), and no live Cloudflare runtime metrics or affected-client timing capture is available. This change addresses a reproduced collaboration cold-load bottleneck, not a verified diagnosis of every mainland delay.
+
+The collaboration build synchronously loaded SheetJS even for the dashboard and ordinary list navigation: **944,491 raw / 333,365 gzip bytes**. It now installs a small loader and requests the same local, content-hashed library only when an Excel operation needs it. Other applications keep their existing eager loading. All six consumers await readiness: legacy verification template and import, current check editor import, work-details workbook parsing, employee import, and courier Excel export. Concurrent callers share one download; errors/timeouts reject the operation and only a new explicit action retries. Selected-file generations prevent an older selection overwriting a newer preview. Authentication, API responses, business calculations, database schema, and inbound stage behavior are unchanged.
+
+Controlled before/after uses actual Chromium, gzip responses from the staging entry, strict synthetic login/operator identity, 100 synthetic inbound plans, and CDP network shaping. Each profile has three fresh-browser samples followed by normal warm reload. It uses local HTTP/1.1 rather than reproducing Cloudflare HTTP/2/3, real packet loss, mainland routing, or remote D1 latency. Readiness means authenticated collaboration dashboard data is visible; it is not merely the HTML load event.
+
+| Measurement | `78ed4f8` | Candidate |
+| --- | ---: | ---: |
+| Cold static gzip bytes | 820,005 | 487,773 (-40.5%) |
+| Cold static requests | 45 | 45 (small loader replaces SheetJS) |
+| Cold ready median, 150 ms / 1.5 Mbps | 5,561 ms | 3,702 ms |
+| Cold ready median, 300 ms / 750 kbps | 10,992 ms | 7,338 ms |
+| Warm static gzip bytes | 1,436 | 1,436 |
+
+Warm readiness remains around 0.7–0.8 seconds and 1.4 seconds respectively; no material warm-navigation speedup is claimed. Initial API actions remain `sop_identity`, `v2_dashboard_summary`, `sop_updates`. Actual mainland speed must still be checked with an affected browser, comparing normal cold/warm behavior and `Server-Timing` against TTFB/download duration. A first Excel operation may wait for the deferred library; later operations reuse it.
+
+Validation:
+
+- Full Node regression with jsdom 30.1.3: 1,186 passed, zero failures/skips.
+- `tests/excel-loader.test.mjs`: no initial request, one concurrent download, cache reuse, malformed response, timeout, explicit failure retry.
+- `tests/staging-load.test.mjs`: fingerprinted lazy URL and unchanged eager contracts for other applications, static/private caching and authentication behavior.
+- `tests/collaboration-excel-browser.mjs`: real built office navigation without SheetJS, template download/failure/retry with retained draft, desktop/mobile workbook preview and text barcodes, replacement file during loading, current check editor, work-details parsing/cancel, employee preview without automatic personnel writes.
+- `tests/courier-browser-export.cjs` against the isolated fixture: actual 205-row XLSX, Chinese/Korean desktop/mobile, leading zeros, failure/retry, snapshot changes, double clicks, close/switch cancellation.
+- `tests/staging-load-browser.mjs` and `tests/inbound-stages-browser.mjs`: authentication, normal module loading, manual refresh/logout, and retained tally/putaway flows at 1440/1280/390/320 widths.
+- `tests/collaboration-load-browser.mjs` is the repeatable latency experiment. `CK_COLLAB_ASSETS` selects retained baseline assets and `CK_COLLAB_REPORT` selects its JSON output. Measurements and screenshots remain under `/tmp`; generated assets are not committed.
+
+Release marker: `20261019-collaboration-excel-load`. Confirm publication only from the exact commit's successful Cloudflare staging check; this document alone is not deployment evidence.

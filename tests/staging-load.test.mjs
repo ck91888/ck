@@ -22,6 +22,10 @@ test('built shared CSS preserves every rule in order and every URL is fingerprin
  }
  const login=fs.readFileSync(path.join(root,'office-login/index.html'),'utf8');
  assert.deepEqual([...login.matchAll(/<script src="\/shared\/([^?]+)\?/g)].map(m=>m[1]),['browser-compat.js','sop-rollout.js','sop-session.js']);
+ const collaboration=fs.readFileSync(path.join(root,'002/index.html'),'utf8');
+ assert.doesNotMatch(collaboration,/<script src="[^\"]*xlsx\.full/);
+ assert.match(collaboration,/data-excel-src="\/shared\/xlsx\.full\.min\.js\?v=[a-f0-9]{12}"/);
+ for(const app of ['001','003','shuju','attendance'])assert.match(fs.readFileSync(path.join(root,app,'index.html'),'utf8'),/<script src="[^\"]*xlsx\.full/,'other applications keep their original library contract');
 });
 
 test('staging timing preserves auth, cookies and bodies without caching private responses',async t=>{
