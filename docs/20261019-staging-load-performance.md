@@ -92,3 +92,26 @@ Validation:
 - `tests/collaboration-load-browser.mjs` is the repeatable latency experiment. `CK_COLLAB_ASSETS` selects retained baseline assets and `CK_COLLAB_REPORT` selects its JSON output. Measurements and screenshots remain under `/tmp`; generated assets are not committed.
 
 Release marker: `20261019-collaboration-excel-load`. Confirm publication only from the exact commit's successful Cloudflare staging check; this document alone is not deployment evidence.
+
+## Follow-up: collaboration API latency and failed responses
+
+The later incident involves an already-rendered collaboration shell, slow outbound/feedback lists and a Safari `Load failed` error. Deferred Excel loading does not establish a remedy for this API failure.
+
+The staging build sets `V2_API = window.SOP_API`, where `/002/` uses `location.origin + '/api'`. Normal list requests are same-origin POSTs, so cross-origin CORS preflight is not part of this path. The old API helper catches both `fetch()` and `Response.json()` under the same network/domain error. A local browser fault experiment confirmed that a transport rejection, HTML 503 response, and a failed body read after HTTP 200 all enter that catch; a valid JSON 500 remains a backend error. There is no five-second deadline on these list requests. This wording cannot diagnose DNS or establish whether the server returned headers.
+
+A separate, reproducible backend defect was found in outbound material counting. For every listed order, the previous correlated query scanned every attachment and then searched the needs table. Unrelated historical needs and attachments multiplied the work even when no material was linked to the order. The new expression selects the order's related needs first, uses the existing attachment index for direct files, then counts distinct IDs across both branches. It preserves historical files, grouped allocation/reservation snapshots, shared-file deduplication, removed material rules, and the `has_material` filters. No schema, records or file objects change.
+
+Local SQLite comparison against `96dee541bcdad15fed1f2bd78ae4f943044a5f95`, with identical 50 orders, 200 needs, 1,000 attachments and 10 orders linked to five files each:
+
+| Material-count query | Three samples | Median |
+| --- | --- | ---: |
+| Before | 8,210.2 / 8,008.9 / 8,050.9 ms | 8,050.9 ms |
+| After | 12.3 / 12.4 / 12.3 ms | 12.3 ms |
+
+All 50 result rows are identical on every sample. A separate full-worker fixture with all materials unrelated measured the outbound API at 8,252.3 ms before and 10.1 ms after; feedback stayed around 1 ms. These are synthetic local observations, not staging D1 timings, actual database cardinalities, or a Korean network measurement. A slow database query could delay other requests sharing the database, but there is no runtime evidence yet linking that mechanism to the reported failed response. The relevant SQL was already present before the inbound-stage release; the latest release is not established as the cause.
+
+Validation includes 1,188 passing Node tests, explicit material visibility/deduplication/filter regressions, existing cargo/shipping/material tests, a seeded differential comparison against the prior expression, and actual built desktop/mobile outbound and feedback navigation with 50 orders/200 needs/1,000 attachments. `tests/outbound-list-performance.mjs` reproduces the before/after SQL experiment; `tests/outbound-list-browser.mjs` exercises rendered counts and both material filters at 1440 and 390 pixels.
+
+Online observations remain blocked in this executor by a proxy CONNECT 403, not by a measured response from the site. To determine the remaining incident cause, the smallest useful observation is one affected `POST /api` request: action name, UTC time, HTTP status or absence of headers, `CF-Ray`, `Server-Timing: app`, and total/TTFB/download duration. Cookie headers, request credentials, and business response bodies are unnecessary. If browser diagnostics are unavailable, staging Worker errors and D1 query duration/rows-read around the reported time can distinguish server failure/queueing from a transport problem. No automatic write retries or infrastructure changes were added.
+
+Release marker for the query change: `20261019-outbound-material-query`. Deployment success and real-user recovery must be checked separately.

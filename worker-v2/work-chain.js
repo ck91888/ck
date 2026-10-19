@@ -165,13 +165,19 @@ export async function uploadWorkMaterial(form,env) {
  await env.DB.batch(batch);return {...result,need_id:row.id};
 }
 
-// A single correlated SQL expression serves list counts and the material filter.
-export const workMaterialCountSql = `(SELECT COUNT(DISTINCT a.id) FROM v2_attachments a WHERE
- (a.related_doc_type='outbound_order' AND a.related_doc_id=v2_outbound_orders.id AND a.attachment_category='outbound_material') OR
- EXISTS(SELECT 1 FROM sop_records n WHERE n.kind='need' AND
+// Select this order's needs before scanning their materials. Starting from every
+// attachment made unrelated needs repeat once per attachment, for every order.
+// CROSS JOIN keeps the need first; UNION ALL plus DISTINCT preserves shared files.
+const materialCountSql = visible => `(SELECT COUNT(DISTINCT id) FROM (
+ SELECT a.id FROM v2_attachments a WHERE
+ a.related_doc_type='outbound_order' AND a.related_doc_id=v2_outbound_orders.id AND a.attachment_category='outbound_material'${visible}
+ UNION ALL
+ SELECT a.id FROM sop_records n CROSS JOIN v2_attachments a WHERE n.kind='need' AND
  (json_extract(n.state,'$.source_id')=v2_outbound_orders.id OR EXISTS(SELECT 1 FROM json_each(n.state,'$.links') l WHERE json_extract(l.value,'$.outbound_id')=v2_outbound_orders.id))
  AND ((json_type(n.state,'$.cargo_groups') IS NOT NULL AND EXISTS(SELECT 1 FROM json_each(n.state,'$.links') gl, json_each(COALESCE(json_extract(gl.value,'$.cargo_allocations'),json_extract(gl.value,'$.cargo_reservation.groups'),'[]')) ga WHERE json_extract(gl.value,'$.outbound_id')=v2_outbound_orders.id AND (EXISTS(SELECT 1 FROM json_each(ga.value,'$.documents') gf WHERE json_extract(gf.value,'$.id')=a.id) OR EXISTS(SELECT 1 FROM json_each(ga.value,'$.public_documents') gf WHERE json_extract(gf.value,'$.id')=a.id)))) OR (json_type(n.state,'$.cargo_groups') IS NULL AND NOT EXISTS(SELECT 1 FROM json_each(n.state,'$.removed_material_ids') r WHERE r.value=a.id)
  AND ((a.related_doc_type='sop_need' AND a.related_doc_id=n.id) OR
  (a.related_doc_type='inbound_plan' AND a.attachment_category IN ('inbound_material','batch_work_material') AND json_extract(n.state,'$.source_type')='inbound' AND a.related_doc_id=json_extract(n.state,'$.source_id')) OR
-  (a.related_doc_type='outbound_order' AND a.attachment_category='outbound_material' AND (a.related_doc_id=json_extract(n.state,'$.source_id') OR EXISTS(SELECT 1 FROM json_each(n.state,'$.links') l WHERE json_extract(l.value,'$.outbound_id')=a.related_doc_id))))))))`;
-export const workMaterialCountFor=env=>batchVisibleSql(env)?workMaterialCountSql.replace(' WHERE\n',' WHERE 1'+batchVisibleSql(env)+' AND (\n').slice(0,-1)+'))':workMaterialCountSql;
+  (a.related_doc_type='outbound_order' AND a.attachment_category='outbound_material' AND (a.related_doc_id=json_extract(n.state,'$.source_id') OR EXISTS(SELECT 1 FROM json_each(n.state,'$.links') l WHERE json_extract(l.value,'$.outbound_id')=a.related_doc_id))))))${visible}
+))`;
+export const workMaterialCountSql = materialCountSql('');
+export const workMaterialCountFor = env => materialCountSql(batchVisibleSql(env));
