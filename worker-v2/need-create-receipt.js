@@ -12,7 +12,7 @@ export async function needCreateReplay(b,e,u){
  const row=await q(e,'SELECT * FROM sop_events WHERE request_id=?',b.client_req_id).first();if(!row)return null;const saved=JSON.parse(row.result_json);
  if(!saved._create_signature)return null;
  const record=await q(e,'SELECT department FROM sop_records WHERE id=? AND kind=?',row.record_id,'need').first();
- if(!record||row.action!==b.action||row.actor_id!==u.id||saved._submit_context!==await context(e,u)||!allowed(u,record?.department))throw Error('此提交不属于当前登录身份，不能复用原请求');
+ if(!record||row.action!==b.action||row.actor_id!==u.id||saved._submit_context!==await context(e,u)||!allowed(u,'bulk'))throw Error('此提交不属于当前登录身份，不能复用原请求');
  if(saved._create_signature!==await signature(b))throw Error('原提交的内容已冻结，请先查询原保存结果；不能用同一编号提交不同内容');
  return result(saved);
 }
@@ -23,7 +23,7 @@ export async function needCreateStatus(b,e,u){
  const unknown={ok:true,state:'unknown'};const row=await q(e,'SELECT * FROM sop_events WHERE request_id=?',id).first();
  if(!row||row.action!=='sop_need_create'||row.actor_id!==u.id)return unknown;
  const saved=JSON.parse(row.result_json);if(!saved._submit_context||saved._submit_context!==await context(e,u))return unknown;
- const record=await q(e,'SELECT department FROM sop_records WHERE id=? AND kind=?',row.record_id,'need').first();if(!record||!allowed(u,record.department))return unknown;
+ const record=await q(e,'SELECT department FROM sop_records WHERE id=? AND kind=?',row.record_id,'need').first();if(!record||!allowed(u,'bulk'))return unknown;
  const data=JSON.parse(row.after_json);if(data.source_type!==b.source_type||(data.source_id||'')!==(b.source_id||''))return unknown;
  return {ok:true,state:'committed',result:result(saved)};
 }

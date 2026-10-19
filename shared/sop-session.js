@@ -51,6 +51,7 @@
   input.focus();
  }
  async function accept(r){
+  if(scope==='field'&&(!r.user.attendance_id||!r.user.badge))r=await request('sop_identity');
   if(scope==='office'){if(!r.user.operation_context)r=await request('sop_identity');const ctx=r.user.operation_context;if(!ctx){complete(r);return;}operationId=ctx.id;const saved=sessionStorage.getItem('ck_operation_context');if(saved&&saved!==ctx.id){operationLock(r.user);return;}if(!ctx.name||sessionStorage.getItem('ck_operation_reconfirm')){operatorForm(r.user);return;}sessionStorage.setItem('ck_operation_context',ctx.id);}
   complete(r);
  }

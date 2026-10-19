@@ -1,3 +1,4 @@
+import {executionDepartment} from './work-execution.js';
 import {simultaneous,ensureBatchLabor,batchFacts,closeLabor,openLabor,readyBatchProcesses} from './bulk-batch-labor.js';
 import {retireCompletedWorkClocks} from './completed-work-clocks.js';
 import {ensureSchema} from './schema-ready.js';
@@ -11,7 +12,7 @@ import {documentCodeError} from '../shared/document-code.js';
 const q=(e,s,...a)=>e.DB.prepare(s).bind(...a),rows=async(e,s,...a)=>(await q(e,s,...a).all()).results;
 const text=v=>String(v??'').trim(),terminal=d=>['completed','cancelled'].includes(d.status);
 const read=async(e,id)=>{if(!id)return null;const r=await q(e,'SELECT * FROM sop_records WHERE id=?',id).first();return r?{...r,data:JSON.parse(r.state)}:null;};
-const pub=r=>({id:r.id,kind:r.kind,revision:r.revision,department:r.department,...r.data});
+const pub=r=>({id:r.id,kind:r.kind,revision:r.revision,department:r.department,...r.data,execution_department:executionDepartment(r)});
 export const bulkBatchEnabled=e=>e.SOP_ENVIRONMENT==='staging'&&e.SOP_UPGRADE_ENABLED==='true'&&e.SOP_WORK_CHAIN_ENABLED==='true'&&attendanceEnabled(e);
 export const BULK_BATCH_ITEMS_TABLE_SQL='CREATE TABLE IF NOT EXISTS ck_bulk_work_batch_items(job_id TEXT PRIMARY KEY,batch_id TEXT NOT NULL,position INTEGER NOT NULL,source_type TEXT NOT NULL,source_id TEXT NOT NULL)';
 export async function ensureBulkBatch(e){
@@ -46,7 +47,7 @@ function readyProcesses(d){
  return readyBatchProcesses(d);
 }
 async function needCandidate(e,r,activeSet=null){
- if(!r||r.kind!=='need'||r.department!=='bulk'||['closed','cancelled','waiting_customer','linked','completed'].includes(r.data.status)||r.data.needs_clarification||r.data.operation_kind==='direct_forward')return null;
+ if(!r||r.kind!=='need'||['closed','cancelled','waiting_customer','linked','completed'].includes(r.data.status)||r.data.needs_clarification||r.data.operation_kind==='direct_forward')return null;
  if(!r.data.cargo_groups&&r.data.status!=='pending')return null;
  const processes=readyProcesses(r.data);if(!processes.length)return null;
  const active=activeSet?activeSet.has(r.id):await q(e,"SELECT 1 FROM sop_records WHERE kind='task' AND json_extract(state,'$.need_id')=? AND json_extract(state,'$.status') NOT IN ('completed','cancelled') LIMIT 1",r.id).first();if(active)return null;
@@ -70,8 +71,8 @@ export async function handleBulkBatch(b,e,helpers){
  const u=e.SOP_REQUEST_USER;await permit(e,u,'',['sop_bulk_batch_candidates','sop_bulk_batch_create','sop_bulk_batch_people'].includes(b.action));await ensureAttendance(e);await ensureBulkBatch(e);
  if(b.action==='sop_bulk_batch_candidates'){
   if(b.external&&b.code){const c=await candidate(e,{source_type:'external',work_order_no:b.code,customer:b.customer},helpers);delete c.order;return {ok:true,items:[c]};}
-  let records;if(b.code){const id=await resolveRecordId(e,text(b.code));records=[await read(e,id)].filter(Boolean);}else records=(await rows(e,"SELECT * FROM sop_records WHERE kind='need' AND department='bulk' AND json_extract(state,'$.status') IN ('pending','assigned','working') ORDER BY updated_at DESC LIMIT 500")).map(r=>({...r,data:JSON.parse(r.state)}));
-  const activeSet=new Set((await rows(e,"SELECT json_extract(state,'$.need_id') AS need_id FROM sop_records WHERE kind='task' AND department='bulk' AND json_extract(state,'$.status') NOT IN ('completed','cancelled')")).map(r=>r.need_id));const list=[];for(const r of records){const c=await needCandidate(e,r,activeSet);if(c)list.push({...pub(r),...c});}return {ok:true,items:await recordNumbers(e,list)};
+  let records;if(b.code){const id=await resolveRecordId(e,text(b.code));records=[await read(e,id)].filter(Boolean);}else records=(await rows(e,"SELECT * FROM sop_records WHERE kind='need' AND json_extract(state,'$.status') IN ('pending','assigned','working') ORDER BY updated_at DESC LIMIT 500")).map(r=>({...r,data:JSON.parse(r.state)}));
+  const activeSet=new Set((await rows(e,"SELECT json_extract(state,'$.need_id') AS need_id FROM sop_records WHERE kind='task' AND json_extract(state,'$.status') NOT IN ('completed','cancelled')")).map(r=>r.need_id));const list=[];for(const r of records){const c=await needCandidate(e,r,activeSet);if(c)list.push({...pub(r),...c});}return {ok:true,items:await recordNumbers(e,list)};
  }
  if(b.action==='sop_bulk_batch_create'){
   if(!text(b.client_req_id))throw Error('缺少请求编号');const old=await replay(e,b,u);if(old)return old;

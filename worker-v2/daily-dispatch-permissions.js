@@ -1,3 +1,5 @@
+import {resolveRecordId} from './document-numbers.js';
+import {executionDepartment} from './work-execution.js';
 import {ensureSchema} from './schema-ready.js';
 import {kstDay} from './attendance-time.js';
 import {activeAttendanceSQL} from './attendance-management.js';
@@ -110,12 +112,12 @@ export async function guardDailyDispatch(b,e){
  if(['sop_bulk_batch_create','sop_bulk_batch_people'].includes(b.action)){needs=true;department='bulk';}
  else if(b.action==='sop_native_start'){needs=true;department=b.labor_department||startDepartment(b.payload||{});}
  else if(b.action==='sop_verify_takeover'||b.action==='sop_owner_transfer'&&u.scope==='field'){needs=true;}
- else if(b.action==='sop_task_dispatch'){needs=true;department=b.department;}
+ else if(b.action==='sop_task_dispatch'){needs=true;const need=b.need_id?await q(e,"SELECT * FROM sop_records WHERE id=? AND kind='need'",await resolveRecordId(e,b.need_id)).first():null;department=need?'bulk':b.department;}
  else if(b.action==='sop_courier_receive'&&b.operation==='start'){needs=true;department='direct_ship';}
  else if(['sop_native_adopt','v2_pick_job_add_docs'].includes(b.action)){needs=true;}
  const legacyResume=b.action==='v2_ops_job_resume',submitted=legacyResume?[{id:b.worker_id}]:b.workers||[];
  const people=legacyResume||['sop_native_people','sop_native_resume','sop_task_people'].includes(b.action)||b.action==='sop_courier_receive'&&b.operation==='people';
- if(people||needs&&!department){record=await q(e,"SELECT * FROM sop_records WHERE id=? AND kind IN ('dispatch','task')",b.job_id||b.parent_job_id||b.batch_id||b.id||'').first();department=record?.department;if(people){const crew=record?JSON.parse(record.state).workers||[]:[];needs=submitted.some(w=>!crew.some(old=>sameWorkerBadge(w.id,old.id)));}}
+ if(people||needs&&!department){record=await q(e,"SELECT * FROM sop_records WHERE id=? AND kind IN ('dispatch','task')",b.job_id||b.parent_job_id||b.batch_id||b.id||'').first();department=record?executionDepartment(record):'';if(people){const crew=record?JSON.parse(record.state).workers||[]:[];needs=submitted.some(w=>!crew.some(old=>sameWorkerBadge(w.id,old.id)));}}
  if(!needs)return;
  if(!department&&(b.action==='sop_native_adopt'||legacyResume)){const job=await q(e,'SELECT * FROM v2_ops_jobs WHERE id=?',b.job_id||b.parent_job_id).first();if(job)department=laborDepartment(job);}
  await ensureDailyDispatch(e);const g=await q(e,'SELECT * FROM ck_daily_dispatch_grants WHERE person_id=?',u.id).first();

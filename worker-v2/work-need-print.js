@@ -1,3 +1,4 @@
+import {executionDepartment} from './work-execution.js';
 // Work-plan print requests are audit events, independent of dispatch and completion.
 const q=(e,s,...a)=>e.DB.prepare(s).bind(...a);
 const parse=s=>{try{return JSON.parse(s||'{}');}catch{return{};}};
@@ -31,7 +32,7 @@ export async function recordWorkNeedPrint(b,env,u,numbered){
  const t=new Date().toISOString(),result={ok:true,print_requested:true,ids:expected.map(x=>x.id),fingerprint,at:t};
  const statements=[];for(const [i,want]of expected.entries()){
   const row=rows.find(x=>x.id===want.id),x=documents.find(x=>x.id===want.id);
-  if(u.role!=='manager'&&!(u.departments||[]).includes(row.department))throw Error('无此部门打印权限');
+  if(u.role!=='manager'&&!(u.departments||[]).includes(executionDepartment(row)))throw Error('无此部门打印权限');
   if(x.status==='cancelled'||x.source_cancelled)throw Error('已取消的作业单不能打印');
   if(['inbound','outbound'].includes(x.source_type)){
    const table=x.source_type==='inbound'?'v2_inbound_plans':'v2_outbound_orders',source=await q(env,'SELECT status,is_deleted FROM '+table+' WHERE id=?',x.source_id).first();

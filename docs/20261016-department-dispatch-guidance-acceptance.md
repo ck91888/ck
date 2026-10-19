@@ -1,5 +1,7 @@
 # Department guidance at bulk dispatch — 2026-10-16
 
+> Superseded: the user corrected the business rule on 2026-10-17. Collaboration work plans all use bulk execution; the department-routing conclusion below is historical and no longer applies. See [the corrected rule and acceptance](20261017-collaboration-bulk-execution.md).
+
 The confirmed code defect is a misleading entry flow: an authorized dispatcher could scan a pending non-bulk work plan in the bulk work-order workspace, see the normal staff picker, add a worker and only then receive “此作业属于其他部门，请从对应现场入口办理”. The printed sheet was a generic warehouse work plan without its actual department. The backend already rejected the incompatible department; the new display makes this restriction clear before staff selection.
 
 This release starts from `c4eaaba66f7fdf94f0a99533c15083e8feb8c8e0`. The reported mobile URL identifies the authorized `ck-v2-api-sop-staging.ck91888.workers.dev` alias. A `workers.dev` suffix does not establish that the user visited a different or production Worker.
