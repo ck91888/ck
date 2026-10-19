@@ -1,3 +1,5 @@
+import {shippingOutput} from './shipping-output.js';
+import {reserveShipping,shippingFullyAllocated} from './shipping-quantities.js';
 import {executionDepartment,executionDepartmentSQL} from './work-execution.js';
 import {dashboardBatches,simultaneous} from './bulk-batch-labor.js';
 import {bulkOwnerTransferStatements} from './bulk-work-batch.js';
@@ -200,6 +202,7 @@ export async function handleSop(b,env) {
   const cancelledDraft=await cancelCargoDraft(b,env,u);if(cancelledDraft)return cancelledDraft;
   const split=await cargoSplit(b,env,u);if(split)return split;
   const reservation=await cargoReservations(b,env,u);if(reservation)return reservation;
+  const correctedShipping=await shippingOutput(b,env,u);if(correctedShipping)return correctedShipping;
   const shipping=await cargoShipping(b,env,u);if(shipping)return shipping;
   const execution=await cargoExecution(b,env,u);if(execution)return execution;
   const cargo=await cargoGroups(b,env,u);if(cargo)return cargo;
@@ -551,13 +554,22 @@ export async function handleSop(b,env) {
     if(!d.result || !['waiting_customer','linked'].includes(d.status))fail('需审核通过后关联出库');
     const ob=await verifySource(env,'outbound',required(b.outbound_id,'出库编号'),d.customer);
     if((ob.biz_class==='return'?'direct_ship':ob.biz_class)!==row.department)fail('出库业务分类与作业需求不一致');
+    if(['shipped','completed','cancelled'].includes(ob.status))fail('已发货或已取消的出库单不能新增关联');
+    const loading=await stmt(env,"SELECT id FROM v2_ops_jobs j WHERE job_type='load_outbound' AND status IN ('pending','working','paused','awaiting_close','completed') AND (related_doc_id=? OR linked_outbound_order_id=?"+(loadTripEnabled(env)?" OR EXISTS(SELECT 1 FROM ck_load_order_links l WHERE l.job_id=j.id AND l.order_id=?)":"")+") LIMIT 1",ob.id,ob.id,...(loadTripEnabled(env)?[ob.id]:[])).first();if(loading)fail('已有装货作业的出库单不能新增关联');
     const others=await linkedNeeds(env,ob.id);if(others.some(x=>x.id!==row.id))fail('此出库计划已有其他作业需求，不得重复关联；请核实原要求');
     if(Number(ob.uses_stock_operation)===1||ob.stock_operation_status==='completed')fail('此单已有库内操作要求或记录，请核实后处理，不能重复关联');
     if(d.links.some(l=>l.outbound_id===ob.id))fail('此出库单已关联，请勿重复');
-    const quantity=positive(b.quantity),used=workChainEnabled(env)?(await chainAllocation(env,d)).used:d.links.reduce((n,l)=>n+l.quantity,0);
-    if(used+quantity>d.result.quantity)fail('关联数量超过本次操作成果；请核实数量和单位');
-    d.links.push({outbound_id:ob.id,quantity,unit:d.result.unit,by:u.name,at:t});
-    d.status=used+quantity===d.result.quantity?'linked':'waiting_customer';
+    const a=await chainAllocation(env,d),[allocation]=reserveShipping(a,[{quantity:b.quantity,unit:b.unit}]),{quantity,unit}=allocation;
+    if(d.shipping_output&&((unit==='箱'&&Number(ob.planned_box_count)!==quantity)||(unit==='托'&&Number(ob.planned_pallet_count)!==quantity)||(unit!=='箱'&&Number(ob.planned_box_count)>0)||(unit!=='托'&&Number(ob.planned_pallet_count)>0)))fail('历史出库数量或单位与本次关联不一致，请核对原单');
+    d.links.push({outbound_id:ob.id,quantity,unit,shipping_output_version:d.shipping_output?.version||0,by:u.name,at:t});
+    d.status=shippingFullyAllocated(a,[allocation])?'linked':'waiting_customer';
+    // Existing event uniqueness claims the historical order across different needs.
+    // A stale order/load state deliberately fails the existing revision trigger;
+    // the whole batch (including the need event above) then rolls back.
+    extra.push(stmt(env,`INSERT INTO sop_events VALUES(?,?,CASE WHEN
+     EXISTS(SELECT 1 FROM v2_outbound_orders WHERE id=? AND status IS ? AND updated_at IS ? AND stock_operation_status IS ? AND planned_box_count IS ? AND planned_pallet_count IS ? AND uses_stock_operation IS ?)
+     AND NOT EXISTS(SELECT 1 FROM v2_ops_jobs j WHERE job_type='load_outbound' AND status IN ('pending','working','paused','awaiting_close','completed') AND (related_doc_id=? OR linked_outbound_order_id=?${loadTripEnabled(env)?' OR EXISTS(SELECT 1 FROM ck_load_order_links l WHERE l.job_id=j.id AND l.order_id=?)':''}))
+     THEN 0 ELSE -1 END,?,?,?,?,?,?,?)`,'LINK-'+ob.id,ob.id,ob.id,ob.status,ob.updated_at,ob.stock_operation_status,ob.planned_box_count,ob.planned_pallet_count,ob.uses_stock_operation,ob.id,ob.id,...(loadTripEnabled(env)?[ob.id]:[]),'sop_need_link_claim',u.id,u.name,row.state,JSON.stringify(d),'{}',t));
     extra.push(stmt(env,"UPDATE v2_outbound_orders SET instruction=?,source_inbound_plan_id=?,stock_operation_status='completed',stock_operation_completed_at=?,stock_operation_result_json=?,updated_at=? WHERE id=?",d.instructions,d.source_type==='inbound'?d.source_id:'',d.result.finished_at,JSON.stringify(d.result),t,ob.id));
    } else if(b.action==='sop_need_close') {
     if(!['waiting_customer','linked'].includes(d.status))fail('当前状态不可关闭');
@@ -670,6 +682,8 @@ export async function handleSop(b,env) {
   } else fail('未知操作');
   return await save(env,b,u,row,d,extra);
  }catch(e){
+  // Shipping corrections validate their own payload and authorization on replay.
+  if(b.action.startsWith('sop_shipping_output_'))return {ok:false,error:/revision_conflict/.test(e.message)?'记录已更新，请刷新后再操作':e.message};
   // A lost response retried with the same request id never applies the mutation twice.
   if(b.client_req_id){const cached=await stmt(env,'SELECT actor_id,action,result_json FROM sop_events WHERE request_id=?',b.client_req_id).first();if(cached&&cached.actor_id===u.id&&cached.action===b.action){const saved=JSON.parse(cached.result_json);if(b.action==='sop_need_create'&&saved._create_signature){try{return await needCreateReplay(b,env,u);}catch(error){return {ok:false,error:error.message};}}return saved;}}
   return {ok:false,error:/revision_conflict/.test(e.message)?'记录已更新，请刷新后再操作':e.message};

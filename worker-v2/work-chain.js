@@ -1,3 +1,4 @@
+import {shippingCapacity,reserveShipping,shippingFullyAllocated} from './shipping-quantities.js';
 import {executionDepartment,executionDepartmentSQL} from './work-execution.js';
 import {cargoReady,cargoFiles,cargoAvailability} from './cargo-allocation.js';
 import {recordNumbers} from './document-numbers.js';
@@ -22,12 +23,9 @@ export async function chainNeed(env, id, user, write = false) {
 export async function chainAllocation(env, data, knownOrders) {
  const links = data.links || [], ids = [...new Set(links.map(l => l.outbound_id))];
  const orders = knownOrders || (ids.length ? (await q(env, `SELECT id,status,display_no,expected_ship_at FROM v2_outbound_orders WHERE id IN (SELECT value FROM json_each(?))`, JSON.stringify(ids)).all()).results : []);
- const current = links.filter(l => orders.some(o => o.id === l.outbound_id && o.status !== 'cancelled'));
+ const current = links.filter(l => !orders.some(o => o.id === l.outbound_id && o.status === 'cancelled'));
  if(data.cargo_groups){const a=await cargoAvailability(env,data),approved=a.groups.filter(g=>g.output?.status==='approved');return {quantity:approved.length,unit:'组',used:approved.filter(g=>!g.available).length,links:current,orders};}
- // Input cargo and packed output need not have the same unit (cartons -> pallets).
- const basis = data.result || data.shipping_basis;
- const quantity = Number(basis?.quantity ?? data.planned_quantity) || 0, unit = basis?.unit || data.planned_unit || '';
- return {quantity, unit, used: current.reduce((sum,l) => sum + Number(l.quantity), 0), links: current, orders};
+ return {...shippingCapacity(data,current),links:current,orders};
 }
 export function assertShippingResult(result, links) {
  const planned = links.filter(l => l.phase === 'planned');
@@ -77,12 +75,11 @@ export async function chainOutboundStatements(env, body, id, t) {
  chainDate(body.expected_ship_at);
  if (str(body.customer) !== d.customer || body.biz_class !== (row.department === 'import' ? 'bulk' : row.department)) throw Error('客户和业务部门须与关联作业需求一致');
  if (Number(body.uses_stock_operation) === 1 || (str(body.instruction) && str(body.instruction) !== d.instructions) || body.lines?.length) throw Error('操作要求、货物明细请在作业需求中维护');
- const a = await chainAllocation(env,d), quantity = positive(body.sop_link_quantity);
- if (!a.quantity || !a.unit) throw Error('请先在作业需求中填写计划数量和单位，再安排出库');
- if (a.used + quantity > a.quantity) throw Error('本次出库数量超过该作业剩余可安排数量');
- d.links = [...(d.links || []), {outbound_id:id,quantity,unit:a.unit,phase:d.result?'confirmed':'planned',by:user.name,at:t}];
- if (d.result) d.status = a.used + quantity === a.quantity ? 'linked' : 'waiting_customer';
- return [...chainEvent(env,row,d,user,'LINK-'+id,'sop_need_schedule',t), q(env, `UPDATE v2_outbound_orders SET instruction=?,source_inbound_plan_id=?,wms_work_order_no=?,planned_box_count=?,planned_pallet_count=?,uses_stock_operation=0,stock_operation_status=?,stock_operation_result_json=?,updated_at=? WHERE id=?`, d.instructions,d.source_type==='inbound'?d.source_id:'',d.supply_chain_no||'',a.unit==='箱'?quantity:0,a.unit==='托'?quantity:0,d.result?'completed':'pending',d.result?JSON.stringify(d.result):'',t,id)];
+ const a = await chainAllocation(env,d), [allocation] = reserveShipping(a,[{quantity:body.sop_link_quantity,unit:body.sop_link_unit}]);
+ const {quantity,unit}=allocation;
+ d.links = [...(d.links || []), {outbound_id:id,quantity,unit,phase:d.result?'confirmed':'planned',shipping_output_version:d.shipping_output?.version||0,by:user.name,at:t}];
+ if (d.result) d.status = shippingFullyAllocated(a,[allocation]) ? 'linked' : 'waiting_customer';
+ return [...chainEvent(env,row,d,user,'LINK-'+id,'sop_need_schedule',t), q(env, `UPDATE v2_outbound_orders SET instruction=?,source_inbound_plan_id=?,wms_work_order_no=?,planned_box_count=?,planned_pallet_count=?,uses_stock_operation=0,stock_operation_status=?,stock_operation_result_json=?,updated_at=? WHERE id=?`, d.instructions,d.source_type==='inbound'?d.source_id:'',d.supply_chain_no||'',unit==='箱'?quantity:0,unit==='托'?quantity:0,d.result?'completed':'pending',d.result?JSON.stringify({...d.result,...(d.shipping_output?{shipping_output:d.shipping_output}:{})}):'',t,id)];
 }
 export async function chainLinked(env, id) {
  return (await q(env, `SELECT * FROM sop_records WHERE kind='need' AND (json_extract(state,'$.source_id')=? OR EXISTS(SELECT 1 FROM json_each(state,'$.links') l WHERE json_extract(l.value,'$.outbound_id')=?))`,id,id).all()).results.map(row => ({...row,data:JSON.parse(row.state)}));
@@ -130,7 +127,7 @@ export async function workMaterialRead(body,env,user) {
  const rows=(await q(env,`SELECT * FROM sop_records WHERE kind='need' AND json_extract(state,'$.status') NOT IN ('closed','cancelled') AND (?='' OR id LIKE ? OR json_extract(state,'$.customer') LIKE ? OR json_extract(state,'$.title') LIKE ? OR EXISTS(SELECT 1 FROM sop_document_numbers dn WHERE dn.record_id=sop_records.id AND dn.display_no LIKE ?) OR EXISTS(SELECT 1 FROM v2_inbound_plans ip WHERE ip.id=json_extract(state,'$.source_id') AND ip.display_no LIKE ?))${dep} ORDER BY updated_at DESC LIMIT 31 OFFSET ?`,search,...Array(5).fill('%'+search+'%'),...(user.role==='manager'?[]:user.departments||[]),offset).all()).results;
  const ids=[...new Set(rows.flatMap(row=>(JSON.parse(row.state).links||[]).map(l=>l.outbound_id)))];
  const orders=ids.length?(await q(env,'SELECT id,status,display_no,expected_ship_at FROM v2_outbound_orders WHERE id IN (SELECT value FROM json_each(?))',JSON.stringify(ids)).all()).results:[];
- const items=await Promise.all(rows.slice(0,30).map(async row=>{const data=JSON.parse(row.state),a=await chainAllocation(env,data,orders);return {id:row.id,revision:row.revision,department:row.department,...data,execution_department:executionDepartment(row),remaining:Math.max(0,a.quantity-a.used),schedule_unit:a.unit,schedule_quantity:a.quantity,shipping_plans:a.orders.filter(o=>(data.links||[]).some(l=>l.outbound_id===o.id))};}));
+ const items=await Promise.all(rows.slice(0,30).map(async row=>{const data=JSON.parse(row.state),a=await chainAllocation(env,data,orders);return {id:row.id,revision:row.revision,department:row.department,...data,execution_department:executionDepartment(row),remaining:a.by_unit?.length>1?null:Math.max(0,a.quantity-a.used),by_unit:a.by_unit,schedule_unit:a.unit,schedule_quantity:a.quantity,shipping_plans:a.orders.filter(o=>(data.links||[]).some(l=>l.outbound_id===o.id))};}));
  return {ok:true,items:await recordNumbers(env,items),more:rows.length>30,offset};
 }
 export function notifyMaterialChange(env,row,user,t,summary,change={}) {
