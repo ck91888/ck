@@ -2537,12 +2537,7 @@ async function loadInboundList() {
     body.innerHTML = pagerHtml + '<div class="card muted">' + L("no_data") + '</div>';
     return;
   }
-  // plan_date 倒序，同日按 created_at 倒序（最新计划在上）
-  items.sort(function(a, b) {
-    var da = String(a.plan_date || ''), db = String(b.plan_date || '');
-    if (da !== db) return db.localeCompare(da);
-    return String(b.created_at || '').localeCompare(String(a.created_at || ''));
-  });
+  // Preserve the server's global arrival-date order across pages and CSV export.
 
   var html = '<div class="card">';
   items.forEach(function(p) {

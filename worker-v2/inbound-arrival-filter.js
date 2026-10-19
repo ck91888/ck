@@ -5,6 +5,9 @@ const arrivalDay=`CASE
  WHEN ${value} GLOB '????/??/??' THEN date(replace(${value},'/','-'))
  WHEN ${value} NOT GLOB '*[Zz+]*' AND instr(substr(${value},12),'-')=0 THEN date(${value})
  ELSE date(${value},'+9 hours') END`;
+// Match the filter/display business day; SQLite DESC puts NULL (undated) last.
+// Keep the previous date/creation precedence for ties, then make paging stable by ID.
+export const inboundArrivalOrder=`(${arrivalDay}) DESC, plan_date DESC, created_at DESC, id DESC`;
 function calendarDay(raw){
  const s=String(raw??'').trim();if(!s)return '';
  if(!/^\d{4}-\d{2}-\d{2}$/.test(s)||!Number.isFinite(Date.parse(s+'T00:00:00Z'))||new Date(s+'T00:00:00Z').toISOString().slice(0,10)!==s)throw Error('预计到达日期无效，请使用有效日历日期 / 입고 예정일을 확인하세요');

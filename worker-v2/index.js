@@ -2,7 +2,7 @@ import {stagedInbound,putawayType,putawayMetrics,stagedPlanStatement} from './in
 import {executionDepartment} from './work-execution.js';
 import {withInboundCreateReceipt,inboundCreateStatus,inboundReceiptStatements} from './inbound-create-receipt.js';
 import {handleBulkBatch,guardBulkBatchMutation} from './bulk-work-batch.js';
-import {inboundArrivalFilter} from './inbound-arrival-filter.js';
+import {inboundArrivalFilter,inboundArrivalOrder} from './inbound-arrival-filter.js';
 import {dailyDispatchEnabled,dailyDispatchAdmin,guardDailyDispatch} from './daily-dispatch-permissions.js';
 import {checkWorkbenchEnabled,scanCheck,finishCheck} from './check-workbench.js';
 import {pickWorkloadContext,readPickWorkload} from './pick-workload.js';
@@ -4277,7 +4277,8 @@ route("v2_inbound_plan_list", async (body, env) => {
   //     COUNT 仅按 WHERE 子句口径，对协同中心场景准确，对 001 候选场景不显示 pager 不影响业务。
   const countRow = await env.DB.prepare("SELECT COUNT(*) AS c FROM v2_inbound_plans" + where).bind(...binds).first();
   const total = Number((countRow && countRow.c) || 0);
-  const listSql = "SELECT * FROM v2_inbound_plans" + where + " ORDER BY plan_date DESC, created_at DESC LIMIT ? OFFSET ?";
+  const orderBy = required_biz_class ? "plan_date DESC, created_at DESC" : inboundArrivalOrder;
+  const listSql = "SELECT * FROM v2_inbound_plans" + where + " ORDER BY " + orderBy + " LIMIT ? OFFSET ?";
   const rs = await env.DB.prepare(listSql).bind(...binds, limit, offset).all();
   const rows = rs.results || [];
 
@@ -6649,7 +6650,7 @@ route("v2_inbound_plan_export", async (body, env) => {
     sql += " AND customer LIKE ?";
     binds.push('%' + customer_keyword + '%');
   }
-  sql += " ORDER BY plan_date DESC, created_at DESC LIMIT ?";
+  sql += " ORDER BY " + inboundArrivalOrder + " LIMIT ?";
   binds.push(limit);
   const rs = await env.DB.prepare(sql).bind(...binds).all();
   const rows = rs.results || [];
