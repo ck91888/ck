@@ -8955,12 +8955,15 @@ route("v2_dashboard_live_docs", async (body, env) => {
     LIMIT 100
   `).all();
 
+  const jobRows = jobs.results || [];
+  // Keep each original indexed query and its DISTINCT/name ordering, but send
+  // the bounded (at most 100) reads in one D1 batch instead of 100 remote waits.
+  const workerRows = jobRows.length ? await env.DB.batch(jobRows.map(job => env.DB.prepare(
+    "SELECT DISTINCT worker_name FROM v2_ops_job_workers WHERE job_id=? AND left_at=''"
+  ).bind(job.job_id))) : [];
   const docs = [];
-  for (const job of (jobs.results || [])) {
-    // Get current worker names
-    const ws = await env.DB.prepare(
-      "SELECT DISTINCT worker_name FROM v2_ops_job_workers WHERE job_id=? AND left_at=''"
-    ).bind(job.job_id).all();
+  for (const [index, job] of jobRows.entries()) {
+    const ws = workerRows[index];
     const names = (ws.results || []).map(function(r) { return r.worker_name; }).filter(Boolean);
 
     // Unified display_no: plan_display_no > job_display_no > related_doc_id > job_id

@@ -3,10 +3,11 @@ import app from './index.js';
 import {sessionUser} from './sop-session.js';
 import {enabled,ensureResetSchema,activeReset,resetAction} from './test-data-reset.js';
 const response=(body,status=200)=>Response.json(body,{status,headers:{'Cache-Control':'no-store'}});
-export default {async fetch(request,env,ctx){
+const isApiPath=path=>['/api','/file','/api/file','/001/api','/001/api/file','/001/file','/attendance/api'].includes(path)||path.startsWith('/api/test-data/');
+const staging={async fetch(request,env,ctx){
  const url=new URL(request.url),maintenance=url.pathname.startsWith('/api/test-data/');
  if(accessEnabled(env)){
-  const api=['/api','/file','/api/file','/001/api','/001/api/file','/001/file','/attendance/api'].includes(url.pathname)||maintenance;
+  const api=isApiPath(url.pathname);
   if(!api){
    // Only shipped code/styles are public and cacheable; pages and API data stay authenticated.
    const staticAsset=/^\/(?:shared|001|002|003|shuju|attendance)\/[^/]+\.(?:js|css)$/.test(url.pathname);
@@ -39,4 +40,14 @@ export default {async fetch(request,env,ctx){
   }
  }catch(error){return response({ok:false,error:'测试维护状态读取失败，请稍后重试 / 잠시 후 다시 시도하세요'},503);}
  return app.fetch(request,env,ctx);
+}};
+export default {async fetch(request,env,ctx){
+ if(!isApiPath(new URL(request.url).pathname))return staging.fetch(request,env,ctx);
+ const started=performance.now(),result=await staging.fetch(request,env,ctx);
+ const headers=new Headers(result.headers);
+ // Time until the application returns a Response; not DNS, TLS, transit or body download.
+ // Only a duration is exposed: no SQL, user identity, action payload or credentials.
+ headers.append('Server-Timing','app;dur='+Math.max(0,performance.now()-started).toFixed(1));
+ headers.set('Cache-Control','private, no-store');
+ return new Response(result.body,{status:result.status,statusText:result.statusText,headers});
 }};

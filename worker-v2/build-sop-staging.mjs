@@ -15,7 +15,21 @@ await mkdir(resolve(out,'templates'),{recursive:true});
 await writeFile(resolve(out,'templates/employees.xlsx'),Buffer.from(await readFile(resolve(root,'shared/templates/employees.xlsx.b64'),'utf8'),'base64'));
 await writeFile(resolve(out,'templates/pallet-details.xlsx'),Buffer.from(await readFile(resolve(root,'shared/templates/pallet-details.xlsx.b64'),'utf8'),'base64'));
 await writeFile(resolve(out,'shared/sop-rollout.js'),"window.CK_SOP_ROLLOUT={enabled:true,staging:true,publicAccess:false,accessControl:true,workChain:true};\nwindow.SOP_API=location.origin+(location.pathname.startsWith('/001/')?'/001/api':location.pathname.startsWith('/attendance/')?'/attendance/api':'/api');\n");
-const head='<script src="/shared/browser-compat.js"></script><link rel="stylesheet" href="/shared/work-plan-list.css"><script src="/shared/work-plan-list.js"></script><link rel="stylesheet" href="/shared/inbound-arrival-filter.css"><script src="/shared/inbound-arrival-filter.js"></script><link rel="stylesheet" href="/shared/daily-dispatch.css"><script src="/shared/daily-dispatch-ui.js"></script><link rel="stylesheet" href="/shared/check-workbench.css"><link rel="stylesheet" href="/shared/pick-workload.css"><script src="/shared/pick-workload-ui.js"></script><script src="/shared/document-labels.js"></script><script src="/shared/outbound-changes.js"></script><link rel="stylesheet" href="/shared/access-ui.css"><link rel="stylesheet" href="/shared/sop-native.css"><link rel="stylesheet" href="/shared/work-chain.css"><link rel="stylesheet" href="/shared/ck-design.css"><link rel="stylesheet" href="/shared/ck-office.css"><link rel="stylesheet" href="/shared/employee-attendance.css"><link rel="stylesheet" href="/shared/courier.css"><link rel="stylesheet" href="/shared/unload-trip.css"><link rel="stylesheet" href="/shared/unload-photos.css"><link rel="stylesheet" href="/shared/native-lifecycle.css"><link rel="stylesheet" href="/shared/outbound-load-trip.css"><link rel="stylesheet" href="/shared/feedback-link.css"><script src="/shared/sop-rollout.js"></script><script src="/shared/sop-session.js"></script>';
+const originalHead='<script src="/shared/browser-compat.js"></script><link rel="stylesheet" href="/shared/work-plan-list.css"><script src="/shared/work-plan-list.js"></script><link rel="stylesheet" href="/shared/inbound-arrival-filter.css"><script src="/shared/inbound-arrival-filter.js"></script><link rel="stylesheet" href="/shared/daily-dispatch.css"><script src="/shared/daily-dispatch-ui.js"></script><link rel="stylesheet" href="/shared/check-workbench.css"><link rel="stylesheet" href="/shared/pick-workload.css"><script src="/shared/pick-workload-ui.js"></script><script src="/shared/document-labels.js"></script><script src="/shared/outbound-changes.js"></script><link rel="stylesheet" href="/shared/access-ui.css"><link rel="stylesheet" href="/shared/sop-native.css"><link rel="stylesheet" href="/shared/work-chain.css"><link rel="stylesheet" href="/shared/ck-design.css"><link rel="stylesheet" href="/shared/ck-office.css"><link rel="stylesheet" href="/shared/employee-attendance.css"><link rel="stylesheet" href="/shared/courier.css"><link rel="stylesheet" href="/shared/unload-trip.css"><link rel="stylesheet" href="/shared/unload-photos.css"><link rel="stylesheet" href="/shared/native-lifecycle.css"><link rel="stylesheet" href="/shared/outbound-load-trip.css"><link rel="stylesheet" href="/shared/feedback-link.css"><script src="/shared/sop-rollout.js"></script><script src="/shared/sop-session.js"></script>';
+// Preserve the exact stylesheet cascade while avoiding 17 separate blocking requests.
+const styleLinks=[...originalHead.matchAll(/<link rel="stylesheet" href="([^\"]+)">/g)];
+const styles=[];
+for(const [,url] of styleLinks){
+ const css=await readFile(resolve(out,'.'+url),'utf8');
+ // Relative resources and imports need explicit rewriting before they can be bundled.
+ if(/@import\b|@charset\b|url\s*\(/i.test(css))throw Error('Shared CSS needs URL/import handling: '+url);
+ styles.push(css);
+}
+await writeFile(resolve(out,'shared/staging-common.css'),styles.join('\n'));
+let firstStyle=true;
+const head=originalHead.replace(/<link rel="stylesheet" href="[^\"]+">/g,()=>{if(!firstStyle)return '';firstStyle=false;return '<link rel="stylesheet" href="/shared/staging-common.css">';});
+// Login only needs compatibility, rollout config and the unchanged session gate.
+const loginHead=head.replace(/<script src="\/shared\/([^\"]+)"><\/script>/g,(tag,name)=>['browser-compat.js','sop-rollout.js','sop-session.js'].includes(name)?tag:'');
 for(const app of apps){
  await mkdir(resolve(out,app),{recursive:true});
  for(const f of app==='attendance'?['index.html','style.css']:['index.html','app.js','config.js','style.css']){
@@ -36,11 +50,11 @@ home=home.replace('<body>','<body class="ck-stage-home">').replace('</head>',hea
 home=home.replace('</head>','<link rel="stylesheet" href="/shared/test-data-reset.css"></head>').replace('</body>','<script src="/shared/test-data-reset.js"></script></body>');
 await writeFile(resolve(out,'index.html'),home);
 await mkdir(resolve(out,'office-login'),{recursive:true});
-await writeFile(resolve(out,'office-login/index.html'),'<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CK 办公室登录</title>'+head+'</head><body class="ck-system"><script>CKSession.ready.then(()=>{const p=new URLSearchParams(location.search).get("next")||"/";location.replace(/^\\/(?:002|003|shuju)(?:\\/|$)/.test(p)?p:"/");});</script></body></html>');
+await writeFile(resolve(out,'office-login/index.html'),'<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CK 办公室登录</title>'+loginHead+'</head><body class="ck-system"><script>CKSession.ready.then(()=>{const p=new URLSearchParams(location.search).get("next")||"/";location.replace(/^\\/(?:002|003|shuju)(?:\\/|$)/.test(p)?p:"/");});</script></body></html>');
 await copyFile(resolve(root,'docs/sop-acceptance.html'),resolve(out,'验收说明.html'));
 await writeFile(resolve(out,'_redirects'),'/sop/ / 302\n/sop / 302\n');
 await writeFile(resolve(out,'_headers'),'/*\n  Cache-Control: no-store\n  X-Content-Type-Options: nosniff\n  Referrer-Policy: same-origin\n');
-await writeFile(resolve(out,'release.json'),JSON.stringify({release:'20261017-collaboration-bulk-execution',commit:execFileSync('git',['rev-parse','HEAD'],{cwd:root,encoding:'utf8'}).trim(),worker:'ck-v2-api-sop-staging',builtAt:new Date().toISOString(),modules:apps}));
+await writeFile(resolve(out,'release.json'),JSON.stringify({release:'20261019-staging-load',commit:execFileSync('git',['rev-parse','HEAD'],{cwd:root,encoding:'utf8'}).trim(),worker:'ck-v2-api-sop-staging',builtAt:new Date().toISOString(),modules:apps}));
 // Content-addressed script/style URLs permit browser reuse without stale deployments.
 for(const html of ['index.html','office-login/index.html',...apps.map(a=>a+'/index.html')]){
  const filename=resolve(out,html),content=await readFile(filename,'utf8');
