@@ -986,14 +986,17 @@ async function loadIssueList() {
 
 // ===== Issue Create =====
 var _issueCreateDraft = null;
+var _issueCreateDragDepth = 0, _issueCreateDropBound = false;
 function issueCreateAttachmentsEnabled() { return !!window.CK_SOP_ROLLOUT?.accessControl; }
 function beginIssueCreateDraft() {
-  _issueCreateDraft = {id:'ISD-'+crypto.randomUUID(),files:[],busy:false,payload:null,uncertain:false,error:''};
+  _issueCreateDraft = {id:'ISD-'+crypto.randomUUID(),files:[],busy:false,payload:null,uncertain:false,error:'',notice:''};
+  bindIssueFileDrop();
   document.getElementById('ic-attachments').hidden=false;
   renderIssueCreateAttachments();
 }
 function clearIssueCreateDraft(cancel) {
   var draft=_issueCreateDraft;_issueCreateDraft=null;
+  resetIssueFileDrag();
   if(draft){
     draft.files.forEach(function(f){if(f.preview)URL.revokeObjectURL(f.preview);});
     if(cancel)api({action:'v2_issue_draft_cancel',draft_id:draft.id});
@@ -1003,14 +1006,79 @@ function clearIssueCreateDraft(cancel) {
   document.getElementById('ic-file-list').innerHTML='';
 }
 function pickIssueFiles(input) {
-  var draft=_issueCreateDraft;if(!draft||draft.busy||draft.uncertain){input.value='';return;}
-  draft.error='';
-  Array.from(input.files||[]).forEach(function(file){
-    if(draft.files.length>=20||!file.size||file.size>20*1024*1024||file.name.length>240||! /\.(pdf|xlsx?|csv|jpe?g|png|webp)$/i.test(file.name)){draft.error=L('ic_invalid');return;}
-    if(draft.files.some(function(f){return f.file.name===file.name&&f.file.size===file.size&&f.file.lastModified===file.lastModified;}))return;
+  addIssueFiles(Array.from(input.files||[]));
+  input.value='';
+}
+// Both picker and drop only stage local File objects. Upload stays in submitIssue.
+function addIssueFiles(files, rejected) {
+  var draft=_issueCreateDraft;if(!draft||draft.busy||draft.uncertain)return;
+  var errors=(rejected||[]).slice(),duplicates=[],added=0;
+  files.forEach(function(file){
+    var reason=!file.size?'ic_unreadable':file.size>20*1024*1024?'ic_size':file.name.length>240?'ic_name':! /\.(pdf|xlsx?|csv|jpe?g|png|webp)$/i.test(file.name)?'ic_type':'';
+    if(reason){errors.push(file.name+' — '+L(reason));return;}
+    if(draft.files.some(function(f){return f.file.name===file.name&&f.file.size===file.size&&f.file.lastModified===file.lastModified;})){duplicates.push(file.name);return;}
+    if(draft.files.length>=20){errors.push(file.name+' — '+L('ic_count'));return;}
     draft.files.push({id:'ISF-'+crypto.randomUUID(),file:file,status:'waiting',preview:/\.(jpe?g|png|webp)$/i.test(file.name)?URL.createObjectURL(file):''});
+    added++;
   });
-  input.value='';renderIssueCreateAttachments();
+  draft.error=errors.length?L('ic_not_added')+'\n'+errors.join('\n'):'';
+  draft.notice=(added?L('ic_added')+added:'')+(duplicates.length?(added?'\n':'')+L('ic_duplicate')+duplicates.join('、'):'');
+  renderIssueCreateAttachments();
+}
+function resetIssueFileDrag() {
+  _issueCreateDragDepth=0;
+  var zone=document.getElementById('ic-dropzone');if(!zone)return;
+  zone.classList.remove('is-dragover');
+  document.getElementById('ic-drop-title').textContent=L('ic_drop');
+}
+function bindIssueFileDrop() {
+  if(_issueCreateDropBound)return;
+  _issueCreateDropBound=true;
+  function isFileDrag(e) {
+    return _currentView==='issue_create'&&_issueCreateDraft&&issueCreateAttachmentsEnabled()&&
+      Array.from(e.dataTransfer?.types||[]).includes('Files');
+  }
+  function inZone(e) {return document.getElementById('ic-dropzone').contains(e.target);}
+  function canAdd() {return !_issueCreateDraft.busy&&!_issueCreateDraft.uncertain;}
+  function highlight() {
+    document.getElementById('ic-dropzone').classList.add('is-dragover');
+    document.getElementById('ic-drop-title').textContent=L('ic_drop_ready');
+  }
+  document.addEventListener('dragenter',function(e){
+    if(!isFileDrag(e)||!inZone(e)||!canAdd())return;
+    _issueCreateDragDepth++;highlight();
+  });
+  document.addEventListener('dragover',function(e){
+    if(!isFileDrag(e))return;
+    // Only file drags on this form are intercepted; text and other views keep native behavior.
+    e.preventDefault();
+    var accept=inZone(e)&&canAdd();e.dataTransfer.dropEffect=accept?'copy':'none';
+    if(accept)highlight();else resetIssueFileDrag();
+  });
+  document.addEventListener('dragleave',function(e){
+    if(!isFileDrag(e)||!inZone(e))return;
+    if(--_issueCreateDragDepth<=0)resetIssueFileDrag();
+  });
+  document.addEventListener('drop',function(e){
+    if(!isFileDrag(e))return;
+    e.preventDefault();resetIssueFileDrag();
+    if(!canAdd()||!inZone(e)){
+      _issueCreateDraft.notice=L(canAdd()?'ic_drop_outside':'ic_drop_locked');renderIssueCreateAttachments();return;
+    }
+    var files=[],rejected=[],items=Array.from(e.dataTransfer.items||[]).filter(function(item){return item.kind==='file';});
+    if(items.length){
+      items.forEach(function(item){
+        var entry;try{entry=item.webkitGetAsEntry?.();}catch(ignore){}
+        if(entry?.isDirectory){rejected.push(entry.name+' — '+L('ic_directory'));return;}
+        var file;try{file=item.getAsFile();}catch(ignore){}
+        if(file)files.push(file);else rejected.push(L('ic_unreadable'));
+      });
+    }else files=Array.from(e.dataTransfer.files||[]);
+    if(!files.length&&!rejected.length)rejected.push(L('ic_unreadable'));
+    addIssueFiles(files,rejected);
+  });
+  document.addEventListener('dragend',resetIssueFileDrag);
+  window.addEventListener('blur',resetIssueFileDrag);
 }
 async function removeIssueFile(id) {
   var d=_issueCreateDraft;if(!d||d.busy||d.uncertain)return;
@@ -1018,11 +1086,11 @@ async function removeIssueFile(id) {
   if(file&&file.status!=='waiting'){
     d.busy=true;renderIssueCreateAttachments();
     var result=await api({action:'v2_issue_draft_remove',draft_id:d.id,file_id:id});
-    d.busy=false;
+    d.busy=false;d.notice='';
     if(!result?.ok){d.error=(getLang()==='ko'?'삭제를 다시 시도하세요: ':'请重试移除：')+(result?.error||'');renderIssueCreateAttachments();return;}
   }
   d.files=d.files.filter(function(f){if(f.id!==id)return true;if(f.preview)URL.revokeObjectURL(f.preview);return false;});
-  d.error='';renderIssueCreateAttachments();
+  d.error='';d.notice='';renderIssueCreateAttachments();
 }
 function renderIssueCreateAttachments() {
   var d=_issueCreateDraft;if(!d)return;
@@ -1034,6 +1102,9 @@ function renderIssueCreateAttachments() {
       '<button type="button" class="ic-file-remove" onclick="removeIssueFile(\''+f.id+'\')" aria-label="'+esc(L('ic_remove')+' '+f.file.name)+'"'+(d.busy||d.uncertain?' disabled':'')+'>'+esc(L('ic_remove'))+'</button></div>';
   }).join(''):'<div class="ic-file-empty">'+esc(L('ic_empty'))+'</div>';
   document.getElementById('ic-file-error').textContent=d.error;
+  document.getElementById('ic-file-notice').textContent=d.notice;
+  document.getElementById('ic-dropzone').setAttribute('aria-disabled',String(d.busy||d.uncertain));
+  if(d.busy||d.uncertain)resetIssueFileDrag();
   document.getElementById('ic-submit-status').textContent=d.uncertain?L('ic_uncertain'):d.busy?(d.payload?L('ic_saving'):L('ic_uploading')):'';
   document.querySelectorAll('#ic-attachments .ic-file-actions button,#ic-attachments input,#ic-biz,#ic-customer,#ic-docno,#ic-desc').forEach(function(el){el.disabled=d.busy||d.uncertain;});
   var btn=document.getElementById('ic-submit');btn.disabled=d.busy;btn.textContent=L(d.busy?'ic_saving':d.uncertain||d.files.some(function(f){return f.status==='failed';})?'ic_retry':'ic_submit');
@@ -1043,7 +1114,7 @@ async function submitIssue(btnEl) {
   var d=_issueCreateDraft;if(!d||d.busy)return;
   var customer=document.getElementById('ic-customer').value.trim(),desc=document.getElementById('ic-desc').value.trim();
   if(!customer||!desc){alert('请填写客户和问题描述 / 고객과 문제 설명을 입력하세요');return;}
-  d.busy=true;d.error='';renderIssueCreateAttachments();
+  d.busy=true;d.error='';d.notice='';renderIssueCreateAttachments();
   try {
     if(!d.payload){
       for(var f of d.files){
@@ -1061,7 +1132,7 @@ async function submitIssue(btnEl) {
     if(res?.ok){d.busy=false;clearIssueCreateDraft(false);alert('已创建 / 생성 완료: '+res.id);goTab('issue');}
     else {d.uncertain=!!res?.network_error;d.error=d.uncertain?'':String(res?.error||'保存失败 / 저장 실패');if(!d.uncertain)d.payload=null;}
   } catch(e) {d.error=String(e.message||e);d.uncertain=!!d.payload;}
-  finally {d.busy=false;if(_issueCreateDraft===d)renderIssueCreateAttachments();}
+  finally {d.busy=false;d.notice='';if(_issueCreateDraft===d)renderIssueCreateAttachments();}
 }
 
 async function submitLegacyIssue(btnEl) {

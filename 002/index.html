@@ -135,8 +135,13 @@
         <input id="ic-photos" type="file" accept=".jpg,.jpeg,.png,.webp" multiple hidden onchange="pickIssueFiles(this)">
         <input id="ic-camera" type="file" accept="image/jpeg,image/png,image/webp" capture="environment" hidden onchange="pickIssueFiles(this)">
         <input id="ic-documents" type="file" accept=".pdf,.xls,.xlsx,.csv" multiple hidden onchange="pickIssueFiles(this)">
-        <div id="ic-file-list" class="ic-file-list"></div>
+        <div id="ic-dropzone" class="ic-dropzone" role="group" aria-labelledby="ic-drop-title" aria-describedby="ic-drop-help">
+          <p id="ic-drop-title" class="ic-drop-title" data-i18n="ic_drop">将照片或文件拖到这里</p>
+          <p id="ic-drop-help" class="ic-drop-help" data-i18n="ic_drop_help">可多选、混合拖入或继续追加，也可使用上方按钮。</p>
+          <div id="ic-file-list" class="ic-file-list"></div>
+        </div>
         <p class="ic-file-help" data-i18n="ic_upload_hint">提交时上传；成功后与问题一起保存，办公室和对应现场可查看。</p>
+        <p id="ic-file-notice" class="ic-file-notice" role="status" aria-live="polite"></p>
         <p id="ic-file-error" class="ic-file-error" role="alert"></p>
         <p id="ic-submit-status" class="ic-submit-status" role="status" aria-live="polite"></p>
       </section>
