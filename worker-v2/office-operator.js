@@ -41,7 +41,7 @@ const reads=new Set('v2_inbound_plan_create_status sop_need_create_status sop_bu
 export function officeOperationGuard(body,env,request){
  if(!env.SOP_OPERATION_CONTEXT)return null;
  const action=String(body.action||'').trim();
- const business=/^sop_daily_dispatch_(?:update|link)$/.test(action)||/^sop_attendance_(?:department|void|restore|permanent_update)$/.test(action)||/^v2_(?:inbound|outbound|ops|issue|verify|pick|bulk|unload|unplanned|import_delivery|attachment|correction)_/.test(action)||/^sop_(?:bulk_batch|need|task|issue|check|native|courier|work_material|batch|demo|crew_return)/.test(action);
+ const business=/^sop_import_daily_scan_save$/.test(action)||/^sop_daily_dispatch_(?:update|link)$/.test(action)||/^sop_attendance_(?:department|void|restore|permanent_update)$/.test(action)||/^v2_(?:inbound|outbound|ops|issue|verify|pick|bulk|unload|unplanned|import_delivery|attachment|correction)_/.test(action)||/^sop_(?:bulk_batch|need|task|issue|check|native|courier|work_material|batch|demo|crew_return)/.test(action);
  const read=reads.has(action)||/_(?:list|detail|list_upcoming|ops_candidates|find_by_code|resolve_code|resolve|export|diag_date_mismatch|lookup|active_list|docs_list|my_active_job|get)$/.test(action);
  if(business&&!read&&(!env.SOP_OPERATION_CONTEXT.operator_name||request.headers.get('X-CK-Operation-Context')!==env.SOP_OPERATION_CONTEXT.context_id))return conflict();
  if(env.SOP_OPERATION_CONTEXT.operator_name){

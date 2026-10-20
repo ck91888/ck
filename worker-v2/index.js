@@ -1,5 +1,6 @@
 import {isInternal,readOperation,operationSummary,operationExport} from '../shared/internal-operations.js';
 import {internalEnabled,protectInternalMutation} from './internal-operations.js';
+import {handleDailyScan} from './import-daily-scan.js';
 import {resolveInboundEntry,independentInbound} from './independent-inbound.js';
 import {stagedInbound,putawayType,putawayMetrics,stagedPlanStatement} from './inbound-stages.js';
 import {executionDepartment} from './work-execution.js';
@@ -13051,6 +13052,10 @@ export default {
     await ensureLoadSchema(env);
     const authResponse = await sessionAction(body, env,request);
     if (authResponse) return authResponse;
+    if(action.startsWith('sop_import_daily_scan_')){
+      if(request.method!=='POST'||request.headers.get('Origin')&&request.headers.get('Origin')!==url.origin||request.headers.get('Sec-Fetch-Site')==='cross-site')return err('Invalid request origin',403);
+      try{return json(await handleDailyScan(body,env));}catch(e){return json({ok:false,error:e.status?e.message:'保存或查询失败，请保留输入后重试 / 저장·조회 실패, 입력을 유지하고 다시 시도하세요'},e.status||500);}
+    }
     if(accessEnabled(env)){const adminAction=await accessAdminAction(body,env);if(adminAction)return adminAction;}
     // Resolve generated daily badge aliases before crew preparation and all admission guards.
     if(attendanceEnabled(env)){try{await ensureAttendance(env);await normalizeDailyBadgeRequest(env,body);}catch(e){return json({ok:false,error:e.message},409);}}
