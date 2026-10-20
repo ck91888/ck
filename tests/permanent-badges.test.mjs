@@ -58,7 +58,7 @@ test('concurrent profile edits have one committed version and audit, stale updat
 
 test('disable blocks checkin and new assignments but permits retaining active crew, completion and checkout',async t=>{
  const s=setup(t),p=await s.register(),day=(await s.call('checkin',{badge:p.badgeId,agency:p.agency})).record;
- const started=await s.api('sop_native_start',{payload:{action:'v2_ops_job_start',job_type:'inventory',flow_stage:'internal',client_req_id:crypto.randomUUID()},labor_department:'bulk',workers:[{id:p.badgeId,name:p.name}],lead_id:p.badgeId,estimated_minutes:5});assert.equal(started.ok,true,started.error);
+ const started=await s.api('sop_native_start',{payload:{action:'v2_ops_job_start',job_type:'inventory',inventory_type:'precise',internal_metrics:{inventory_count:0,location_count:0,used_forklift:false},flow_stage:'internal',client_req_id:crypto.randomUUID()},labor_department:'bulk',workers:[{id:p.badgeId,name:p.name}],lead_id:p.badgeId,estimated_minutes:5});assert.equal(started.ok,true,started.error);
  const disabled=(await s.update(p,{enabled:false})).person;
  assert.equal(s.DB.raw.prepare("SELECT COUNT(*) n FROM v2_ops_job_workers WHERE worker_id=? AND left_at=''").get(p.badgeId).n,1);
  await assert.rejects(s.call('checkin',{badge:p.badgeId,agency:p.agency}),/停用/);
@@ -96,7 +96,7 @@ test('disable after dispatch preflight rolls back native start and its audit',as
  const s=setup(t),p=await s.register();await s.call('checkin',{badge:p.badgeId,agency:p.agency});
  const batch=s.DB.batch.bind(s.DB);let injected=false;
  s.DB.batch=async statements=>{if(!injected&&statements.some(st=>/^INSERT INTO v2_ops_job_workers/i.test(st.sql))){injected=true;await s.update(p,{enabled:false});}return batch(statements);};
- const started=await s.api('sop_native_start',{payload:{action:'v2_ops_job_start',job_type:'inventory',flow_stage:'internal',client_req_id:crypto.randomUUID()},labor_department:'bulk',workers:[{id:p.badgeId,name:p.name}],lead_id:p.badgeId,estimated_minutes:5});
+ const started=await s.api('sop_native_start',{payload:{action:'v2_ops_job_start',job_type:'inventory',inventory_type:'precise',internal_metrics:{inventory_count:0,location_count:0,used_forklift:false},flow_stage:'internal',client_req_id:crypto.randomUUID()},labor_department:'bulk',workers:[{id:p.badgeId,name:p.name}],lead_id:p.badgeId,estimated_minutes:5});
  assert.equal(injected,true);assert.equal(started.ok,false);assert.equal(s.count('v2_ops_job_workers'),0);assert.equal(s.count('v2_ops_jobs'),0);
  assert.equal(s.DB.raw.prepare("SELECT COUNT(*) n FROM sop_events WHERE action='sop_native_start'").get().n,0);
 });

@@ -1,3 +1,4 @@
+import {validateOperationStart} from '../shared/internal-operations.js';
 import {validateInboundStage,stagedPlanStatement} from './inbound-stages.js';
 import {resolveInboundEntry,independentInbound} from './independent-inbound.js';
 import {pickWorkloadContext,pickWorkloadSnapshot} from './pick-workload.js';
@@ -89,6 +90,7 @@ export async function startAtomicInbound(e,p,staff,number){
  }
  if(returned)sql.push(q(e,`INSERT OR IGNORE INTO v2_inbound_plan_biz_tasks(id,plan_id,biz_class,job_type,status,created_at,updated_at) VALUES(?,?,'return','inbound_return','pending',?,?)`,'IBT-'+crypto.randomUUID(),planId,t,t));
  sql.push(q(e,`INSERT INTO v2_ops_jobs(id,flow_stage,biz_class,job_type,related_doc_type,related_doc_id,status,created_by,created_at,updated_at,active_worker_count,inbound_external_no) VALUES(?,'inbound',?,?,'inbound_plan',?,'working',?,?,?,?,?)`,id,biz,type,planId,lead.id,t,t,staff.workers.length,code));
+ if(returned){const data=validateOperationStart(type,p);sql.push(q(e,'UPDATE v2_ops_jobs SET shared_result_json=? WHERE id=?',JSON.stringify({internal_operation:{...data,start:{...data.start,recorded_at:t,recorded_by:e.SOP_REQUEST_USER.id}}}),id));}
  return commitPrepared(e,p,staff,{id,t,sql,jobType:type,sourceType:'inbound_plan',sourceId:planId,after:[stagedPlanStatement(e,planId,t)],extra:{plan_id:planId,external_inbound_no:code}});
 }
 export async function startAtomicBulk(e,p,staff,findOutbound,needs){
@@ -110,11 +112,13 @@ export async function startAtomicImportDelivery(e,p,staff){
  return commitPrepared(e,p,staff,{id,t,sql:[q(e,"INSERT INTO v2_ops_jobs(id,flow_stage,biz_class,job_type,related_doc_type,related_doc_id,status,created_by,created_at,updated_at,active_worker_count) VALUES(?,'import','import','pickup_delivery_import','','','working',?,?,?,?)",id,lead.id,t,t,staff.workers.length)],sourceType:'',sourceId:'',jobType:'pickup_delivery_import'});
 }
 export async function startAtomicGeneric(e,p,staff){
+ const data=validateOperationStart(p.job_type,p);
  const id='JOB-'+crypto.randomUUID(),t=new Date().toISOString(),lead=staff.workers.find(w=>w.id===staff.lead_id),seg='WS-'+crypto.randomUUID(),signature=dispatchSignature(e,p,staff),result={ok:true,job_id:id,worker_seg_id:seg,is_new_job:true,lead,assigned_workers:staff.workers,_dispatch_signature:signature};
  if(p.related_doc_type&&p.related_doc_id){const old=await q(e,"SELECT id FROM v2_ops_jobs WHERE related_doc_type=? AND related_doc_id=? AND job_type=? AND status IN ('pending','working','awaiting_close','paused')",p.related_doc_type,p.related_doc_id,p.job_type).first();if(old)return {ok:false,error:'此单已有旧任务，请继续原任务并核对人员',active_job_id:old.id};}
  const sql=[q(e,`INSERT INTO v2_idempotency_keys(idem_key,action,response_json,created_at) VALUES(?,?,?,?)`,p.client_req_id,p.action,JSON.stringify(result),t),
  q(e,`INSERT INTO v2_ops_jobs(id,flow_stage,biz_class,job_type,related_doc_type,related_doc_id,status,parent_job_id,is_temporary_interrupt,interrupt_type,created_by,created_at,updated_at,active_worker_count) VALUES(?,?,?,?,?,?,'working',?,?,?,?,?,?,?)`,id,String(p.flow_stage||''),String(p.biz_class||''),String(p.job_type||''),String(p.related_doc_type||''),String(p.related_doc_id||''),String(p.parent_job_id||''),p.is_temporary_interrupt?1:0,String(p.interrupt_type||''),lead.id,t,t,staff.workers.length),
  ...staffedDispatchStatements(e,{...p,source_type:p.related_doc_type||'',source_id:p.related_doc_id||''},staff,id,t,result)];
+ if(data)sql.push(q(e,'UPDATE v2_ops_jobs SET shared_result_json=? WHERE id=?',JSON.stringify({internal_operation:{...data,start:{...data.start,recorded_at:t,recorded_by:e.SOP_REQUEST_USER.id}}}),id));
  await ensureDispatchStartGuard(e);
  try{await e.DB.batch(sql);}catch(error){const old=await q(e,'SELECT response_json FROM v2_idempotency_keys WHERE idem_key=?',p.client_req_id).first();if(old){const saved=JSON.parse(old.response_json);if(saved._dispatch_signature===signature)return saved;throw Error('同一请求的人员或作业要求已变化，请重新提交');}throw error;}return result;
 }

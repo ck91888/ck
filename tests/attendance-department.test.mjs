@@ -56,7 +56,7 @@ test('every field job type and native start entrance has an explicit department 
 });
 test('shared work requires actual department before creating a job and preserves cargo classification',async()=>{
  const {DB,call}=setup(),p=(await call('sop_attendance_checkin',{name:'虚拟盘点甲',agency:'가온'})).record;
- const request={payload:{action:'v2_ops_job_start',job_type:'inventory',flow_stage:'internal',client_req_id:'shared-job-fixture'},workers:[{id:p.badgeId,name:p.name}],lead_id:p.badgeId,estimated_minutes:5};
+ const request={payload:{action:'v2_ops_job_start',job_type:'inventory',inventory_type:'precise',internal_metrics:{inventory_count:0,location_count:0,used_forklift:false},flow_stage:'internal',client_req_id:'shared-job-fixture'},workers:[{id:p.badgeId,name:p.name}],lead_id:p.badgeId,estimated_minutes:5};
  const missing=await call('sop_native_start',request,false);assert.equal(missing.ok,false);assert.match(missing.error,/用工部门/);assert.equal(DB.raw.prepare('SELECT COUNT(*) n FROM v2_ops_jobs').get().n,0);
  const invalid=await call('sop_native_start',{...request,labor_department:'invented'},false);assert.equal(invalid.ok,false);
  const started=await call('sop_native_start',{...request,labor_department:'import'});const job=DB.raw.prepare('SELECT * FROM v2_ops_jobs WHERE id=?').get(started.job_id);assert.equal(job.biz_class,'');

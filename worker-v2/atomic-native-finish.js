@@ -1,3 +1,4 @@
+import {isInternal,validateOperationFinish} from '../shared/internal-operations.js';
 import {putawayType,putawayMetrics,stagedPlanStatement} from './inbound-stages.js';
 import {departmentCodes,inboundCodes,needsPutaway} from './inbound-flow.js';
 const q=(e,s,...a)=>e.DB.prepare(s).bind(...a);
@@ -7,6 +8,12 @@ const unfinished="('pending','working','awaiting_close','paused')";
 export async function atomicNativeFinish(env,body,job,{inbound=false,biz='',delivery=false}={}){
  const t=new Date().toISOString(),id=job.id,resultId='RES-FINAL-'+id,token=crypto.randomUUID(),by=String(body.worker_id||env.SOP_REQUEST_USER?.id||'');
  const isReturn=job.job_type==='inbound_return',isPutaway=job.job_type===putawayType,lines=isReturn||isPutaway?[]:(body.result_lines||[]),data=delivery?{destination_note:String(body.destination_note||'').trim(),estimated_piece_count:Number(body.estimated_piece_count||0),remark:String(body.remark||'').trim()}:inbound?{remark:String(body.remark||''),result_note:String(body.result_note||''),result_lines:lines,...(isReturn?{is_return:true}:isPutaway?putawayMetrics(body):{extra_ops:body.extra_ops||{}})}:(body.shared_result||{});
+ const operation=validateOperationFinish(job,body);
+ if(operation)data.internal_operation={...operation,finish:{...operation.finish,recorded_at:t,recorded_by:env.SOP_REQUEST_USER?.id||by}};
+ else if(isInternal(job.job_type)){
+  const previous=JSON.parse(job.shared_result_json||'{}');
+  for(const [key,value] of Object.entries(previous))if(!Object.hasOwn(data,key)||!Object.hasOwn(body,key))data[key]=value;
+ }
  const plan=inbound&&job.related_doc_id?await q(env,'SELECT * FROM v2_inbound_plans WHERE id=?',job.related_doc_id).first():null;
  const json=JSON.stringify({...data,_completion_request:token}),result=inbound||delivery?{ok:true,result_id:resultId}:{ok:true},claimKey='NATIVE-FINISH:'+id;
  const gate=inbound?"EXISTS(SELECT 1 FROM v2_ops_job_results WHERE id=? AND json_extract(result_json,'$._completion_request')=?)":"EXISTS(SELECT 1 FROM v2_idempotency_keys WHERE idem_key=? AND json_extract(response_json,'$._completion_request')=?)",g=[inbound?resultId:claimKey,token],sql=[];
@@ -16,7 +23,7 @@ export async function atomicNativeFinish(env,body,job,{inbound=false,biz='',deli
  SELECT ?,?,?,?,?,?,?,?,? FROM v2_ops_jobs WHERE id=? AND status IN ${active}${planGuard}`,resultId,id,0,0,String(body.remark||''),json,JSON.stringify(lines),by,t,id,...planArgs));
  else{
    sql.push(q(env,`INSERT INTO v2_idempotency_keys(idem_key,action,response_json,created_at) SELECT ?,?,?,? FROM v2_ops_jobs WHERE id=? AND status IN ${active}`,claimKey,body.action||'v2_ops_job_finish',JSON.stringify({...result,_completion_request:token}),t,id));
-   if(delivery||body.box_count!=null||body.pallet_count!=null||body.remark)sql.push(q(env,`INSERT INTO v2_ops_job_results(id,job_id,box_count,pallet_count,remark,result_json,created_by,created_at) SELECT ?,?,?,?,?,?,?,? WHERE ${gate}`,resultId,id,Number(body.box_count||0),Number(body.pallet_count||0),String(body.remark||''),JSON.stringify(data),by,t,...g));
+   if(operation||delivery||body.box_count!=null||body.pallet_count!=null||body.remark)sql.push(q(env,`INSERT INTO v2_ops_job_results(id,job_id,box_count,pallet_count,remark,result_json,created_by,created_at) SELECT ?,?,?,?,?,?,?,? WHERE ${gate}`,resultId,id,Number(body.box_count||0),Number(body.pallet_count||0),String(body.remark||''),JSON.stringify(data),by,t,...g));
  }
  sql.push(q(env,`UPDATE v2_ops_job_workers SET left_at=?,minutes_worked=MAX(0,ROUND((julianday(?)-julianday(joined_at))*14400)/10.0),leave_reason='job_completed' WHERE job_id=? AND left_at='' AND ${gate}`,t,t,id,...g));
  sql.push(q(env,`UPDATE v2_ops_jobs SET status='completed',active_worker_count=0,shared_result_json=?,finished_at=?,updated_at=? WHERE id=? AND ${gate}`,JSON.stringify(data),t,t,id,...g));

@@ -7,7 +7,7 @@ async function setup(){
  const ok=async(s,a,b={},c)=>{const r=await call(s,a,b,c);assert.equal(r.ok,true,a+': '+r.error);return r;};await ok('office','sop_login',{sop_key:'synthetic-daily-permission'});await confirmOperation((a,b)=>call('office',a,b),'合成权限管理员');await ok('office','sop_attendance_config');
  const permanent=async(name='合成同名人员')=>(await ok('office','sop_attendance_register',{name,agency:'가온'})).person,checkin=async p=>(await ok('office','sop_attendance_checkin',{badge:p.badgeId,agency:p.agency})).record;
  const grant=(p,enabled=true,version=0,departments=['bulk'])=>ok('office','sop_daily_dispatch_update',{person_id:p.id,badge:p.badgeId,enabled,version,departments,reason:'合成核实授权'}),login=p=>ok('field','sop_login',{badge:p.badgeId});
- const start=(p,more={})=>call('field','sop_native_start',{payload:{action:'v2_ops_job_start',job_type:'inventory',flow_stage:'internal',client_req_id:crypto.randomUUID()},workers:[{id:p.badgeId,name:p.name}],lead_id:p.badgeId,estimated_minutes:10,labor_department:'bulk',...more});
+ const start=(p,more={})=>call('field','sop_native_start',{payload:{action:'v2_ops_job_start',job_type:'inventory',inventory_type:'precise',internal_metrics:{inventory_count:0,location_count:0,used_forklift:false},flow_stage:'internal',client_req_id:crypto.randomUUID()},workers:[{id:p.badgeId,name:p.name}],lead_id:p.badgeId,estimated_minutes:10,labor_department:'bulk',...more});
  return {DB,env,cookies,call,ok,permanent,checkin,grant,login,start};
 }
 test('daily dispatch defaults off, grants only explicit departments and no administrative authority',async()=>{

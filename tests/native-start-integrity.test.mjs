@@ -13,7 +13,7 @@ async function fixture(t){
   const env={DB,SOP_ENVIRONMENT:'staging',SOP_UPGRADE_ENABLED:'true',SOP_PUBLIC_TEST_ACCESS:'true',SOP_WORK_CHAIN_ENABLED:'true'};
   const call=async(action,body={})=> (await worker.fetch(new Request('https://fixture.invalid/api',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,client_req_id:crypto.randomUUID(),...body})}),env)).json();
   assert.equal((await call('sop_identity')).ok,true);
-  const body={payload:{action:'v2_ops_job_start',flow_stage:'internal',job_type:'inventory',client_req_id:'QA-START-ATOMIC-ONCE'},workers:[{id:'QA-A',name:'QA alpha'},{id:'QA-B',name:'QA beta'}],lead_id:'QA-A',estimated_minutes:10,labor_department:'direct_ship'};
+  const body={payload:{action:'v2_ops_job_start',flow_stage:'internal',job_type:'inventory',inventory_type:'precise',internal_metrics:{inventory_count:0,location_count:0,used_forklift:false},client_req_id:'QA-START-ATOMIC-ONCE'},workers:[{id:'QA-A',name:'QA alpha'},{id:'QA-B',name:'QA beta'}],lead_id:'QA-A',estimated_minutes:10,labor_department:'direct_ship'};
   const snapshot=()=>({jobs:DB.raw.prepare('SELECT id,status FROM v2_ops_jobs').all(),workers:DB.raw.prepare('SELECT id,worker_id,job_id,left_at FROM v2_ops_job_workers').all(),dispatch:DB.raw.prepare("SELECT id,state FROM sop_records WHERE kind='dispatch'").all(),events:DB.raw.prepare("SELECT request_id FROM sop_events WHERE action='sop_native_start'").all(),idem:DB.raw.prepare('SELECT idem_key FROM v2_idempotency_keys WHERE idem_key=?').all(body.payload.client_req_id)});
   return{DB,env,call,body,snapshot};
 }

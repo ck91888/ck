@@ -1,3 +1,5 @@
+import {isInternal,readOperation,operationSummary,operationExport} from '../shared/internal-operations.js';
+import {internalEnabled,protectInternalMutation} from './internal-operations.js';
 import {resolveInboundEntry,independentInbound} from './independent-inbound.js';
 import {stagedInbound,putawayType,putawayMetrics,stagedPlanStatement} from './inbound-stages.js';
 import {executionDepartment} from './work-execution.js';
@@ -221,7 +223,7 @@ async function batchSelectInGlobal(env, sqlTemplate, ids) {
 // 解析 v2_ops_job_results → 业务可读摘要 + 各项数量累加
 // 输入：job_type, results rows
 // 输出：result_summary / 累加字段 / raw_result_json_compact
-function parseOpsResultForExport(job_type, resultRows) {
+function parseOpsResultForExport(job_type, resultRows, job) {
   const out = {
     result_summary: '',
     location_count_sum: 0,
@@ -527,6 +529,7 @@ function parseOpsResultForExport(job_type, resultRows) {
   if (out.result_summary.length > 500) {
     out.result_summary = out.result_summary.slice(0, 500) + '...';
   }
+  if(job&&isInternal(job_type)){Object.assign(out,operationExport(job));out.result_summary=operationSummary(job)+(readOperation(job)?(out.result_notes?'；备注：'+out.result_notes:''):'；'+out.result_summary);}
   return out;
 }
 
@@ -815,7 +818,7 @@ async function autoCloseJobIfNoOpenWorkers(env, jobId, t) {
   if (!jobId) return null;
   const closeAt = t || now();
   const job = await env.DB.prepare(
-    "SELECT id, status, job_type FROM v2_ops_jobs WHERE id=?"
+    "SELECT id, status, job_type,shared_result_json FROM v2_ops_jobs WHERE id=?"
   ).bind(jobId).first();
   if (!job) return null;
   if (job.status === 'completed' || job.status === 'cancelled') return job;
@@ -826,6 +829,10 @@ async function autoCloseJobIfNoOpenWorkers(env, jobId, t) {
   const openCount = Number((openCnt && openCnt.c) || 0);
   if (openCount > 0) return job;
 
+  if(internalEnabled(env)&&readOperation(job)){
+    await env.DB.prepare("UPDATE v2_ops_jobs SET status='awaiting_close',active_worker_count=0,updated_at=? WHERE id=? AND status IN ('pending','working','awaiting_close')").bind(closeAt,jobId).run();
+    return {...job,status:'awaiting_close'};
+  }
   if (isTimeOnlyJobType(job.job_type)) {
     const defaultSummary = (job.job_type === 'verify_scan')
       ? '扫码核对：仅记录工时，无数量结果'
@@ -5873,6 +5880,7 @@ route("v2_inbound_job_start", async (body, env) => {
   if (VALID_JOB_TYPES.indexOf(job_type) === -1) return err("invalid job_type: " + job_type);
   if(stagedInbound(job_type))return err('请从正常派工入口开始理货或上架 / 담당자가 배정하여 시작하세요');
   const isReturn = (job_type === 'inbound_return');
+  if(internalEnabled(env)&&isReturn)return err('请从退件入库派工入口开始 / 반품 입고 배정으로 시작하세요',409);
   // 入库换单（biz_class=change_order）走标准计划路径，与代发/大货同流程
   const isStandard = (job_type === 'inbound_direct_tally' || job_type === 'inbound_direct_putaway' || job_type === 'inbound_direct' || job_type === 'inbound_bulk' || job_type === 'inbound_change_order');
 
@@ -6077,7 +6085,7 @@ route("v2_inbound_job_finish", async (body, env) => {
     if (!leave_only) {
       const jobCheck = await env.DB.prepare("SELECT status, job_type FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
       if (jobCheck && jobCheck.status === 'completed') {
-        const cleaned = await closeOpenWorkerSegmentsForJob(env, job_id, t, 'already_completed_cleanup');
+        const cleaned = internalEnabled(env)&&isInternal(jobCheck.job_type)?0:await closeOpenWorkerSegmentsForJob(env, job_id, t, 'already_completed_cleanup');
         return { ok: true, already_completed: true, error: "already_completed", cleaned_open_segments: cleaned, message: "任务已完成" };
       }
     }
@@ -6916,6 +6924,7 @@ route("v2_outbound_order_export", async (body, env) => {
 // GENERIC OPS JOB — for flexible use
 // =====================================================
 route("v2_ops_job_start", async (body, env) => {
+  if(internalEnabled(env)&&isInternal(body.job_type))return err("请从本作业派工入口开始 / 담당자가 배정하여 시작하세요",409);
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
   if(env.SOP_ENVIRONMENT==='staging'&&env.SOP_UPGRADE_ENABLED==='true'&&String(body.job_type||'').trim()==='pick_direct')return err('请从代发拣货入口开始 / 직배송 피킹 메뉴에서 시작하세요',409);
   const flow_stage = String(body.flow_stage || "").trim();
@@ -7009,9 +7018,9 @@ route("v2_ops_job_finish", async (body, env) => {
   return withIdem(env, body, "v2_ops_job_finish", async () => {
     const t = now();
 
-    const jobCheck = await env.DB.prepare("SELECT status FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
+    const jobCheck = await env.DB.prepare("SELECT status,job_type FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
     if (jobCheck && jobCheck.status === 'completed') {
-      const cleaned = await closeOpenWorkerSegmentsForJob(env, job_id, t, 'already_completed_cleanup');
+      const cleaned = internalEnabled(env)&&isInternal(jobCheck.job_type)?0:await closeOpenWorkerSegmentsForJob(env, job_id, t, 'already_completed_cleanup');
       return { ok: true, already_completed: true, error: "already_completed", cleaned_open_segments: cleaned, message: "任务已完成" };
     }
 
@@ -9767,7 +9776,7 @@ route("v2_admin_cleanup_job_statuses", async (body, env) => {
   const t = now();
   const tMs = Date.parse(t);
   const rs = await env.DB.prepare(`
-    SELECT id, job_type, status, finished_at, updated_at, created_at
+    SELECT id, job_type, status, shared_result_json, finished_at, updated_at, created_at
       FROM v2_ops_jobs
      WHERE status IN ('pending','working','awaiting_close')
      ORDER BY created_at ASC
@@ -9785,6 +9794,7 @@ route("v2_admin_cleanup_job_statuses", async (body, env) => {
   const examples = [];
   for (const j of rows) {
     checked_count++;
+    if(internalEnabled(env)&&readOperation(j)){kept_active_count++;continue;}
     const openCnt = await env.DB.prepare(
       "SELECT COUNT(*) AS c FROM v2_ops_job_workers WHERE job_id=? AND left_at=''"
     ).bind(j.id).first();
@@ -10737,7 +10747,7 @@ route("v2_dashboard_order_list", async (body, env) => {
   const sql = `
     SELECT
       j.id, j.display_no, j.related_doc_type, j.related_doc_id, j.linked_outbound_order_id,
-      j.flow_stage, j.biz_class, j.job_type, j.status, j.created_at, j.updated_at,
+      j.flow_stage, j.biz_class, j.job_type, j.status, j.shared_result_json, j.created_at, j.updated_at,
       (SELECT COUNT(DISTINCT w2.worker_id) FROM v2_ops_job_workers w2 WHERE w2.job_id=j.id) AS worker_count,
       (SELECT COALESCE(SUM(w2.minutes_worked),0) FROM v2_ops_job_workers w2 WHERE w2.job_id=j.id) AS total_minutes,
       (SELECT MIN(w2.joined_at) FROM v2_ops_job_workers w2 WHERE w2.job_id=j.id) AS started_at,
@@ -10757,7 +10767,7 @@ route("v2_dashboard_order_list", async (body, env) => {
   resultsAll.forEach(r => { (resultsByJob[r.job_id] = resultsByJob[r.job_id] || []).push(r); });
 
   const items = baseItems.map(j => {
-    const parsed = parseOpsResultForExport(j.job_type, resultsByJob[j.id] || []);
+    const parsed = parseOpsResultForExport(j.job_type, resultsByJob[j.id] || [],j);
     return Object.assign({}, j, {
       total_minutes: round1(j.total_minutes),
       box_count_sum: parsed.box_count_sum,
@@ -10765,6 +10775,7 @@ route("v2_dashboard_order_list", async (body, env) => {
       packed_box_count_sum: parsed.packed_box_count_sum,
       total_operated_box_count_sum: parsed.total_operated_box_count_sum,
       label_count_sum: parsed.label_count_sum,
+      ...operationExport(j),
       result_summary: parsed.result_summary,
       result_remarks_short: (parsed.result_notes || '').slice(0, 100)
     });
@@ -10799,7 +10810,7 @@ route("v2_dashboard_order_detail", async (body, env) => {
   }
 
   const results = resultsRs.results || [];
-  const parsed = parseOpsResultForExport(job.job_type, results);
+  const parsed = parseOpsResultForExport(job.job_type, results,job);
 
   // 关联单据的备注（让单子详情能直接看到客服备注 / 出库要求 等）
   let inbound_remark = '';
@@ -10885,7 +10896,7 @@ route("v2_dashboard_order_export", async (body, env) => {
 
   const jobsRs = await env.DB.prepare(
     `SELECT id, display_no, related_doc_type, related_doc_id, linked_outbound_order_id,
-            flow_stage, biz_class, job_type, status, created_at, updated_at
+            flow_stage, biz_class, job_type, status, shared_result_json, created_at, updated_at
      FROM v2_ops_jobs j ${where}
      ORDER BY j.created_at DESC LIMIT ?`
   ).bind(...binds, limit).all();
@@ -10976,7 +10987,7 @@ route("v2_dashboard_order_export", async (body, env) => {
     const ended_at_iso = ws.reduce((m, w) => (w.left_at && w.left_at > m) ? w.left_at : m, '');
 
     // 解析 result_json → 业务可读摘要 + 各项累加
-    const parsed = parseOpsResultForExport(j.job_type, rs);
+    const parsed = parseOpsResultForExport(j.job_type, rs,j);
 
     // 代发拣货：拣货单号 + 拣货人员明细 + 摘要补充
     let pick_doc_nos = '', pick_worker_summary = '';
@@ -11083,6 +11094,7 @@ route("v2_dashboard_order_export", async (body, env) => {
       total_hours: round1(total_minutes / 60),
       // 作业结果（业务可读摘要 + 解析后的各项累加）
       result_count: rs.length,
+      ...operationExport(j),
       result_summary: parsed.result_summary,
       result_notes: parsed.result_notes,
       diff_notes: parsed.diff_notes,
@@ -13089,7 +13101,7 @@ export default {
       try{return json(await (action==='v2_verify_scan_submit'?scanCheck:finishCheck)(body,env));}catch(e){return json({ok:false,error:e.message},409);}
     }
     env.SOP_GROUP_FINISH = /_(finish|finalize)$/.test(action) && !body.leave_only && await nativeOwner(body,env);
-    try{await validateNativeMutation(body,env);}catch(e){return json({ok:false,error:e.message},409);}
+    try{await protectInternalMutation(body,env);await validateNativeMutation(body,env);}catch(e){return json({ok:false,error:e.message},409);}
     if(action==='sop_demo_prepare'){
       try{return json(await prepareDemo(env,async input=>{const response=await HANDLERS[input.action](input,env);return response.json();},input=>handleSop(input,env)));}
       catch(e){return json({ok:false,error:'虚拟数据准备失败：'+e.message},400);}

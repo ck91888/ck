@@ -83,8 +83,8 @@ test('all 20 historical native job types preserve identity through pause and con
  const types=['unload','inbound_direct','inbound_bulk','inbound_return','inbound_change_order','pick_direct','bulk_op','pack_direct','change_order','load_outbound','outbound_stock_op','inventory','disposal','qc','issue_handle','other_internal','scan_pallet','load_import','pickup_delivery_import','verify_scan'];
  const f=setup();for(const [i,type] of types.entries()){
   // Canonical dispatch fixture, including historical types with no new-start entry.
-  const a=await f.person('QA 20类型 '+i),j=await f.start([a.w],'v2_ops_job_start',{job_type:type==='pick_direct'?'other_internal':type,flow_stage:'internal'});
-  if(type==='pick_direct'){f.DB.raw.prepare('UPDATE v2_ops_jobs SET job_type=? WHERE id=?').run(type,j.job_id);f.DB.raw.prepare("UPDATE sop_records SET state=json_set(state,'$.job_type',?) WHERE id=?").run(type,j.job_id);}
+  const a=await f.person('QA 20类型 '+i),j=await f.start([a.w],'v2_ops_job_start',{job_type:'pack_direct',flow_stage:'internal'});
+  {f.DB.raw.prepare('UPDATE v2_ops_jobs SET job_type=? WHERE id=?').run(type,j.job_id);f.DB.raw.prepare("UPDATE sop_records SET state=json_set(state,'$.job_type',?) WHERE id=?").run(type,j.job_id);}
   await f.ok('sop_native_pause',{job_id:j.job_id,revision:1,reason:'QA '+type});assert.equal(f.active(j.job_id).length,0,type);
   const detail=await f.ok('v2_ops_job_detail',{job_id:j.job_id});assert.equal(detail.can_manage_dispatch,true);assert.equal(detail.job.status,'paused');
   await f.ok('sop_native_resume',{job_id:j.job_id,revision:2,workers:[a.w],lead_id:a.w.id});assert.equal(f.active(j.job_id).length,1,type);

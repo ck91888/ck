@@ -18,7 +18,7 @@ async function fixture(t){
  const activeWorkers=()=>DB.raw.prepare("SELECT count(*) n FROM v2_ops_job_workers WHERE left_at=''").get().n;
  const snapshot=()=>Object.fromEntries(['v2_inbound_plans','v2_inbound_plan_lines','v2_inbound_plan_biz_tasks','ck_courier_plan_items','ck_courier_plan_item_history','ck_inbound_document_versions','v2_outbound_orders'].map(table=>[table,DB.raw.prepare('SELECT * FROM '+table+' ORDER BY rowid').all()]));
  const native=(payload,key=crypto.randomUUID())=>call('sop_native_start',{payload:{client_req_id:key,...payload},workers:[{id:'QA-CANCEL-WORKER',name:'QA synthetic worker'}],lead_id:'QA-CANCEL-WORKER',estimated_minutes:10,labor_department:'bulk'});
- const generic=id=>native({action:'v2_ops_job_start',flow_stage:'internal',job_type:'inventory',related_doc_type:'inbound_plan',related_doc_id:id});
+ const generic=id=>native({action:'v2_ops_job_start',flow_stage:'internal',job_type:'inventory',inventory_type:'precise',internal_metrics:{inventory_count:0,location_count:0,used_forklift:false},related_doc_type:'inbound_plan',related_doc_id:id});
  await ok('sop_identity');
  return {DB,env,call,ok,createBody,create,cancel,plan,jobs,activeWorkers,snapshot,native,generic};
 }

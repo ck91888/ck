@@ -724,6 +724,20 @@ async function exportOrders(btn) {
       开始时间: r.started_at || '',
       结束时间: r.ended_at || '',
       作业结果摘要: r.result_summary || '',
+      记录版本: r.internal_record_version ?? '',
+      盘点类型: ({blind:'盲盘',precise:'精盘'})[r.inventory_type] || (r.job_type==='inventory'?'未记录':''),
+      填写时点: ({start:'开始',finish:'结束',legacy:'旧版未记录'})[r.internal_record_phase] || '',
+      盘点数量: r.inventory_count ?? '',
+      废弃拣货数量: r.disposal_pick_count ?? '',
+      库内货位数量: r.internal_location_count ?? '',
+      库内使用叉车: r.internal_used_forklift == null ? '' : (r.internal_used_forklift?'是':'否'),
+      质检数量: r.qc_count ?? '',
+      整理内容: r.organizing_content ?? '',
+      退件入库单数: r.return_order_count ?? '',
+      入库产品数: r.return_product_count ?? '',
+      专项记录时间: r.internal_recorded_at ?? '',
+      专项记录人: r.internal_recorded_by ?? '',
+      专项原始记录: r.internal_operation_json || '',
       作业备注: r.result_notes || '',
       差异说明: r.diff_notes || '',
       作业明细行数: r.result_lines_count || 0,
@@ -823,14 +837,16 @@ async function openOrderDetail(jobId) {
   html += statusTag(j.status) + chipHtml;
   if (j.customer) html += ' <span style="font-size:13px;color:#1565c0;"><b>客户:</b> ' + esc(j.customer) + '</span>';
   // 待收尾 → 补录按钮；已完成 → 修改产出按钮（扫码核对均不显示）
-  if (!isVerifyScan && (j.status === 'awaiting_close' || j.status === 'pending' || j.status === 'working')) {
+  var measuredOperation=!!j.shared_result_json && (()=>{try{return JSON.parse(j.shared_result_json).internal_operation?.version===1;}catch(e){return false;}})();
+  if (!isVerifyScan && !measuredOperation && (j.status === 'awaiting_close' || j.status === 'pending' || j.status === 'working')) {
     html += ' <button class="btn-primary" onclick="openManualFinalize(\'' + esc(j.id) + '\')">补充产出并完成 / 결과 입력 후 완료</button>';
   }
-  if (!isVerifyScan && j.status === 'completed') {
+  if (!isVerifyScan && !measuredOperation && j.status === 'completed') {
     html += ' <button class="btn-secondary" onclick="openResultUpdate(\'' + esc(j.id) + '\')">修改产出数据 / 결과 수정</button>';
   }
   html += '</div>';
 
+  if(res.parsed?.internal_operation_json)html += '<p style="white-space:pre-wrap;overflow-wrap:anywhere">'+esc(res.parsed.result_summary)+'</p>';
   html += '<h3>基本信息</h3>';
   html += '<table class="data-table"><tr><th>作业计划号</th><td>' + esc(j.work_plan_no || '--') + '</td>';
   html += '<th>业务单号</th><td>' + esc(window.CKDocumentLabels.jobLabel(j)) + '</td></tr>';

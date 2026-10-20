@@ -2095,6 +2095,7 @@ async function initInboundReturn() {
 }
 
 function renderInboundReturnSession(job) {
+  window.CKInternalOperations?.working(job);
   var el = document.getElementById("inboundReturnSessionInfo");
   if (!el) return;
   var html = '<div><b>任务 / 작업:</b> ' + esc(window.CKDocumentLabels.jobLabel(job)) + '</div><div><b>派审员 / 배정·검수 담당자:</b> ' + esc(window.CKDocumentLabels.jobDispatcher(job)) + '</div>';
@@ -2152,6 +2153,7 @@ async function inboundReturnLeave(btnEl) {
 async function finishInboundReturn(btnEl) {
   if (!_activeJobId) { alert("没有进行中的任务 / 진행 중인 작업 없음"); return; }
   withActionLock('finishInboundReturn', btnEl || null, '提交中.../저장중...', async function() {
+    var metrics;try{metrics=await window.CKInternalOperations?.finish(_activeJobId)||{};}catch(e){alert(e.message);return;}
     var remark = (document.getElementById("inboundReturnRemark") || {}).value || "";
     var resultNote = (document.getElementById("inboundReturnResultNote") || {}).value || "";
     var res = await api({
@@ -2160,6 +2162,7 @@ async function finishInboundReturn(btnEl) {
       worker_id: getWorkerId(),
       remark: remark.trim(),
       result_note: resultNote.trim(),
+      ...metrics,
       complete_job: true
     });
     if (res && res.ok && !res.already_completed) {
@@ -4315,6 +4318,7 @@ async function refreshBulkWorkers() {
 
 // ===== Generic Job — 轻量工时页统一模板 =====
 var _genericJobCtx = {};
+var _gjStartRequest = null;
 var _gjStartedAt = null;
 var _gjElapsedTimer = null;
 
@@ -4378,6 +4382,7 @@ function _gjStopElapsedTimer() {
 }
 
 function _gjEnterWorkingState(jobDetail) {
+  window.CKInternalOperations?.working(jobDetail);
   _gjSwitchState("working");
   var titleEl = document.getElementById("gjActiveTitle");
   if (titleEl) titleEl.textContent = window.CKDocumentLabels.jobSummary(jobDetail || _genericJobCtx);
@@ -4400,6 +4405,9 @@ function _gjEnterWorkingState(jobDetail) {
 function initGenericJob() {
   resetGenericJobState();
   _genericJobCtx = _pageParams || {};
+  _gjStartRequest = null;
+  window.CKInternalOperations?.idle(_genericJobCtx.job_type);
+  var internalFinish=document.getElementById("ck-internal-finish");if(internalFinish)internalFinish.hidden=true;
   var title = _genericJobCtx.title || "--";
   var el = document.getElementById("genericJobTitle");
   if (el) el.textContent = title;
@@ -4447,8 +4455,11 @@ function goGenericBack() {
 async function startGenericJob(btnEl) {
   if (hasOtherActiveJob()) return warnActiveJob();
   withActionLock('startGenericJob', btnEl || null, '提交中.../저장중...', async function() {
+    var metrics;try{metrics=await window.CKInternalOperations?.start(_genericJobCtx.job_type)||{};}catch(e){alert(e.message);return;}
+    if(!_gjStartRequest)_gjStartRequest=crypto.randomUUID();
     var res = await api({
       action: "v2_ops_job_start",
+      ...metrics,client_req_id:_gjStartRequest,
       flow_stage: _genericJobCtx.flow_stage || "",
       biz_class: _genericJobCtx.biz_class || "",
       job_type: _genericJobCtx.job_type || "",
@@ -4493,8 +4504,10 @@ async function leaveGenericJob(btnEl) {
 async function finishGenericJob(btnEl) {
   if (!_activeJobId) { alert("没有进行中的任务 / 진행 중인 작업 없음"); return; }
   withActionLock('finishGenericJob', btnEl || null, '提交中.../저장중...', async function() {
+    var metrics;try{metrics=await window.CKInternalOperations?.finish(_activeJobId)||{};}catch(e){_gjShowError(e.message);return;}
     var res = await api({
       action: "v2_ops_job_finish",
+      ...metrics,
       job_id: _activeJobId,
       worker_id: getWorkerId()
     });

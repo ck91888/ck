@@ -46,8 +46,8 @@ test('putaway candidate lists exclude unload-only plans in either labor departme
 });
 test('return inbound remains an independent labor session and cannot attach to pallet-return plans',async()=>{
  const {plan,unload,call,detail,DB}=setup();const pallet=await plan(['return']);await unload(pallet);
- const j=await call('v2_inbound_job_start',{job_type:'inbound_return',biz_class:'return',worker_id:'R',worker_name:'退件甲'});assert.notEqual(j.plan_id,pallet.id);assert.equal(DB.raw.prepare('SELECT source_type FROM v2_inbound_plans WHERE id=?').get(j.plan_id).source_type,'return_session');
- await call('v2_inbound_job_finish',{job_id:j.job_id,worker_id:'R',complete_job:true});assert.equal((await detail(pallet)).plan.status,'completed');assert.equal(DB.raw.prepare('SELECT status FROM v2_ops_jobs WHERE id=?').get(j.job_id).status,'completed');
+ const j=await call('sop_native_start',{payload:{action:'v2_inbound_job_start',job_type:'inbound_return',biz_class:'return',client_req_id:crypto.randomUUID()},workers:[{id:'R',name:'退件甲'}],lead_id:'R',estimated_minutes:10,labor_department:'direct_ship'});assert.notEqual(j.plan_id,pallet.id);assert.equal(DB.raw.prepare('SELECT source_type FROM v2_inbound_plans WHERE id=?').get(j.plan_id).source_type,'return_session');
+ await call('v2_inbound_job_finish',{job_id:j.job_id,worker_id:'R',complete_job:true,internal_metrics:{return_order_count:0,return_product_count:0}});assert.equal((await detail(pallet)).plan.status,'completed');assert.equal(DB.raw.prepare('SELECT status FROM v2_ops_jobs WHERE id=?').get(j.job_id).status,'completed');
 });
 test('legacy arrived plans can add a reference; stale edits, duplicates and rebinds during putaway are rejected',async()=>{
  const {plan,unload,call,DB,detail}=setup();const p=await plan(['direct_ship'],{external_inbound_no:'OLD-CODE'});await unload(p);DB.raw.prepare("UPDATE v2_inbound_plans SET external_inbound_no='' WHERE id=?").run(p.id);

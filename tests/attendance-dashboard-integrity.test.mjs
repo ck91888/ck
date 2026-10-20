@@ -75,7 +75,7 @@ async function disabledHistoricalPunch(t){
 test('disabled employee with a legacy open punch cannot enter a new native task',async t=>{
  const {s,p}=await disabledHistoricalPunch(t);
  const started=await s.raw('sop_native_start',{
-  payload:{action:'v2_ops_job_start',job_type:'inventory',flow_stage:'internal',client_req_id:crypto.randomUUID()},
+  payload:{action:'v2_ops_job_start',job_type:'inventory',inventory_type:'precise',internal_metrics:{inventory_count:0,location_count:0,used_forklift:false},flow_stage:'internal',client_req_id:crypto.randomUUID()},
   labor_department:'bulk',workers:[{id:p.badgeId,name:p.name}],lead_id:p.badgeId,estimated_minutes:5
  });
  assert.equal(started.body.ok,false,JSON.stringify(started));

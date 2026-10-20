@@ -76,17 +76,17 @@ test('two external-number jobs finishing together close the department and paren
   assert.match(detail.biz_tasks[0].worker_names,/验收0甲/);assert.match(detail.biz_tasks[0].worker_names,/验收1甲/);
 });
 
-test('time-only generic finish rolls back all crew clocks if job completion fails, then retries once',async t=>{
+test('QC result finish rolls back all crew clocks if job completion fails, then retries once',async t=>{
   const f=fixture(t),job=await f.start('v2_ops_job_start',{flow_stage:'internal',job_type:'qc'}),before=f.snap(job.job_id);
   f.DB.raw.exec("CREATE TRIGGER qa_generic_failure BEFORE UPDATE OF status ON v2_ops_jobs WHEN NEW.status='completed' AND NEW.job_type='qc' BEGIN SELECT RAISE(ABORT,'qa_generic_failure'); END");
-  const body={job_id:job.job_id,worker_id:'QA-A',client_req_id:'QA-GENERIC-ONCE'};
+  const body={job_id:job.job_id,worker_id:'QA-A',client_req_id:'QA-GENERIC-ONCE',internal_metrics:{qc_count:0}};
   assert.equal((await f.call('v2_ops_job_finish',body)).ok,false);
   assert.deepEqual(f.snap(job.job_id),before);
   f.DB.raw.exec('DROP TRIGGER qa_generic_failure');
   assert.equal((await f.call('v2_ops_job_finish',body)).ok,true);
   const after=f.snap(job.job_id);assert.equal(after.job.status,'completed');assert.equal(after.workers.filter(w=>!w.left_at).length,0);
-  // Time-only tasks must keep their existing no-quantity-result semantics.
-  assert.equal(after.results.length,0);
+  // One task result is recorded even when the actual count is zero.
+  assert.equal(after.results.length,1);
   assert.equal((await f.call('v2_ops_job_finish',body)).ok,true);assert.deepEqual(f.snap(job.job_id),after);
 });
 

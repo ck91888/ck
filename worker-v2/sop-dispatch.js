@@ -16,6 +16,7 @@ export async function startNative(body,env,invoke,guard,helpers={}){
  const u=env.SOP_REQUEST_USER;
  if(env.SOP_ENVIRONMENT!=='staging'||!['manager','dispatcher'].includes(u?.role))return {ok:false,error:'请以已授权的派审员登录 / 배정 담당자로 로그인하세요'};
  const p={...body.payload};if(!starts.has(p.action))return {ok:false,error:'无效作业类型'};
+ if(p.action==='v2_ops_job_start'&&p.job_type==='inbound_return')return {ok:false,error:'请从退件入库入口开始 / 반품 입고 메뉴에서 시작하세요'};
  if(p.action==='v2_ops_job_start'&&p.job_type==='pick_direct')return {ok:false,error:'请从代发拣货入口扫描拣货单并填写开工工作量 / 직배송 피킹 메뉴에서 시작하세요'};
  if(p.action==='v2_pick_job_start_by_docs'||p.action==='v2_pick_job_start'){
   const codes=Array.isArray(p.pick_doc_nos)?p.pick_doc_nos:typeof p.pick_doc_nos==='string'?p.pick_doc_nos.split(','):[];

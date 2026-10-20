@@ -70,7 +70,7 @@ test('resting or signed-out staff cannot be added; valid attendance rejoins with
 });
 test('all generic job types finish a three-person crew under dispatch management',async()=>{
  const {start,ok,count,status}=setup();for(const job_type of ['pack_direct','change_order','load_import','scan_pallet','inventory','qc','disposal','other_internal']){
-  const j=await start('v2_ops_job_start',{job_type,flow_stage:'internal'});await ok('v2_ops_job_finish',{job_id:j.job_id,worker_id:'A'});assert.equal(count(j.job_id),0,job_type);assert.equal(status(j.job_id),'completed',job_type);
+  const j=await start('v2_ops_job_start',{job_type,flow_stage:'internal',...(job_type==='inventory'?{inventory_type:'precise',internal_metrics:{inventory_count:0,location_count:0,used_forklift:false}}:job_type==='disposal'?{internal_metrics:{pick_count:0,location_count:0,used_forklift:false}}:{})});await ok('v2_ops_job_finish',{job_id:j.job_id,worker_id:'A',...(job_type==='qc'?{internal_metrics:{qc_count:0}}:job_type==='other_internal'?{internal_metrics:{organizing_content:'合成整理'}}:{})});assert.equal(count(j.job_id),0,job_type);assert.equal(status(j.job_id),'completed',job_type);
  }
 });
 test('moving the whole crew preserves a finishable task and restores the correct lead on reassignment',async()=>{
@@ -91,7 +91,7 @@ test('independent import trips do not merge crews and both finish from the dispa
   await ok('v2_import_delivery_job_finish',{job_id:a.job_id,worker_id:'A',complete_job:true,destination_note:'QA first dock'});assert.equal(status(a.job_id),'completed');assert.equal(count(b.job_id),2);await ok('v2_import_delivery_job_finish',{job_id:b.job_id,worker_id:'D',complete_job:true,destination_note:'QA second dock'});assert.equal(count(b.job_id),0);
 });
 test('return receiving and barcode verification both close the assigned three-person crew',async()=>{
- const {ok,start,count,status}=setup();const j=await start('v2_inbound_job_start',{job_type:'inbound_return',biz_class:'return'});await ok('v2_inbound_job_finish',{job_id:j.job_id,worker_id:'A',complete_job:true});assert.equal(count(j.job_id),0);assert.equal(status(j.job_id),'completed');
+ const {ok,start,count,status}=setup();const j=await start('v2_inbound_job_start',{job_type:'inbound_return',biz_class:'return'});await ok('v2_inbound_job_finish',{job_id:j.job_id,worker_id:'A',complete_job:true,internal_metrics:{return_order_count:0,return_product_count:0}});assert.equal(count(j.job_id),0);assert.equal(status(j.job_id),'completed');
  const seed=await ok('sop_demo_prepare');const v=await start('v2_verify_job_start',{batch_id:seed.batch_id});await ok('v2_verify_job_finish',{job_id:v.job_id,worker_id:'A',complete_job:true,complete_batch:false});assert.equal(count(v.job_id),0);assert.equal(status(v.job_id),'completed');
 });
 
