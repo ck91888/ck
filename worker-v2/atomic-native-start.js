@@ -1,4 +1,5 @@
 import {validateInboundStage,stagedPlanStatement} from './inbound-stages.js';
+import {resolveInboundEntry,independentInbound} from './independent-inbound.js';
 import {pickWorkloadContext,pickWorkloadSnapshot} from './pick-workload.js';
 import {staffedDispatchStatements} from './crew-borrow.js';
 import {ensureSchema} from './schema-ready.js';
@@ -59,10 +60,23 @@ export async function startAtomicInbound(e,p,staff,number){
  const id='JOB-'+crypto.randomUUID(),t=new Date().toISOString(),lead=staff.workers.find(w=>w.id===staff.lead_id),type=p.job_type||'inbound_direct',returned=type==='inbound_return',biz=String(p.biz_class||''),sql=[];let planId=String(p.plan_id||''),code='';
  if(type==='inbound_change_order')return {ok:false,error:'换单计划卸货后自动入库，无需再次理货'};
  if(!['inbound_direct_tally','inbound_direct_putaway','inbound_direct','inbound_bulk','inbound_return'].includes(type)||(!returned&&biz!==(type==='inbound_bulk'?'bulk':'direct_ship'))||(returned&&biz&&biz!=='return'))return {ok:false,error:'入库业务类型不匹配'};
- if(returned&&!planId){planId='IB-'+crypto.randomUUID();const display=await number(),day=new Date(Date.now()+9*3600000).toISOString().slice(0,10);sql.push(q(e,`INSERT INTO v2_inbound_plans(id,plan_date,customer,biz_class,biz_classes_json,cargo_summary,purpose,remark,status,created_by,created_at,updated_at,display_no,source_type) VALUES(?,?,?,'return','["return"]','退件入库会话','',?,'putting_away',?,?,?,?,'return_session')`,planId,day,String(p.customer_name||'未指定'),String(p.start_remark||''),lead.id,t,t,display));}
+ let recognized;
+ if(!returned&&!planId){
+  recognized=await resolveInboundEntry(e,p.external_inbound_no,biz,type);
+  if(!['system','independent'].includes(recognized.kind))return {ok:false,error:recognized.message};
+  if(recognized.plan)planId=recognized.plan.id;
+ }
+ if(recognized?.kind==='independent'&&!recognized.plan){
+  planId='ITS-'+crypto.randomUUID();code=recognized.code;
+  sql.push(q(e,`INSERT INTO v2_inbound_plans(id,plan_date,customer,biz_class,biz_classes_json,cargo_summary,purpose,remark,status,created_by,created_at,updated_at,display_no,source_type,external_inbound_no)
+   VALUES(?,?,'','direct_ship','["direct_ship"]','独立单号理货上架','','','putting_away',?,?,?,'','direct_tally_session',?)`,planId,new Date(Date.now()+9*3600000).toISOString().slice(0,10),e.SOP_REQUEST_USER.id,t,t,code));
+  sql.push(q(e,`INSERT INTO v2_inbound_plan_biz_tasks(id,plan_id,biz_class,job_type,status,created_at,updated_at) VALUES(?,?,'direct_ship',?,'pending',?,?)`,'IBT-'+crypto.randomUUID(),planId,type,t,t));
+ }
+ else if(returned&&!planId){planId='IB-'+crypto.randomUUID();const display=await number(),day=new Date(Date.now()+9*3600000).toISOString().slice(0,10);sql.push(q(e,`INSERT INTO v2_inbound_plans(id,plan_date,customer,biz_class,biz_classes_json,cargo_summary,purpose,remark,status,created_by,created_at,updated_at,display_no,source_type) VALUES(?,?,?,'return','["return"]','退件入库会话','',?,'putting_away',?,?,?,?,'return_session')`,planId,day,String(p.customer_name||'未指定'),String(p.start_remark||''),lead.id,t,t,display));}
  else{
   if(!planId){const found=await resolveInboundPlan(e,p.external_inbound_no,biz);if(found.kind!=='system')return {ok:false,error:found.message};planId=found.plan.id;}
   const plan=await q(e,'SELECT * FROM v2_inbound_plans WHERE id=?',planId).first();if(!plan||plan.is_deleted)return {ok:false,error:'入库计划不存在或已删除'};
+  if(independentInbound(plan)&&!['inbound_direct_tally','inbound_direct_putaway'].includes(type))return {ok:false,error:'独立单号须按理货、上架分阶段操作'};
   if(returned){if(plan.source_type!=='return_session'||plan.biz_class!=='return'||plan.status!=='putting_away')return {ok:false,error:'退件会话状态不允许开工'};}
   else{
    if(!['unloading','unloading_putting_away','arrived_pending_putaway','putting_away','tallied_pending_putaway','direct_putting_away','partially_completed'].includes(plan.status))return {ok:false,error:'当前计划状态不可开始理货'};

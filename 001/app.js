@@ -1303,6 +1303,7 @@ function onInboundCandidateSelect() {
 }
 
 function clearInboundResolve() {
+  _ibResolveSequence++;
   _ibResolvedKind = '';
   _ibResolvedPlanId = '';
   _ibResolvedPlan = null;
@@ -1320,11 +1321,12 @@ async function resolveInboundCode(btnEl) {
   if(!acceptDocumentCode(code,"inboundCodeInput"))return;
   var resultEl = document.getElementById("ibResolveResult");
   var extFields = document.getElementById("ibExternalFields");
-  var bc = _resolveBizClass();
+  var bc = _resolveBizClass(), resolveType = _pageParams.job_type, sequence = ++_ibResolveSequence;
 
   if (btnEl) { btnEl.disabled = true; btnEl.textContent = '识别中...'; }
   try {
-    var res = await api({ action: "v2_inbound_resolve_code", code: code, biz_class: bc });
+    var res = await api({ action: "v2_inbound_resolve_code", code: code, biz_class: bc, job_type: resolveType });
+    if (sequence !== _ibResolveSequence || inp.value.trim() !== code || _pageParams.job_type !== resolveType) return;
     if (!res || !res.ok) { alert("识别失败 / 인식 실패"); return; }
 
     if (res.kind === 'system') {
@@ -1332,6 +1334,11 @@ async function resolveInboundCode(btnEl) {
       _ibResolvedPlanId = res.plan.id;
       _ibResolvedPlan = res.plan;
       if (resultEl) resultEl.innerHTML = '<div style="background:#e8f5e9;border-radius:6px;padding:8px;"><b>✓ 系统单</b> ' + esc(res.plan.display_no || res.plan.id) + '<br>' + esc(res.plan.customer) + ' · ' + esc(res.plan.cargo_summary || '--') + '</div>';
+      if (extFields) extFields.style.display = 'none';
+    } else if (res.kind === 'independent') {
+      _ibResolvedKind = 'independent';
+      _ibResolvedPlanId = res.plan?.id || '';
+      _ibResolvedPlan = res.plan || { selected_external_inbound_no: res.code, source_type: 'direct_tally_session' };
       if (extFields) extFields.style.display = 'none';
     } else if (res.kind === 'external') {
       _ibResolvedKind = 'external';
@@ -1771,7 +1778,8 @@ function renderWorkers(containerId, workers) {
 
 // ===== Inbound (standard: direct_ship + bulk) =====
 // ===== 统一入库入口：resolve 状态 =====
-var _ibResolvedKind = ''; // 'system' | 'external' | ''
+var _ibResolveSequence = 0;
+var _ibResolvedKind = ''; // 'system' | 'independent' | 'external' | ''
 var _ibResolvedPlanId = '';
 var _ibResolvedPlan = null; // plan summary object from resolve
 
@@ -1834,7 +1842,7 @@ async function startInbound(btnEl) {
     job_type: jobType
   };
 
-  if (_ibResolvedKind === 'system') {
+  if (_ibResolvedKind === 'system' || _ibResolvedKind === 'independent') {
     payload.plan_id = _ibResolvedPlanId;
     if (_ibResolvedPlan && _ibResolvedPlan.selected_external_inbound_no) {
       payload.external_inbound_no = _ibResolvedPlan.selected_external_inbound_no;
@@ -1910,7 +1918,7 @@ async function loadInboundPlanInfo(planId) {
   var lines = res.lines || [];
   // Plan info card
   if (infoEl) {
-    var html = '<div><b>' + esc(p.display_no || p.id) + '</b> · ' + esc(p.customer || '--') + '</div>';
+    var html = p.source_type === 'direct_tally_session' ? '<div><b>独立入库单号 / 독립 입고번호：' + esc(p.external_inbound_no) + '</b></div>' : '<div><b>' + esc(p.display_no || p.id) + '</b> · ' + esc(p.customer || '--') + '</div>';
     html += '<div>' + esc(p.cargo_summary || '--') + '</div>';
     html += renderInboundPlanRemark(p);
     html += renderInboundMaterialsReadonly(res);

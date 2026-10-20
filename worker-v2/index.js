@@ -1,3 +1,4 @@
+import {resolveInboundEntry,independentInbound} from './independent-inbound.js';
 import {stagedInbound,putawayType,putawayMetrics,stagedPlanStatement} from './inbound-stages.js';
 import {executionDepartment} from './work-execution.js';
 import {withInboundCreateReceipt,inboundCreateStatus,inboundReceiptStatements} from './inbound-create-receipt.js';
@@ -1391,6 +1392,24 @@ const MIGRATIONS = [
       AND NOT EXISTS(SELECT 1 FROM v2_ops_jobs p WHERE p.related_doc_type='inbound_plan' AND p.related_doc_id=t.related_doc_id AND p.inbound_external_no=t.inbound_external_no AND p.job_type='inbound_direct_putaway' AND p.status='completed'))
     BEGIN SELECT RAISE(ABORT,'putaway stage is not complete'); END`,
 
+  // New independent tally sessions reuse job relationships, never a collaboration RU plan.
+  `CREATE UNIQUE INDEX IF NOT EXISTS ck_independent_inbound_number ON v2_inbound_plans(external_inbound_no) WHERE source_type='direct_tally_session'`,
+  `CREATE TRIGGER IF NOT EXISTS ck_independent_inbound_create BEFORE INSERT ON v2_inbound_plans WHEN NEW.source_type='direct_tally_session' BEGIN
+    SELECT CASE WHEN COALESCE(NEW.external_inbound_no,'')='' OR NEW.display_no!='' OR NEW.customer!='' OR NEW.biz_class!='direct_ship' OR NEW.biz_classes_json!='["direct_ship"]' OR COALESCE(NEW.bulk_external_inbound_no,'')!='' OR NEW.status!='putting_away'
+      THEN RAISE(ABORT,'invalid independent tally session') END;
+    SELECT CASE WHEN EXISTS(SELECT 1 FROM v2_inbound_plans p WHERE p.id=NEW.external_inbound_no OR p.display_no=NEW.external_inbound_no OR instr(char(10)||COALESCE(p.external_inbound_no,'')||char(10),char(10)||NEW.external_inbound_no||char(10))>0)
+      THEN RAISE(ABORT,'inbound number already registered; refresh before dispatch') END;
+  END`,
+  `CREATE TRIGGER IF NOT EXISTS ck_independent_inbound_collision_insert BEFORE INSERT ON v2_inbound_plans WHEN NEW.source_type!='direct_tally_session' AND EXISTS(SELECT 1 FROM v2_inbound_plans s WHERE s.source_type='direct_tally_session' AND (s.external_inbound_no=NEW.id OR s.external_inbound_no=NEW.display_no OR instr(char(10)||COALESCE(NEW.external_inbound_no,'')||char(10),char(10)||s.external_inbound_no||char(10))>0)) BEGIN SELECT RAISE(ABORT,'inbound number belongs to an independent tally session'); END`,
+  `CREATE TRIGGER IF NOT EXISTS ck_independent_inbound_collision_update BEFORE UPDATE OF external_inbound_no,display_no,id ON v2_inbound_plans WHEN OLD.source_type!='direct_tally_session' AND EXISTS(SELECT 1 FROM v2_inbound_plans s WHERE s.source_type='direct_tally_session' AND (s.external_inbound_no=NEW.id OR s.external_inbound_no=NEW.display_no OR instr(char(10)||COALESCE(NEW.external_inbound_no,'')||char(10),char(10)||s.external_inbound_no||char(10))>0)) BEGIN SELECT RAISE(ABORT,'inbound number belongs to an independent tally session'); END`,
+  `CREATE TRIGGER IF NOT EXISTS ck_independent_inbound_identity BEFORE UPDATE ON v2_inbound_plans WHEN (OLD.source_type='direct_tally_session' OR NEW.source_type='direct_tally_session') AND (NEW.source_type IS NOT OLD.source_type OR NEW.id IS NOT OLD.id OR NEW.external_inbound_no IS NOT OLD.external_inbound_no OR NEW.bulk_external_inbound_no IS NOT OLD.bulk_external_inbound_no OR NEW.biz_class IS NOT OLD.biz_class OR NEW.biz_classes_json IS NOT OLD.biz_classes_json OR NEW.display_no IS NOT OLD.display_no OR NEW.customer IS NOT OLD.customer OR NEW.unload_completed_at IS NOT OLD.unload_completed_at) BEGIN SELECT RAISE(ABORT,'independent tally identity cannot change'); END`,
+  `CREATE TRIGGER IF NOT EXISTS ck_independent_inbound_terminal BEFORE UPDATE OF status,is_deleted ON v2_inbound_plans WHEN OLD.source_type='direct_tally_session' BEGIN
+    SELECT CASE WHEN NEW.status='completed' AND NOT EXISTS(SELECT 1 FROM v2_ops_jobs j WHERE j.related_doc_type='inbound_plan' AND j.related_doc_id=OLD.id AND j.job_type='inbound_direct_putaway' AND j.status='completed') THEN RAISE(ABORT,'putaway stage is not complete') END;
+    SELECT CASE WHEN (NEW.status='cancelled' OR NEW.is_deleted=1) AND EXISTS(SELECT 1 FROM v2_ops_jobs j WHERE j.related_doc_type='inbound_plan' AND j.related_doc_id=OLD.id AND j.status NOT IN ('completed','cancelled')) THEN RAISE(ABORT,'independent inbound has active work') END;
+    SELECT CASE WHEN OLD.status IN ('completed','cancelled') AND NEW.status IS NOT OLD.status THEN RAISE(ABORT,'independent inbound is closed') END;
+  END`,
+  `CREATE TRIGGER IF NOT EXISTS ck_independent_inbound_job BEFORE INSERT ON v2_ops_jobs WHEN NEW.related_doc_type='inbound_plan' AND EXISTS(SELECT 1 FROM v2_inbound_plans p WHERE p.id=NEW.related_doc_id AND p.source_type='direct_tally_session') AND NEW.job_type NOT IN ('inbound_direct_tally','inbound_direct_putaway') BEGIN SELECT RAISE(ABORT,'independent inbound requires tally and putaway stages'); END`,
+
   // ---- idempotency keys for create/start/convert class writes ----
   `CREATE TABLE IF NOT EXISTS v2_idempotency_keys (
     idem_key TEXT PRIMARY KEY,
@@ -2093,7 +2112,7 @@ const MIGRATIONS = [
 ];
 
 // 每次发布迁移变化时手动 +1（patch 段），冷启动只比对一次字符串即可跳过整段 MIGRATIONS
-const CURRENT_SCHEMA_VERSION = 'v2.20261019-inbound-stages';
+const CURRENT_SCHEMA_VERSION = 'v2.20261020-independent-inbound';
 
 const migratedDatabases = new WeakSet();
 async function ensureMigrated(db) {
@@ -2211,13 +2230,13 @@ route("v2_dashboard_summary", async (body, env) => {
     // ---- inbounds（待执行入库 / 多业务计划部分完成也算"待执行"）----
     env.DB.prepare(
       `SELECT COUNT(*) AS c FROM v2_inbound_plans
-        WHERE source_type != 'return_session'
+        WHERE source_type NOT IN ('return_session','direct_tally_session')
           AND COALESCE(is_deleted,0)=0
           AND status IN ('pending','unloading','unloading_putting_away','arrived_pending_putaway','putting_away','tallied_pending_putaway','direct_putting_away','partially_completed')`
     ).first(),
     env.DB.prepare(
       `SELECT * FROM v2_inbound_plans
-        WHERE source_type != 'return_session'
+        WHERE source_type NOT IN ('return_session','direct_tally_session')
           AND COALESCE(is_deleted,0)=0
           AND status IN ('pending','unloading','unloading_putting_away','arrived_pending_putaway','putting_away','tallied_pending_putaway','direct_putting_away','partially_completed')
         ORDER BY plan_date ASC, created_at ASC LIMIT 3`
@@ -2240,7 +2259,7 @@ route("v2_dashboard_summary", async (body, env) => {
     env.DB.prepare(
       `SELECT * FROM v2_inbound_plans
         WHERE plan_date>=? AND plan_date<=?
-          AND source_type != 'return_session'
+          AND source_type NOT IN ('return_session','direct_tally_session')
           AND COALESCE(is_deleted,0)=0
           AND status NOT IN ('completed','cancelled','deleted')
         ORDER BY plan_date ASC, created_at ASC`
@@ -4221,7 +4240,7 @@ route("v2_inbound_plan_list", async (body, env) => {
 
   // 排除退件入库会话：return_session 不属于正式入库计划口径
   // 软删除单：列表/导出永远排除（即便用户显式筛 cancelled 也不显示 deleted）
-  let where = " WHERE source_type != 'return_session' AND COALESCE(is_deleted,0)=0";
+  let where = " WHERE source_type NOT IN ('return_session','direct_tally_session') AND COALESCE(is_deleted,0)=0";
   const binds = [];
   let arrivalFilter;try{arrivalFilter=inboundArrivalFilter(body);}catch(e){return err(e.message,400);}
   where += arrivalFilter.sql;binds.push(...arrivalFilter.binds);
@@ -4632,7 +4651,7 @@ route("v2_inbound_resolve_code", async (body, env) => {
   const code = String(body.code || "").trim();
   const biz_class = String(body.biz_class || "").trim();
   if (!code) return err("missing code");
-  if(inboundFlowEnabled(env))return json(await resolveInboundPlan(env,code,biz_class));
+  if(inboundFlowEnabled(env))return json(await resolveInboundEntry(env,code,biz_class,String(body.job_type||'')));
 
   // 先探测：是否存在但已被软删除（"误转正回滚"产物）→ 现场扫码给清晰提示
   const probeDel = await env.DB.prepare(
@@ -4714,7 +4733,7 @@ route("v2_inbound_plan_list_upcoming", async (body, env) => {
   const first = dates[0];
   const last = dates[dates.length - 1];
   const rs = await env.DB.prepare(
-    "SELECT * FROM v2_inbound_plans WHERE plan_date>=? AND plan_date<=? AND status NOT IN ('completed','cancelled','deleted') AND source_type != 'return_session' AND COALESCE(is_deleted,0)=0 ORDER BY plan_date ASC, created_at ASC"
+    "SELECT * FROM v2_inbound_plans WHERE plan_date>=? AND plan_date<=? AND status NOT IN ('completed','cancelled','deleted') AND source_type NOT IN ('return_session','direct_tally_session') AND COALESCE(is_deleted,0)=0 ORDER BY plan_date ASC, created_at ASC"
   ).bind(first, last).all();
   return json({ ok: true, items: rs.results || [], dates });
 });
@@ -4728,6 +4747,7 @@ route("v2_inbound_plan_update_status", async (body, env) => {
   if (status === 'cancelled') return err("请使用 v2_inbound_plan_cancel 取消入库计划");
   // 禁止通过此接口直接设 completed —— 必须走 v2_inbound_mark_completed（含 biz_task 校验）
   if (status === 'completed') return err("请使用 v2_inbound_mark_completed 完成入库计划（需所有业务类型已完成）");
+  if(independentInbound(await env.DB.prepare('SELECT source_type FROM v2_inbound_plans WHERE id=?').bind(id).first()))return err('独立单号状态由理货、上架任务更新');
   const t=now();
   await env.DB.batch([env.DB.prepare(
     "UPDATE v2_inbound_plans SET status=?, updated_at=? WHERE id=?"
@@ -4872,7 +4892,8 @@ route("v2_inbound_plan_cancel", async (body, env) => {
   if(inboundFlowEnabled(env)&&plan.status==='cancelled')return json({ok:true,duplicate:true,operator,cancelled_at:plan.updated_at});
 
   // 只允许 pending / arrived_pending_putaway 取消
-  const allowCancel = ['pending', 'arrived_pending_putaway'];
+  const allowCancel = independentInbound(plan)?['arrived_pending_putaway','tallied_pending_putaway']:['pending', 'arrived_pending_putaway'];
+  if(independentInbound(plan)&&!reason)return err('独立单号取消须填写原因');
   if (!allowCancel.includes(plan.status)) {
     return json({ ok: false, error: "cancel_not_allowed", message: "当前状态（" + plan.status + "）不允许取消，只有待到库和已到库待入库可以取消" });
   }
@@ -4896,7 +4917,7 @@ route("v2_inbound_plan_cancel", async (body, env) => {
   binds.push(id);
   if(inboundFlowEnabled(env)){
     // Recheck after concurrent dispatch. A retry cannot append the reason twice.
-    updateSql += " AND status IN ('pending','arrived_pending_putaway') AND NOT EXISTS(SELECT 1 FROM v2_inbound_plan_jobs j WHERE j.plan_id=v2_inbound_plans.id AND j.status NOT IN ('completed','cancelled'))";
+    updateSql += " AND (status IN ('pending','arrived_pending_putaway') OR (source_type='direct_tally_session' AND status='tallied_pending_putaway')) AND NOT EXISTS(SELECT 1 FROM v2_inbound_plan_jobs j WHERE j.plan_id=v2_inbound_plans.id AND j.status NOT IN ('completed','cancelled'))";
     const statements=[env.DB.prepare(updateSql).bind(...binds)],context=env.SOP_OPERATION_CONTEXT;
     if(context?.operator_name)statements.push(env.DB.prepare('INSERT INTO ck_plan_operation_audit SELECT ?,?,?,?,?,?,? WHERE changes()=1').bind(crypto.randomUUID(),'inbound',id,'cancel',env.SOP_REQUEST_USER.id,context.operator_name,t));
     const results=await env.DB.batch(statements);
@@ -6601,7 +6622,7 @@ route("v2_inbound_plan_export", async (body, env) => {
   if (!Number.isFinite(limit) || limit <= 0) limit = 5000;
   if (limit > 10000) limit = 10000;
 
-  let sql = "SELECT * FROM v2_inbound_plans WHERE source_type != 'return_session' AND COALESCE(is_deleted,0)=0";
+  let sql = "SELECT * FROM v2_inbound_plans WHERE source_type NOT IN ('return_session','direct_tally_session') AND COALESCE(is_deleted,0)=0";
   const binds = [];
   let arrivalFilter;try{arrivalFilter=inboundArrivalFilter(body);}catch(e){return err(e.message,400);}
   sql += arrivalFilter.sql;binds.push(...arrivalFilter.binds);
@@ -9599,7 +9620,7 @@ route("v2_admin_cleanup_inbound_unload_scope", async (body, env) => {
     SELECT id, display_no, status, biz_class, biz_classes_json, source_type, updated_at
       FROM v2_inbound_plans
      WHERE status NOT IN ('cancelled')
-       AND (source_type IS NULL OR source_type != 'return_session')
+       AND (source_type IS NULL OR source_type NOT IN ('return_session','direct_tally_session'))
      ORDER BY created_at ASC
      LIMIT 10000
   `).all();
@@ -9700,7 +9721,7 @@ route("v2_admin_backfill_inbound_unload_completed_at", async (body, env) => {
   const rs = await env.DB.prepare(`
     SELECT id, display_no, status FROM v2_inbound_plans
      WHERE (unload_completed_at IS NULL OR unload_completed_at='')
-       AND (source_type IS NULL OR source_type != 'return_session')
+       AND (source_type IS NULL OR source_type NOT IN ('return_session','direct_tally_session'))
        AND COALESCE(is_deleted,0)=0
      ORDER BY created_at ASC
      LIMIT 10000

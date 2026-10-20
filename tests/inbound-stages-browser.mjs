@@ -28,7 +28,7 @@ async function start(p,code,type,staff){
  const result=p.waitForResponse(r=>r.url().endsWith('/api')&&r.request().postDataJSON()?.action==='sop_native_start');
  await modal(p).locator('[type=submit]').click();const j=await(await result).json();assert.equal(j.ok,true,JSON.stringify(j));await p.locator('#inboundWorkingCard').waitFor({state:'visible'});await p.waitForFunction(()=>_inboundPlanLoad.status==='ready');return j;
 }
-async function finish(p){const result=p.waitForResponse(r=>r.url().endsWith('/api')&&r.request().postDataJSON()?.action==='v2_inbound_job_finish');await p.locator('[onclick="finishInbound(this)"]').click();const r=await(await result).json();assert.equal(r.ok,true,JSON.stringify(r));await p.locator('#page-home.active').waitFor();}
+async function finish(p){const result=p.waitForResponse(r=>r.url().endsWith('/api')&&r.request().postDataJSON()?.action==='v2_inbound_job_finish');await p.locator('[onclick="finishInbound(this)"]').click();const r=await(await result).json();assert.equal(r.ok,true,JSON.stringify(r));await p.locator('#page-home.active').waitFor();await p.waitForFunction(()=>!_actionLocks.finishInbound&&!_activeJobId);}
 try{
  for(const width of [1440,1280,390,320]){
   const context=await browser.newContext({viewport:{width,height:900}}),p=await field(context),code='SYNTH-STAGE-'+width;
@@ -36,7 +36,7 @@ try{
   const u=await call('v2_unload_job_start',{plan_id:plan.id,worker_id:dispatcher.badgeId});await call('v2_unload_job_finish',{job_id:u.job_id,worker_id:dispatcher.badgeId,complete_job:true,result_lines:[{unit_type:'carton',actual_qty:8}]});
   await p.evaluate(()=>goPage('inbound_menu'));assert.equal(await p.locator('#page-inbound_menu [onclick*=inbound_direct_tally]').count(),1);assert.equal(await p.locator('#page-inbound_menu [onclick*=inbound_direct_putaway]').count(),1);assert.match(await p.locator('#page-inbound_menu').innerText(),/大货理货上架/);
   await p.screenshot({path:path.join(artifacts,'menu-'+width+'.png'),fullPage:true});
-  const tally=await start(p,code,'inbound_direct_tally',[a]);
+  const tally=await start(p,[1280,320].includes(width)?plan.display_no:code,'inbound_direct_tally',[a]);
   for(const id of ['inboundExtraSort','inboundExtraLabel','inboundExtraRepair','inboundExtraOther','inboundResultNote','inboundRemark'])assert.equal(await p.locator('#'+id).isVisible(),true,id);
   assert.equal(await p.locator('#ck-putaway-workload').isVisible(),false);await p.locator('.ib-putaway-input').fill('8');await p.locator('#inboundExtraLabel').fill('2');await p.locator('#inboundResultNote').fill('合成理货说明');
   await p.screenshot({path:path.join(artifacts,'tally-'+width+'.png'),fullPage:true});await finish(p);let d=await call('v2_inbound_plan_detail',{id:plan.id});assert.equal(d.plan.status,'tallied_pending_putaway');assert.equal(d.lines[0].putaway_qty,8);

@@ -1,0 +1,160 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import worker from '../worker-v2/index.js';
+import {database} from './d1-adapter.mjs';
+const tally='inbound_direct_tally',putaway='inbound_direct_putaway';
+function fixture(t){
+ const DB=database();t.after(()=>DB.raw.close());
+ const env={DB,SOP_ENVIRONMENT:'staging',SOP_UPGRADE_ENABLED:'true',SOP_PUBLIC_TEST_ACCESS:'true'};
+ const call=async(action,data={})=>(await worker.fetch(new Request('https://fixture.invalid/api',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,client_req_id:crypto.randomUUID(),...data})}),env)).json();
+ const ok=async(a,b)=>{const r=await call(a,b);assert.equal(r.ok,true,a+': '+JSON.stringify(r));return r;};
+ const payload=(code,type=tally,id=crypto.randomUUID(),who='SYNTH-W')=>({payload:{action:'v2_inbound_job_start',external_inbound_no:code,job_type:type,biz_class:'direct_ship',client_req_id:id},workers:[{id:who,name:'合成操作员'}],lead_id:who,estimated_minutes:15});
+ const start=(code,type=tally,who='SYNTH-W')=>call('sop_native_start',payload(code,type,crypto.randomUUID(),who));
+ const finish=(j,extra={})=>call('v2_inbound_job_finish',{job_id:j.job_id,worker_id:j.lead.id,complete_job:true,...extra});
+ const resolve=(code,type=tally)=>ok('v2_inbound_resolve_code',{code,biz_class:'direct_ship',job_type:type});
+ const detail=j=>ok('v2_inbound_plan_detail',{id:j.plan_id});
+ return {DB,env,call,ok,payload,start,finish,resolve,detail};
+}
+test('unknown numeric reference is read-only until dispatch; two complete stages preserve fields, identity and clocks',async t=>{
+ const f=fixture(t),code='999880001001';
+ assert.equal((await f.resolve(code)).kind,'independent');
+ assert.equal(f.DB.raw.prepare('SELECT count(*) n FROM v2_inbound_plans').get().n,0);
+ const a=await f.start('９９９８８０００１００１');assert.equal(a.ok,true,JSON.stringify(a));
+ let d=await f.detail(a);assert.equal(d.plan.source_type,'direct_tally_session');assert.equal(d.plan.external_inbound_no,code);
+ for(const key of ['display_no','customer','unload_completed_at'])assert.equal(d.plan[key],'');
+ assert.deepEqual(d.lines,[]);assert.equal(d.plan.status,'putting_away');
+ assert.equal((await f.resolve(code)).plan.id,a.plan_id);
+ assert.equal((await f.start(code,putaway,'SYNTH-P')).ok,false);
+ const data={extra_ops:{sort_qty:0,label_qty:2,repair_box_qty:1,other_op_remark:'合成记录'},result_note:'合成说明',remark:'合成备注',result_lines:[]};
+ f.DB.raw.prepare("UPDATE v2_ops_job_workers SET joined_at=? WHERE job_id=?").run(new Date(Date.now()-5*60000).toISOString(),a.job_id);
+ assert.equal((await f.finish(a,data)).ok,true);
+ assert.equal((await f.finish(a,data)).ok,true);
+ d=await f.detail(a);assert.equal(d.plan.status,'tallied_pending_putaway');
+ const result=JSON.parse(f.DB.raw.prepare('SELECT result_json FROM v2_ops_job_results WHERE job_id=?').get(a.job_id).result_json);
+ for(const [key,value]of Object.entries(data))assert.deepEqual(result[key],value);
+ assert.equal((await f.start(code)).ok,false);
+ const candidates=await f.ok('v2_inbound_plan_ops_candidates',{scene:'putaway',biz_class:'direct_ship'});assert.equal(candidates.items[0].id,a.plan_id);
+ assert.equal((await f.resolve(code,putaway)).plan.id,a.plan_id);
+ const b=await f.start(code,putaway);assert.equal(b.ok,true,JSON.stringify(b));assert.equal(b.plan_id,a.plan_id);assert.equal((await f.detail(b)).plan.status,'direct_putting_away');
+ for(const payload of [{},{location_count:1},{location_count:-1,used_forklift:false},{location_count:1.5,used_forklift:false},{location_count:1,used_forklift:'no'}])assert.equal((await f.finish(b,payload)).ok,false);
+ const replies=await Promise.all([f.finish(b,{location_count:3,used_forklift:false}),f.finish(b,{location_count:3,used_forklift:false})]);assert.ok(replies.every(r=>r.ok),JSON.stringify(replies));
+ assert.equal((await f.detail(b)).plan.status,'completed');assert.equal((await f.start(code,putaway)).ok,false);
+ assert.equal((await f.resolve(code)).kind,'biz_already_completed');
+ assert.equal(f.DB.raw.prepare('SELECT count(*) n FROM v2_ops_job_results').get().n,2);
+ assert.equal(f.DB.raw.prepare("SELECT count(*) n FROM v2_ops_job_workers WHERE left_at=''").get().n,0);
+ assert.ok(f.DB.raw.prepare('SELECT minutes_worked FROM v2_ops_job_workers WHERE job_id=?').get(a.job_id).minutes_worked>=5);
+ assert.equal((await f.ok('v2_inbound_plan_list',{})).items.length,0);assert.equal((await f.ok('v2_inbound_plan_export',{})).rows.length,0);
+ const exported=await f.ok('v2_dashboard_order_export',{});assert.equal(exported.rows.filter(x=>x.job_id===a.job_id||x.job_id===b.job_id).length,2);
+});
+test('unknown, malformed, reserved, wrong-department and direct-route starts cannot bypass prerequisite',async t=>{
+ const f=fixture(t);
+ for(const code of ['SYNTH-UNKNOWN','RU-20261020-9999','IB-missing','EMP-SYNTH','A,B','A\nB','x'.repeat(121),'']){
+  assert.notEqual((await f.call('v2_inbound_resolve_code',{code,biz_class:'direct_ship',job_type:putaway})).kind,'independent');
+  assert.equal((await f.start(code,putaway)).ok,false,code);
+ }
+ for(const code of ['RU-20261020-9999','IB-missing','EMP-SYNTH','A,B','A\nB','x'.repeat(121),''])assert.equal((await f.start(code)).ok,false,code);
+ for(const type of ['inbound_direct','inbound_bulk'])assert.equal((await f.start('SYNTH-UNKNOWN',type)).ok,false);
+ assert.equal((await f.call('v2_inbound_job_start',{external_inbound_no:'SYNTH-UNKNOWN',worker_id:'SYNTH-W',job_type:tally,biz_class:'direct_ship'})).ok,false);
+ assert.equal(f.DB.raw.prepare('SELECT count(*) n FROM v2_inbound_plans').get().n,0);
+});
+test('concurrent duplicate dispatch and same-request retries create one session, crew and audit',async t=>{
+ const f=fixture(t),p=f.payload('SYNTH-RACE');
+ const same=await Promise.all([f.call('sop_native_start',p),f.call('sop_native_start',p)]);assert.ok(same.every(r=>r.ok),JSON.stringify(same));assert.equal(same[0].job_id,same[1].job_id);
+ assert.equal((await f.start('SYNTH-RACE',tally,'SYNTH-OTHER')).ok,false);
+ const different=await Promise.all([f.start('SYNTH-RACE-2',tally,'SYNTH-A'),f.start('SYNTH-RACE-2',tally,'SYNTH-B')]);assert.equal(different.filter(r=>r.ok).length,1,JSON.stringify(different));
+ assert.equal(f.DB.raw.prepare("SELECT count(*) n FROM v2_inbound_plans WHERE source_type='direct_tally_session'").get().n,2);
+ assert.equal(f.DB.raw.prepare("SELECT count(*) n FROM sop_records WHERE kind='dispatch'").get().n,2);
+ assert.equal(f.DB.raw.prepare('SELECT count(*) n FROM v2_ops_job_workers').get().n,2);
+});
+test('dispatch and finish failures roll back session, results and worker clocks for safe retry',async t=>{
+ const f=fixture(t),body=f.payload('SYNTH-ROLLBACK',tally,'SYNTH-SAME-REQUEST');
+ f.DB.raw.exec("CREATE TRIGGER synth_fail_worker BEFORE INSERT ON v2_ops_job_workers BEGIN SELECT RAISE(ABORT,'synthetic failure'); END");
+ assert.equal((await f.call('sop_native_start',body)).ok,false);assert.equal(f.DB.raw.prepare('SELECT count(*) n FROM v2_inbound_plans').get().n,0);
+ f.DB.raw.exec('DROP TRIGGER synth_fail_worker');const a=await f.ok('sop_native_start',body);
+ f.DB.raw.exec("CREATE TRIGGER synth_fail_finish BEFORE UPDATE OF status ON v2_inbound_plans WHEN NEW.status='tallied_pending_putaway' BEGIN SELECT RAISE(ABORT,'synthetic failure'); END");
+ assert.equal((await f.finish(a)).ok,false);assert.equal(f.DB.raw.prepare('SELECT count(*) n FROM v2_ops_job_results').get().n,0);assert.equal((await f.detail(a)).plan.status,'putting_away');
+ f.DB.raw.exec('DROP TRIGGER synth_fail_finish');assert.equal((await f.finish(a)).ok,true);
+ f.DB.raw.exec("CREATE TRIGGER synth_fail_putaway BEFORE INSERT ON v2_ops_job_workers BEGIN SELECT RAISE(ABORT,'synthetic failure'); END");
+ assert.equal((await f.start('SYNTH-ROLLBACK',putaway)).ok,false);assert.equal((await f.detail(a)).plan.status,'tallied_pending_putaway');
+ f.DB.raw.exec('DROP TRIGGER synth_fail_putaway');assert.equal((await f.start('SYNTH-ROLLBACK',putaway)).ok,true);
+});
+test('database constraints prevent cross-path reference races, forged combined jobs, rebinding and forced completion',async t=>{
+ const f=fixture(t),a=await f.start('SYNTH-LOCK');assert.equal(a.ok,true);
+ assert.equal((await f.call('v2_inbound_plan_create',{customer:'Synthetic',biz_classes:['direct_ship'],external_inbound_no:'SYNTH-LOCK'})).ok,false);
+ assert.throws(()=>f.DB.raw.prepare("INSERT INTO v2_inbound_plans(id,external_inbound_no,source_type) VALUES('SYNTH-RACED-PLAN','SYNTH-LOCK','manual')").run(),/independent tally|ck_external_reference_conflict/);
+ const plan=await f.ok('v2_inbound_plan_create',{customer:'Synthetic',biz_classes:['direct_ship'],external_inbound_no:'SYNTH-OTHER'});
+ assert.throws(()=>f.DB.raw.prepare("UPDATE v2_inbound_plans SET external_inbound_no='SYNTH-LOCK' WHERE id=?").run(plan.id),/independent tally|ck_external_reference_conflict/);
+ assert.throws(()=>f.DB.raw.prepare("UPDATE v2_inbound_plans SET source_type='manual',display_no='SYNTH-RU' WHERE id=?").run(a.plan_id),/identity/);
+ assert.throws(()=>f.DB.raw.prepare("INSERT INTO v2_ops_jobs(id,job_type,related_doc_type,related_doc_id,status) VALUES('SYNTH-ILLEGAL','inbound_direct','inbound_plan',?,'working')").run(a.plan_id),/independent inbound|staged inbound/);
+ assert.throws(()=>f.DB.raw.prepare("INSERT INTO v2_ops_jobs(id,job_type,related_doc_type,related_doc_id,inbound_external_no,status) VALUES('SYNTH-SKIP',?,'inbound_plan',?,'SYNTH-LOCK','working')").run(putaway,a.plan_id),/tally must finish/);
+ assert.equal((await f.finish(a)).ok,true);
+ assert.throws(()=>f.DB.raw.prepare("UPDATE v2_inbound_plans SET status='completed' WHERE id=?").run(a.plan_id),/putaway stage/);
+ assert.equal((await f.call('v2_inbound_plan_force_complete',{id:a.plan_id,reason:'synthetic'})).ok,false);
+ assert.equal((await f.call('v2_inbound_plan_bind_external',{id:a.plan_id,previous_code:'SYNTH-LOCK',external_inbound_no:'SYNTH-NEW'})).ok,false);
+});
+test('cancellation blocks active work; cancelled or deleted numbers never become fresh independent work',async t=>{
+ const f=fixture(t),a=await f.start('SYNTH-CANCEL');assert.equal(a.ok,true);
+ const cancel=()=>f.call('v2_inbound_plan_cancel',{inbound_plan_id:a.plan_id,reason:'合成取消'});
+ assert.equal((await cancel()).ok,false);assert.equal((await f.finish(a)).ok,true);
+ assert.equal((await cancel()).ok,true);assert.equal((await cancel()).ok,true);
+ assert.equal((await f.start('SYNTH-CANCEL',putaway)).ok,false);assert.equal((await f.start('SYNTH-CANCEL')).ok,false);
+ assert.equal((await f.resolve('SYNTH-CANCEL')).kind,'status_not_allowed');
+ const p=await f.ok('v2_inbound_plan_create',{customer:'Synthetic',external_inbound_no:'SYNTH-OLD-CANCEL',biz_classes:['direct_ship']});
+ await f.ok('v2_inbound_plan_cancel',{inbound_plan_id:p.id,reason:'synthetic'});
+ assert.equal((await f.start('SYNTH-OLD-CANCEL')).ok,false);
+ f.DB.raw.prepare('UPDATE v2_inbound_plans SET is_deleted=1 WHERE id=?').run(p.id);
+ assert.equal((await f.start('SYNTH-OLD-CANCEL')).ok,false);
+ const replacement=await f.ok('v2_inbound_plan_create',{customer:'Synthetic replacement',external_inbound_no:'SYNTH-OLD-CANCEL',biz_classes:['direct_ship'],lines:[{unit_type:'carton',planned_qty:1}]});
+ const u=await f.ok('v2_unload_job_start',{plan_id:replacement.id,worker_id:'SYNTH-U'});
+ await f.ok('v2_unload_job_finish',{job_id:u.job_id,worker_id:'SYNTH-U',complete_job:true,result_lines:[{unit_type:'carton',actual_qty:1}]});
+ const recognized=await f.resolve('SYNTH-OLD-CANCEL');assert.equal(recognized.kind,'system');assert.equal(recognized.plan.id,replacement.id);
+});
+test('cancel versus putaway start and pause/resume preserve the completed tally',async t=>{
+ const f=fixture(t),a=await f.start('SYNTH-CANCEL-RACE');assert.equal((await f.finish(a)).ok,true);
+ const results=await Promise.all([f.call('v2_inbound_plan_cancel',{inbound_plan_id:a.plan_id,reason:'synthetic'}),f.start('SYNTH-CANCEL-RACE',putaway)]);assert.equal(results.filter(r=>r.ok).length,1,JSON.stringify(results));
+ const b=await f.start('SYNTH-PAUSE');assert.equal(b.ok,true);
+ await f.ok('sop_native_pause',{job_id:b.job_id,revision:1,reason:'synthetic pause'});
+ assert.equal((await f.start('SYNTH-PAUSE',putaway)).ok,false);assert.equal((await f.finish(b)).ok,false);
+ await f.ok('sop_native_resume',{job_id:b.job_id,revision:2,workers:[b.lead],lead_id:b.lead.id});
+ assert.equal((await f.finish(b)).ok,true);
+ const c=await f.start('SYNTH-PAUSE',putaway);assert.equal(c.ok,true);
+ await f.ok('sop_native_pause',{job_id:c.job_id,revision:1,reason:'synthetic pause'});
+ assert.equal((await f.start('SYNTH-PAUSE',putaway,'SYNTH-NEW')).ok,false);
+ await f.ok('sop_native_resume',{job_id:c.job_id,revision:2,workers:[c.lead],lead_id:c.lead.id});
+ assert.equal((await f.finish(c,{location_count:0,used_forklift:true})).ok,true);
+});
+test('RU and registered external references retain original association and legacy combined history',async t=>{
+ const f=fixture(t),p=await f.ok('v2_inbound_plan_create',{customer:'Synthetic existing customer',external_inbound_no:'SYNTH-REGISTERED',biz_classes:['direct_ship'],lines:[{unit_type:'carton',planned_qty:2}]});
+ const u=await f.ok('v2_unload_job_start',{plan_id:p.id,worker_id:'SYNTH-U'});await f.ok('v2_unload_job_finish',{job_id:u.job_id,worker_id:'SYNTH-U',complete_job:true,result_lines:[{unit_type:'carton',actual_qty:2}]});
+ const row=f.DB.raw.prepare('SELECT * FROM v2_inbound_plans WHERE id=?').get(p.id);
+ for(const code of [p.id,row.display_no,'SYNTH-REGISTERED']){const r=await f.resolve(code);assert.equal(r.kind,'system');assert.equal(r.plan.id,p.id);}
+ const a=await f.start(row.display_no);assert.equal(a.ok,true);assert.equal(a.plan_id,p.id);assert.equal((await f.finish(a,{result_lines:[{unit_type:'carton',putaway_qty:2}]})).ok,true);
+ const b=await f.start('SYNTH-REGISTERED',putaway);assert.equal(b.ok,true);assert.equal((await f.finish(b,{location_count:1,used_forklift:true})).ok,true);assert.equal((await f.detail(b)).plan.status,'completed');
+ assert.equal(f.DB.raw.prepare("SELECT count(*) n FROM v2_inbound_plans WHERE source_type='direct_tally_session'").get().n,0);
+ assert.equal(f.DB.raw.prepare('SELECT customer FROM v2_inbound_plans WHERE id=?').get(p.id).customer,row.customer);
+ const legacy=await f.ok('v2_inbound_plan_create',{customer:'Synthetic legacy customer',external_inbound_no:'SYNTH-LEGACY',biz_classes:['direct_ship']});
+ f.DB.raw.prepare("UPDATE v2_inbound_plans SET source_type='external_inbound',status='putting_away' WHERE id=?").run(legacy.id);
+ const l=await f.start('SYNTH-LEGACY','inbound_direct');assert.equal(l.ok,true,JSON.stringify(l));assert.equal((await f.start('SYNTH-LEGACY',putaway,'SYNTH-OTHER')).ok,false);assert.equal((await f.finish(l)).ok,true);
+ assert.equal((await f.resolve('SYNTH-LEGACY',putaway)).kind,'biz_already_completed');
+});
+test('concurrent putaway dispatch and changing a recognized number cannot duplicate or redirect work',async t=>{
+ const f=fixture(t),code='SYNTH-PUTAWAY-RACE',a=await f.start(code);assert.equal((await f.finish(a)).ok,true);
+ const results=await Promise.all([f.start(code,putaway,'SYNTH-P1'),f.start(code,putaway,'SYNTH-P2')]);assert.equal(results.filter(r=>r.ok).length,1,JSON.stringify(results));
+ const j=results.find(r=>r.ok);assert.equal((await f.finish(j,{location_count:2,used_forklift:false})).ok,true);
+ assert.equal(f.DB.raw.prepare("SELECT count(*) n FROM v2_ops_jobs WHERE related_doc_id=? AND job_type=?").get(a.plan_id,putaway).n,1);
+ const before=await f.resolve('SYNTH-LATE-PLAN');assert.equal(before.kind,'independent');
+ const p=await f.ok('v2_inbound_plan_create',{customer:'Synthetic race',external_inbound_no:'SYNTH-LATE-PLAN',biz_classes:['direct_ship']});
+ assert.equal((await f.start('SYNTH-LATE-PLAN')).ok,false);assert.equal(f.DB.raw.prepare("SELECT source_type FROM v2_inbound_plans WHERE id=?").get(p.id).source_type,'manual');
+});
+test('installing the independent constraints leaves historical business rows unchanged',async t=>{
+ const f=fixture(t);
+ for(const row of f.DB.raw.prepare("SELECT type,name FROM sqlite_master WHERE name LIKE 'ck_independent_inbound_%'").all())f.DB.raw.exec('DROP '+row.type+' '+row.name);
+ f.DB.raw.exec(`INSERT INTO v2_inbound_plans(id,display_no,customer,external_inbound_no,status,source_type) VALUES('SYNTH-OLD-PLAN','RU-20000101-9999','Synthetic historical','SYNTH-HISTORY','completed','external_inbound');
+  INSERT INTO v2_ops_jobs(id,job_type,related_doc_type,related_doc_id,status,created_at,updated_at) VALUES('SYNTH-OLD-JOB','inbound_direct','inbound_plan','SYNTH-OLD-PLAN','completed','2000-01-01T00:00:00Z','2000-01-01T00:05:00Z');
+  INSERT INTO v2_ops_job_workers(id,job_id,worker_id,worker_name,joined_at,left_at,minutes_worked) VALUES('SYNTH-OLD-CLOCK','SYNTH-OLD-JOB','SYNTH-OLD-W','合成历史人员','2000-01-01T00:00:00Z','2000-01-01T00:05:00Z',5);
+  INSERT INTO v2_ops_job_results(id,job_id,result_json) VALUES('SYNTH-OLD-RESULT','SYNTH-OLD-JOB','{\"remark\":\"synthetic history\"}')`);
+ const snapshot=()=>Object.fromEntries(['v2_inbound_plans','v2_ops_jobs','v2_ops_job_workers','v2_ops_job_results'].map(table=>[table,f.DB.raw.prepare('SELECT * FROM '+table).all()]));
+ const before=snapshot();assert.equal((await f.resolve('SYNTH-HISTORY',putaway)).kind,'biz_already_completed');
+ assert.deepEqual(snapshot(),before);assert.ok(f.DB.raw.prepare("SELECT name FROM sqlite_master WHERE name='ck_independent_inbound_create'").get());
+ assert.equal((await f.start('SYNTH-HISTORY',putaway)).ok,false);assert.deepEqual(snapshot(),before);
+});
