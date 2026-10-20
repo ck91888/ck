@@ -6673,7 +6673,7 @@ route("v2_inbound_plan_export", async (body, env) => {
     if (!materialFilesByPlan[r.plan_id]) materialFilesByPlan[r.plan_id] = [];
     materialFilesByPlan[r.plan_id].push(r.file_name || '');
   }
-  // 入库实际数量来源是 v2_inbound_plan_lines（按 unit_type='carton'/'pallet' 分行）
+  // 入库数量只取 v2_inbound_plan_lines；快递数量按箱计，不再从运单/作业结果重复汇总。
   // v2_inbound_plans 主表无 actual_box_count / actual_pallet_count 字段
   const planLineRows = await batchSelectInGlobal(env,
     `SELECT plan_id, unit_type, SUM(planned_qty) AS pq, SUM(actual_qty) AS aq, SUM(putaway_qty) AS pu
@@ -6712,9 +6712,10 @@ route("v2_inbound_plan_export", async (body, env) => {
     const linkedNos = linkByPlan[p.id] || [];
     const lp = linesByPlan[p.id] || {};
     const cartonAgg = lp.carton || { pq: 0, aq: 0, pu: 0 };
+    const courierAgg = lp.courier || { pq: 0, aq: 0, pu: 0 };
     const palletAgg = lp.pallet || { pq: 0, aq: 0, pu: 0 };
-    // 实际数量优先取 putaway（实际入库），否则取卸货 actual
-    const actualBox = cartonAgg.pu || cartonAgg.aq;
+    // 箱/托沿用原 putaway 优先口径；快递取详情中的 actual_qty，零/缺失不以计划或上架数补齐。
+    const actualBox = (cartonAgg.pu || cartonAgg.aq) + courierAgg.aq;
     const actualPallet = palletAgg.pu || palletAgg.aq;
 
     return {
@@ -6737,7 +6738,7 @@ route("v2_inbound_plan_export", async (body, env) => {
       备注: p.remark || '',
       创建人: p.created_by || '',
       创建时间: fmtKst(p.created_at),
-      计划箱数: cartonAgg.pq,
+      计划箱数: cartonAgg.pq + courierAgg.pq,
       计划托数: palletAgg.pq,
       实际箱数: actualBox,
       实际托数: actualPallet,
