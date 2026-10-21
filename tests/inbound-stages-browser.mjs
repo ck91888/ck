@@ -26,7 +26,7 @@ async function start(p,code,type,staff){
  await p.locator('[onclick="startInbound(this)"]').click();await modal(p).waitFor();
  for(const person of staff)await add(p,person);
  const result=p.waitForResponse(r=>r.url().endsWith('/api')&&r.request().postDataJSON()?.action==='sop_native_start');
- await modal(p).locator('[type=submit]').click();const j=await(await result).json();assert.equal(j.ok,true,JSON.stringify(j));await p.locator('#inboundWorkingCard').waitFor({state:'visible'});await p.waitForFunction(()=>_inboundPlanLoad.status==='ready');return j;
+ await modal(p).locator('[type=submit]').click();const j=await(await result).json();assert.equal(j.ok,true,JSON.stringify(j));await p.locator('#inboundWorkingCard').waitFor({state:'visible'});await p.waitForFunction(()=>_inboundPlanLoad.status==='ready');assert.equal(await p.locator('#ck-inbound-owner-name').getAttribute('readonly'),'');assert.equal(await p.locator('#ck-inbound-owner-name').inputValue(),DB.raw.prepare('SELECT customer FROM v2_inbound_plans WHERE id=?').get(j.plan_id).customer);return j;
 }
 async function finish(p){const result=p.waitForResponse(r=>r.url().endsWith('/api')&&r.request().postDataJSON()?.action==='v2_inbound_job_finish');await p.locator('[onclick="finishInbound(this)"]').click();const r=await(await result).json();assert.equal(r.ok,true,JSON.stringify(r));await p.locator('#page-home.active').waitFor();await p.waitForFunction(()=>!_actionLocks.finishInbound&&!_activeJobId);}
 try{

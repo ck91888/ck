@@ -1106,15 +1106,17 @@ const MIGRATIONS = [
 
   // New independent tally sessions reuse job relationships, never a collaboration RU plan.
   `CREATE UNIQUE INDEX IF NOT EXISTS ck_independent_inbound_number ON v2_inbound_plans(external_inbound_no) WHERE source_type='direct_tally_session'`,
+  `DROP TRIGGER IF EXISTS ck_independent_inbound_create`,
   `CREATE TRIGGER IF NOT EXISTS ck_independent_inbound_create BEFORE INSERT ON v2_inbound_plans WHEN NEW.source_type='direct_tally_session' BEGIN
-    SELECT CASE WHEN COALESCE(NEW.external_inbound_no,'')='' OR NEW.display_no!='' OR NEW.customer!='' OR NEW.biz_class!='direct_ship' OR NEW.biz_classes_json!='["direct_ship"]' OR COALESCE(NEW.bulk_external_inbound_no,'')!='' OR NEW.status!='putting_away'
+    SELECT CASE WHEN COALESCE(NEW.external_inbound_no,'')='' OR NEW.display_no!='' OR trim(COALESCE(NEW.customer,''))='' OR length(NEW.customer)>120 OR NEW.biz_class!='direct_ship' OR NEW.biz_classes_json!='["direct_ship"]' OR COALESCE(NEW.bulk_external_inbound_no,'')!='' OR NEW.status!='putting_away'
       THEN RAISE(ABORT,'invalid independent tally session') END;
     SELECT CASE WHEN EXISTS(SELECT 1 FROM v2_inbound_plans p WHERE p.id=NEW.external_inbound_no OR p.display_no=NEW.external_inbound_no OR instr(char(10)||COALESCE(p.external_inbound_no,'')||char(10),char(10)||NEW.external_inbound_no||char(10))>0)
       THEN RAISE(ABORT,'inbound number already registered; refresh before dispatch') END;
   END`,
   `CREATE TRIGGER IF NOT EXISTS ck_independent_inbound_collision_insert BEFORE INSERT ON v2_inbound_plans WHEN NEW.source_type!='direct_tally_session' AND EXISTS(SELECT 1 FROM v2_inbound_plans s WHERE s.source_type='direct_tally_session' AND (s.external_inbound_no=NEW.id OR s.external_inbound_no=NEW.display_no OR instr(char(10)||COALESCE(NEW.external_inbound_no,'')||char(10),char(10)||s.external_inbound_no||char(10))>0)) BEGIN SELECT RAISE(ABORT,'inbound number belongs to an independent tally session'); END`,
   `CREATE TRIGGER IF NOT EXISTS ck_independent_inbound_collision_update BEFORE UPDATE OF external_inbound_no,display_no,id ON v2_inbound_plans WHEN OLD.source_type!='direct_tally_session' AND EXISTS(SELECT 1 FROM v2_inbound_plans s WHERE s.source_type='direct_tally_session' AND (s.external_inbound_no=NEW.id OR s.external_inbound_no=NEW.display_no OR instr(char(10)||COALESCE(NEW.external_inbound_no,'')||char(10),char(10)||s.external_inbound_no||char(10))>0)) BEGIN SELECT RAISE(ABORT,'inbound number belongs to an independent tally session'); END`,
-  `CREATE TRIGGER IF NOT EXISTS ck_independent_inbound_identity BEFORE UPDATE ON v2_inbound_plans WHEN (OLD.source_type='direct_tally_session' OR NEW.source_type='direct_tally_session') AND (NEW.source_type IS NOT OLD.source_type OR NEW.id IS NOT OLD.id OR NEW.external_inbound_no IS NOT OLD.external_inbound_no OR NEW.bulk_external_inbound_no IS NOT OLD.bulk_external_inbound_no OR NEW.biz_class IS NOT OLD.biz_class OR NEW.biz_classes_json IS NOT OLD.biz_classes_json OR NEW.display_no IS NOT OLD.display_no OR NEW.customer IS NOT OLD.customer OR NEW.unload_completed_at IS NOT OLD.unload_completed_at) BEGIN SELECT RAISE(ABORT,'independent tally identity cannot change'); END`,
+  `DROP TRIGGER IF EXISTS ck_independent_inbound_identity`,
+  `CREATE TRIGGER IF NOT EXISTS ck_independent_inbound_identity BEFORE UPDATE ON v2_inbound_plans WHEN (OLD.source_type='direct_tally_session' OR NEW.source_type='direct_tally_session') AND (NEW.source_type IS NOT OLD.source_type OR NEW.id IS NOT OLD.id OR NEW.external_inbound_no IS NOT OLD.external_inbound_no OR NEW.bulk_external_inbound_no IS NOT OLD.bulk_external_inbound_no OR NEW.biz_class IS NOT OLD.biz_class OR NEW.biz_classes_json IS NOT OLD.biz_classes_json OR NEW.display_no IS NOT OLD.display_no OR (NEW.customer IS NOT OLD.customer AND (trim(COALESCE(NEW.customer,''))='' OR length(NEW.customer)>120 OR OLD.status!='putting_away' OR NOT EXISTS(SELECT 1 FROM v2_ops_jobs j WHERE j.related_doc_type='inbound_plan' AND j.related_doc_id=OLD.id AND j.job_type='inbound_direct_tally' AND j.status IN ('working','awaiting_close')) OR EXISTS(SELECT 1 FROM v2_ops_jobs j WHERE j.related_doc_type='inbound_plan' AND j.related_doc_id=OLD.id AND j.job_type='inbound_direct_tally' AND j.status='completed'))) OR NEW.unload_completed_at IS NOT OLD.unload_completed_at) BEGIN SELECT RAISE(ABORT,'independent tally identity cannot change'); END`,
   `DROP TRIGGER IF EXISTS ck_independent_inbound_terminal`,
   `CREATE TRIGGER IF NOT EXISTS ck_independent_inbound_terminal BEFORE UPDATE OF status,is_deleted ON v2_inbound_plans WHEN OLD.source_type='direct_tally_session' BEGIN
     SELECT CASE WHEN NEW.status='completed' AND NOT EXISTS(SELECT 1 FROM v2_inbound_references j WHERE j.related_doc_type='inbound_plan' AND j.plan_id=OLD.id AND j.job_type='inbound_direct_putaway' AND j.status='completed') THEN RAISE(ABORT,'putaway stage is not complete') END;
@@ -1854,7 +1856,7 @@ const MIGRATIONS = [
 ];
 
 // 每次发布迁移变化时手动 +1（patch 段），冷启动只比对一次字符串即可跳过整段 MIGRATIONS
-const CURRENT_SCHEMA_VERSION = 'v2.20261021-multi-putaway';
+const CURRENT_SCHEMA_VERSION = 'v2.20261021-inbound-owner';
 
 const migratedDatabases = new WeakSet(), migratingDatabases = new WeakMap();
 async function ensureMigrated(db){
@@ -4401,6 +4403,14 @@ route("v2_inbound_plan_ops_candidates", async (body, env) => {
 });
 
 // ===== Resolve inbound code: identify system plan vs external no =====
+// Search registered names only; free text follows the existing external-inbound model.
+route("v2_inbound_owner_lookup", async (body,env) => {
+  if(!isOpsAuth(body,env)||!inboundFlowEnabled(env))return err('unauthorized',401);
+  const search=String(body.q||'').trim().slice(0,120);
+  const names=await env.DB.prepare("SELECT DISTINCT trim(customer) AS customer FROM v2_inbound_plans WHERE COALESCE(is_deleted,0)=0 AND trim(COALESCE(customer,''))!='' AND instr(lower(customer),lower(?))>0 ORDER BY customer LIMIT 20").bind(search).all();
+  return json({ok:true,items:names.results||[]});
+});
+
 route("v2_inbound_resolve_code", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
   const code = String(body.code || "").trim();
@@ -10663,7 +10673,7 @@ route("v2_dashboard_order_export", async (body, env) => {
   const total=Number((await env.DB.prepare(`SELECT COUNT(*) c FROM v2_ops_jobs j ${where}`).bind(...binds).first())?.c||0);
   const jobsRs = await env.DB.prepare(
     `SELECT id, display_no, related_doc_type, related_doc_id, linked_outbound_order_id,
-            flow_stage, biz_class, job_type, status, shared_result_json, created_at, updated_at
+            flow_stage, biz_class, job_type, status, shared_result_json, inbound_external_no, created_at, updated_at
      FROM v2_ops_jobs j ${where}
      ORDER BY j.created_at DESC,j.id LIMIT ? OFFSET ?`
   ).bind(...binds, limit,offset).all();
@@ -10713,6 +10723,9 @@ route("v2_dashboard_order_export", async (body, env) => {
        FROM v2_outbound_orders WHERE id IN (PLACEHOLDER)`,
       outboundIds)
   ]);
+
+  const ownerLinks=await batchSelectInGlobal(env,'SELECT l.job_id,l.plan_id,l.external_no AS external_inbound_no,p.customer FROM ck_putaway_links l JOIN v2_inbound_plans p ON p.id=l.plan_id WHERE l.job_id IN (PLACEHOLDER) ORDER BY l.position',jobs.filter(j=>j.job_type===putawayType).map(j=>j.id));
+  const ownersByJob=new Map();for(const ref of ownerLinks){if(!ownersByJob.has(ref.job_id))ownersByJob.set(ref.job_id,[]);ownersByJob.get(ref.job_id).push(ref);}
 
   // One plan per task, independent of document and participant counts.
   const pickPlans=env.SOP_UPGRADE_ENABLED==='true'?await batchSelectInGlobal(env,
@@ -10783,7 +10796,9 @@ route("v2_dashboard_order_export", async (body, env) => {
     if (isInboundLink(j.related_doc_type)) related = inboundById[j.related_doc_id] || null;
     else if (isOutboundRelType(j.related_doc_type)) related = outboundById[j.related_doc_id] || null;
     const linked_ob = j.linked_outbound_order_id ? outboundById[j.linked_outbound_order_id] : null;
-    const customer = (related && related.customer) || (linked_ob && linked_ob.customer) || '';
+    const inbound_owners=ownersByJob.get(j.id)||(isInboundLink(j.related_doc_type)&&related?[{plan_id:related.id,external_inbound_no:j.inbound_external_no||related.external_inbound_no,customer:related.customer||''}]:[]);
+    const customer = inbound_owners.length?[...new Set(inbound_owners.map(p=>p.customer||'未记录 / 미기록'))].join('、'):(related && related.customer) || (linked_ob && linked_ob.customer) || '';
+
     const accounted = (related && related.accounted) ?? (linked_ob && linked_ob.accounted) ?? '';
     const accounted_by = (related && related.accounted_by) || (linked_ob && linked_ob.accounted_by) || '';
     const accounted_at_iso = (related && related.accounted_at) || (linked_ob && linked_ob.accounted_at) || '';
@@ -10897,6 +10912,8 @@ route("v2_dashboard_order_export", async (body, env) => {
       result_lines_count: parsed.result_lines_count,
       raw_result_json_compact: parsed.raw_result_json_compact,
       // 业务关联
+      inbound_owners,
+      inbound_owner_details:inbound_owners.map(p=>(p.external_inbound_no||p.plan_id)+'：'+(p.customer||'未记录 / 미기록')).join('；'),
       customer,
       accounted: accounted === '' ? '' : (accounted ? 1 : 0),
       accounted_by,

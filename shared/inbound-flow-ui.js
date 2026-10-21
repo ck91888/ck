@@ -95,6 +95,21 @@ window.CKInstallInboundFlow=function(app){
    const putaway=button.cloneNode(true);putaway.textContent='上架 / 적치';putaway.setAttribute('onclick',action.replace('inbound_direct','inbound_direct_putaway'));button.after(putaway);
   }else if(action.includes('inbound_bulk'))button.textContent=CKInboundLabel('bulk_putaway');}
   const stageType=()=>window._pageParams?.job_type||'';
+  const ownerLabel='货主 / 화주',unknownOwner='未记录 / 미기록';
+  const entryOwner=document.getElementById('inboundExternalCustomer'),entryFields=document.getElementById('ibExternalFields');
+  entryFields.querySelector('label').textContent=ownerLabel+' *';
+  entryOwner.maxLength=120;entryOwner.setAttribute('aria-label',ownerLabel);entryOwner.placeholder='搜索已登记货主或输入名称 / 화주 검색 또는 입력';
+  const ownerForm=document.createElement('div');ownerForm.id='ck-inbound-owner';ownerForm.hidden=true;
+  ownerForm.innerHTML='<label for="ck-inbound-owner-name">货主 / 화주 <span data-required>*</span></label><input id="ck-inbound-owner-name" maxlength="120" placeholder="搜索已登记货主或输入名称 / 화주 검색 또는 입력"><p class="muted" data-owner-hint></p><p role="alert"></p>';
+  document.getElementById('inboundResultLines').before(ownerForm);
+  const finishOwner=ownerForm.querySelector('input');finishOwner.addEventListener('input',()=>{ownerForm.querySelector('[role=alert]').textContent='';});
+  for(const [i,input] of [entryOwner,finishOwner].entries()){
+   const options=document.createElement('datalist');options.id='ck-owner-options-'+i;input.setAttribute('list',options.id);input.after(options);
+   let ticket=0,timer;
+   const search=()=>{clearTimeout(timer);const run=++ticket,value=input.value.trim();timer=setTimeout(async()=>{try{const r=await api({action:'v2_inbound_owner_lookup',q:value});if(run!==ticket||input.value.trim()!==value)return;options.replaceChildren(...(r?.items||[]).map(x=>new Option(x.customer,x.customer)));}catch{}},180);};
+   input.addEventListener('input',search);input.addEventListener('focus',search);
+  }
+
   const putawayForm=document.createElement('div');putawayForm.id='ck-putaway-workload';putawayForm.hidden=true;
   putawayForm.innerHTML='<p>上架完成时填写本单实际工作量 / 완료 시 실제 작업량 입력</p><label for="ck-putaway-locations">货位数 / 적치 위치 수</label><input id="ck-putaway-locations" type="number" min="0" max="100000000" step="1" inputmode="numeric" placeholder="必填，0 或正整数 / 필수"><fieldset><legend>是否使用叉车 / 지게차 사용 여부</legend><label><input type="radio" name="ck-putaway-forklift" value="yes"> 是 / 예</label> <label><input type="radio" name="ck-putaway-forklift" value="no"> 否 / 아니요</label></fieldset><p role="alert"></p>';
   document.getElementById('inboundResultLines').before(putawayForm);
@@ -102,6 +117,13 @@ window.CKInstallInboundFlow=function(app){
     const isPutaway=job?.job_type==='inbound_direct_putaway';
     document.querySelector('#inboundPlanInfoCard .card-title').textContent=rendered.data.plan.source_type==='direct_tally_session'?'入库单信息 / 입고 정보':'入库计划信息 / 입고계획 정보';
     if(job?.job_type)window._pageParams.job_type=job.job_type;
+    const p=rendered.data.plan,editable=job?.job_type==='inbound_direct_tally'&&p.source_type==='direct_tally_session'&&!['completed','cancelled'].includes(job.status);
+    ownerForm.hidden=!['inbound_direct_tally','inbound_direct_putaway'].includes(job?.job_type)||(isPutaway&&job.putaway_refs?.length>1);
+    finishOwner.readOnly=!editable;finishOwner.required=editable;ownerForm.querySelector('[data-required]').hidden=!editable;
+    if(ownerForm.dataset.jobId!==rendered.jobId){ownerForm.dataset.jobId=rendered.jobId;finishOwner.value=p.customer||'';ownerForm.querySelector('[role=alert]').textContent='';}
+    if(!editable)finishOwner.value=p.customer||unknownOwner;
+    ownerForm.querySelector('[data-owner-hint]').textContent=editable?'独立单号完成理货前必填，可选择已登记名称或输入外部货主。 / 독립 입고번호 검수 완료 전 화주 필수':isPutaway?'货主沿用原入库单；多单货主见上方逐单明细。 / 원 입고 화주 유지, 공동 적치는 위 입고별 명세 확인':'已从入库计划带出 / 입고계획에서 자동 입력';
+
     putawayForm.hidden=!isPutaway;
     putawayForm.parentElement.querySelector('.card-title').textContent=isPutaway?'上架结果 / 적치 결과':'入库结果 / 입고 결과';
     if(putawayForm.dataset.jobId!==rendered.jobId){putawayForm.dataset.jobId=rendered.jobId;document.getElementById('ck-putaway-locations').value='';putawayForm.querySelectorAll('input[type=radio]').forEach(x=>x.checked=false);}
@@ -111,6 +133,12 @@ window.CKInstallInboundFlow=function(app){
     const finish=document.querySelector('button[onclick="finishInbound(this)"]');if(finish)finish.textContent=isPutaway?'完成上架 / 적치 완료':job?.job_type==='inbound_direct_tally'?'完成理货 / 검수 완료':'完成入库 / 입고 완료';
   };
   const originalApi=window.api;window.api=async function(body){
+   if(body.action==='v2_inbound_job_finish'&&body.complete_job&&window._inboundPlanData?.plan?.source_type==='direct_tally_session'&&stageType()==='inbound_direct_tally'){
+    if(ownerForm.dataset.jobId!==body.job_id)return {ok:false,error:'请重新读取本单资料 / 입고정보를 다시 확인하세요'};
+    const customer=finishOwner.value.trim();
+    if(!customer){ownerForm.querySelector('[role=alert]').textContent='请填写货主 / 화주를 입력하세요';finishOwner.focus();return {ok:false,error:'请填写货主 / 화주를 입력하세요'};}
+    body={...body,customer_name:customer};
+   }
    if(body.action==='v2_inbound_job_finish'&&body.complete_job&&stageType()==='inbound_direct_putaway'){
     const raw=document.getElementById('ck-putaway-locations').value,choice=document.querySelector('[name="ck-putaway-forklift"]:checked');
     if(raw.trim()===''||!Number.isSafeInteger(Number(raw))||Number(raw)<0||Number(raw)>1e8)return {ok:false,error:'货位数必填，请填写 0–100000000 的整数 / 적치 위치 수를 입력하세요'};
@@ -119,10 +147,11 @@ window.CKInstallInboundFlow=function(app){
    }
    return originalApi(body);
   };
+  const clearResolve=window.clearInboundResolve;window.clearInboundResolve=function(...args){entryOwner.value='';return clearResolve(...args);};
   const code=document.getElementById('inboundCodeInput');code.placeholder='输入或扫描入库单号 / 입고번호 입력 또는 스캔';code.addEventListener('input',()=>{window._ibResolveSequence++;window._ibResolvedKind='';window._ibResolvedPlanId='';window._ibResolvedPlan=null;});
   document.querySelector('#inboundEntryCard>label').textContent='输入或扫描入库单号 / 입고번호 입력 또는 스캔';
-  const resolve=window.resolveInboundCode;window.resolveInboundCode=async function(...args){window._ibResolvedKind='';window._ibResolvedPlanId='';window._ibResolvedPlan=null;await resolve(...args);if(['system','independent'].includes(window._ibResolvedKind)){const p=window._ibResolvedPlan;const ref=p.inbound_progress?.items.find(x=>x.external_no===p.selected_external_inbound_no);if(stageType()==='inbound_direct_putaway'&&!['tallied_pending_putaway','putting_away'].includes(ref?.status)||stageType()==='inbound_direct_tally'&&['tallied_pending_putaway','putting_away'].includes(ref?.status)){window._ibResolvedKind='';document.getElementById('ibResolveResult').textContent=stageType()==='inbound_direct_putaway'?'本单理货尚未完成，不能开始上架 / 검수 완료 후 적치를 시작하세요':'本单理货已完成，请从上架入口派工 / 적치 메뉴에서 시작하세요';return;}document.getElementById('ibResolveResult').innerHTML='<div class="ck-inbound-match"><strong>本次外部入库单 / 이번 입고번호：'+esc(p.selected_external_inbound_no||'—')+'</strong><div>'+ (p.source_type==='direct_tally_session'?'独立单号 · 完成理货后才可上架 / 검수 완료 후 적치':'已关联 '+esc(p.display_no||p.id)+' · '+esc(p.customer))+'</div><div>'+esc(p.cargo_summary||'')+'</div>'+progressHtml(p)+'</div>';}};
-  window.loadInboundCandidates=async function(){const sel=document.getElementById('inboundPlanSelect'),bc=_resolveBizClass();const r=await api({action:'v2_inbound_plan_ops_candidates',scene:'putaway',biz_class:bc,required_biz_class:bc});sel.innerHTML='<option value="">选择本次外部入库单 / 작업할 입고번호 선택</option>';for(const p of r?.items||[]){const refs=p.inbound_progress?.items||[{external_no:p.external_inbound_no||p.display_no||p.id,status:'pending'}];for(const ref of refs.filter(x=>x.status!=='completed'&&(stageType()==='inbound_direct_putaway'?['tallied_pending_putaway','putting_away'].includes(x.status):stageType()==='inbound_direct_tally'?!['tallied_pending_putaway','putting_away'].includes(x.status):true))){const o=document.createElement('option');o.value=p.id+'::'+ref.external_no;o.dataset.code=ref.external_no;o.textContent=ref.external_no+' · '+(p.source_type==='direct_tally_session'?'独立单号 / 독립 입고번호':p.customer+' · '+(p.display_no||p.id))+(ref.status==='working'?' · 理货中':'');sel.append(o);}}};
+  const resolve=window.resolveInboundCode;window.resolveInboundCode=async function(...args){window._ibResolvedKind='';window._ibResolvedPlanId='';window._ibResolvedPlan=null;await resolve(...args);if(['system','independent'].includes(window._ibResolvedKind)){const p=window._ibResolvedPlan;const independent=p.source_type==='direct_tally_session';entryFields.style.display=independent&&stageType()==='inbound_direct_tally'?'':'none';entryOwner.value=independent?(p.customer||''):'';const ref=p.inbound_progress?.items.find(x=>x.external_no===p.selected_external_inbound_no);if(stageType()==='inbound_direct_putaway'&&!['tallied_pending_putaway','putting_away'].includes(ref?.status)||stageType()==='inbound_direct_tally'&&['tallied_pending_putaway','putting_away'].includes(ref?.status)){window._ibResolvedKind='';document.getElementById('ibResolveResult').textContent=stageType()==='inbound_direct_putaway'?'本单理货尚未完成，不能开始上架 / 검수 완료 후 적치를 시작하세요':'本单理货已完成，请从上架入口派工 / 적치 메뉴에서 시작하세요';return;}document.getElementById('ibResolveResult').innerHTML='<div class="ck-inbound-match"><strong>本次外部入库单 / 이번 입고번호：'+esc(p.selected_external_inbound_no||'—')+'</strong><div>'+ (p.source_type==='direct_tally_session'?'独立单号 · '+esc(p.customer||unknownOwner)+' · 完成理货后才可上架 / 검수 완료 후 적치':'已关联 '+esc(p.display_no||p.id)+' · '+esc(p.customer))+'</div><div>'+esc(p.cargo_summary||'')+'</div>'+progressHtml(p)+'</div>';}};
+  window.loadInboundCandidates=async function(){const sel=document.getElementById('inboundPlanSelect'),bc=_resolveBizClass();const r=await api({action:'v2_inbound_plan_ops_candidates',scene:'putaway',biz_class:bc,required_biz_class:bc});sel.innerHTML='<option value="">选择本次外部入库单 / 작업할 입고번호 선택</option>';for(const p of r?.items||[]){const refs=p.inbound_progress?.items||[{external_no:p.external_inbound_no||p.display_no||p.id,status:'pending'}];for(const ref of refs.filter(x=>x.status!=='completed'&&(stageType()==='inbound_direct_putaway'?['tallied_pending_putaway','putting_away'].includes(x.status):stageType()==='inbound_direct_tally'?!['tallied_pending_putaway','putting_away'].includes(x.status):true))){const o=document.createElement('option');o.value=p.id+'::'+ref.external_no;o.dataset.code=ref.external_no;o.textContent=ref.external_no+' · '+(p.source_type==='direct_tally_session'?'独立单号 / 독립 입고번호 · '+(p.customer||unknownOwner):p.customer+' · '+(p.display_no||p.id))+(ref.status==='working'?' · 理货中':'');sel.append(o);}}};
   window.onInboundCandidateSelect=function(){const s=document.getElementById('inboundPlanSelect');if(!s.value)return;code.value=s.selectedOptions[0].dataset.code;resolveInboundCode();};
    const planInfo=window.loadInboundPlanInfo;window.loadInboundPlanInfo=async function(...args){const rendered=await planInfo(...args);if(!rendered?.rendered||rendered.jobId!==window._activeJobId||rendered.data!==window._inboundPlanData)return rendered;const data=rendered.data,p=data.plan;const job=(data.jobs||[]).find(x=>x.id===window._activeJobId),current=job?.inbound_external_no||p.external_inbound_nos?.[0]||'';const box=document.createElement('section');box.className='ck-inbound-match';box.innerHTML='<strong>本次外部入库单 / 이번 입고번호：'+esc(current)+'</strong>'+progressHtml(p);document.getElementById('inboundPlanInfo').prepend(box);
    if(p.inbound_progress?.total>1){document.querySelectorAll('.ib-putaway-input').forEach(x=>{x.value='';x.placeholder='本单实际数';});const note=document.createElement('p');note.className='muted';note.textContent='以下填写本次外部入库单的实际数量，请勿重复填写整批数量 / 이번 입고번호의 실제 수량만 입력하세요';document.getElementById('inboundResultLines').prepend(note);}

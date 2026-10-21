@@ -4,10 +4,17 @@ import {documentCodeError} from '../shared/document-code.js';
 
 export const independentSource='direct_tally_session';
 export const independentInbound=plan=>plan?.source_type===independentSource;
+// Reuse the existing external-inbound customer text, without creating master data.
+export function inboundOwner(value){
+ const name=typeof value==='string'?value.trim():'';
+ if(!name)throw Error('请填写货主 / 화주를 입력하세요');
+ if(name.length>120||/[\u0000-\u001f\u007f]/.test(name))throw Error('货主最多120字符，不能包含控制字符 / 화주는 120자 이내로 입력하세요');
+ return name;
+}
 
 // Recognition is read-only. Only an authorized atomic dispatch creates a session.
 // The shared plan storage supplies existing job/clock/detail relationships; these
-// sessions have no RU number, customer assertion, unload evidence or planned stock.
+// sessions have no RU number, unload evidence or planned stock.
 export async function resolveInboundEntry(env,value,biz,type){
  const code=inboundCode(value),blocked=message=>({ok:true,kind:'status_not_allowed',message});
  if(!inboundFlowEnabled(env)||!stagedInbound(type))return resolveInboundPlan(env,code,biz);

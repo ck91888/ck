@@ -14,7 +14,7 @@ window.CKInstallMultiPutaway=function(){
   list.innerHTML='<h3>已选入库单 / 선택한 입고번호（'+selected.length+'）</h3><p>连续扫码、输入或选择加入；一次派工，数量和工时按整任务记录。 / 연속 스캔·입력·선택, 한 번 배정. 수량·시간은 작업 전체 기준.</p>';
   for(const [i,p] of selected.entries()){
    const row=document.createElement('div');row.className='ck-putaway-member';
-   const info=document.createElement('div'),no=document.createElement('strong'),hint=document.createElement('small');no.textContent=p.selected_external_inbound_no;hint.textContent=(p.source_type==='direct_tally_session'?'独立单号 / 독립 입고번호':(p.display_no||p.id)+' · '+(p.customer||''))+' · 理货完成 / 검수 완료';info.append(no,hint);
+   const info=document.createElement('div'),no=document.createElement('strong'),hint=document.createElement('small');no.textContent=p.selected_external_inbound_no;hint.textContent=(p.source_type==='direct_tally_session'?'独立单号 / 독립 입고번호':(p.display_no||p.id))+' · 货主 / 화주：'+(p.customer||'未记录 / 미기록')+' · 理货完成 / 검수 완료';info.append(no,hint);
    const remove=document.createElement('button');remove.type='button';remove.textContent='移除 / 삭제';remove.disabled=busy;remove.setAttribute('aria-label',p.selected_external_inbound_no+' 移除 / 삭제');remove.onclick=()=>{selected.splice(i,1);render();};row.append(info,remove);list.append(row);
   }
   if(!selected.length){const empty=document.createElement('p');empty.textContent='尚未加入入库单 / 입고번호를 추가하세요';list.append(empty);}
@@ -58,7 +58,7 @@ window.CKInstallMultiPutaway=function(){
  const cancel=document.createElement('button');cancel.type='button';cancel.id='ck-putaway-cancel';cancel.className='btn btn-outline';cancel.textContent='取消本次上架 / 이번 적치 취소';cancel.hidden=true;$('inboundWorkingCard').append(cancel);
  const original=window.api;window.api=async function(body){const r=await original(body);if(body.action==='v2_ops_job_detail'&&r?.ok&&body.job_id===window._activeJobId){
   detail=r;const refs=r.putaway_refs||[],show=r.job.job_type==='inbound_direct_putaway';members.hidden=!show;$('inboundWorkingCard').classList.toggle('ck-multi-putaway-working',show&&refs.length>1);cancel.hidden=!show||!r.can_manage_dispatch||['completed','cancelled'].includes(r.job.status);
-  if(show){members.innerHTML='<h3>本次共同上架 / 이번 공동 적치</h3>';for(const ref of refs){const row=document.createElement('p');row.textContent=ref.external_inbound_no+' · '+(ref.display_no||'独立单号 / 독립 입고번호')+(ref.customer?' · '+ref.customer:'')+' · '+(ref.status==='completed'?'已入库 / 입고 완료':'上架中 / 적치 중');members.append(row);}if(!refs.length){const p=document.createElement('p');p.textContent=r.job.inbound_external_no||r.job.business_no;members.append(p);}const note=document.createElement('p');note.textContent='货位数、叉车及人员工时按本次任务记录一次，未按单分摊。 / 위치 수·지게차·인원 시간은 작업 전체 기준, 입고번호별 배분 없음.';members.append(note);}
+  if(show){members.innerHTML='<h3>本次共同上架 / 이번 공동 적치</h3>';for(const ref of refs){const row=document.createElement('p');row.textContent=ref.external_inbound_no+' · '+(ref.display_no||'独立单号 / 독립 입고번호')+(' · 货主 / 화주：'+(ref.customer||'未记录 / 미기록'))+' · '+(ref.status==='completed'?'已入库 / 입고 완료':'上架中 / 적치 중');members.append(row);}if(!refs.length){const p=document.createElement('p');p.textContent=r.job.inbound_external_no||r.job.business_no;members.append(p);}const note=document.createElement('p');note.textContent='货位数、叉车及人员工时按本次任务记录一次，未按单分摊。 / 위치 수·지게차·인원 시간은 작업 전체 기준, 입고번호별 배분 없음.';members.append(note);}
  }return r;};
  cancel.onclick=async()=>{
   if(!detail?.can_manage_dispatch)return;

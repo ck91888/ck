@@ -281,6 +281,7 @@ export async function handleSop(b,env) {
     (SELECT json_group_array(json_object('id',w.worker_id,'name',w.worker_name)) FROM v2_ops_job_workers w WHERE w.job_id=j.id AND w.left_at='') AS active_crew,
     (SELECT json_group_array(pd.pick_doc_no) FROM v2_ops_job_pick_docs pd WHERE pd.job_id=j.id) AS pick_numbers,
     (SELECT json_group_array(json_object('number',p.display_no,'customer',p.customer)) FROM ck_unload_plan_links l JOIN v2_inbound_plans p ON p.id=l.plan_id WHERE l.job_id=j.id ORDER BY l.position) AS unload_plans,
+    (SELECT json_group_array(json_object('plan_id',p.id,'external_inbound_no',l.external_no,'customer',p.customer)) FROM ck_putaway_links l JOIN v2_inbound_plans p ON p.id=l.plan_id WHERE l.job_id=j.id ORDER BY l.position) AS putaway_plans,
     ${loadTripEnabled(env)?"(SELECT json_group_array(json_object('number',o.display_no,'customer',o.customer)) FROM ck_load_order_links l JOIN v2_outbound_orders o ON o.id=l.order_id WHERE l.job_id=j.id ORDER BY l.position)":"'[]'"} AS load_orders
      FROM v2_ops_jobs j LEFT JOIN sop_records s ON j.id=s.id
     LEFT JOIN sop_records n ON n.id=json_extract(s.state,'$.need_id') AND n.kind='need'
@@ -293,10 +294,10 @@ export async function handleSop(b,env) {
     ${owned} AND (?='' OR (s.kind='dispatch' AND j.job_type='bulk_op' AND (j.id=? OR j.related_doc_id=? OR j.display_no=? OR ob.display_no=? OR ob.wms_work_order_no=?)))
      ORDER BY j.updated_at DESC LIMIT 200`,...access.args,...rest.args,...(claimDepartments.length?[JSON.stringify(claimDepartments),u.id]:[]),u.role,JSON.stringify(u.departments||[]),u.role,JSON.stringify(u.departments||[]),...(mine?[u.id]:[]),...Array(6).fill(externalCode));
    return {ok:true,...(mine?{view:'mine',viewer_id:u.id}:{}),items:await Promise.all((await jobNumbers(env,rows)).map(async r=>{
-    const d=JSON.parse(r.state),plans=JSON.parse(r.unload_plans||'[]'),loads=JSON.parse(r.load_orders||'[]'),picks=JSON.parse(r.pick_numbers||'[]');
-    const customer=[...new Set(loads.length?loads.map(o=>o.customer).filter(Boolean):plans.length?plans.map(p=>p.customer).filter(Boolean):[r.customer||r.inbound_customer||r.outbound_customer].filter(Boolean))].join('、');
+    const d=JSON.parse(r.state),putaways=JSON.parse(r.putaway_plans||'[]'),plans=JSON.parse(r.unload_plans||'[]'),loads=JSON.parse(r.load_orders||'[]'),picks=JSON.parse(r.pick_numbers||'[]');
+    const customer=[...new Set(putaways.length?putaways.map(p=>p.customer||'未记录 / 미기록'):loads.length?loads.map(o=>o.customer).filter(Boolean):plans.length?plans.map(p=>p.customer).filter(Boolean):[r.customer||r.inbound_customer||r.outbound_customer].filter(Boolean))].join('、');
     const canClaim=(r.task_kind==='dispatch'||!!d.bulk_batch_id)&&claimDepartments.includes(executionDepartment({kind:r.task_kind,department:r.dispatch_department,data:d}))&&await canClaimOwner(env,u,{kind:r.task_kind,department:r.dispatch_department,data:d});
-    return {id:r.id,bulk_batch_id:d.bulk_batch_id||'',assigned_workers:d.workers||[],...jobDisplayMetadata(r),task_no:r.task_no||'',task_kind:r.task_kind,job_type:r.job_type,title:r.task_kind==='task'?JSON.parse(r.need_state||'{}').title||d.title:loads.length?'本车装货 · '+loads.length+' 单':'',status:r.task_kind==='task'?d.status:r.status,source_type:r.related_doc_type,source_id:r.related_doc_id,lead_id:d.lead_id,last_lead:d.last_lead,display_no:r.display_no,business_no:r.business_no,customer,workers:JSON.parse(r.active_crew||'[]'),owner:d.owner,can_claim:canClaim,estimated_minutes:d.estimated_minutes};
+    return {id:r.id,bulk_batch_id:d.bulk_batch_id||'',assigned_workers:d.workers||[],...jobDisplayMetadata(r),task_no:r.task_no||'',task_kind:r.task_kind,job_type:r.job_type,title:r.task_kind==='task'?JSON.parse(r.need_state||'{}').title||d.title:loads.length?'本车装货 · '+loads.length+' 单':'',status:r.task_kind==='task'?d.status:r.status,source_type:r.related_doc_type,source_id:r.related_doc_id,lead_id:d.lead_id,last_lead:d.last_lead,display_no:r.display_no,business_no:r.business_no,customer,putaway_refs:putaways,workers:JSON.parse(r.active_crew||'[]'),owner:d.owner,can_claim:canClaim,estimated_minutes:d.estimated_minutes};
    }))};
   }
   if(b.action==='sop_dashboard') return await dashboard(env,u,b);

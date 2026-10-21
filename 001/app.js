@@ -1847,6 +1847,11 @@ async function startInbound(btnEl) {
   };
 
   if (_ibResolvedKind === 'system' || _ibResolvedKind === 'independent') {
+    if (_ibResolvedKind === 'independent' && jobType === 'inbound_direct_tally') {
+      var owner = document.getElementById('inboundExternalCustomer');
+      if (!owner.value.trim()) { alert('请填写货主 / 화주를 입력하세요'); owner.focus(); return; }
+      payload.customer_name = owner.value.trim();
+    }
     payload.plan_id = _ibResolvedPlanId;
     if (_ibResolvedPlan && _ibResolvedPlan.selected_external_inbound_no) {
       payload.external_inbound_no = _ibResolvedPlan.selected_external_inbound_no;
@@ -1922,7 +1927,7 @@ async function loadInboundPlanInfo(planId) {
   var lines = res.lines || [];
   // Plan info card
   if (infoEl) {
-    var html = p.source_type === 'direct_tally_session' ? '<div><b>独立入库单号 / 독립 입고번호：' + esc(p.external_inbound_no) + '</b></div>' : '<div><b>' + esc(p.display_no || p.id) + '</b> · ' + esc(p.customer || '--') + '</div>';
+    var html = p.source_type === 'direct_tally_session' ? '<div><b>独立入库单号 / 독립 입고번호：' + esc(p.external_inbound_no) + '</b></div><div>货主 / 화주：' + esc(p.customer || '未记录 / 미기록') + '</div>' : '<div><b>' + esc(p.display_no || p.id) + '</b> · ' + esc(p.customer || '--') + '</div>';
     html += '<div>' + esc(p.cargo_summary || '--') + '</div>';
     html += renderInboundPlanRemark(p);
     html += renderInboundMaterialsReadonly(res);
@@ -1949,7 +1954,7 @@ async function loadInboundPlanInfo(planId) {
       }
       linesEl.innerHTML = html;
     } else {
-      linesEl.innerHTML = '<div style="font-size:12px;color:#999;">无明细行，完成时仅记录备注</div>';
+      linesEl.innerHTML = '<div style="font-size:12px;color:#999;">无数量明细，可填写下方作业量和说明 / 수량 명세 없음, 아래 작업량·설명 입력</div>';
     }
   }
   context.status = 'ready';

@@ -3059,7 +3059,7 @@ async function loadInboundDetail() {
   }
   html += '<div><b>' + L("biz_class") + ':</b> ' + (bizTagsHtml || '--') + '</div>';
   if (!window.CK_SOP_ROLLOUT?.staging) html += '<div><b>' + L("plan_date") + ':</b> ' + esc(p.plan_date) + '</div>';
-  html += '<div><b>' + L("customer") + ':</b> ' + esc(p.customer) + '</div>';
+  html += '<div><b>' + L("customer") + ':</b> ' + esc(p.customer || (p.source_type === 'direct_tally_session' ? '未记录 / 미기록' : '')) + '</div>';
   html += '<div><b>' + L("cargo_summary") + ':</b> ' + esc(p.cargo_summary) + '</div>';
   html += '<div><b>' + L("expected_arrival") + ':</b> ' + esc(dateOnly(p.expected_arrival) || '--') + '</div>';
   if (p.purpose) html += '<div style="grid-column:1/-1;"><b>' + L("purpose") + ':</b> ' + esc(p.purpose) + '</div>';

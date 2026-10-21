@@ -8,7 +8,7 @@ function fixture(t){
  const env={DB,SOP_ENVIRONMENT:'staging',SOP_UPGRADE_ENABLED:'true',SOP_PUBLIC_TEST_ACCESS:'true'};
  const call=async(action,data={})=>(await worker.fetch(new Request('https://fixture.invalid/api',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,client_req_id:crypto.randomUUID(),...data})}),env)).json();
  const ok=async(a,b)=>{const r=await call(a,b);assert.equal(r.ok,true,a+': '+JSON.stringify(r));return r;};
- const payload=(code,type=tally,id=crypto.randomUUID(),who='SYNTH-W')=>({payload:{action:'v2_inbound_job_start',external_inbound_no:code,job_type:type,biz_class:'direct_ship',client_req_id:id},workers:[{id:who,name:'合成操作员'}],lead_id:who,estimated_minutes:15});
+ const payload=(code,type=tally,id=crypto.randomUUID(),who='SYNTH-W')=>({payload:{action:'v2_inbound_job_start',external_inbound_no:code,customer_name:'合成独立货主',job_type:type,biz_class:'direct_ship',client_req_id:id},workers:[{id:who,name:'合成操作员'}],lead_id:who,estimated_minutes:15});
  const start=(code,type=tally,who='SYNTH-W')=>call('sop_native_start',payload(code,type,crypto.randomUUID(),who));
  const finish=(j,extra={})=>call('v2_inbound_job_finish',{job_id:j.job_id,worker_id:j.lead.id,complete_job:true,...extra});
  const resolve=(code,type=tally)=>ok('v2_inbound_resolve_code',{code,biz_class:'direct_ship',job_type:type});
@@ -21,7 +21,7 @@ test('unknown numeric reference is read-only until dispatch; two complete stages
  assert.equal(f.DB.raw.prepare('SELECT count(*) n FROM v2_inbound_plans').get().n,0);
  const a=await f.start('９９９８８０００１００１');assert.equal(a.ok,true,JSON.stringify(a));
  let d=await f.detail(a);assert.equal(d.plan.source_type,'direct_tally_session');assert.equal(d.plan.external_inbound_no,code);
- for(const key of ['display_no','customer','unload_completed_at'])assert.equal(d.plan[key],'');
+ for(const key of ['display_no','unload_completed_at'])assert.equal(d.plan[key],'');
  assert.deepEqual(d.lines,[]);assert.equal(d.plan.status,'putting_away');
  assert.equal((await f.resolve(code)).plan.id,a.plan_id);
  assert.equal((await f.start(code,putaway,'SYNTH-P')).ok,false);

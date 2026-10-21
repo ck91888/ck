@@ -1,7 +1,7 @@
 import {preparePutaway} from './multi-putaway.js';
 import {validateOperationStart} from '../shared/internal-operations.js';
 import {validateInboundStage,stagedPlanStatement} from './inbound-stages.js';
-import {resolveInboundEntry,independentInbound} from './independent-inbound.js';
+import {resolveInboundEntry,independentInbound,inboundOwner} from './independent-inbound.js';
 import {pickWorkloadContext,pickWorkloadSnapshot} from './pick-workload.js';
 import {staffedDispatchStatements} from './crew-borrow.js';
 import {ensureSchema} from './schema-ready.js';
@@ -70,9 +70,10 @@ export async function startAtomicInbound(e,p,staff,number){
   if(recognized.plan)planId=recognized.plan.id;
  }
  if(recognized?.kind==='independent'&&!recognized.plan){
+  const customer=inboundOwner(p.customer_name);
   planId='ITS-'+crypto.randomUUID();code=recognized.code;
   sql.push(q(e,`INSERT INTO v2_inbound_plans(id,plan_date,customer,biz_class,biz_classes_json,cargo_summary,purpose,remark,status,created_by,created_at,updated_at,display_no,source_type,external_inbound_no)
-   VALUES(?,?,'','direct_ship','["direct_ship"]','独立单号理货上架','','','putting_away',?,?,?,'','direct_tally_session',?)`,planId,new Date(Date.now()+9*3600000).toISOString().slice(0,10),e.SOP_REQUEST_USER.id,t,t,code));
+   VALUES(?,?,?,'direct_ship','["direct_ship"]','独立单号理货上架','','','putting_away',?,?,?,'','direct_tally_session',?)`,planId,new Date(Date.now()+9*3600000).toISOString().slice(0,10),customer,e.SOP_REQUEST_USER.id,t,t,code));
   sql.push(q(e,`INSERT INTO v2_inbound_plan_biz_tasks(id,plan_id,biz_class,job_type,status,created_at,updated_at) VALUES(?,?,'direct_ship',?,'pending',?,?)`,'IBT-'+crypto.randomUUID(),planId,type,t,t));
  }
  else if(returned&&!planId){planId='IB-'+crypto.randomUUID();const display=await number(),day=new Date(Date.now()+9*3600000).toISOString().slice(0,10);sql.push(q(e,`INSERT INTO v2_inbound_plans(id,plan_date,customer,biz_class,biz_classes_json,cargo_summary,purpose,remark,status,created_by,created_at,updated_at,display_no,source_type) VALUES(?,?,?,'return','["return"]','退件入库会话','',?,'putting_away',?,?,?,?,'return_session')`,planId,day,String(p.customer_name||'未指定'),String(p.start_remark||''),lead.id,t,t,display));}

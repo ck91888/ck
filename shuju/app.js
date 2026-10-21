@@ -781,6 +781,7 @@ async function exportOrders(btn) {
       结果提交时间: r.result_submitted_at || '',
       出库单号: r.outbound_display_no || '',
       入库单号: r.inbound_display_no || '',
+      入库单货主明细: r.inbound_owner_details || '',
       WMS工单号: r.wms_work_order_no || '',
       目的地: r.destination || '',
       PO号: r.po_no || '',

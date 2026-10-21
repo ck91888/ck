@@ -11,7 +11,7 @@ function fixture(t){
  const finish=(j,extra={})=>call('v2_inbound_job_finish',{job_id:j.job_id,worker_id:j.lead.id,complete_job:true,location_count:7,used_forklift:false,...extra});
  const ready=async(code,{plan=false,done=true}={})=>{
   let p;if(plan){p=await ok('v2_inbound_plan_create',{customer:'合成客户',external_inbound_no:code,biz_classes:['direct_ship'],lines:[{unit_type:'carton',planned_qty:6}]});const u=await ok('v2_unload_job_start',{plan_id:p.id,worker_id:'SYNTH-U'});await ok('v2_unload_job_finish',{job_id:u.job_id,worker_id:'SYNTH-U',complete_job:true,result_lines:[{unit_type:'carton',actual_qty:6}]});}
-  const b=body([],'SYNTH-T-'+code);delete b.payload.putaway_refs;Object.assign(b.payload,{job_type:'inbound_direct_tally',external_inbound_no:code});const j=await ok('sop_native_start',b);
+  const b=body([],'SYNTH-T-'+code);delete b.payload.putaway_refs;Object.assign(b.payload,{job_type:'inbound_direct_tally',external_inbound_no:code,customer_name:'合成独立货主'});const j=await ok('sop_native_start',b);
   if(done)await ok('v2_inbound_job_finish',{job_id:j.job_id,worker_id:j.lead.id,complete_job:true,result_lines:plan?[{unit_type:'carton',putaway_qty:6}]:[],result_note:'合成理货历史'});
   return {id:j.plan_id,code,tally:j,display_no:p?.display_no};
  };
@@ -87,7 +87,7 @@ test('cancel versus finish has one terminal outcome without partial state',async
 });
 test('real field sessions reject unauthorized and cross-department dispatch, finish and cancellation',async t=>{
  const f=await executionFixture(t);await f.daily('A',['direct_ship']);await f.daily('B',['import']);const w=await f.person();
- const body=(code,job_type='inbound_direct_tally')=>({payload:{action:'v2_inbound_job_start',job_type,biz_class:'direct_ship',external_inbound_no:code,client_req_id:crypto.randomUUID()},workers:[{id:w.badgeId,name:w.name}],lead_id:w.badgeId,estimated_minutes:10});
+ const body=(code,job_type='inbound_direct_tally')=>({payload:{action:'v2_inbound_job_start',job_type,biz_class:'direct_ship',external_inbound_no:code,customer_name:'合成独立货主',client_req_id:crypto.randomUUID()},workers:[{id:w.badgeId,name:w.name}],lead_id:w.badgeId,estimated_minutes:10});
  for(const code of ['SYNTH-A','SYNTH-B']){const j=await f.ok('A','sop_native_start',body(code));await f.ok('A','v2_inbound_job_finish',{job_id:j.job_id,worker_id:w.badgeId,complete_job:true});}
  const multi=body('');delete multi.payload.external_inbound_no;multi.payload.job_type=type;multi.payload.putaway_refs=['SYNTH-A','SYNTH-B'];assert.equal((await f.call('B','sop_native_start',multi)).ok,false);
  const j=await f.ok('A','sop_native_start',multi);for(const action of ['v2_inbound_job_finish','sop_putaway_cancel'])assert.equal((await f.call('B',action,{job_id:j.job_id,worker_id:w.badgeId,complete_job:true,location_count:2,used_forklift:true,revision:1,reason:'越权测试'})).ok,false);
