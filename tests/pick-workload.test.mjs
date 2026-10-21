@@ -87,7 +87,7 @@ test('task detail and existing export expose one shared plan for multiple people
  const exported=await f.ok('v2_dashboard_order_export',{job_type:'pick_direct'});assert.equal(exported.rows.length,1);const row=exported.rows[0];
  assert.equal(row.job_id,r.job_id);assert.equal(row.worker_count,2);assert.equal(row.pick_doc_nos.split('、').length,2);
  assert.deepEqual(Object.fromEntries(Object.keys(plan()).map(k=>[k,row.planned_pick_workload[k]])),plan());
- assert.equal(row.planned_pick_workload.scope,'whole_task');assert.equal(row.order_count,undefined);assert.equal(row.box_count_sum,0);assert.deepEqual(f.snapshot(),before);
+ assert.equal(row.planned_pick_workload.scope,'whole_task');assert.equal(row.order_count,undefined);assert.equal(row.box_count_sum,null);assert.equal(row.quantity_state,'missing');assert.deepEqual(f.snapshot(),before);
 });
 test('historical four-field plans keep their quantities, continue and complete without an order count or backfill',async t=>{
  const f=await fixture(t),r=await f.ok('sop_native_start',f.request()),id=r.job_id,p=f.people[0];

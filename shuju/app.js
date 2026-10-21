@@ -631,9 +631,12 @@ async function requestCorrection(jobId) {
 // 单子数据 (orders)
 // =====================================================
 var _ordersItems = [];
+var _ordersQuery=null, _ordersResult=null, _ordersOffset=0;
 
 function ordersFilterParams() {
   return {
+    department:(document.getElementById("ordersDepartment")||{}).value||'',
+    date_basis: (document.getElementById("ordersDateBasis")||{}).value||'actual_work',
     start_date: document.getElementById("ordersFilterStart").value || '',
     end_date: document.getElementById("ordersFilterEnd").value || '',
     flow_stage: document.getElementById("ordersFilterFlow").value || '',
@@ -645,11 +648,13 @@ function ordersFilterParams() {
   };
 }
 
-async function loadOrders(btn) {
+async function loadOrders(btn, nextPage) {
+  if(!nextPage){_ordersOffset=0;_ordersQuery=null;_ordersResult=null;}
   var tbody = document.getElementById("ordersBody");
   tbody.innerHTML = '<tr><td colspan="12" class="muted" style="text-align:center;">加载中...</td></tr>';
   setBtnLoading(btn, true);
-  var params = ordersFilterParams();
+  var params = nextPage?Object.assign({},_ordersQuery):ordersFilterParams();
+  params.offset=_ordersOffset;
   params.action = "v2_dashboard_order_list";
   var res = await api(params);
   setBtnLoading(btn, false, "查询");
@@ -658,7 +663,9 @@ async function loadOrders(btn) {
     return;
   }
   _ordersItems = res.items || [];
-  document.getElementById("ordersTotal").textContent = (res.total || 0) + ' 条 (显示前 ' + _ordersItems.length + ')';
+  _ordersResult=res;_ordersQuery=Object.assign({},params,{as_of:res.metadata?.as_of,snapshot:res.metadata?.snapshot});
+  document.getElementById("ordersReportHint").textContent=reportHint(res,params.date_basis);
+  document.getElementById("ordersTotal").textContent = (res.total || 0) + ' 条（第 ' + (_ordersOffset+1) + '–' + (_ordersOffset+_ordersItems.length) + '）';
   if (_ordersItems.length === 0) {
     tbody.innerHTML = '<tr><td colspan="12" class="muted" style="text-align:center;">暂无数据</td></tr>';
     return;
@@ -668,21 +675,21 @@ async function loadOrders(btn) {
     var resultSummary = j.result_summary || '';
     if (!resultSummary) resultSummary = '<span class="muted">--</span>';
     html += '<tr>';
-    html += '<td>' + esc((j.created_at || '').slice(0, 10)) + '</td>';
+    html += '<td>' + esc(workhourKstDate(j.created_at)) + '</td>';
     html += '<td><b>' + esc(window.CKDocumentLabels.jobSummary(j)) + '</b></td>';
     html += '<td>' + esc(flowLabel(j.flow_stage)) + '</td>';
     html += '<td>' + esc(jobTypeLabel(j.job_type)) + '</td>';
-    html += '<td>' + esc(bizLabel(j.biz_class)) + '</td>';
+    html += '<td>' + esc(params.date_basis==='actual_work'?reportDepartment(j.department):bizLabel(j.biz_class)) + '</td>';
     html += '<td>' + statusTag(j.status) + '</td>';
     html += '<td>' + (j.worker_count || 0) + '</td>';
-    html += '<td>' + fmtMinutes(j.total_minutes) + '</td>';
+    html += '<td>' + fmtMinutes(j.total_minutes) + (j.data_gaps?.length?'<small class=report-gap title="'+esc(j.data_gaps.join('；'))+'">待核 '+j.data_gaps.length+' 项 · 见详情</small>':'') + '</td>';
     html += '<td>' + esc(fmtTime(j.started_at)) + '</td>';
     html += '<td>' + esc(fmtTime(j.ended_at)) + '</td>';
     html += '<td>' + (resultSummary.indexOf('<span') === 0 ? resultSummary : esc(resultSummary)) + '</td>';
     html += '<td><button class="row-action" onclick="openOrderDetail(\'' + esc(j.id) + '\')">详情</button></td>';
     html += '</tr>';
   });
-  tbody.innerHTML = html;
+  tbody.innerHTML = html;reportResponsiveTable(tbody);
 }
 
 async function exportOrders(btn) {
@@ -690,9 +697,10 @@ async function exportOrders(btn) {
   try {
     var params = ordersFilterParams();
     params.action = "v2_dashboard_order_export";
-    params.limit = 10000;
-    delete params.offset;
-    var res = await api(params);
+    params.limit = 200;
+    params.offset = 0;
+    if(params.date_basis==='actual_work'){await exportActualReport(params,'tasks');return;}
+    var res = await collectReportPages(params);
     if (!res || !res.ok) {
       var msg = res ? String(res.message || res.error || '') : 'unknown';
       if (msg.indexOf('too many SQL variables') >= 0) {
@@ -706,6 +714,11 @@ async function exportOrders(btn) {
     if (rows.length === 0) { alert("无数据可导出"); return; }
     var csvRows = rows.map(function(r) {
     return {
+      统计口径: '按建单日期（任务累计；非期间工时/产量）',
+      区间: (params.start_date||'全部')+' 至 '+(params.end_date||'全部')+' KST（结束日含当天）',
+      截止时间: res.metadata?.as_of||'',
+      数量状态: r.quantity_state||'',
+      数量异常: (r.quantity_warnings||[]).join('；'),
       日期: r['日期'] || '',
       单号: window.CKDocumentLabels.jobLabel(Object.assign({ display_no: r['单号'] }, r)),
       派审员: window.CKDocumentLabels.jobDispatcher(r),
@@ -745,18 +758,18 @@ async function exportOrders(btn) {
       差异说明: r.diff_notes || '',
       作业明细行数: r.result_lines_count || 0,
       作业明细说明: r.readable_result_lines || '',
-      箱数合计: r.box_count_sum || 0,
-      板数合计: r.pallet_count_sum || 0,
-      打包SKU数: r.packed_sku_count_sum || 0,
-      打包箱数: r.packed_box_count_sum || 0,
-      总操作箱数: r.total_operated_box_count_sum || 0,
-      贴标数: r.label_count_sum || 0,
-      修箱数: r.repaired_box_count_sum || 0,
-      换箱数: r.reboxed_count_sum || 0,
-      使用大纸箱数: r.used_carton_large_count_sum || 0,
-      使用小纸箱数: r.used_carton_small_count_sum || 0,
-      核对OK数: r.verify_ok_count_sum || 0,
-      核对NG数: r.verify_ng_count_sum || 0,
+      箱数合计: r.box_count_sum ?? '',
+      板数合计: r.pallet_count_sum ?? '',
+      打包SKU数: r.packed_sku_count_sum ?? '',
+      打包箱数: r.packed_box_count_sum ?? '',
+      总操作箱数: r.total_operated_box_count_sum ?? '',
+      贴标数: r.label_count_sum ?? '',
+      修箱数: r.repaired_box_count_sum ?? '',
+      换箱数: r.reboxed_count_sum ?? '',
+      使用大纸箱数: r.used_carton_large_count_sum ?? '',
+      使用小纸箱数: r.used_carton_small_count_sum ?? '',
+      核对OK数: r.verify_ok_count_sum ?? '',
+      核对NG数: r.verify_ng_count_sum ?? '',
       '拣货计划订单数量（整任务） / 피킹 계획 주문 수 (작업 전체)': r.planned_pick_workload?.order_count ?? '',
       '拣货计划产品总件数（整任务） / 피킹 계획 상품 수량 (작업 전체)': r.planned_pick_workload?.product_quantity ?? '',
       '拣货计划SKU种类数（整任务） / 피킹 계획 SKU 종류 수 (작업 전체)': r.planned_pick_workload?.sku_count ?? '',
@@ -799,7 +812,7 @@ async function exportOrders(btn) {
     var endD = (params.end_date || '').replace(/-/g, '');
     var fname = 'orders_export_' + (startD || 'all') + '_' + (endD || 'all') + '.csv';
     exportCsv(fname, csvRows);
-    if (res.truncated) alert('已达单次导出上限 10000 行，部分数据可能被截断。请缩小日期或筛选范围。');
+
   } catch (e) {
     alert('导出失败: ' + (e && e.message || e));
   } finally {
@@ -815,14 +828,15 @@ async function openOrderDetail(jobId) {
   var body = document.getElementById("orderDetailBody");
   body.innerHTML = '<div class="muted">加载中...</div>';
   modal.style.display = '';
-  var res = await api({ action: "v2_dashboard_order_detail", job_id: jobId });
+  var res = await api(Object.assign({},_ordersQuery||{},{ action: "v2_dashboard_order_detail", job_id: jobId }));
   if (!res || !res.ok) {
     body.innerHTML = '<div class="muted">加载失败</div>';
     return;
   }
   _lastOrderDetail = res;
   var j = res.job || {};
-  var html = '';
+  var period=(res.period_report?.items||[]).find(x=>x.job_id===jobId);
+  var html = period?'<p class=section-hint>'+esc(reportHint(res.period_report,'actual_work'))+'</p><p><b>本期记录工时 '+period.total_seconds+' 秒 / '+period.total_hours+' 人时</b><br>'+esc(period.data_gaps.join('；'))+'<br>'+esc(period.efficiency_reason)+'</p>':'';
   // 顶部状态/客户/手动收尾/修正 chip + 操作按钮
   // 扫码核对（verify_scan）只记工时，不需要补产出（cleanup 会按 48h 规则自动结束）
   var isVerifyScan = (j.job_type === 'verify_scan');
@@ -1002,9 +1016,9 @@ async function openOrderDetail(jobId) {
     html += '<table class="data-table" style="margin-top:6px;"><thead><tr><th>箱</th><th>板</th><th>备注</th><th>diff_note</th><th>result_json</th><th>result_lines_json</th><th>提交人</th><th>提交时间</th></tr></thead><tbody>';
     results.forEach(function(r) {
       var rj = r.result_json == null ? '' : String(r.result_json);
-      if (rj.length > 200) rj = rj.slice(0, 200) + '...';
+
       var rl = r.result_lines_json == null ? '' : String(r.result_lines_json);
-      if (rl.length > 200) rl = rl.slice(0, 200) + '...';
+
       html += '<tr><td>' + (r.box_count || 0) + '</td>';
       html += '<td>' + (r.pallet_count || 0) + '</td>';
       html += '<td>' + esc(r.remark || '--') + '</td>';
@@ -1052,6 +1066,7 @@ async function openOrderDetail(jobId) {
   }
 
   body.innerHTML = html;
+  body.querySelectorAll('table').forEach(function(table){if(table.querySelector('thead')){table.classList.add('report-detail-records');table.querySelectorAll('tbody').forEach(reportResponsiveTable);}else table.classList.add('report-detail-facts');});
 }
 
 function closeOrderDetail() {
@@ -1062,11 +1077,14 @@ function closeOrderDetail() {
 // 工时分析 (workhours)
 // =====================================================
 var _whSummary = null;
+var _whOffset=0;
 var _whQuery = null;
 function workhourKstDate(value) { var ms=Date.parse(value||'');return Number.isFinite(ms)?new Date(ms+9*3600000).toISOString().slice(0,10):''; }
 
 function whFilterParams() {
   return {
+    department:(document.getElementById("whDepartment")||{}).value||'',
+    date_basis:'actual_work',
     start_date: document.getElementById("whFilterStart").value || '',
     end_date: document.getElementById("whFilterEnd").value || '',
     worker_name: document.getElementById("whFilterWorker").value.trim(),
@@ -1075,29 +1093,32 @@ function whFilterParams() {
   };
 }
 
-async function loadWorkhours(btn) {
+async function loadWorkhours(btn,nextPage) {
+  if(!nextPage)_whOffset=0;
+  var params=nextPage?Object.assign({},_whQuery):whFilterParams();params.offset=_whOffset;
   _whSummary=null;_whQuery=null;
   setBtnLoading(btn, true);
-  var params = whFilterParams();
   params.action = "v2_dashboard_workhour_summary";
   var res = await api(params);
   setBtnLoading(btn, false, "查询");
   if (!res || !res.ok) {
-    document.getElementById("whSummaryRow").innerHTML = '<div class="muted">加载失败</div>';
+    document.getElementById("whSummaryRow").textContent = res?.error||'加载失败';
     return;
   }
   _whSummary = res;
-  _whQuery = Object.assign({},params);
+  _whQuery = Object.assign({},params,{as_of:res.metadata?.as_of,snapshot:res.metadata?.snapshot});
+  document.getElementById("whReportHint").textContent=reportHint(res,'actual_work');
+  document.getElementById("whDepartments").innerHTML=(res.by_department||[]).map(function(d){return '<div><b>'+esc(reportDepartment(d.department))+'</b><br>'+d.total_seconds+' 秒 / '+d.total_hours+' 人时<br>'+d.job_count+' 项任务 · 缺分段 '+(d.missing_segment_task_count||0)+' 项 · 重叠待核 '+d.overlap_seconds+' 秒</div>';}).join('');
   var s = res.summary || {};
 
   // 顶部统计卡
   var cards = [
-    { label: '总工时', value: fmtMinutes(s.total_minutes || 0), sub: round1(s.total_hours) + ' 小时' },
+    { label: '本期记录工时', value: fmtMinutes(s.total_minutes || 0), sub: Number(s.total_hours||0).toFixed(2) + ' 小时' },
     { label: '参与人数', value: s.worker_count || 0 },
     { label: '任务数', value: s.job_count || 0 },
     { label: '人均工时', value: fmtMinutes(s.avg_minutes_per_worker || 0) },
     { label: '最长单段', value: fmtMinutes(s.max_segment_minutes || 0) },
-    { label: '异常段', value: s.anomaly_count || 0, sub: '≥12小时 / ≤0分 / 跨天未结束' },
+    { label: '异常段', value: s.anomaly_count || 0, sub: '重叠 / 未结束 / 无效 / 长时段' },
     { label: '长工时提醒', value: s.long_segment_count || 0, sub: '≥240分 但未达异常' }
   ];
   var ch = '';
@@ -1116,7 +1137,7 @@ async function loadWorkhours(btn) {
   else bw.forEach(function(w) {
     tb1 += '<tr><td><b>' + esc(w.worker_name) + '</b><small style="display:block;overflow-wrap:anywhere">' + esc(w.worker_id||'工牌待核实') + '</small></td>';
     tb1 += '<td>' + round1(w.total_minutes) + '</td>';
-    tb1 += '<td>' + round1(w.total_hours) + '</td>';
+    tb1 += '<td>' + Number(w.total_hours||0).toFixed(2) + '</td>';
     tb1 += '<td>' + (w.job_count || 0) + '</td>';
     tb1 += '<td>' + round1(w.avg_minutes_per_job) + '</td>';
     tb1 += '<td>' + round1(w.max_segment_minutes) + '</td></tr>';
@@ -1131,7 +1152,7 @@ async function loadWorkhours(btn) {
     tb2 += '<tr><td><b>' + esc(jobTypeLabel(j.job_type)) + '</b></td>';
     tb2 += '<td>' + round1(j.total_minutes) + '</td>';
     tb2 += '<td>' + (j.worker_count || 0) + '</td>';
-    tb2 += '<td>' + (j.job_count || 0) + '</td>';
+    tb2 += '<td>' + (j.job_count || 0) + (j.gap_task_count?' · 待核 '+j.gap_task_count:'') + '</td>';
     tb2 += '<td>' + round1(j.avg_minutes_per_worker) + '</td></tr>';
   });
   document.getElementById("whByJobTypeBody").innerHTML = tb2;
@@ -1147,23 +1168,24 @@ async function loadWorkhours(btn) {
     var longTag = s.long_segment ? ' <span class="tag tag-orange" style="font-size:10px;">长工时</span>' : '';
     var activeTag = s.active ? ' <span class="tag tag-green" style="font-size:10px;">在岗</span>' : '';
     tb3 += '<tr><td>' + esc(s.worker_name) + '</td>';
-    tb3 += '<td>' + esc(workhourKstDate(s.joined_at)) + '</td>';
+    tb3 += '<td>' + esc(s.work_date||workhourKstDate(s.joined_at)) + '</td>';
     tb3 += '<td>' + esc(jobTypeLabel(s.job_type)) + '</td>';
     tb3 += '<td>' + esc(window.CKDocumentLabels.jobSummary(s)) + '</td>';
-    tb3 += '<td>' + esc(fmtTime(s.joined_at)) + '</td>';
-    tb3 += '<td>' + esc(fmtTime(s.left_at)) + '</td>';
+    tb3 += '<td>' + esc(fmtTime(s.clipped_start||s.joined_at)) + '</td>';
+    tb3 += '<td>' + esc(fmtTime(s.clipped_end||s.left_at)) + '</td>';
     tb3 += '<td>' + round1(s.minutes || 0) + activeTag + longTag + anomalyTag + '</td>';
     tb3 += '<td>' + statusTag(s.status) + '</td></tr>';
   });
-  document.getElementById("whSegmentsBody").innerHTML = tb3;
+  document.getElementById("whSegmentsBody").innerHTML = tb3;reportResponsiveTable(document.getElementById("whSegmentsBody"));
   if (res.truncated) {
     document.getElementById("whSegmentsHint").textContent = '* 段数已截断为 1000 条，请缩小日期/筛选范围';
   } else {
-    document.getElementById("whSegmentsHint").textContent = '';
+    document.getElementById("whSegmentsHint").textContent = '共 '+res.total+' 条人员分日时段，当前 '+(_whOffset+1)+'–'+(_whOffset+segs.length)+'；导出按页读取全部记录。';
   }
 }
 
 function exportWorkhoursSegments() {
+  if(_whQuery?.date_basis==='actual_work')return exportActualReport(Object.assign({},_whQuery),'segments').catch(function(e){alert('导出失败：'+e.message);});
   if (!_whSummary) { alert("请先查询"); return; }
   var rows = (_whSummary.segments || []).map(function(s) {
     return {
@@ -1423,10 +1445,10 @@ async function loadManagement(btn) {
   setBtnLoading(btn, true);
   var start = document.getElementById("mgmtFilterStart").value || '';
   var end = document.getElementById("mgmtFilterEnd").value || '';
-  var res = await api({ action: "v2_dashboard_management_summary", start_date: start, end_date: end });
+  var res = await api({ action: "v2_dashboard_management_summary",date_basis:"actual_work", start_date: start, end_date: end });
   setBtnLoading(btn, false, "查询");
   if (!res || !res.ok) {
-    document.getElementById("mgmtSummaryRow").innerHTML = '<div class="muted">加载失败</div>';
+    document.getElementById("mgmtSummaryRow").innerHTML = '<div class="muted">'+esc(res?.error||'加载失败')+'</div>';
     return;
   }
   var s = res.summary || {};
@@ -1437,7 +1459,7 @@ async function loadManagement(btn) {
     { label: '综合件/小时', value: s.qty_per_hour },
     { label: '综合箱/小时', value: s.boxes_per_hour },
     { label: '活跃员工', value: s.worker_count || 0 },
-    { label: '异常工时段', value: s.anomaly_count || 0 }
+    { label: '异常工时段', value: s.anomaly_count || 0, sub:'同人重叠 '+(s.overlap_seconds||0)+' 秒（记录工时含重复部分）；未结束排除 '+(s.excluded_open_count||0)+' 段' }
   ];
   var ch = '';
   cards.forEach(function(c) {
@@ -1684,4 +1706,61 @@ async function submitOpsResult(btnEl) {
     var msg = res ? (res.message || res.error || JSON.stringify(res)) : 'unknown';
     alert('失败 / 실패：' + msg);
   }
+}
+
+// Shared reporting controls: the loaded query owns its cutoff and snapshot.
+function reportDepartment(value){return ({bulk:'大货',direct_ship:'代发',import:'进口',other:'未归属 / 支持（待核）'})[value]||value;}
+function reportHint(res,basis){
+ if(basis!=='actual_work')return '按建单日期（KST）选任务；工时、数量均为任务累计，不是所选期间实绩。';
+ var m=res.metadata||{},s=res.summary||{};
+ return (m.basis_label||'按实际作业日期')+'；区间 '+fmtKstFull(m.start_inclusive)+' ≤ 作业时间 < '+fmtKstFull(m.end_exclusive)+' KST；截止 '+fmtKstFull(m.as_of)+' KST。'+(m.open_policy||'')+'。同人重叠 '+(s.overlap_seconds||0)+' 秒（统计含重复部分），待核任务 '+(s.gap_task_count||0)+' 项，数量未记录 '+(s.missing_quantity_tasks||0)+' 项。'+(m.quantity_policy||'')+' 未归属部门不表示闲置。';
+}
+function workhoursPage(direction){
+ if(!_whQuery||!_whSummary)return;
+ var offset=_whOffset+direction*200;if(offset<0||offset>=_whSummary.total)return;
+ _whOffset=offset;return loadWorkhours(null,true);
+}
+function ordersPage(direction){
+ if(!_ordersQuery||!_ordersResult)return;
+ var offset=_ordersOffset+direction*200;if(offset<0||offset>=_ordersResult.total)return;
+ _ordersOffset=offset;return loadOrders(null,true);
+}
+async function collectReportPages(params){
+ var rows=[],first=null,bytes=0,p=Object.assign({},params,{offset:0,limit:200});
+ for(;;){
+  var res=await api(p);if(!res?.ok&&String(res?.error||'').includes('8MB')&&p.limit>1){p.limit=Math.max(1,Math.floor(p.limit/2));continue;}if(!res?.ok)throw Error(res?.message||res?.error||'查询失败');
+  if(!first){first=res;p.as_of=res.metadata?.as_of;p.snapshot=res.metadata?.snapshot;}
+  var page=res.rows||res.items||[];bytes+=JSON.stringify(page).length;
+  if(res.truncated)throw Error('服务器返回不完整数据，请缩小范围');
+  if(rows.length+page.length>30000||bytes>30*1024*1024)throw Error('导出超过30000行或30MB安全上限，请按日期分批；未下载部分文件');
+  rows.push.apply(rows,page);
+  if(!res.has_more)break;
+  if(!page.length)throw Error('分页未前进，请重新查询');
+  p.offset+=page.length;
+ }
+ if(first.total!==rows.length)throw Error('分页数量不一致，请重新查询');
+ return Object.assign({},first,{rows:rows,items:rows});
+}
+async function exportActualReport(params,kind){
+ if(params.date_basis&&params.date_basis!=='actual_work')throw Error('请先选择按实际作业日期，再导出同类数量样本');
+ params=Object.assign({},params,{action:'v2_dashboard_order_export',date_basis:'actual_work',report_kind:kind});
+ var res=await collectReportPages(params),m=res.metadata;
+ var rows=res.rows.map(function(r){
+  var meta={统计口径:m.basis_label,时区:m.timezone,区间开始含:m.start_inclusive,区间结束不含:m.end_exclusive,截止时间:m.as_of,快照:m.snapshot,未结束政策:m.open_policy,重叠政策:m.overlap_policy,数量政策:m.quantity_policy,数据缺口说明:m.gap_policy};
+  if(kind==='segments')return Object.assign(meta,{
+   派审员:window.CKDocumentLabels.jobDispatcher(r),任务ID:r.job_id,人员段ID:r.id,作业日期KST:r.work_date,工牌:r.worker_id,原始工牌:r.source_worker_id,人员:r.worker_name,部门:reportDepartment(r.department),工种:jobTypeLabel(r.job_type),单号:window.CKDocumentLabels.jobLabel(r),
+   原始开始UTC:r.joined_at,原始结束UTC:r.left_at,本日区间开始UTC:r.clipped_start,本日区间结束UTC:r.clipped_end,本日开始KST:fmtKstFull(r.clipped_start),本日结束KST:fmtKstFull(r.clipped_end),本期秒数:r.seconds,本期分钟:r.minutes,原始时段分钟:r.raw_minutes??'',未结束已排除:r.active,暂算:r.provisional,重叠说明:r.overlap_note||'',原始段重叠秒数_勿跨日累加:r.segment_overlap_seconds??r.overlap_seconds,异常:r.anomaly_reason||'',退出原因:r.leave_reason||''});
+  if(kind==='quantities')return Object.assign(meta,{部门:reportDepartment(r.department),工种:jobTypeLabel(r.job_type),指标:r.label,盘点类型:r.inventory_type||'',单位:r.unit,记录阶段:r.phase,有数量记录任务数:r.recorded_task_count,相关任务累计数量:r.task_cumulative_quantity,本期完成任务数量_非周产量:r.completed_in_period_quantity,可比样本数:r.sample_count,可比数量:r.comparable_quantity,可比人秒:r.comparable_seconds,同类样本每人小时:r.qty_per_hour??''});
+  return Object.assign(meta,{
+   派审员:window.CKDocumentLabels.jobDispatcher(r),任务ID:r.job_id,单号:window.CKDocumentLabels.jobLabel(r),客户:r.customer||'',工时数据状态:r.hour_state,部门:reportDepartment(r.department),工种:jobTypeLabel(r.job_type),状态:statusLabel(r.status),建单时间KST:fmtKstFull(r.created_at),完成时间KST:fmtKstFull(r.finished_at),参与人数:r.worker_count,参与人员:r.worker_names,
+   本期秒数:r.total_seconds,本期分钟:r.total_minutes,本期人时:r.total_hours,同人重叠秒数:r.overlap_seconds,历史累计记录分钟_仅追溯:r.recorded_lifetime_minutes,数据缺口:r.data_gaps.join('；'),数量状态:r.quantity_state,数量范围:r.quantity_scope,任务累计结果:r.result_summary,
+   '上架货位数（整任务）':r.job_type==='inbound_direct_putaway'?r.location_count_sum??'':'','上架使用叉车（整任务）':r.putaway_forklift==null?'':r.putaway_forklift?'是':'否',
+   盘点类型:r.inventory_type||'',专项填写时点:r.internal_record_phase||'',盘点数量:r.inventory_count??'',退件入库单数:r.return_order_count??'',入库产品数:r.return_product_count??'',核对OK数:r.verify_ok_count_sum??'',核对NG数:r.verify_ng_count_sum??'',理货箱数:r.putaway_carton_qty_sum??'',理货托数:r.putaway_pallet_qty_sum??'',卸货实际箱数:r.actual_carton_qty_sum??'',卸货实际托数:r.actual_pallet_qty_sum??'',
+   本期完成:r.completed_in_period?'是':'否',可比任务样本:r.comparable?'是':'否',效率可比性:r.efficiency_reason,分单位任务数量JSON:JSON.stringify(r.quantity_metrics),完整结果JSON:r.raw_result_json_compact,专项快照JSON:r.internal_operation_json||''});
+ });
+ exportCsv('actual_work_'+kind+'_'+params.start_date+'_'+params.end_date+'.csv',rows);
+}
+function reportResponsiveTable(tbody){
+ var labels=Array.from(tbody.closest('table').querySelectorAll('thead th')).map(function(el){return el.textContent;});
+ Array.from(tbody.rows).forEach(function(row){Array.from(row.cells).forEach(function(cell,i){cell.dataset.label=labels[i]||'';});});
 }

@@ -1,5 +1,7 @@
+import {actualWorkReport,measureSegments} from './actual-work-report.js';
+import {parseOpsResultForExport} from './report-results.js';
 import {cancelPutaway,putawayReferences} from './multi-putaway.js';
-import {isInternal,readOperation,operationSummary,operationExport} from '../shared/internal-operations.js';
+import {isInternal,readOperation,operationExport} from '../shared/internal-operations.js';
 import {internalEnabled,protectInternalMutation} from './internal-operations.js';
 import {handleDailyScan} from './import-daily-scan.js';
 import {resolveInboundEntry,independentInbound} from './independent-inbound.js';
@@ -225,315 +227,7 @@ async function batchSelectInGlobal(env, sqlTemplate, ids) {
 // 解析 v2_ops_job_results → 业务可读摘要 + 各项数量累加
 // 输入：job_type, results rows
 // 输出：result_summary / 累加字段 / raw_result_json_compact
-function parseOpsResultForExport(job_type, resultRows, job) {
-  const out = {
-    result_summary: '',
-    location_count_sum: 0,
-    putaway_forklift: null,
-    result_notes: '',
-    diff_notes: '',
-    box_count_sum: 0,
-    pallet_count_sum: 0,
-    // 入库理货数量（按 unit_type 分桶 + 总和）
-    putaway_qty_sum: 0,
-    putaway_carton_qty_sum: 0,
-    putaway_pallet_qty_sum: 0,
-    // 卸货 / 通用实际数量（fallback：line 没有 putaway_qty 但有 actual_qty）
-    actual_qty_sum: 0,
-    actual_carton_qty_sum: 0,
-    actual_pallet_qty_sum: 0,
-    // 入库 extra_ops（理货顺手做的）
-    sort_qty_sum: 0,           // 单独整理数量
-    repair_box_qty_sum: 0,     // extra_ops.repair_box_qty（与 repaired_box_count 区分写入端）
-    packed_sku_count_sum: 0,
-    packed_box_count_sum: 0,
-    total_operated_box_count_sum: 0,
-    label_count_sum: 0,
-    repaired_box_count_sum: 0,
-    reboxed_count_sum: 0,
-    used_carton_large_count_sum: 0,
-    used_carton_small_count_sum: 0,
-    verify_ok_count_sum: 0,
-    verify_ng_count_sum: 0,
-    result_submitters: '',
-    result_submitted_at: '',
-    readable_result_lines: '',
-    result_lines_count: 0,
-    raw_result_json_compact: ''
-  };
-  const rows = resultRows || [];
-  const remarks = [], diffs = [], rawObjs = [], readableLines = [], submitters = new Set();
-  let lastCreatedAt = '';
 
-  // 累加单行 line 中的 putaway_qty / actual_qty 到分桶（unit_type 兼容 carton/pallet/box）
-  const aggregateLine = (item) => {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) return;
-    const unit = String(item.unit_type || item.unit || '').toLowerCase();
-    const isCarton = (unit === 'carton' || unit === 'box' || unit === 'cartons' || unit === 'boxes');
-    const isPallet = (unit === 'pallet' || unit === 'pallets' || unit === 'plt' || unit === 'tray');
-    const pq = Number(item.putaway_qty);
-    const aq = Number(item.actual_qty);
-    if (Number.isFinite(pq) && pq > 0) {
-      out.putaway_qty_sum += pq;
-      if (isCarton) out.putaway_carton_qty_sum += pq;
-      else if (isPallet) out.putaway_pallet_qty_sum += pq;
-    }
-    if (Number.isFinite(aq) && aq > 0) {
-      out.actual_qty_sum += aq;
-      if (isCarton) out.actual_carton_qty_sum += aq;
-      else if (isPallet) out.actual_pallet_qty_sum += aq;
-    }
-    // 行内附带的 label_count / repaired_box_count 等也尝试累加
-    const ln = Number(item.label_count); if (Number.isFinite(ln) && ln > 0) out.label_count_sum += ln;
-    const rb = Number(item.repaired_box_count); if (Number.isFinite(rb) && rb > 0) out.repaired_box_count_sum += rb;
-    const rx = Number(item.reboxed_count); if (Number.isFinite(rx) && rx > 0) out.reboxed_count_sum += rx;
-  };
-
-  // result_lines_json 单行 → 可读文本
-  const renderLine = (item) => {
-    if (item == null) return '';
-    if (typeof item !== 'object') return String(item);
-    if (Array.isArray(item)) return item.join(' / ');
-    const id = item.sku || item.barcode || item.item || item.product_name || item.name || '';
-    const parts = [];
-    if (id) parts.push('SKU ' + id);
-    const planned = item.planned_qty ?? item.plan_qty ?? item['计划'] ?? null;
-    const actual = item.actual_qty ?? item.qty ?? item['实际'] ?? null;
-    const putaway = item.putaway_qty ?? item['入库'] ?? null;
-    const diff = item.diff_qty ?? item.diff ?? null;
-    if (item.unit_type) {
-      const u = String(item.unit_type).toLowerCase();
-      const unitLbl = (u === 'carton' || u === 'box') ? '箱' : (u === 'pallet' ? '托' : item.unit_type);
-      parts.push(unitLbl);
-    }
-    if (planned != null && planned !== '') parts.push('计划 ' + planned);
-    if (actual != null && actual !== '') parts.push('实际 ' + actual);
-    if (putaway != null && putaway !== '') parts.push('理货 ' + putaway);
-    if (diff != null && diff !== '') parts.push('差异 ' + diff);
-    if (item.box_count != null && item.box_count !== '') parts.push('箱 ' + item.box_count);
-    if (item.pallet_count != null && item.pallet_count !== '') parts.push('板 ' + item.pallet_count);
-    if (item.remark) parts.push('备注 ' + item.remark);
-    if (parts.length === 0) {
-      try { return JSON.stringify(item); } catch (e) { return ''; }
-    }
-    return parts.join(' / ');
-  };
-
-  // 从 result_json 顶层兼容老 shorthand：{carton:4}/{pallet:3}/{box_count:4}
-  const aggregateShorthand = (rj) => {
-    if (!rj || typeof rj !== 'object' || Array.isArray(rj)) return;
-    const c = Number(rj.carton);
-    if (Number.isFinite(c) && c > 0) {
-      out.putaway_qty_sum += c;
-      out.putaway_carton_qty_sum += c;
-    }
-    const p = Number(rj.pallet);
-    if (Number.isFinite(p) && p > 0) {
-      out.putaway_qty_sum += p;
-      out.putaway_pallet_qty_sum += p;
-    }
-  };
-
-  effectiveResults(rows).forEach(r => {
-    out.box_count_sum += Number(r.box_count) || 0;
-    out.pallet_count_sum += Number(r.pallet_count) || 0;
-    if (r.remark) remarks.push(String(r.remark));
-    if (r.diff_note) diffs.push(String(r.diff_note));
-    if (r.created_by) submitters.add(String(r.created_by));
-    if (r.created_at && r.created_at > lastCreatedAt) lastCreatedAt = r.created_at;
-
-    let rj = null;
-    if (r.result_json) {
-      try { rj = JSON.parse(r.result_json); } catch (e) { rj = null; }
-    }
-    if (rj && typeof rj === 'object' && !Array.isArray(rj)) {
-      const addNum = (k, target) => {
-        const v = Number(rj[k]);
-        if (Number.isFinite(v)) out[target] += v;
-      };
-      if(job_type===putawayType&&rj.location_count!=null){out.location_count_sum+=Number(rj.location_count)||0;out.putaway_forklift=rj.used_forklift===true;}
-      addNum('packed_sku_count', 'packed_sku_count_sum');
-      addNum('packed_box_count', 'packed_box_count_sum');
-      addNum('total_operated_box_count', 'total_operated_box_count_sum');
-      addNum('label_count', 'label_count_sum');
-      addNum('repaired_box_count', 'repaired_box_count_sum');
-      addNum('reboxed_count', 'reboxed_count_sum');
-      addNum('used_carton_large_count', 'used_carton_large_count_sum');
-      addNum('used_carton_small_count', 'used_carton_small_count_sum');
-      addNum('verify_ok_count', 'verify_ok_count_sum');
-      addNum('verify_ng_count', 'verify_ng_count_sum');
-      if (!r.pallet_count && Number(rj.pallet_count) > 0) {
-        out.pallet_count_sum += Number(rj.pallet_count);
-      }
-      // 入库 extra_ops（理货顺手贴标/修箱/整理）— 与 packing 端的 *_count 区分但归入同一摘要桶
-      if (rj.extra_ops && typeof rj.extra_ops === 'object') {
-        const eo = rj.extra_ops;
-        const sq = Number(eo.sort_qty); if (Number.isFinite(sq) && sq > 0) out.sort_qty_sum += sq;
-        const lq = Number(eo.label_qty); if (Number.isFinite(lq) && lq > 0) out.label_count_sum += lq;
-        const rq = Number(eo.repair_box_qty);
-        if (Number.isFinite(rq) && rq > 0) {
-          out.repair_box_qty_sum += rq;
-          out.repaired_box_count_sum += rq;
-        }
-        if (eo.other_op_remark) remarks.push(String(eo.other_op_remark));
-      }
-      // result_json 顶层"单行式" e.g. {unit_type:'carton', putaway_qty:4}
-      if (rj.unit_type) aggregateLine(rj);
-      // result_json 内嵌 result_lines / lines
-      const innerLines = Array.isArray(rj.result_lines) ? rj.result_lines
-                       : Array.isArray(rj.lines) ? rj.lines
-                       : null;
-      if (innerLines) {
-        innerLines.forEach(aggregateLine);
-        if (out.result_lines_count === 0 && innerLines.length > 0) {
-          // 仅当 result_lines_json 不存在时才用 inner 计数（避免重复）
-          if (!r.result_lines_json) out.result_lines_count += innerLines.length;
-        }
-      }
-      // 老 shorthand：{carton:4}/{pallet:3}
-      aggregateShorthand(rj);
-      const diffVal = rj.diff_note || rj.diff_notes || rj.diff || rj['差异'] || rj['差异说明'] || '';
-      if (diffVal) diffs.push(String(diffVal));
-      rawObjs.push(rj);
-    } else if (r.result_json) {
-      rawObjs.push(r.result_json);
-    }
-
-    // 解析 result_lines_json
-    if (r.result_lines_json) {
-      let lines = null;
-      try { lines = JSON.parse(r.result_lines_json); } catch (e) { lines = null; }
-      const arr = Array.isArray(lines)
-        ? lines
-        : (lines && Array.isArray(lines.lines)) ? lines.lines
-        : (lines && Array.isArray(lines.result_lines)) ? lines.result_lines
-        : (lines ? [lines] : []);
-      out.result_lines_count += arr.length;
-      arr.forEach(item => {
-        aggregateLine(item);
-        const txt = renderLine(item);
-        if (txt) readableLines.push(txt);
-      });
-    }
-  });
-
-  out.result_notes = remarks.join(' | ');
-  // 去重 diff_notes
-  out.diff_notes = [...new Set(diffs.filter(Boolean))].join(' | ');
-  out.result_submitters = [...submitters].join('、');
-  out.result_submitted_at = fmtKst(lastCreatedAt);
-
-  let linesStr = readableLines.join(' || ');
-  if (linesStr.length > 2000) linesStr = linesStr.slice(0, 2000) + '...已截断';
-  out.readable_result_lines = linesStr;
-
-  let rawStr = '';
-  try { rawStr = JSON.stringify(rawObjs); } catch (e) { rawStr = ''; }
-  if (rawStr.length > 1000) rawStr = rawStr.slice(0, 1000) + '...已截断';
-  out.raw_result_json_compact = rawStr;
-
-  // 生成业务摘要
-  const parts = [];
-  if(job_type===putawayType&&out.putaway_forklift!==null)parts.push('货位数 '+out.location_count_sum+'（整任务）'+' · 是否使用叉车 '+(out.putaway_forklift?'是':'否'));
-  const isInboundJob = (job_type || '').indexOf('inbound') === 0; // inbound_direct / inbound_bulk / inbound_change_order / inbound_return
-  if (job_type === 'pack_direct') {
-    if (out.packed_sku_count_sum > 0) parts.push('打包SKU ' + out.packed_sku_count_sum);
-    if (out.packed_box_count_sum > 0) parts.push('打包箱 ' + out.packed_box_count_sum);
-    if (out.label_count_sum > 0) parts.push('贴标 ' + out.label_count_sum);
-    if (out.total_operated_box_count_sum > 0) parts.push('总操作箱 ' + out.total_operated_box_count_sum);
-    if (out.pallet_count_sum > 0) parts.push('托盘 ' + out.pallet_count_sum);
-    if (out.repaired_box_count_sum > 0) parts.push('修箱 ' + out.repaired_box_count_sum);
-    if (out.reboxed_count_sum > 0) parts.push('换箱 ' + out.reboxed_count_sum);
-    if (out.used_carton_large_count_sum > 0) parts.push('大纸箱 ' + out.used_carton_large_count_sum);
-    if (out.used_carton_small_count_sum > 0) parts.push('小纸箱 ' + out.used_carton_small_count_sum);
-  } else if (job_type === 'change_order') {
-    parts.push('仅计时，无数量结果');
-  } else if (job_type === 'verify_scan') {
-    if (out.verify_ok_count_sum > 0) parts.push('核对OK ' + out.verify_ok_count_sum);
-    if (out.verify_ng_count_sum > 0) parts.push('核对NG ' + out.verify_ng_count_sum);
-    if (out.box_count_sum > 0) parts.push('箱 ' + out.box_count_sum);
-    if (out.pallet_count_sum > 0) parts.push('板 ' + out.pallet_count_sum);
-  } else if (isInboundJob) {
-    // 入库类：理货箱数/理货托数 优先；无 putaway 时 fallback actual
-    if (out.putaway_carton_qty_sum > 0) parts.push('理货箱数 ' + out.putaway_carton_qty_sum);
-    if (out.putaway_pallet_qty_sum > 0) parts.push('理货托数 ' + out.putaway_pallet_qty_sum);
-    if (out.putaway_qty_sum > 0 && out.putaway_carton_qty_sum === 0 && out.putaway_pallet_qty_sum === 0) {
-      parts.push('理货数量 ' + out.putaway_qty_sum);
-    }
-    if (out.putaway_qty_sum === 0) {
-      if (out.actual_carton_qty_sum > 0) parts.push('实际箱数 ' + out.actual_carton_qty_sum);
-      if (out.actual_pallet_qty_sum > 0) parts.push('实际托数 ' + out.actual_pallet_qty_sum);
-    }
-    if (out.sort_qty_sum > 0) parts.push('整理 ' + out.sort_qty_sum);
-    if (out.label_count_sum > 0) parts.push('贴标 ' + out.label_count_sum);
-    if (out.repaired_box_count_sum > 0) parts.push('修箱 ' + out.repaired_box_count_sum);
-    if (out.box_count_sum > 0) parts.push('箱 ' + out.box_count_sum);
-    if (out.pallet_count_sum > 0) parts.push('板 ' + out.pallet_count_sum);
-  } else if (job_type === 'unload') {
-    // 卸货：以行内 actual_qty 为准；按 unit 分桶
-    if (out.actual_carton_qty_sum > 0) parts.push('卸货箱数 ' + out.actual_carton_qty_sum);
-    if (out.actual_pallet_qty_sum > 0) parts.push('卸货托数 ' + out.actual_pallet_qty_sum);
-    if (out.actual_qty_sum > 0 && out.actual_carton_qty_sum === 0 && out.actual_pallet_qty_sum === 0) {
-      parts.push('卸货数量 ' + out.actual_qty_sum);
-    }
-    if (out.box_count_sum > 0) parts.push('箱 ' + out.box_count_sum);
-    if (out.pallet_count_sum > 0) parts.push('板 ' + out.pallet_count_sum);
-  } else {
-    // 默认：出库/库内/拣货 等
-    if (out.box_count_sum > 0) parts.push('箱 ' + out.box_count_sum);
-    if (out.pallet_count_sum > 0) parts.push('板 ' + out.pallet_count_sum);
-    if (out.actual_qty_sum > 0 && out.box_count_sum === 0 && out.pallet_count_sum === 0) {
-      parts.push('实际数量 ' + out.actual_qty_sum);
-    }
-  }
-
-  // 任意一个数量字段 > 0 都不应再判定"无数量结果"
-  const hasAnyQty = (
-    out.box_count_sum > 0 ||
-    out.pallet_count_sum > 0 ||
-    out.putaway_qty_sum > 0 ||
-    out.putaway_carton_qty_sum > 0 ||
-    out.putaway_pallet_qty_sum > 0 ||
-    out.actual_qty_sum > 0 ||
-    out.actual_carton_qty_sum > 0 ||
-    out.actual_pallet_qty_sum > 0 ||
-    out.sort_qty_sum > 0 ||
-    out.repair_box_qty_sum > 0 ||
-    out.packed_sku_count_sum > 0 ||
-    out.packed_box_count_sum > 0 ||
-    out.total_operated_box_count_sum > 0 ||
-    out.label_count_sum > 0 ||
-    out.repaired_box_count_sum > 0 ||
-    out.reboxed_count_sum > 0 ||
-    out.used_carton_large_count_sum > 0 ||
-    out.used_carton_small_count_sum > 0 ||
-    out.verify_ok_count_sum > 0 ||
-    out.verify_ng_count_sum > 0
-  );
-
-  if (parts.length === 0) {
-    if (out.result_notes && job_type !== 'change_order') {
-      out.result_summary = '备注：' + out.result_notes;
-    } else if (job_type === 'change_order') {
-      out.result_summary = '仅计时，无数量结果';
-    } else if (!hasAnyQty) {
-      out.result_summary = '仅记录工时，无数量结果';
-    } else {
-      out.result_summary = '';
-    }
-  } else {
-    out.result_summary = parts.join('，');
-    if (out.result_notes && job_type !== 'change_order') {
-      out.result_summary += '；备注：' + out.result_notes;
-    }
-  }
-
-  if (out.result_summary.length > 500) {
-    out.result_summary = out.result_summary.slice(0, 500) + '...';
-  }
-  if(job&&isInternal(job_type)){Object.assign(out,operationExport(job));out.result_summary=operationSummary(job)+(readOperation(job)?(out.result_notes?'；备注：'+out.result_notes:''):'；'+out.result_summary);}
-  return out;
-}
 
 function isAuth(body, env) {
   if(accessEnabled(env))return env.SOP_REQUEST_USER?.scope==='office'&&env.SOP_REQUEST_USER.role==='manager';
@@ -10763,6 +10457,8 @@ route("v2_verify_job_finish", async (body, env) => {
 // 1) 单子数据 — 列表（按筛选 + 聚合 worker count / total minutes / start / end）
 route("v2_dashboard_order_list", async (body, env) => {
   if (!isAuth(body, env)) return err("unauthorized", 401);
+  if(body.date_basis==='actual_work') return json(await actualWorkReport({...body, report_kind:body.report_kind||'tasks'},env));
+  if(body.department)throw Error('用工部门筛选请使用按实际作业日期口径');
   const start_date = String(body.start_date || "").trim();
   const end_date = String(body.end_date || "").trim();
   const flow_stage = String(body.flow_stage || "").trim();
@@ -10777,6 +10473,7 @@ route("v2_dashboard_order_list", async (body, env) => {
   let offset = parseInt(body.offset, 10);
   if (!Number.isFinite(offset) || offset < 0) offset = 0;
 
+  dashboardRange(start_date,end_date);
   let where = "WHERE 1=1";
   const binds = [];
   const startRange = kstDayRangeUtc(start_date);
@@ -10808,7 +10505,7 @@ route("v2_dashboard_order_list", async (body, env) => {
       (SELECT MIN(w2.joined_at) FROM v2_ops_job_workers w2 WHERE w2.job_id=j.id) AS started_at,
       (SELECT MAX(w2.left_at) FROM v2_ops_job_workers w2 WHERE w2.job_id=j.id AND w2.left_at!='') AS ended_at
     FROM v2_ops_jobs j ${where}
-    ORDER BY j.created_at DESC LIMIT ? OFFSET ?`;
+    ORDER BY j.created_at DESC,j.id LIMIT ? OFFSET ?`;
   const rs = await env.DB.prepare(sql).bind(...binds, limit, offset).all();
   const baseItems = rs.results || [];
   if (baseItems.length === 0) return json({ ok: true, items: [], total, limit, offset });
@@ -10832,6 +10529,7 @@ route("v2_dashboard_order_list", async (body, env) => {
       label_count_sum: parsed.label_count_sum,
       ...operationExport(j),
       result_summary: parsed.result_summary,
+      quantity_state: parsed.quantity_state, quantity_metrics: parsed.quantity_metrics, quantity_warnings: parsed.quantity_warnings,
       putaway_task_no: j.job_type===putawayType?(j.task_no||j.id):'',
       putaway_location_count: j.job_type===putawayType&&parsed.putaway_forklift!==null?parsed.location_count_sum:null,
       putaway_used_forklift: j.job_type===putawayType?parsed.putaway_forklift:null,
@@ -10848,21 +10546,24 @@ route("v2_dashboard_order_detail", async (body, env) => {
   const job_id = String(body.job_id || "").trim();
   if (!job_id) return err("missing job_id");
 
+  let period_report=null;
+  if(body.date_basis==='actual_work'){period_report=await actualWorkReport({...body,snapshot:undefined,report_kind:'tasks',job_id},env);}
   const job = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
   if (!job) return err("not found", 404);
 
   const [workersRs, resultsRs, pickDocsRs] = await Promise.all([
     env.DB.prepare(
-      "SELECT id, worker_id, worker_name, joined_at, left_at, minutes_worked, leave_reason FROM v2_ops_job_workers WHERE job_id=? ORDER BY joined_at ASC LIMIT 200"
+      "SELECT id, worker_id, worker_name, joined_at, left_at, minutes_worked, leave_reason FROM v2_ops_job_workers WHERE job_id=? ORDER BY joined_at ASC LIMIT 20001"
     ).bind(job_id).all(),
     env.DB.prepare(
-      "SELECT * FROM v2_ops_job_results WHERE job_id=? ORDER BY created_at ASC LIMIT 200"
+      "SELECT * FROM v2_ops_job_results WHERE job_id=? ORDER BY created_at ASC LIMIT 20001"
     ).bind(job_id).all(),
     env.DB.prepare(
-      "SELECT id, segment_id, worker_id, worker_name, pick_doc_no, status, started_at AS joined_at, finished_at AS left_at, minutes_worked FROM v2_pick_worker_docs WHERE job_id=? ORDER BY started_at ASC LIMIT 500"
+      "SELECT id, segment_id, worker_id, worker_name, pick_doc_no, status, started_at AS joined_at, finished_at AS left_at, minutes_worked FROM v2_pick_worker_docs WHERE job_id=? ORDER BY started_at ASC LIMIT 20001"
     ).bind(job_id).all()
   ]);
 
+  if ([workersRs,resultsRs,pickDocsRs].some(r=>(r.results||[]).length>20000)) return err('任务明细超过安全上限 20000 行，请按实际作业日期缩小区间导出');
   if(job.job_type==='pick_direct'&&env.SOP_UPGRADE_ENABLED==='true'){
     const dispatch=await env.DB.prepare("SELECT state FROM sop_records WHERE id=? AND kind='dispatch'").bind(job_id).first();
     job.planned_pick_workload=readPickWorkload(JSON.parse(dispatch?.state||'{}').planned_pick_workload);
@@ -10904,6 +10605,7 @@ route("v2_dashboard_order_detail", async (body, env) => {
 
   return json({
     ok: true,
+    period_report,
     job:(await jobNumbers(env,[job]))[0],
     workers: workersRs.results || [],
     results,
@@ -10924,6 +10626,8 @@ route("v2_dashboard_order_detail", async (body, env) => {
 // 2.5) 单子数据 — 导出（一次性聚合 worker / result / pick / 关联单据；不要 N+1）
 route("v2_dashboard_order_export", async (body, env) => {
   if (!isAuth(body, env)) return err("unauthorized", 401);
+  if(body.date_basis==='actual_work') return json(await actualWorkReport({...body, report_kind:body.report_kind||'tasks'},env));
+  if(body.department)throw Error('用工部门筛选请使用按实际作业日期口径');
   const start_date = String(body.start_date || "").trim();
   const end_date = String(body.end_date || "").trim();
   const flow_stage = String(body.flow_stage || "").trim();
@@ -10934,8 +10638,10 @@ route("v2_dashboard_order_export", async (body, env) => {
 
   let limit = parseInt(body.limit, 10);
   if (!Number.isFinite(limit) || limit <= 0) limit = 5000;
-  if (limit > 10000) limit = 10000;
+  if (limit > 200) limit = 200;
+  const offset=Math.max(0,Math.trunc(Number(body.offset)||0));
 
+  dashboardRange(start_date,end_date);
   let where = "WHERE 1=1";
   const binds = [];
   const startRange = kstDayRangeUtc(start_date);
@@ -10953,16 +10659,19 @@ route("v2_dashboard_order_export", async (body, env) => {
     binds.push("%" + worker_name + "%");
   }
 
+  const total=Number((await env.DB.prepare(`SELECT COUNT(*) c FROM v2_ops_jobs j ${where}`).bind(...binds).first())?.c||0);
   const jobsRs = await env.DB.prepare(
     `SELECT id, display_no, related_doc_type, related_doc_id, linked_outbound_order_id,
             flow_stage, biz_class, job_type, status, shared_result_json, created_at, updated_at
      FROM v2_ops_jobs j ${where}
-     ORDER BY j.created_at DESC LIMIT ?`
-  ).bind(...binds, limit).all();
+     ORDER BY j.created_at DESC,j.id LIMIT ? OFFSET ?`
+  ).bind(...binds, limit,offset).all();
   const jobs = await jobNumbers(env,jobsRs.results || []);
   if (jobs.length === 0) return json({ ok: true, rows: [], total: 0 });
 
   const jobIds = jobs.map(j => j.id);
+  const counts=await env.DB.batch(['v2_ops_job_workers','v2_ops_job_results','v2_pick_worker_docs'].map(table=>env.DB.prepare('SELECT COUNT(*) c FROM '+table+' WHERE job_id IN (SELECT value FROM json_each(?))').bind(JSON.stringify(jobIds))));
+  if(counts.some(r=>Number(r.results?.[0]?.c)>20000))throw Error('本页关联明细超过20000行安全上限，请缩小范围或每页数量；未截断导出');
   // 兼容历史 related_doc_type 写法：实际写入是 'inbound_plan'，旧导出按 'inbound' 过滤导致永远空
   const isInboundLink = (t) => (t === 'inbound_plan' || t === 'inbound');
   const inboundIds = [...new Set(jobs.filter(j => isInboundLink(j.related_doc_type) && j.related_doc_id).map(j => j.related_doc_id))];
@@ -11131,7 +10840,7 @@ route("v2_dashboard_order_export", async (body, env) => {
 
     return {
       job_id: j.id,
-      日期: (j.created_at || '').slice(0, 10),
+      日期: kstDateOf(j.created_at),
       单号: j.display_business_no || j.job_label || '作业信息未记录',
       作业: j.job_label || '',
       派审员: j.dispatcher_name || '未记录',
@@ -11155,6 +10864,7 @@ route("v2_dashboard_order_export", async (body, env) => {
       result_count: rs.length,
       ...operationExport(j),
       result_summary: parsed.result_summary,
+      quantity_state: parsed.quantity_state, quantity_metrics: parsed.quantity_metrics, quantity_warnings: parsed.quantity_warnings,
       putaway_task_no: j.job_type===putawayType?(j.task_no||j.id):'',
       putaway_location_count: j.job_type===putawayType&&parsed.putaway_forklift!==null?parsed.location_count_sum:null,
       putaway_used_forklift: j.job_type===putawayType?parsed.putaway_forklift:null,
@@ -11181,7 +10891,7 @@ route("v2_dashboard_order_export", async (body, env) => {
       verify_ok_count_sum: parsed.verify_ok_count_sum,
       verify_ng_count_sum: parsed.verify_ng_count_sum,
       result_submitters: parsed.result_submitters,
-      result_submitted_at: parsed.result_submitted_at,
+      result_submitted_at: fmtKst(parsed.result_submitted_at),
       readable_result_lines: parsed.readable_result_lines,
       result_lines_count: parsed.result_lines_count,
       raw_result_json_compact: parsed.raw_result_json_compact,
@@ -11220,12 +10930,13 @@ route("v2_dashboard_order_export", async (body, env) => {
     };
   });
 
-  return json({ ok: true, rows: out, total: out.length, truncated: jobs.length >= limit });
+  return json({ ok: true, rows: out, total, limit, offset, has_more:offset+out.length<total, truncated:false, metadata:{basis:"created_at",basis_label:"按建单日期（任务累计工时，非期间工时）",timezone:"Asia/Seoul (UTC+09:00)",as_of:now()} });
 });
 
 // 3) 工时分析 — 汇总（summary + by_worker + by_job_type + segments）
 route("v2_dashboard_workhour_summary", async (body, env) => {
   if (!isAuth(body, env)) return err("unauthorized", 401);
+  if(body.date_basis==='actual_work') return json(await actualWorkReport({...body, report_kind:body.report_kind||'segments'},env));
   const start_date = String(body.start_date || "").trim();
   const end_date = String(body.end_date || "").trim();
   const worker_name = String(body.worker_name || "").trim();
@@ -11250,8 +10961,9 @@ route("v2_dashboard_workhour_summary", async (body, env) => {
     FROM v2_ops_job_workers w
     JOIN v2_ops_jobs j ON j.id = w.job_id
     ${where}
-    ORDER BY w.joined_at DESC LIMIT 1000`;
+    ORDER BY w.joined_at DESC LIMIT 20001`;
   const rs = await env.DB.prepare(segSql).bind(...binds).all();
+  if((rs.results||[]).length>20000)throw Error('工时超过20000段安全上限，请缩小区间；未返回部分汇总');
   const rows = await jobNumbers(env,rs.results || [],'job_id');
 
   const nowMs = Date.now();
@@ -11344,7 +11056,7 @@ route("v2_dashboard_workhour_summary", async (body, env) => {
     by_worker,
     by_job_type,
     segments,
-    truncated: rows.length >= 1000
+    truncated: false, metadata:{basis:"actual_work",open_policy:"未结束时段排除",overlap_policy:"推荐使用实际作业口径参数 date_basis=actual_work 获取重叠检查及分页"}
   });
 });
 
@@ -11454,6 +11166,7 @@ route("v2_dashboard_management_summary", async (body, env) => {
     outbound: ['load_outbound', 'verify_scan', 'bulk_op'],
   };
 
+  const actual=body.date_basis==='actual_work'?await actualWorkReport({...body,report_kind:'segments'},env):null;
   // ---- 工时段（与 workhour_summary 同口径，但聚合到 by_job_type / by_worker）----
   let where = "WHERE 1=1";
   const binds = [];
@@ -11464,13 +11177,14 @@ route("v2_dashboard_management_summary", async (body, env) => {
   if (endRange)   { where += " AND julianday(w.joined_at)<julianday(?)"; binds.push(endRange.endUtc); }
 
   const segRs = await env.DB.prepare(`
-    SELECT w.id, w.worker_id, w.worker_name, w.joined_at, w.left_at, w.minutes_worked,
+    SELECT w.id,w.job_id, w.worker_id, w.worker_name, w.joined_at, w.left_at, w.minutes_worked,
            j.flow_stage, j.biz_class, j.job_type
     FROM v2_ops_job_workers w
     JOIN v2_ops_jobs j ON j.id = w.job_id
     ${where}
-    ORDER BY w.joined_at DESC LIMIT 5000`).bind(...binds).all();
+    ORDER BY w.joined_at DESC LIMIT 20001`).bind(...binds).all();
   const segs = segRs.results || [];
+  if(segs.length>20000)throw Error('工时超过20000段安全上限，请缩小区间；未返回部分汇总');
 
   // ---- WMS 行（按 work_date 在范围内）----
   let wmsWhere = "WHERE 1=1";
@@ -11478,17 +11192,19 @@ route("v2_dashboard_management_summary", async (body, env) => {
   if (start_date) { wmsWhere += " AND work_date>=?"; wmsBinds.push(start_date); }
   if (end_date)   { wmsWhere += " AND work_date<=?"; wmsBinds.push(end_date); }
   const wmsRs = await env.DB.prepare(
-    `SELECT import_type, worker_id, worker_name, qty, box_count FROM v2_wms_import_rows ${wmsWhere} LIMIT 20000`
+    `SELECT import_type, worker_id, worker_name, qty, box_count FROM v2_wms_import_rows ${wmsWhere} LIMIT 20001`
   ).bind(...wmsBinds).all();
   const wmsRows = wmsRs.results || [];
+  if(wmsRows.length>20000)throw Error('WMS超过20000行安全上限，请缩小区间；未返回部分汇总');
 
   // ---- 工时聚合 ----
   const nowMs = Date.now();
   let total_minutes = 0, anomaly_count = 0;
   const workerMins = Object.create(null), jobTypeMins = Object.create(null), workerJobTypeMins = Object.create(null), workerNames=Object.create(null),nameIds=new Map();
-  segs.forEach(r => {
+  const measured=measureSegments(segs,range,actual?Date.parse(actual.metadata.as_of):Date.now());
+  measured.forEach(r => {
     const closed = !!r.left_at;
-    const counted=segmentMinutes(r,range,nowMs),m=counted.minutes;
+    const counted={invalid:r.anomaly,raw_minutes:r.raw_minutes},m=r.minutes;
     if(counted.invalid||counted.raw_minutes>240||(closed&&counted.raw_minutes<=0))anomaly_count++;
     total_minutes += m;
     const wk=reportWorkerId(r);
@@ -11567,7 +11283,12 @@ route("v2_dashboard_management_summary", async (body, env) => {
   const total_hours = Math.round(total_minutes / 6) / 10;
   return json({
     ok: true,
+    metadata:actual?.metadata||{basis:"actual_work",open_policy:"未结束时段排除",overlap_policy:"同人重叠显式告警，记录时长含重复部分"},
+    by_department:actual?.by_department||[],
     summary: {
+      total_seconds:measured.reduce((n,r)=>n+r.seconds,0),
+      overlap_seconds:measured.reduce((n,r)=>n+r.overlap_seconds,0),
+      excluded_open_count:measured.filter(r=>r.active).length,
       total_minutes,
       total_hours,
       total_qty: Math.round(total_qty * 10) / 10,
@@ -11578,7 +11299,7 @@ route("v2_dashboard_management_summary", async (body, env) => {
       anomaly_count
     },
     by_job_type,
-    by_worker, unmatched_wms:unmatched, truncated:segs.length>=5000||wmsRows.length>=20000
+    by_worker, unmatched_wms:unmatched, truncated:false
   });
 });
 

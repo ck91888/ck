@@ -7,7 +7,7 @@ export function dashboardRange(start='',end=''){
 export function segmentMinutes(row,range,current=Date.now()){
  const a=Date.parse(row.joined_at),z=row.left_at?Date.parse(row.left_at):current;
  const invalid=!Number.isFinite(a)||!Number.isFinite(z)||z<a;
- const raw=invalid?0:Math.max(0,(Math.min(z,current)-a)/60000);
- return {minutes:invalid?0:Math.round(Math.max(0,Math.min(z,current,range.end)-Math.max(a,range.start))/6000)/10,raw_minutes:Math.round(raw*10)/10,invalid};
+ const raw=invalid||!row.left_at?0:Math.max(0,(Math.min(z,current)-a)/60000);
+ return {minutes:invalid||!row.left_at?0:Math.max(0,Math.min(z,current,range.end)-Math.max(a,range.start))/60000,raw_minutes:raw,invalid};
 }
 export const reportWorkerId=row=>String(row.worker_id||'').trim()||'UNIDENTIFIED:'+row.id;

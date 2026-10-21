@@ -86,12 +86,12 @@ test('manager order list/detail/result dialog and export carry business + actual
  const p=fixture(t,'shuju'),j=fixtureJob();p.setApi(()=>({ok:true,items:[j],total:1}));await p.w.loadOrders();checkLabel(p.$('ordersBody'),j);
  p.setApi(()=>({ok:true,job:j,workers:[],results:[]}));await p.w.openOrderDetail(ID);checkLabel(p.$('orderDetailBody'),j);assert.equal(p.calls.at(-1)[0].job_id,ID);
  p.w.openManualFinalize(ID);checkLabel(p.$('opsResultOverlay'),j);assert.equal(p.$('opsResultOverlay').querySelector('[data-job]').dataset.job,ID);p.w.closeResultModal();
- let output;p.w.exportCsv=(name,rows)=>{output={name,rows};};p.setApi(()=>({ok:true,rows:[{...j,'日期':'2026-10-08','单号':ID}]}));await p.w.exportOrders();assert.equal(output.rows[0].单号,j.business_no);assert.equal(output.rows[0].派审员,j.dispatcher_name);assert.ok(!JSON.stringify(output.rows[0]).includes(ID));
+ p.$('ordersDateBasis').value='created_at';let output;p.w.exportCsv=(name,rows)=>{output={name,rows};};p.setApi(()=>({ok:true,total:1,has_more:false,rows:[{...j,'日期':'2026-10-08','单号':ID}]}));await p.w.exportOrders();assert.equal(output.rows[0].单号,j.business_no);assert.equal(output.rows[0].派审员,j.dispatcher_name);assert.ok(!JSON.stringify(output.rows[0]).includes(ID));
 });
 
 test('work-hour segment table and CSV pair business label with dispatcher, including legacy missing source',domOptions,async t=>{
  const p=fixture(t,'shuju'),j=fixtureJob(),missing=missingJob();p.setApi(()=>({ok:true,summary:{},segments:[j,missing]}));await p.w.loadWorkhours();checkLabel(p.$('whSegmentsBody'),j);assert.match(p.$('whSegmentsBody').textContent,/未记录|미기록/);
- let rows;p.w.exportCsv=(_name,r)=>{rows=r;};p.w.exportWorkhoursSegments();assert.equal(rows[0].任务号,j.business_no);assert.equal(rows[0].派审员,j.dispatcher_name);assert.doesNotMatch(JSON.stringify(rows),/JOB-|CREATOR-NOT|LEAD-NOT/);
+ let rows;p.w.exportCsv=(_name,r)=>{rows=r;};p.w._whQuery.date_basis='legacy';p.w.exportWorkhoursSegments();assert.equal(rows[0].任务号,j.business_no);assert.equal(rows[0].派审员,j.dispatcher_name);assert.doesNotMatch(JSON.stringify(rows),/JOB-|CREATOR-NOT|LEAD-NOT/);
 });
 
 test('standalone SOP list, detail, history, live board and CSV use business identities; buttons retain record IDs',domOptions,async t=>{

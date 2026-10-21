@@ -117,26 +117,26 @@
   <div id="tab-orders" class="tab-content" style="display:none;">
     <div class="section-card">
       <div class="filter-row">
-        <label title="按作业 created_at（KST 日期）筛选">作业创建日期 开始</label>
+        <label>日期口径 <select id="ordersDateBasis" onchange="document.getElementById('ordersDepartment').disabled=this.value!=='actual_work';if(this.value!=='actual_work')document.getElementById('ordersDepartment').value=''"><option value="actual_work">按实际作业日期</option><option value="created_at">按建单日期 · 任务累计（追溯）</option></select></label><label>开始（KST）</label>
         <input type="date" id="ordersFilterStart">
         <label>结束</label>
         <input type="date" id="ordersFilterEnd">
-        <select id="ordersFilterFlow"></select>
+        <select id="ordersDepartment"><option value="">全部用工部门</option><option value="bulk">大货</option><option value="direct_ship">代发</option><option value="import">进口</option><option value="other">未归属 / 支持</option></select><select id="ordersFilterFlow"></select>
         <select id="ordersFilterJobType"></select>
         <select id="ordersFilterStatus"></select>
         <input type="text" id="ordersFilterWorker" placeholder="员工姓名（模糊）">
         <input type="text" id="ordersFilterDoc" placeholder="单号 / display_no">
         <button class="btn-primary" onclick="loadOrders(this)">查询</button>
         <button class="btn-secondary" onclick="exportOrders(this)">导出明细 CSV</button>
-        <span class="muted" id="ordersTotal" style="margin-left:auto;font-size:12px;"></span>
+        <button class="btn-secondary" onclick="exportActualReport(ordersFilterParams(),'quantities').catch(e=>alert(e.message))">导出同类数量样本</button><span class="muted" id="ordersTotal" style="margin-left:auto;font-size:12px;"></span>
       </div>
-      <div style="overflow-x:auto;">
+      <div class="section-hint" id="ordersReportHint">实际作业：按人员时段与 KST 区间交集统计；结束日期含当天，最多31天。数量是整任务累计结果，不是周内产量。未归属部门不表示闲置。</div><div class="filter-row"><button class="btn-secondary" onclick="ordersPage(-1)">上一页</button><button class="btn-secondary" onclick="ordersPage(1)">下一页</button></div><div style="overflow-x:auto;">
         <table class="data-table">
           <thead>
             <tr>
-              <th>日期</th><th>单号</th><th>业务阶段</th><th>任务类型</th>
-              <th>业务分类</th><th>状态</th><th>参与人数</th><th>总工时</th>
-              <th>开始时间</th><th>结束时间</th><th>作业结果</th><th>操作</th>
+              <th>创建日（KST）</th><th>单号</th><th>业务阶段</th><th>任务类型</th>
+              <th>用工部门 / 业务</th><th>状态</th><th>参与人数</th><th>工时</th>
+              <th>开始时间</th><th>结束时间</th><th>任务累计结果</th><th>操作</th>
             </tr>
           </thead>
           <tbody id="ordersBody">
@@ -144,7 +144,7 @@
           </tbody>
         </table>
       </div>
-      <div class="section-hint">日期口径 = 作业 created_at（KST 日历日）。客服按"预计出库日期"筛选请去协同中心。列表最多 200 条；导出最多 10000 条。</div>
+
     </div>
   </div>
 
@@ -152,23 +152,23 @@
   <div id="tab-workhours" class="tab-content" style="display:none;">
     <div class="section-card">
       <div class="filter-row">
-        <label title="按工人 joined_at（KST 日期）筛选">工时日期 开始</label>
+        <label title="按人员时段与区间交集（KST）">实际作业日期 开始（KST）</label>
         <input type="date" id="whFilterStart">
         <label>结束</label>
         <input type="date" id="whFilterEnd">
         <input type="text" id="whFilterWorker" placeholder="员工姓名（模糊）">
-        <select id="whFilterFlow"></select>
+        <select id="whDepartment"><option value="">全部用工部门</option><option value="bulk">大货</option><option value="direct_ship">代发</option><option value="import">进口</option><option value="other">未归属 / 支持</option></select><select id="whFilterFlow"></select>
         <select id="whFilterJobType"></select>
         <button class="btn-primary" onclick="loadWorkhours(this)">查询</button>
         <button class="btn-secondary" onclick="exportWorkhoursSegments()">导出明细 CSV</button>
       </div>
-      <div class="stat-row" id="whSummaryRow">
+      <p id="whReportHint" class="section-hint">按实际作业日期；未结束时段排除，同人重叠待核。结束日期含当天，最多31天。</p><div class="stat-row" id="whSummaryRow">
         <div class="muted" style="grid-column:1/-1;padding:20px;text-align:center;">请点击「查询」</div>
       </div>
     </div>
 
     <div class="section-card">
-      <h3>按员工汇总</h3>
+      <h3>按部门汇总</h3><div id="whDepartments" class="report-departments"></div></div><div class="section-card"><h3>按员工汇总</h3>
       <div style="overflow-x:auto;">
         <table class="data-table">
           <thead>
@@ -202,7 +202,7 @@
     </div>
 
     <div class="section-card">
-      <h3>明细段（前 200 条）</h3>
+      <h3>人员分日时段（每页 200 条）</h3>
       <div style="overflow-x:auto;">
         <table class="data-table">
           <thead>
@@ -216,7 +216,7 @@
           </tbody>
         </table>
       </div>
-      <div class="section-hint" id="whSegmentsHint"></div>
+      <div class="section-hint" id="whSegmentsHint"></div><div class="filter-row"><button class="btn-secondary" onclick="workhoursPage(-1)">上一页</button><button class="btn-secondary" onclick="workhoursPage(1)">下一页</button></div>
     </div>
   </div>
 
@@ -290,12 +290,12 @@
   <div id="tab-management" class="tab-content" style="display:none;">
     <div class="section-card">
       <div class="filter-row">
-        <label title="工时按 joined_at KST 日期；WMS 按 work_date">日期 开始</label>
+        <label title="工时按时段交集 KST 日期；WMS 按 work_date">日期 开始</label>
         <input type="date" id="mgmtFilterStart">
         <label>结束</label>
         <input type="date" id="mgmtFilterEnd">
         <button class="btn-primary" onclick="loadManagement(this)">查询</button>
-        <span class="muted" style="font-size:12px;margin-left:auto;">工时按 joined_at（KST），WMS 按 work_date；人效 = WMS 数量 ÷ 工时小时</span>
+        <span class="muted" style="font-size:12px;margin-left:auto;">工时按实际时段交集（KST）；WMS 按 work_date。旧 WMS 匹配仅供核对，进口日报人效公式尚未确定。</span>
       </div>
       <div class="stat-row" id="mgmtSummaryRow">
         <div class="muted" style="grid-column:1/-1;padding:20px;text-align:center;">请点击「查询」</div>

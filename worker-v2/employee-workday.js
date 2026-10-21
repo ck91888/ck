@@ -126,7 +126,7 @@ export async function employeeWorkdays(env,{date,asOf,items,validSegments,detail
  return details;
 }
 
-async function jobCustomers(env,jobs,tables){
+export async function jobCustomers(env,jobs,tables){
  const result=new Map(jobs.map(j=>[j.id,new Set(j.customer?[j.customer]:[])]));if(!jobs.length)return new Map();
  const selects=[];
  if(tables.has('sop_records'))selects.push("SELECT s.id AS job_id,COALESCE(NULLIF(json_extract(s.state,'$.customer'),''),json_extract(n.state,'$.customer')) AS customer FROM sop_records s LEFT JOIN sop_records n ON n.id=json_extract(s.state,'$.need_id') WHERE s.kind IN ('task','dispatch')");
@@ -134,6 +134,7 @@ async function jobCustomers(env,jobs,tables){
  if(tables.has('v2_outbound_orders'))selects.push(`SELECT j.id AS job_id,p.customer FROM v2_ops_jobs j JOIN v2_outbound_orders p ON (p.id=j.related_doc_id AND j.related_doc_type IN ('outbound','outbound_order')) ${jobs.some(j=>Object.hasOwn(j,'linked_outbound_order_id'))?' OR p.id=j.linked_outbound_order_id':''}`);
  if(tables.has('ck_unload_plan_links')&&tables.has('v2_inbound_plans'))selects.push('SELECT l.job_id,p.customer FROM ck_unload_plan_links l JOIN v2_inbound_plans p ON p.id=l.plan_id');
  if(tables.has('ck_load_order_links')&&tables.has('v2_outbound_orders'))selects.push('SELECT l.job_id,p.customer FROM ck_load_order_links l JOIN v2_outbound_orders p ON p.id=l.order_id');
+ if(tables.has('ck_putaway_links')&&tables.has('v2_inbound_plans'))selects.push('SELECT l.job_id,p.customer FROM ck_putaway_links l JOIN v2_inbound_plans p ON p.id=l.plan_id');
  if(selects.length)for(const row of await rows(env,`SELECT job_id,customer FROM (${selects.join(' UNION ALL ')}) WHERE job_id IN (SELECT value FROM json_each(?)) AND COALESCE(customer,'')!=''`,JSON.stringify(jobs.map(j=>j.id))))result.get(row.job_id)?.add(row.customer);
  return new Map([...result].map(([id,names])=>[id,[...names]]));
 }

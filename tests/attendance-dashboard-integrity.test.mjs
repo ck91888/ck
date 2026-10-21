@@ -124,11 +124,11 @@ test('a closed 23:30 to 00:30 KST segment contributes thirty minutes to each Kor
  assert.equal(entire.summary.total_minutes,60);
 });
 
-test('an unclosed historical segment is bounded by the requested Korean day end',async t=>{
+test('an unclosed historical segment is explicitly excluded rather than estimated',async t=>{
  const s=await setup(t);s.job('QA-HISTORICAL-OPEN');
  s.DB.raw.prepare("UPDATE v2_ops_jobs SET status='working' WHERE id='QA-HISTORICAL-OPEN'").run();
  s.segment('QA-HISTORICAL-OPEN-SEG','QA-HISTORICAL-OPEN','EMP-QA-STALE','QA historical open','2026-09-29T14:30:00.000Z','',0);
  for(const result of [await s.hours({start_date:'2026-09-29',end_date:'2026-09-29'}),await s.management({start_date:'2026-09-29',end_date:'2026-09-29'})]){
-  assert.equal(result.summary.total_minutes,30,JSON.stringify(result.summary));
+  assert.equal(result.summary.total_minutes,0,JSON.stringify(result.summary));
  }
 });

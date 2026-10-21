@@ -113,7 +113,7 @@ test('CSV can export invalid legacy timestamps as quality issues instead of cras
 });
 
 test('failed workhour query invalidates the previous summary before another export',async()=>{
- const loadStart=app.indexOf('async function loadWorkhours(btn)');const branchEnd=app.indexOf('  _whSummary = res;',loadStart);
+ const loadStart=app.indexOf('async function loadWorkhours(');const branchEnd=app.indexOf('  _whSummary = res;',loadStart);
  const prefix=app.slice(loadStart,branchEnd)+'\n}';
  const ctx={_whSummary:{segments:[{worker_id:'QA-OLD'}]},document:{getElementById:()=>({innerHTML:''})},setBtnLoading:()=>{},whFilterParams:()=>({start_date:'2026-10-01'}),api:async()=>({ok:false})};
  vm.createContext(ctx);vm.runInContext(prefix,ctx);await ctx.loadWorkhours(null);assert.equal(ctx._whSummary,null);
