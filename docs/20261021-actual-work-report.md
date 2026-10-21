@@ -2,6 +2,20 @@
 
 范围：从指定测试分支 `upgrade/sop-safe-rollout-20260917` 的 `caafccccec4f23817535c45fd36d369a6afce888` 开始，保留多单上架、状态标签及既有功能。发布标记 `20261021-actual-work-report`，仅 `ck-v2-api-sop-staging` / `sop-test.ck91888.cn`。无历史数据回填、迁移、清理或业务写测试，不合 main。
 
+## 2026-10-21 查询故障热修复
+
+用户反馈 e580eb3 的实际作业日期查询出现 `D1_ERROR: too many terms in compound SELECT: SQLITE_ERROR`。根因位于 `employee-workday.js` 的 `jobCustomers()`：派工、直接入库、关联出库、共同卸货、共同装货和共同上架共6路查询通过 `UNION ALL` 拼接。六类关系表同时存在且候选任务非空时即可触发，与任务数量无关。workerd 的 `SQLITE_LIMIT_COMPOUND_SELECT` 为5，而前一轮测试使用的普通 SQLite 默认值为500；此前1268项回归及1003任务测试未覆盖这个运行时差异，故未能发现故障。这是前一轮验证遗漏。
+
+修复为一次 `DB.batch()` 执行最多6条独立来源查询，无复合 SELECT、无逐任务 N+1。每条固定SQL仅绑定一个任务ID JSON参数，保留全部来源；相同任务的相同客户标签按既有集合语义去重，不对任务、数量或人员时段去重。每来源20000个任务/客户配对安全上限，读取20001条检测超限并明确失败，批处理失败也不返回部分统计。原日期、跨期数量、工时、分页和导出语义保持不变。发布标记 `20261021-report-d1-query-fix`。
+
+新增 `tests/actual-work-d1.mjs` 使用本地 Miniflare/workerd D1，实测5项复合SELECT通过、6项与501项返回上述完整错误；普通SQLite500项通过、501项失败。另将e580eb3原函数在同一本地D1中执行，一项合成任务即复现同一完整错误；修复后该任务全部7个客户标签返回成功。规模数据包含1003任务、2006人员时段、4012分日行、全部6类关联与7021个客户标签（包含同任务多单重复客户）。验证列表、所有分页、任务详情、任务导出数据、同类数量样本、人员分日、业务单号/部门/工种/状态筛选、明确零数量和无业务写入。数量与工时不因客户关联放大。
+
+本地D1证据：首次列表查询12条SQL，应用侧299ms，其中SQL36ms、rows_read 62299；包含完整分页和筛选的测试约9秒。各查询最大SQL文本4045字节、最多20个绑定参数、最大单参数19058字节，业务 rows_written 为0。此数据仅代表本机合成测试，不代表线上延迟。对照[Cloudflare D1限制](https://developers.cloudflare.com/d1/platform/limits/)（SQL100KB、100绑定参数、单值/行2MB）及[workerd限制源码](https://github.com/cloudflare/workerd/blob/main/src/workerd/util/sqlite.c%2B%2B)，查询结构远低于相应限制；保留原分页和明确报错的结果安全上限。
+
+运行：`CODEX_PRIMARY_RUNTIME_NODE_MODULES=<node_modules> node --test tests/actual-work-d1.mjs`。浏览器规模验收：`CK_REPORT_LOCAL_D1=1 CK_REPORT_SCALE=1003 CODEX_PRIMARY_RUNTIME_NODE_MODULES=<node_modules> node tests/actual-work-browser.mjs`；真实本地D1服务，所有请求限定localhost，使用内存合成数据复制到临时D1，未连接线上数据库。
+
+热修复全量回归1268项通过、0失败、0跳过。本地D1浏览器8组（1440/1280×100%/125%/150%，390/320手机）全部通过：1006任务、2008人员分日行、60240秒，实际下载任务明细、同类数量样本和人员分日CSV，客户标签、任务数量和秒数均完整；筛选、分页、旧口径仍可用。既有多单上架浏览器8组全部通过。构建和staging dry-run通过。此前CONNECT403限制未重试或绕过，线上浏览器和真实业务周数据仍未读取。
+
 ## 已核实及修正
 
 原订单列表/导出按创建日期筛选，工时取累计 `minutes_worked`；创建日展示用了 UTC slice。原工时页已有区间交集，但逐段舍入且只统计前1000段。管理看板最多5000段。结果解析同时累加两个 JSON 明细来源；扫描 `scanned_ok_count/abnormal_count` 没有映射；原始结果1000字符、明细说明2000字符截短，任务详情最多200条。以上均根据本次基线源码独立核实，不据旧周报推断线上记录。

@@ -135,7 +135,16 @@ export async function jobCustomers(env,jobs,tables){
  if(tables.has('ck_unload_plan_links')&&tables.has('v2_inbound_plans'))selects.push('SELECT l.job_id,p.customer FROM ck_unload_plan_links l JOIN v2_inbound_plans p ON p.id=l.plan_id');
  if(tables.has('ck_load_order_links')&&tables.has('v2_outbound_orders'))selects.push('SELECT l.job_id,p.customer FROM ck_load_order_links l JOIN v2_outbound_orders p ON p.id=l.order_id');
  if(tables.has('ck_putaway_links')&&tables.has('v2_inbound_plans'))selects.push('SELECT l.job_id,p.customer FROM ck_putaway_links l JOIN v2_inbound_plans p ON p.id=l.plan_id');
- if(selects.length)for(const row of await rows(env,`SELECT job_id,customer FROM (${selects.join(' UNION ALL ')}) WHERE job_id IN (SELECT value FROM json_each(?)) AND COALESCE(customer,'')!=''`,JSON.stringify(jobs.map(j=>j.id))))result.get(row.job_id)?.add(row.customer);
+ // workerd limits compound SELECTs to five terms. Keep each relationship source
+ // separate: a fixed batch (at most six reads), never a query per task or UNION.
+ // Customer labels are a set; this query never aggregates task work or quantities.
+ const ids=JSON.stringify([...new Set(jobs.map(j=>j.id))]);
+ const batches=selects.length?await env.DB.batch(selects.map(sql=>env.DB.prepare(`SELECT job_id,customer FROM (${sql}) WHERE job_id IN (SELECT value FROM json_each(?)) AND COALESCE(customer,'')!='' GROUP BY job_id,customer ORDER BY job_id,customer LIMIT 20001`).bind(ids))):[];
+ for(const batch of batches){
+  if(batch.success===false||batch.error)throw Error('客户关联读取失败；未返回部分统计');
+  const found=batch.results||[];if(found.length>20000)throw Error('单来源客户关联超过安全上限20000条；未返回部分统计');
+  for(const row of found)result.get(row.job_id)?.add(row.customer);
+ }
  return new Map([...result].map(([id,names])=>[id,[...names]]));
 }
 
