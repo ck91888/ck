@@ -32,7 +32,7 @@ export async function inboundReferenceData(env,classes,body,plan={}){
 export async function inboundCodeProgress(env,plan,knownJobs,biz){
  if(!inboundFlowEnabled(env)||!plan||!needsPutaway(plan))return null;
  const codes=departmentCodes(plan,biz),allCodes=inboundCodes(plan.external_inbound_no);
- const jobs=knownJobs ? knownJobs.filter(j=>['inbound_direct','inbound_bulk',tallyType,putawayType].includes(j.job_type)&&j.status!=='cancelled') : (await env.DB.prepare("SELECT id,job_type,status,inbound_external_no,created_at,updated_at FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type IN ('inbound_direct','inbound_bulk','inbound_direct_tally','inbound_direct_putaway') AND status!='cancelled' ORDER BY created_at DESC").bind(plan.id).all()).results||[];
+ const jobs=knownJobs?knownJobs.filter(j=>['inbound_direct','inbound_bulk',tallyType,putawayType].includes(j.job_type)&&j.status!=='cancelled'):(await env.DB.prepare("SELECT * FROM v2_inbound_references WHERE plan_id=? AND job_type IN ('inbound_direct','inbound_bulk','inbound_direct_tally','inbound_direct_putaway') AND status!='cancelled' ORDER BY created_at DESC").bind(plan.id).all()).results||[];
  const items=codes.map(code=>{
   const matches=jobs.filter(j=>j.inbound_external_no===code||(!j.inbound_external_no&&allCodes.length===1));
   const final=matches.find(j=>j.job_type!==tallyType&&j.status==='completed');

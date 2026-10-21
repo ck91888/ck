@@ -1373,6 +1373,7 @@ async function resolveInboundCode(btnEl) {
 
 // ===== 统一扫码器（入库页） =====
 var _inboundScanner = null;
+var _inboundLastScan = {code:'',at:0};
 function startInboundScan() {
   if (_inboundScanner) { stopInboundScan(); return; }
   var readerEl = document.getElementById("inboundScanReader");
@@ -1386,8 +1387,11 @@ function startInboundScan() {
       "inboundScanReader",
       { fps: 10, qrbox: { width: 250, height: 150 } },
       function(decoded) {
-        stopInboundScan();
         var code = String(decoded || "").trim();
+        if(_pageParams.job_type==='inbound_direct_putaway'){
+          if(_inboundLastScan.code===code&&Date.now()-_inboundLastScan.at<2000)return;
+          _inboundLastScan={code:code,at:Date.now()};
+        }else stopInboundScan();
         if (!code) return;
         var inp = document.getElementById("inboundCodeInput");
         if (inp) inp.value = code;

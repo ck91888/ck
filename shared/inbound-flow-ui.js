@@ -56,7 +56,7 @@ window.CKInstallInboundFlow=function(app){
  if(!window.CK_SOP_ROLLOUT?.staging)return;
  if(app==='002'){
   window.inboundBizTaskLabel=window.CKInboundLabel;
-  const statusLabel=window.inboundStatusLabel;window.inboundStatusLabel=status=>({completed:'已入库 / 입고 완료',tallied_pending_putaway:'理货完成待上架 / 검수 완료 · 적치 대기',direct_putting_away:'上架中 / 적치 중'}[status]||statusLabel(status));
+  const statusLabel=window.inboundStatusLabel;window.inboundStatusLabel=status=>({putting_away:'理货中 / 검수 중',arrived_pending_putaway:'已到库待理货 / 도착 · 검수 대기',unloading_putting_away:'卸货中＋理货中 / 하차·검수 중',completed:'已入库 / 입고 완료',tallied_pending_putaway:'理货完成待上架 / 검수 완료 · 적치 대기',direct_putting_away:'上架中 / 적치 중'}[status]||statusLabel(status));
   for(const [value,label] of [['tallied_pending_putaway','理货完成待上架 / 검수 완료 · 적치 대기'],['direct_putting_away','上架中 / 적치 중']])document.getElementById('ibFilterStatus').add(new Option(label,value));
   document.querySelector('#ibFilterStatus option[value="completed"]').textContent='已入库 / 입고 완료';
   choices(document.getElementById('ibc-biz-classes'),'.ibc-biz-chk','ck-ibc-external');

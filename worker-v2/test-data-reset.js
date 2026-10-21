@@ -7,7 +7,7 @@ export const STAGING_DATABASE = 'ba1eba33-bcdd-4de2-8927-d37dc3788396';
 export const TABLES = [
  'ck_courier_batch_items','ck_courier_batch_requests','ck_courier_batches',
  'ck_courier_plan_item_history',
- 'ck_inbound_create_receipts',
+ 'ck_inbound_create_receipts','ck_putaway_links',
  'ck_bulk_labor_finishes','ck_bulk_work_batch_items',
  'ck_crew_borrows','ck_crew_requests',
  'ck_load_order_claims','ck_load_order_links','ck_load_trips',

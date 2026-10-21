@@ -79,7 +79,7 @@
     const r=await CKSession.request('sop_native_start',{payload:pending.payload,...staff});
     retries.delete(fingerprint);lead=r.lead||staff.workers.find(x=>x.id===staff.lead_id);sessionStorage.setItem('ck_test_active_lead',JSON.stringify(lead));
     return r;
-   }catch(e){if(e.businessError&&!e.message.includes('任务已建立'))retries.delete(fingerprint);return {ok:false,error:e.message};}
+   }catch(e){if(e.businessError&&!(body.job_type==='inbound_direct_putaway'&&e.httpStatus>=500)&&!e.message.includes('任务已建立'))retries.delete(fingerprint);return {ok:false,error:e.message};}
   };
  };
  // Native job dispatch and courier dispatch share this actual dialog and picker.

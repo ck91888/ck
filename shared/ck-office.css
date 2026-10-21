@@ -169,3 +169,11 @@
  .ck-system[data-app="attendance"] .reprint-body .field-label{font-size:18px}
  .ck-system[data-app="attendance"] .reprint-body .field-label span{font-size:13px}
 }
+/* Inbound stages: explicit foreground/background pairs. New stages previously
+   inherited white .st text with no background and disappeared on light rows. */
+.ck-system[data-app="002"] .st:is(.st-arrived_pending_putaway,.st-putting_away,.st-unloading_putting_away,.st-tallied_pending_putaway,.st-direct_putting_away){max-width:100%;white-space:normal;word-break:keep-all;overflow-wrap:anywhere;overflow:visible;text-overflow:clip;line-height:1.5;vertical-align:middle;border:1px solid transparent}
+.ck-system[data-app="002"] .st-arrived_pending_putaway{color:#174b76;background:#e5f0fa;border-color:#afcbe1}
+.ck-system[data-app="002"] .st-putting_away{color:#5b287e;background:#f0e6f7;border-color:#c9a9dc}
+.ck-system[data-app="002"] .st-unloading_putting_away{color:#7d351b;background:#fff0e6;border-color:#dfb294}
+.ck-system[data-app="002"] .st-tallied_pending_putaway{color:#7b4f06;background:#fff1cc;border-color:#d5ad57}
+.ck-system[data-app="002"] .st-direct_putting_away{color:#15544a;background:#dff2e9;border-color:#9ccabb}

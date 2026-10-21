@@ -126,6 +126,7 @@
   window.CKBadgeIdentity=badges;if(documents)window.CKDocumentCode=documents;
   const nav=document.createElement('nav');nav.className='ck-cross-nav';nav.innerHTML='<a href="/">CK</a><a href="/001/">现场执行</a><a href="/002/">协同中心</a><a href="/003/">耗材与物品</a><a href="/shuju/">数据看板</a><a href="/attendance/">上下班签到</a>';for(const a of nav.querySelectorAll('a'))if(a.getAttribute('href')===(app==='home'?'/':'/'+app+'/'))a.setAttribute('aria-current','page');document.body.insertBefore(nav,document.body.children[1]||null);if(app==='001'||app==='attendance'){nav.replaceChildren();nav.hidden=true;}
   window.CKInstallInboundFlow?.(app);
+  if(app==='001')window.CKInstallMultiPutaway?.();
   window.CKInstallFeedbackLink?.(app);
   if(app==='002'){
    const originalPager=window.renderPager;window.renderPager=function(key,res,reload){const html=originalPager(key,res,reload),p=getPager(key);return p.total<=p.limit?html.replace('class="pager-bar"','class="pager-bar pager-single"'):html;};

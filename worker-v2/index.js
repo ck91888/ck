@@ -1,3 +1,4 @@
+import {cancelPutaway,putawayReferences} from './multi-putaway.js';
 import {isInternal,readOperation,operationSummary,operationExport} from '../shared/internal-operations.js';
 import {internalEnabled,protectInternalMutation} from './internal-operations.js';
 import {handleDailyScan} from './import-daily-scan.js';
@@ -433,7 +434,7 @@ function parseOpsResultForExport(job_type, resultRows, job) {
 
   // 生成业务摘要
   const parts = [];
-  if(job_type===putawayType&&out.putaway_forklift!==null)parts.push('货位数 '+out.location_count_sum+' · 是否使用叉车 '+(out.putaway_forklift?'是':'否'));
+  if(job_type===putawayType&&out.putaway_forklift!==null)parts.push('货位数 '+out.location_count_sum+'（整任务）'+' · 是否使用叉车 '+(out.putaway_forklift?'是':'否'));
   const isInboundJob = (job_type || '').indexOf('inbound') === 0; // inbound_direct / inbound_bulk / inbound_change_order / inbound_return
   if (job_type === 'pack_direct') {
     if (out.packed_sku_count_sum > 0) parts.push('打包SKU ' + out.packed_sku_count_sum);
@@ -1365,6 +1366,11 @@ const MIGRATIONS = [
       AND ((NEW.job_type='inbound_bulk') != (instr(char(10)||p.bulk_external_inbound_no||char(10),char(10)||NEW.inbound_external_no||char(10))>0)))
     BEGIN SELECT RAISE(ABORT,'inbound department changed; refresh before starting'); END`,
 
+  `CREATE TABLE IF NOT EXISTS ck_putaway_links(job_id TEXT NOT NULL,plan_id TEXT NOT NULL,external_no TEXT NOT NULL,tally_job_id TEXT NOT NULL,position INTEGER NOT NULL,PRIMARY KEY(job_id,plan_id,external_no),UNIQUE(job_id,position))`,
+  `CREATE INDEX IF NOT EXISTS ck_putaway_plan_lookup ON ck_putaway_links(plan_id,external_no,job_id)`,
+  `CREATE VIEW IF NOT EXISTS v2_inbound_references AS
+    SELECT j.id,j.related_doc_type,COALESCE(l.plan_id,j.related_doc_id) AS plan_id,COALESCE(l.external_no,j.inbound_external_no) AS inbound_external_no,j.job_type,j.status,j.created_at,j.updated_at
+    FROM v2_ops_jobs j LEFT JOIN ck_putaway_links l ON l.job_id=j.id WHERE j.related_doc_type='inbound_plan'`,
   // Staged jobs have separate uniqueness; historical combined jobs remain intact.
   `CREATE UNIQUE INDEX IF NOT EXISTS ck_inbound_stage_unique ON v2_ops_jobs(related_doc_id,inbound_external_no,job_type)
     WHERE related_doc_type='inbound_plan' AND job_type IN ('inbound_direct_tally','inbound_direct_putaway') AND status!='cancelled'`,
@@ -1384,20 +1390,23 @@ const MIGRATIONS = [
     SELECT CASE WHEN NEW.job_type='inbound_direct_putaway' AND NOT EXISTS(SELECT 1 FROM v2_ops_jobs j WHERE j.related_doc_type='inbound_plan' AND j.related_doc_id=NEW.related_doc_id AND j.inbound_external_no=NEW.inbound_external_no AND j.job_type='inbound_direct_tally' AND j.status='completed')
       THEN RAISE(ABORT,'tally must finish before putaway') END;
     END`,
+  `DROP TRIGGER IF EXISTS ck_inbound_legacy_after_stage`,
   `CREATE TRIGGER IF NOT EXISTS ck_inbound_legacy_after_stage BEFORE INSERT ON v2_ops_jobs
-    WHEN NEW.job_type='inbound_direct' AND EXISTS(SELECT 1 FROM v2_ops_jobs j WHERE j.related_doc_type='inbound_plan' AND j.related_doc_id=NEW.related_doc_id
+    WHEN NEW.job_type='inbound_direct' AND EXISTS(SELECT 1 FROM v2_inbound_references j WHERE j.related_doc_type='inbound_plan' AND j.plan_id=NEW.related_doc_id
       AND (j.inbound_external_no=NEW.inbound_external_no OR COALESCE(NEW.inbound_external_no,'')='') AND j.job_type IN ('inbound_direct_tally','inbound_direct_putaway') AND j.status!='cancelled')
     BEGIN SELECT RAISE(ABORT,'use staged inbound task'); END`,
 
+  `DROP TRIGGER IF EXISTS ck_inbound_stage_reference_locked`,
   `CREATE TRIGGER IF NOT EXISTS ck_inbound_stage_reference_locked BEFORE UPDATE OF external_inbound_no,bulk_external_inbound_no ON v2_inbound_plans
-    WHEN EXISTS(SELECT 1 FROM v2_ops_jobs j WHERE j.related_doc_type='inbound_plan' AND j.related_doc_id=OLD.id AND j.job_type IN ('inbound_direct_tally','inbound_direct_putaway') AND j.status!='cancelled'
+    WHEN EXISTS(SELECT 1 FROM v2_inbound_references j WHERE j.related_doc_type='inbound_plan' AND j.plan_id=OLD.id AND j.job_type IN ('inbound_direct_tally','inbound_direct_putaway') AND j.status!='cancelled'
       AND (instr(char(10)||COALESCE(NEW.external_inbound_no,'')||char(10),char(10)||j.inbound_external_no||char(10))=0
         OR instr(char(10)||COALESCE(NEW.bulk_external_inbound_no,'')||char(10),char(10)||j.inbound_external_no||char(10))>0))
     BEGIN SELECT RAISE(ABORT,'staged inbound reference cannot change'); END`,
 
+  `DROP TRIGGER IF EXISTS ck_inbound_stage_completion_gate`,
   `CREATE TRIGGER IF NOT EXISTS ck_inbound_stage_completion_gate BEFORE UPDATE OF status ON v2_inbound_plans
-    WHEN NEW.status='completed' AND EXISTS(SELECT 1 FROM v2_ops_jobs t WHERE t.related_doc_type='inbound_plan' AND t.related_doc_id=NEW.id AND t.job_type='inbound_direct_tally' AND t.status!='cancelled'
-      AND NOT EXISTS(SELECT 1 FROM v2_ops_jobs p WHERE p.related_doc_type='inbound_plan' AND p.related_doc_id=t.related_doc_id AND p.inbound_external_no=t.inbound_external_no AND p.job_type='inbound_direct_putaway' AND p.status='completed'))
+    WHEN NEW.status='completed' AND EXISTS(SELECT 1 FROM v2_inbound_references t WHERE t.related_doc_type='inbound_plan' AND t.plan_id=NEW.id AND t.job_type='inbound_direct_tally' AND t.status!='cancelled'
+      AND NOT EXISTS(SELECT 1 FROM v2_inbound_references p WHERE p.related_doc_type='inbound_plan' AND p.plan_id=t.plan_id AND p.inbound_external_no=t.inbound_external_no AND p.job_type='inbound_direct_putaway' AND p.status='completed'))
     BEGIN SELECT RAISE(ABORT,'putaway stage is not complete'); END`,
 
   // New independent tally sessions reuse job relationships, never a collaboration RU plan.
@@ -1411,9 +1420,10 @@ const MIGRATIONS = [
   `CREATE TRIGGER IF NOT EXISTS ck_independent_inbound_collision_insert BEFORE INSERT ON v2_inbound_plans WHEN NEW.source_type!='direct_tally_session' AND EXISTS(SELECT 1 FROM v2_inbound_plans s WHERE s.source_type='direct_tally_session' AND (s.external_inbound_no=NEW.id OR s.external_inbound_no=NEW.display_no OR instr(char(10)||COALESCE(NEW.external_inbound_no,'')||char(10),char(10)||s.external_inbound_no||char(10))>0)) BEGIN SELECT RAISE(ABORT,'inbound number belongs to an independent tally session'); END`,
   `CREATE TRIGGER IF NOT EXISTS ck_independent_inbound_collision_update BEFORE UPDATE OF external_inbound_no,display_no,id ON v2_inbound_plans WHEN OLD.source_type!='direct_tally_session' AND EXISTS(SELECT 1 FROM v2_inbound_plans s WHERE s.source_type='direct_tally_session' AND (s.external_inbound_no=NEW.id OR s.external_inbound_no=NEW.display_no OR instr(char(10)||COALESCE(NEW.external_inbound_no,'')||char(10),char(10)||s.external_inbound_no||char(10))>0)) BEGIN SELECT RAISE(ABORT,'inbound number belongs to an independent tally session'); END`,
   `CREATE TRIGGER IF NOT EXISTS ck_independent_inbound_identity BEFORE UPDATE ON v2_inbound_plans WHEN (OLD.source_type='direct_tally_session' OR NEW.source_type='direct_tally_session') AND (NEW.source_type IS NOT OLD.source_type OR NEW.id IS NOT OLD.id OR NEW.external_inbound_no IS NOT OLD.external_inbound_no OR NEW.bulk_external_inbound_no IS NOT OLD.bulk_external_inbound_no OR NEW.biz_class IS NOT OLD.biz_class OR NEW.biz_classes_json IS NOT OLD.biz_classes_json OR NEW.display_no IS NOT OLD.display_no OR NEW.customer IS NOT OLD.customer OR NEW.unload_completed_at IS NOT OLD.unload_completed_at) BEGIN SELECT RAISE(ABORT,'independent tally identity cannot change'); END`,
+  `DROP TRIGGER IF EXISTS ck_independent_inbound_terminal`,
   `CREATE TRIGGER IF NOT EXISTS ck_independent_inbound_terminal BEFORE UPDATE OF status,is_deleted ON v2_inbound_plans WHEN OLD.source_type='direct_tally_session' BEGIN
-    SELECT CASE WHEN NEW.status='completed' AND NOT EXISTS(SELECT 1 FROM v2_ops_jobs j WHERE j.related_doc_type='inbound_plan' AND j.related_doc_id=OLD.id AND j.job_type='inbound_direct_putaway' AND j.status='completed') THEN RAISE(ABORT,'putaway stage is not complete') END;
-    SELECT CASE WHEN (NEW.status='cancelled' OR NEW.is_deleted=1) AND EXISTS(SELECT 1 FROM v2_ops_jobs j WHERE j.related_doc_type='inbound_plan' AND j.related_doc_id=OLD.id AND j.status NOT IN ('completed','cancelled')) THEN RAISE(ABORT,'independent inbound has active work') END;
+    SELECT CASE WHEN NEW.status='completed' AND NOT EXISTS(SELECT 1 FROM v2_inbound_references j WHERE j.related_doc_type='inbound_plan' AND j.plan_id=OLD.id AND j.job_type='inbound_direct_putaway' AND j.status='completed') THEN RAISE(ABORT,'putaway stage is not complete') END;
+    SELECT CASE WHEN (NEW.status='cancelled' OR NEW.is_deleted=1) AND EXISTS(SELECT 1 FROM v2_inbound_references j WHERE j.related_doc_type='inbound_plan' AND j.plan_id=OLD.id AND j.status NOT IN ('completed','cancelled')) THEN RAISE(ABORT,'independent inbound has active work') END;
     SELECT CASE WHEN OLD.status IN ('completed','cancelled') AND NEW.status IS NOT OLD.status THEN RAISE(ABORT,'independent inbound is closed') END;
   END`,
   `CREATE TRIGGER IF NOT EXISTS ck_independent_inbound_job BEFORE INSERT ON v2_ops_jobs WHEN NEW.related_doc_type='inbound_plan' AND EXISTS(SELECT 1 FROM v2_inbound_plans p WHERE p.id=NEW.related_doc_id AND p.source_type='direct_tally_session') AND NEW.job_type NOT IN ('inbound_direct_tally','inbound_direct_putaway') BEGIN SELECT RAISE(ABORT,'independent inbound requires tally and putaway stages'); END`,
@@ -2099,7 +2109,8 @@ const MIGRATIONS = [
   `CREATE TABLE IF NOT EXISTS ck_unload_plan_links(job_id TEXT NOT NULL,plan_id TEXT NOT NULL,position INTEGER NOT NULL,plan_version TEXT NOT NULL,lines_snapshot TEXT NOT NULL,result_json TEXT NOT NULL DEFAULT '',PRIMARY KEY(job_id,plan_id))`,
   `CREATE INDEX IF NOT EXISTS ck_unload_plan_lookup ON ck_unload_plan_links(plan_id,job_id)`,
   // Used only by plan-scoped reads. Global labor/output queries continue to use v2_ops_jobs.
-  `CREATE VIEW IF NOT EXISTS v2_inbound_plan_jobs AS SELECT j.*,COALESCE(l.plan_id,j.related_doc_id) AS plan_id FROM v2_ops_jobs j LEFT JOIN ck_unload_plan_links l ON l.job_id=j.id WHERE j.related_doc_type='inbound_plan'`,
+  `DROP VIEW IF EXISTS v2_inbound_plan_jobs`,
+  `CREATE VIEW IF NOT EXISTS v2_inbound_plan_jobs AS SELECT j.*,COALESCE(l.plan_id,p.plan_id,j.related_doc_id) AS plan_id FROM v2_ops_jobs j LEFT JOIN ck_unload_plan_links l ON l.job_id=j.id LEFT JOIN (SELECT DISTINCT job_id,plan_id FROM ck_putaway_links) p ON p.job_id=j.id WHERE j.related_doc_type='inbound_plan'`,
   `CREATE TRIGGER IF NOT EXISTS ck_unload_link_guard BEFORE INSERT ON ck_unload_plan_links BEGIN
     SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM v2_inbound_plans p WHERE p.id=NEW.plan_id AND p.status='pending' AND COALESCE(p.is_deleted,0)=0 AND p.updated_at=NEW.plan_version) THEN RAISE(ABORT,'unload_plan_changed') END;
     SELECT CASE WHEN EXISTS(SELECT 1 FROM v2_inbound_plan_jobs j WHERE j.plan_id=NEW.plan_id AND j.id!=NEW.job_id AND j.job_type='unload' AND j.status IN ('pending','working','awaiting_close','completed')) THEN RAISE(ABORT,'unload_plan_busy') END;
@@ -2117,13 +2128,47 @@ const MIGRATIONS = [
   `CREATE TRIGGER IF NOT EXISTS ck_feedback_keep_results BEFORE DELETE ON v2_ops_job_results WHEN EXISTS(SELECT 1 FROM ck_feedback_plan_links WHERE job_id=OLD.job_id) BEGIN SELECT RAISE(ABORT,'feedback_already_linked'); END`,
   `CREATE TRIGGER IF NOT EXISTS ck_feedback_keep_source BEFORE DELETE ON v2_field_feedbacks WHEN EXISTS(SELECT 1 FROM ck_feedback_plan_links WHERE feedback_id=OLD.id) BEGIN SELECT RAISE(ABORT,'feedback_already_linked'); END`,
   `CREATE TRIGGER IF NOT EXISTS ck_unload_legacy_guard BEFORE INSERT ON v2_ops_jobs WHEN NEW.job_type='unload' AND NEW.related_doc_type='inbound_plan' AND EXISTS(SELECT 1 FROM ck_unload_plan_links l JOIN v2_ops_jobs j ON j.id=l.job_id WHERE l.plan_id=NEW.related_doc_id AND j.status IN ('pending','working','awaiting_close','completed')) BEGIN SELECT RAISE(ABORT,'unload_plan_busy'); END`,
+  // Each member is checked again in the transaction; a conflicting member aborts the entire dispatch.
+  `CREATE TRIGGER IF NOT EXISTS ck_putaway_link_guard BEFORE INSERT ON ck_putaway_links BEGIN
+    SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM v2_ops_jobs j WHERE j.id=NEW.job_id AND j.job_type='inbound_direct_putaway' AND j.status='working') THEN RAISE(ABORT,'上架任务状态已变化 / 적치 작업 상태 변경') END;
+    SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM v2_inbound_plans p JOIN v2_ops_jobs t ON t.id=NEW.tally_job_id
+      WHERE p.id=NEW.plan_id AND p.status IN ('tallied_pending_putaway','direct_putting_away','partially_completed','putting_away') AND COALESCE(p.is_deleted,0)=0
+      AND t.related_doc_id=p.id AND t.inbound_external_no=NEW.external_no AND t.job_type='inbound_direct_tally' AND t.status='completed'
+      AND instr(char(10)||p.external_inbound_no||char(10),char(10)||NEW.external_no||char(10))>0
+      AND instr(char(10)||COALESCE(p.bulk_external_inbound_no,'')||char(10),char(10)||NEW.external_no||char(10))=0
+      AND (p.biz_class='direct_ship' OR EXISTS(SELECT 1 FROM json_each(p.biz_classes_json) WHERE value='direct_ship'))
+      AND NOT EXISTS(SELECT 1 FROM v2_inbound_plan_biz_tasks b WHERE b.plan_id=p.id AND b.biz_class='direct_ship' AND b.status='completed'))
+      THEN RAISE(ABORT,'入库单或理货状态已变化，整组未开始 / 입고·검수 상태 변경') END;
+    SELECT CASE WHEN EXISTS(SELECT 1 FROM v2_inbound_references r WHERE r.plan_id=NEW.plan_id AND r.id!=NEW.job_id AND (r.inbound_external_no=NEW.external_no OR COALESCE(r.inbound_external_no,'')='') AND r.job_type IN ('inbound_direct','inbound_direct_putaway','inbound_bulk') AND r.status!='cancelled') THEN RAISE(ABORT,'入库单已占用或已上架，整组未开始 / 이미 배정·완료된 입고번호') END;
+  END`,
+  `CREATE TRIGGER IF NOT EXISTS ck_putaway_legacy_conflict BEFORE INSERT ON v2_ops_jobs WHEN NEW.job_type IN ('inbound_direct','inbound_direct_tally','inbound_direct_putaway','inbound_bulk') AND EXISTS(SELECT 1 FROM ck_putaway_links l JOIN v2_ops_jobs j ON j.id=l.job_id WHERE l.plan_id=NEW.related_doc_id AND (l.external_no=NEW.inbound_external_no OR COALESCE(NEW.inbound_external_no,'')='') AND j.status!='cancelled') BEGIN SELECT RAISE(ABORT,'入库单已占用或已上架 / 이미 배정·완료된 입고번호'); END`,
+  `CREATE TRIGGER IF NOT EXISTS ck_putaway_link_identity BEFORE UPDATE ON ck_putaway_links BEGIN SELECT RAISE(ABORT,'putaway membership is immutable'); END`,
+  `CREATE TRIGGER IF NOT EXISTS ck_putaway_plan_lock BEFORE UPDATE OF status,is_deleted,external_inbound_no,bulk_external_inbound_no,biz_class,biz_classes_json ON v2_inbound_plans
+    WHEN EXISTS(SELECT 1 FROM ck_putaway_links l JOIN v2_ops_jobs j ON j.id=l.job_id WHERE l.plan_id=OLD.id AND j.status IN ('pending','working','awaiting_close','paused'))
+    AND (NEW.status IN ('cancelled','completed') OR NEW.is_deleted=1 OR NEW.external_inbound_no IS NOT OLD.external_inbound_no OR NEW.bulk_external_inbound_no IS NOT OLD.bulk_external_inbound_no OR NEW.biz_class IS NOT OLD.biz_class OR NEW.biz_classes_json IS NOT OLD.biz_classes_json)
+    BEGIN SELECT RAISE(ABORT,'共同上架任务进行中，请先处理原任务 / 공동 적치 작업 진행 중'); END`,
+  `CREATE TRIGGER IF NOT EXISTS ck_putaway_finish_guard BEFORE INSERT ON v2_ops_job_results WHEN EXISTS(SELECT 1 FROM ck_putaway_links WHERE job_id=NEW.job_id) BEGIN
+    SELECT CASE WHEN EXISTS(SELECT 1 FROM ck_putaway_links l LEFT JOIN v2_inbound_plans p ON p.id=l.plan_id LEFT JOIN v2_ops_jobs t ON t.id=l.tally_job_id WHERE l.job_id=NEW.job_id AND
+      (p.id IS NULL OR COALESCE(p.is_deleted,0)!=0 OR p.status NOT IN ('direct_putting_away','tallied_pending_putaway','partially_completed','putting_away') OR t.status IS NOT 'completed'
+       OR instr(char(10)||p.external_inbound_no||char(10),char(10)||l.external_no||char(10))=0
+       OR EXISTS(SELECT 1 FROM v2_inbound_plan_jobs u WHERE u.plan_id=l.plan_id AND u.job_type='unload' AND u.status IN ('pending','working','awaiting_close','paused'))
+       OR EXISTS(SELECT 1 FROM ck_courier_plan_items ci WHERE ci.plan_id=l.plan_id AND NOT EXISTS(SELECT 1 FROM ck_courier_receipts cr WHERE cr.tracking_no=ci.tracking_no))))
+    THEN RAISE(ABORT,'关联入库单状态已变化，整组未完成，请刷新核对 / 연결 입고 상태 변경, 전체 미완료') END;
+  END`,
+
 ];
 
 // 每次发布迁移变化时手动 +1（patch 段），冷启动只比对一次字符串即可跳过整段 MIGRATIONS
-const CURRENT_SCHEMA_VERSION = 'v2.20261020-independent-inbound';
+const CURRENT_SCHEMA_VERSION = 'v2.20261021-multi-putaway';
 
-const migratedDatabases = new WeakSet();
-async function ensureMigrated(db) {
+const migratedDatabases = new WeakSet(), migratingDatabases = new WeakMap();
+async function ensureMigrated(db){
+ if(migratedDatabases.has(db))return;
+ if(migratingDatabases.has(db))return migratingDatabases.get(db);
+ const pending=runMigrations(db);migratingDatabases.set(db,pending);
+ try{await pending;}finally{migratingDatabases.delete(db);}
+}
+async function runMigrations(db) {
   if (migratedDatabases.has(db)) return;
   // 1. 先确保 v2_schema_meta 存在（轻量幂等 DDL）
   try {
@@ -2146,9 +2191,12 @@ async function ensureMigrated(db) {
   } catch (e) { /* 表刚建好/读失败一律走完整迁移 */ }
 
   // 3. 版本不匹配（首次部署 / 升级），跑全量迁移
-  for (const sql of MIGRATIONS) {
+  for (let i=0;i<MIGRATIONS.length;i++) {
+    const sql=MIGRATIONS[i];
     try {
-      await db.prepare(sql).run();
+      // Replacing a view/guard must not expose a missing schema between requests.
+      if(/^DROP (?:VIEW|TRIGGER)/.test(sql.trim())&&/^CREATE (?:VIEW|TRIGGER)/.test(MIGRATIONS[i+1]?.trim()||'')){await db.batch([db.prepare(sql),db.prepare(MIGRATIONS[++i])]);}
+      else await db.prepare(sql).run();
     } catch (e) {
       // ALTER TABLE may fail if column already exists — ignore
       if (!sql.trim().toUpperCase().startsWith("ALTER")) throw e;
@@ -4402,11 +4450,13 @@ route("v2_inbound_plan_detail", async (body, env) => {
       env.DB.prepare('SELECT id, display_no, status, customer, biz_class, outbound_mode, expected_ship_at, planned_box_count, planned_pallet_count, order_date, uses_stock_operation FROM v2_outbound_orders WHERE source_inbound_plan_id=? ORDER BY created_at ASC').bind(id),
       inboundFlowEnabled(env)?courierProgressRead(env,id):env.DB.prepare('SELECT 1 WHERE 0'),
       inboundFlowEnabled(env)?feedbackLinkRead(env,id):env.DB.prepare('SELECT 1 WHERE 0'),
-      env.SOP_UPGRADE_ENABLED==='true'?env.DB.prepare(jobNumberSQL(env)+' WHERE j.id IN ('+inPlan+')').bind(id):env.DB.prepare('SELECT 1 WHERE 0')
+      env.SOP_UPGRADE_ENABLED==='true'?env.DB.prepare(jobNumberSQL(env)+' WHERE j.id IN ('+inPlan+')').bind(id):env.DB.prepare('SELECT 1 WHERE 0'),
+      env.DB.prepare('SELECT l.*,p.display_no,p.customer FROM ck_putaway_links l JOIN v2_inbound_plans p ON p.id=l.plan_id WHERE l.job_id IN ('+inPlan+') ORDER BY l.position').bind(id)
     ]),
     linkedNeeds(env,id)
   ]);
-  const [taskRows, planLines, jobs, atts, workers, results, unloadLinks, linkedObRs,courierRows,feedbackRows,jobNumberRows] = reads;
+  const [taskRows, planLines, jobs, atts, workers, results, unloadLinks, linkedObRs,courierRows,feedbackRows,jobNumberRows,putawayRows] = reads;
+  const putawayLinks=putawayRows.results||[];
   const courier_progress=inboundFlowEnabled(env)?courierProgressRows(courierRows.results||[]):null,existing_feedback_link=feedbackRows.results?.[0]||null;
   let biz_tasks = taskRows.results || [];
   const biz_classes = extractPlanBizClasses(row);
@@ -4415,7 +4465,7 @@ route("v2_inbound_plan_detail", async (body, env) => {
     await ensureInboundPlanBizTasks(env,row,biz_tasks);
     biz_tasks = await listInboundPlanBizTasks(env,id);
   }
-  const inbound_progress = await inboundCodeProgress(env,row,jobs.results || []);
+  const inbound_progress = await inboundCodeProgress(env,row,(jobs.results||[]).flatMap(j=>{const refs=putawayLinks.filter(l=>l.job_id===j.id&&l.plan_id===id);return refs.length?refs.map(l=>({...j,inbound_external_no:l.external_no})):[j];}));
   const workersByJob = new Map();
   for(const worker of workers.results || []){
     if(!workersByJob.has(worker.job_id))workersByJob.set(worker.job_id,[]);
@@ -4463,6 +4513,8 @@ route("v2_inbound_plan_detail", async (body, env) => {
       result_note: resultNote,
       extra_ops: extraOps,
       putaway_workload: putawayWorkload,
+      putaway_refs: putawayLinks.filter(l=>l.job_id===job.id),
+      putaway_scope: putawayLinks.filter(l=>l.job_id===job.id).length>1?'shared_task':'single',
       is_return: isReturnFlag || (job.job_type === 'inbound_return')
     });
   }
@@ -6720,8 +6772,8 @@ route("v2_inbound_plan_export", async (body, env) => {
   }
 
   // Aggregate task results before any worker join: one shared workload per job.
-  const putawayRows=await batchSelectInGlobal(env,`SELECT j.related_doc_id AS plan_id,j.inbound_external_no,r.result_json FROM v2_ops_jobs j JOIN v2_ops_job_results r ON r.id='RES-FINAL-'||j.id WHERE j.related_doc_id IN (PLACEHOLDER) AND j.job_type='inbound_direct_putaway' AND j.status='completed'`,planIds);
-  const putawayByPlan=new Map();for(const r of putawayRows){const data=JSON.parse(r.result_json);if(!putawayByPlan.has(r.plan_id))putawayByPlan.set(r.plan_id,[]);putawayByPlan.get(r.plan_id).push({...data,external_no:r.inbound_external_no});}
+  const putawayRows=await batchSelectInGlobal(env,`SELECT j.plan_id,j.inbound_external_no,j.id AS job_id,COALESCE((SELECT display_no FROM sop_document_numbers WHERE record_id=j.id),j.id) AS task_no,(SELECT COUNT(*) FROM ck_putaway_links l WHERE l.job_id=j.id) AS member_count,(SELECT group_concat(external_no,'、') FROM ck_putaway_links l WHERE l.job_id=j.id) AS all_numbers,r.result_json FROM v2_inbound_references j JOIN v2_ops_job_results r ON r.id='RES-FINAL-'||j.id WHERE j.plan_id IN (PLACEHOLDER) AND j.job_type='inbound_direct_putaway' AND j.status='completed'`,planIds);
+  const putawayByPlan=new Map();for(const r of putawayRows){const data=JSON.parse(r.result_json);if(!putawayByPlan.has(r.plan_id))putawayByPlan.set(r.plan_id,[]);putawayByPlan.get(r.plan_id).push({...data,external_no:r.inbound_external_no,job_id:r.job_id,task_no:r.task_no,member_count:r.member_count,all_numbers:r.all_numbers});}
   const out = rows.map(p => {
     const bizArr = extractPlanBizClasses(p);
     const tasks = tasksByPlan[p.id] || [];
@@ -6751,7 +6803,8 @@ route("v2_inbound_plan_export", async (body, env) => {
     return {
       入库单号: p.display_no || p.id,
       外部WMS单号: p.external_inbound_no || '',
-      上架货位数: putawayByPlan.has(p.id)?putawayByPlan.get(p.id).reduce((n,r)=>n+Number(r.location_count||0),0):'',
+      上架货位数: putawayByPlan.has(p.id)?(putawayByPlan.get(p.id).some(r=>r.member_count<=1)?putawayByPlan.get(p.id).filter(r=>r.member_count<=1).reduce((n,r)=>n+Number(r.location_count||0),0):''):'',
+      '共同上架任务（整任务数量，未分摊）': [...new Map((putawayByPlan.get(p.id)||[]).filter(r=>r.member_count>1).map(r=>[r.job_id,r])).values()].map(r=>r.task_no+' · '+r.all_numbers+' · 货位数 '+r.location_count+' · 叉车 '+(r.used_forklift?'是':'否')).join('；'),
       上架叉车使用明细: (putawayByPlan.get(p.id)||[]).map(r=>r.external_no+'：'+(r.used_forklift?'是':'否')).join('；'),
       计划日期: p.plan_date || '',
       客户: p.customer || '',
@@ -7079,6 +7132,7 @@ route("v2_ops_job_detail", async (body, env) => {
   if(job.job_type==='pick_direct')job.planned_pick_workload=readPickWorkload(JSON.parse(dispatchRows?.results[0]?.state||'{}').planned_pick_workload);
   return json({
     ok: true, dispatch: inboundFlowEnabled(env)?dispatchRows?.results[0]||null:null, job, can_manage_dispatch: canManage, can_view_resting: await restingDispatch(env,job_id), unload_plans: job.job_type==='unload'?await tripPlans(env,job_id):[],
+    putaway_refs: job.job_type===putawayType?await putawayReferences(env,job.id):[],
     load_orders: await loadOrdersForJob(env,job),
     load_trip: loadTripEnabled(env)&&job.job_type==='load_outbound'?await env.DB.prepare('SELECT vehicle_no,driver_name,finished_at FROM ck_load_trips WHERE job_id=?').bind(job.id).first():null,
     workers: workers.results || [],
@@ -10778,6 +10832,10 @@ route("v2_dashboard_order_list", async (body, env) => {
       label_count_sum: parsed.label_count_sum,
       ...operationExport(j),
       result_summary: parsed.result_summary,
+      putaway_task_no: j.job_type===putawayType?(j.task_no||j.id):'',
+      putaway_location_count: j.job_type===putawayType&&parsed.putaway_forklift!==null?parsed.location_count_sum:null,
+      putaway_used_forklift: j.job_type===putawayType?parsed.putaway_forklift:null,
+      putaway_quantity_scope: j.job_type===putawayType?'task':'',
       result_remarks_short: (parsed.result_notes || '').slice(0, 100)
     });
   });
@@ -11097,6 +11155,10 @@ route("v2_dashboard_order_export", async (body, env) => {
       result_count: rs.length,
       ...operationExport(j),
       result_summary: parsed.result_summary,
+      putaway_task_no: j.job_type===putawayType?(j.task_no||j.id):'',
+      putaway_location_count: j.job_type===putawayType&&parsed.putaway_forklift!==null?parsed.location_count_sum:null,
+      putaway_used_forklift: j.job_type===putawayType?parsed.putaway_forklift:null,
+      putaway_quantity_scope: j.job_type===putawayType?'task':'',
       result_notes: parsed.result_notes,
       diff_notes: parsed.diff_notes,
       box_count_sum: parsed.box_count_sum,
@@ -13095,6 +13157,7 @@ export default {
     if(action.startsWith('sop_bulk_batch_')){try{return json(await handleBulkBatch(body,env,{findOutbound:no=>findOutboundByWorkOrder(env,no),linkedNeeds:id=>linkedNeeds(env,id)}));}catch(e){return json({ok:false,error:e.message},409);}}
     try{await guardBulkBatchMutation(body,env);}catch(e){return json({ok:false,error:e.message},409);}
     if(action==='sop_native_adopt'){try{return json(await adoptLegacyLoad(body,env));}catch(e){return json({ok:false,error:e.message},409);}}
+    if(action==='sop_putaway_cancel'){try{return json(await cancelPutaway(env,body));}catch(e){return json({ok:false,error:e.message},409);}}
     if(action==='sop_native_pause'){try{return json(await pauseNative(body,env));}catch(e){return json({ok:false,error:e.message},409);}}
     if(action==='sop_native_resume'){try{return json(await nativePeople(body,env,{resume:true}));}catch(e){return json({ok:false,error:e.message},409);}}
     if(action==='sop_native_people'){try{const allowed=await canCrewDestination(env,body),result=await nativePeople(body,env);if(allowed){try{result.crew_returns=await reconcileCrewReturns(env,body.job_id);}catch{result.crew_return_error='人员已调整，归还暂未完成，请重试归还';}}return json(result);}catch(e){return json({ok:false,error:e.message},409);}}

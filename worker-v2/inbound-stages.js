@@ -13,14 +13,14 @@ export function stagedPlanStatement(env,id,t,gate='1',args=[]){
  // Evaluate committed jobs inside the same transaction. Arrival/unload states
  // and terminal plans retain their established gates and historical meaning.
  return env.DB.prepare(`UPDATE v2_inbound_plans SET status=CASE
-  WHEN EXISTS(SELECT 1 FROM v2_inbound_plan_jobs j WHERE j.plan_id=v2_inbound_plans.id AND j.job_type='inbound_direct_putaway' AND j.status IN ('pending','working','awaiting_close','paused')) THEN 'direct_putting_away'
-  WHEN EXISTS(SELECT 1 FROM v2_inbound_plan_jobs j WHERE j.plan_id=v2_inbound_plans.id AND j.job_type='inbound_direct_tally' AND j.status IN ('pending','working','awaiting_close','paused')) THEN 'putting_away'
-  WHEN EXISTS(SELECT 1 FROM v2_inbound_plan_jobs j WHERE j.plan_id=v2_inbound_plans.id AND j.job_type='inbound_direct_tally' AND j.status='completed' AND NOT EXISTS(SELECT 1 FROM v2_inbound_plan_jobs p WHERE p.plan_id=j.plan_id AND p.inbound_external_no=j.inbound_external_no AND p.job_type='inbound_direct_putaway' AND p.status='completed')) THEN 'tallied_pending_putaway'
+  WHEN EXISTS(SELECT 1 FROM v2_inbound_references j WHERE j.plan_id=v2_inbound_plans.id AND j.job_type='inbound_direct_putaway' AND j.status IN ('pending','working','awaiting_close','paused')) THEN 'direct_putting_away'
+  WHEN EXISTS(SELECT 1 FROM v2_inbound_references j WHERE j.plan_id=v2_inbound_plans.id AND j.job_type='inbound_direct_tally' AND j.status IN ('pending','working','awaiting_close','paused')) THEN 'putting_away'
+  WHEN EXISTS(SELECT 1 FROM v2_inbound_references j WHERE j.plan_id=v2_inbound_plans.id AND j.job_type='inbound_direct_tally' AND j.status='completed' AND NOT EXISTS(SELECT 1 FROM v2_inbound_references p WHERE p.plan_id=j.plan_id AND p.inbound_external_no=j.inbound_external_no AND p.job_type='inbound_direct_putaway' AND p.status='completed')) THEN 'tallied_pending_putaway'
   ELSE status END,updated_at=? WHERE id=? AND status IN ('arrived_pending_putaway','putting_away','tallied_pending_putaway','direct_putting_away','partially_completed') AND ${gate}`).bind(t,id,...args);
 }
 export async function validateInboundStage(env,plan,code,type){
  if(!stagedInbound(type))return;
- const jobs=(await env.DB.prepare("SELECT id,job_type,status FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND (inbound_external_no=? OR COALESCE(inbound_external_no,'')='') AND status!='cancelled'").bind(plan.id,code).all()).results||[];
+ const jobs=(await env.DB.prepare("SELECT id,job_type,status FROM v2_inbound_references WHERE related_doc_type='inbound_plan' AND plan_id=? AND (inbound_external_no=? OR COALESCE(inbound_external_no,'')='') AND status!='cancelled'").bind(plan.id,code).all()).results||[];
  if(jobs.some(j=>j.job_type==='inbound_direct'))throw Error('此单已有旧版理货上架任务，请继续原任务 / 기존 검수·적치 작업을 계속하세요');
  const tally=jobs.find(j=>j.job_type===tallyType&&j.status==='completed');
  if(type===tallyType&&tally)throw Error('本单理货已完成，请从上架入口派工 / 검수 완료, 적치를 시작하세요');

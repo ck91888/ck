@@ -1,3 +1,4 @@
+import {preparePutaway} from './multi-putaway.js';
 import {validateOperationStart} from '../shared/internal-operations.js';
 import {validateInboundStage,stagedPlanStatement} from './inbound-stages.js';
 import {resolveInboundEntry,independentInbound} from './independent-inbound.js';
@@ -58,6 +59,7 @@ export async function startAtomicDocument(e,p,staff,pickNumber){
  return commitPrepared(e,p,staff,{id,t,sql,after,jobType:type,sourceType:doc,sourceId:source,extra});
 }
 export async function startAtomicInbound(e,p,staff,number){
+ if(p.job_type==='inbound_direct_putaway')return commitPrepared(e,p,staff,await preparePutaway(e,p,staff));
  const id='JOB-'+crypto.randomUUID(),t=new Date().toISOString(),lead=staff.workers.find(w=>w.id===staff.lead_id),type=p.job_type||'inbound_direct',returned=type==='inbound_return',biz=String(p.biz_class||''),sql=[];let planId=String(p.plan_id||''),code='';
  if(type==='inbound_change_order')return {ok:false,error:'换单计划卸货后自动入库，无需再次理货'};
  if(!['inbound_direct_tally','inbound_direct_putaway','inbound_direct','inbound_bulk','inbound_return'].includes(type)||(!returned&&biz!==(type==='inbound_bulk'?'bulk':'direct_ship'))||(returned&&biz&&biz!=='return'))return {ok:false,error:'入库业务类型不匹配'};

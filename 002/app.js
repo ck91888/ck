@@ -3183,6 +3183,8 @@ async function loadInboundDetail() {
     html += '</div>';
   }
 
+  if(jobs.some(function(j){return j.putaway_scope==='shared_task';}))html+='<p class="muted">本单工时小计不含未分摊的共同上架工时；完整人员与工时见下方共同任务。 / 입고번호별 소계에는 미배분 공동 적치 시간이 포함되지 않습니다. 전체 인원·시간은 공동 작업에서 확인하세요.</p>';
+
   // --- 状态异常自检：unloading*/putting_away 但无 active 对应 job ---
   (function() {
     var needCheck = ['unloading','unloading_putting_away','putting_away'].indexOf(p.status) !== -1;
@@ -3263,6 +3265,7 @@ async function loadInboundDetail() {
           html += '<div>' + (isInboundJob ? '实际入库：' : '实际结果：') + '--</div>';
         }
       }
+      if(j.putaway_refs?.length>1){html+='<div>共同上架 / 공동 적치：'+j.putaway_refs.map(x=>esc(x.external_no)).join('、')+'<br>货位数及工时为整任务，未按单分摊 / 수량·시간은 작업 전체, 배분 안 함</div>';}
       if(j.putaway_workload){html+='<div>货位数：'+esc(j.putaway_workload.location_count)+' · 是否使用叉车：'+(j.putaway_workload.used_forklift?'是':'否')+'</div>';}
       // Extra ops — standard inbound only
       if (!isReturnJob && isInboundJob && j.extra_ops) {

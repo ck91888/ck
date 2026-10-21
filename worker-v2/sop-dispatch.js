@@ -63,7 +63,7 @@ export async function startNative(body,env,invoke,guard,helpers={}){
   if(p.action==='v2_unplanned_unload_start'||p.action==='v2_outbound_load_start')return startBorrowableSimple(env,p,{workers,lead_id:lead.id,estimated_minutes:minutes,department,signature:dispatchSignature(env,p,{workers,lead_id:lead.id,estimated_minutes:minutes,department})},p.action==='v2_unplanned_unload_start'?await helpers.feedbackNumber():undefined);
    if(p.action==='v2_import_delivery_job_start')return startAtomicImportDelivery(env,p,{workers,lead_id:lead.id,estimated_minutes:minutes,department});
    if(p.action==='v2_ops_job_start'&&!env.SOP_CREW_BORROW?.plans.length)return startAtomicGeneric(env,p,{workers,lead_id:lead.id,estimated_minutes:minutes,department});
-  if(p.action==='v2_inbound_job_start'&&!env.SOP_CREW_BORROW?.plans.length)return startAtomicInbound(env,p,{workers,lead_id:lead.id,estimated_minutes:minutes,department},helpers.inboundNumber);
+  if(p.action==='v2_inbound_job_start'&&(!env.SOP_CREW_BORROW?.plans.length||p.job_type==='inbound_direct_putaway'))return startAtomicInbound(env,p,{workers,lead_id:lead.id,estimated_minutes:minutes,department},helpers.inboundNumber);
   if(p.action==='v2_bulk_op_job_start'&&!env.SOP_CREW_BORROW?.plans.length)return startAtomicBulk(env,p,{workers,lead_id:lead.id,estimated_minutes:minutes,department},helpers.findOutbound,helpers.linkedNeeds);
   if(['v2_pick_job_start','v2_pick_job_start_by_docs','v2_outbound_stock_op_start','v2_issue_handle_start','v2_verify_job_start'].includes(p.action)&&!env.SOP_CREW_BORROW?.plans.length)return startAtomicDocument(env,p,{workers,lead_id:lead.id,estimated_minutes:minutes,department},helpers.pickNumber);
  if(env.SOP_CREW_BORROW?.plans.length){
