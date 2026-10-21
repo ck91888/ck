@@ -4,6 +4,8 @@ const q=(e,s,...a)=>e.DB.prepare(s).bind(...a);
 const parse=s=>{try{return JSON.parse(s||'{}');}catch{return{};}};
 export async function workNeedDocumentKey(x){
  const document={id:x.id,display_no:x.display_no||'',source_type:x.source_type||'',source_display_no:x.source_display_no||'',customer:x.customer||'',supply_chain_no:x.supply_chain_no||'',requirement_version:x.requirement_version||1,title:x.title||'',deadline:x.deadline||'',scope_text:x.scope_text||'',instructions:x.instructions||''};
+ // Only printed mapping content affects the key; execution/review progress does not.
+ if(x.cargo_groups?.groups?.length){const c=x.cargo_groups,files=xs=>(xs||[]).map(f=>f.file_name||'');document.cargo_groups={total_range:c.total_range||'',box_count:c.box_count,groups:c.groups.map(g=>({name:g.name||'',range:g.range||'',box_count:g.box_count,identifier:g.identifier||'',instructions:g.instructions||'',documents:files([...(g.public_documents||c.public_documents||[]),...(g.documents||[])])}))};}
  return [...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(document))))].map(v=>v.toString(16).padStart(2,'0')).join('');
 }
 export async function workNeedPrintFacts(env,items){
