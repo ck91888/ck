@@ -60,6 +60,6 @@ export function resultShippingComponents(result){
  return shippingComponents(components);
 }
 export function shippingReady(data,links){
- if(!data.result||['cancelled','closed','assigned','pending'].includes(data.status))return false;
+ if(!data.result||data.status==='cancelled')return false;
  return shippingCapacity(data,links).by_unit.every(c=>Number.isSafeInteger(c.used)&&c.used>=0&&c.used<=c.quantity);
 }

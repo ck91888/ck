@@ -1,4 +1,4 @@
-import {expectedShippingSources,shippingCapacity,reserveShipping} from './shipping-quantities.js';
+import {expectedShippingSources,shippingCapacity,reserveShipping,shippingUnit} from './shipping-quantities.js';
 import {cargoCreateStatements} from './cargo-create.js';
 import { workChainEnabled, chainDate } from './work-chain.js';
 import { nextOutboundDisplayNo } from './outbound-number.js';
@@ -23,7 +23,7 @@ export async function workPlanStatements(env,rows,source,actor,t){
   const obs=item.outbounds||[];if(!Array.isArray(obs)||obs.length>20)throw Error('每条作业最多关联20个出库计划');
   for(const ob of obs){
    if(!data.planned_quantity)throw Error('同步出库时请填写本作业的计划数量和单位');
-   const quantity=qty(ob.quantity),unit=required(ob.unit||data.planned_unit,'出库数量单位');
+   const quantity=qty(ob.quantity),unit=shippingUnit(required(ob.unit||data.planned_unit,'出库数量单位'));
    reserveShipping(shippingCapacity(data,data.links),[{quantity,unit}]);
    if(!['warehouse_dispatch','customer_pickup','milk_express','milk_pallet','container_pickup'].includes(ob.outbound_mode))throw Error('请选择出库方式');
    const ship=required(ob.expected_ship_at,'预计出库日期');if(workChainEnabled(env))chainDate(ship);if(!/^\d{4}-\d{2}-\d{2}$/.test(ship)||Number.isNaN(Date.parse(ship)))throw Error('出库日期无效');
