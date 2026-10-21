@@ -2137,8 +2137,7 @@ async function loadOutboundDetail() {
       html += '<td>' + esc(att.uploaded_by || '--') + '</td>';
       html += '<td>' + esc(fmtTime(att.created_at)) + '</td>';
       html += '<td>';
-      html += '<a class="btn btn-outline btn-sm" href="' + esc(url) + '" download="' + esc(att.file_name) + '">' + esc(L("download")) + '</a> ';
-      html += '<a class="btn btn-outline btn-sm" href="' + esc(url) + '" target="_blank" rel="noopener">' + esc(openLabel) + '</a>';
+      html += window.CKMaterialFiles ? CKMaterialFiles.actions(att) : '<a class="btn btn-outline btn-sm" href="' + esc(url) + '" download="' + esc(att.file_name) + '">' + esc(L("download")) + '</a> <a class="btn btn-outline btn-sm" href="' + esc(url) + '" target="_blank" rel="noopener">' + esc(openLabel) + '</a>';
       html += '</td>';
       html += '</tr>';
     });
@@ -3516,7 +3515,7 @@ function renderInboundEditMaterials() {
     if (att.created_at) html += ' <span class="muted">' + esc(fmtTime(att.created_at)) + '</span>';
     if (pending) html += ' <span class="st" style="background:#ffebee;color:#c62828;margin-left:4px;">待删除</span>';
     html += '</div>';
-    html += '<a class="btn btn-outline btn-sm" href="' + esc(url) + '" target="_blank" rel="noopener">打开</a>';
+    html += window.CKMaterialFiles ? CKMaterialFiles.actions(att) : '<a class="btn btn-outline btn-sm" href="' + esc(url) + '" target="_blank" rel="noopener">打开</a>';
     if (pending) {
       html += '<button type="button" class="btn btn-outline btn-sm" onclick="cancelInboundEditMaterialDelete(\'' + esc(att.id) + '\')">撤销</button>';
     } else {
@@ -3753,7 +3752,7 @@ function renderOutboundEditMaterials() {
     if (att.created_at) html += ' <span class="muted">' + esc(fmtTime(att.created_at)) + '</span>';
     if (pending) html += ' <span class="st" style="background:#ffebee;color:#c62828;margin-left:4px;">待删除</span>';
     html += '</div>';
-    html += '<a class="btn btn-outline btn-sm" href="' + esc(url) + '" target="_blank" rel="noopener">打开</a>';
+    html += window.CKMaterialFiles ? CKMaterialFiles.actions(att) : '<a class="btn btn-outline btn-sm" href="' + esc(url) + '" target="_blank" rel="noopener">打开</a>';
     if (pending) {
       html += '<button type="button" class="btn btn-outline btn-sm" onclick="cancelOutboundEditMaterialDelete(\'' + esc(att.id) + '\')">撤销</button>';
     } else {

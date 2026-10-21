@@ -1,3 +1,4 @@
+import {materialFileResponse} from './material-file-response.js';
 import {actualWorkReport,measureSegments} from './actual-work-report.js';
 import {parseOpsResultForExport} from './report-results.js';
 import {cancelPutaway,putawayReferences} from './multi-putaway.js';
@@ -12772,7 +12773,7 @@ export default {
       const key=url.searchParams.get('key')||url.searchParams.get('file_key')||'';
       if(!key||!await accessFileAllowed(request,env,key))return err('请登录有权限的系统 / 로그인 권한을 확인하세요',401);
       const obj=await env.R2_BUCKET.get(key);if(!obj)return err('not found',404);
-      return new Response(obj.body,{headers:{'Content-Type':obj.httpMetadata?.contentType||'application/octet-stream','Content-Disposition':/^image\/(png|jpeg|webp)$/.test(obj.httpMetadata?.contentType||'')?'inline':'attachment','Cache-Control':'private, no-store','X-Content-Type-Options':'nosniff'}});
+      return materialFileResponse(request,env,key,obj);
     }
 
     // Handle attachment file GET
