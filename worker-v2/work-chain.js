@@ -30,15 +30,13 @@ export async function chainAllocation(env, data, knownOrders) {
 export function assertShippingResult(result, links) {
  const planned = links.filter(l => l.phase === 'planned');
  if (!planned.length) return;
- const quantities = new Map();
- for (const l of planned) quantities.set(l.unit, (quantities.get(l.unit) || 0) + Number(l.quantity));
- const booked = [...quantities].map(([u,n]) => n + ' ' + u).join('、');
- if (planned.some(l => l.unit !== result.unit)) throw Error(`成果单位不一致：本次填写 ${result.quantity} ${result.unit}，已预约出库 ${booked}。箱数与托数不能直接比较，请联系办公室在作业计划中调整出库数量与单位。 / 출고 예약과 완료 단위가 다릅니다.`);
- const total = quantities.get(result.unit);
- if (total > Number(result.quantity)) throw Error(`实际成果不足：本次填写 ${result.quantity} ${result.unit}，已预约出库 ${total} ${result.unit}，相差 ${total-Number(result.quantity)} ${result.unit}。请核实实际成果或调整出库预约。 / 완료 수량이 출고 예약보다 적습니다.`);
+ const capacity=shippingCapacity({result},planned);
+ if(capacity.by_unit.some(c=>c.quantity===0&&c.used>0))throw Error('成果单位不一致：本次 '+result.quantity+' '+result.unit+'，已预约 '+planned.map(l=>l.quantity+' '+l.unit).join('、')+'。请填写实际独立出货箱托构成，或由办公室核对预约；箱托不能直接比较');
+ if(capacity.by_unit.some(c=>c.used>c.quantity))throw Error('实际成果不足：本次 '+result.quantity+' '+result.unit+'，已预约 '+planned.map(l=>l.quantity+' '+l.unit).join('、')+'，相差 '+capacity.by_unit.filter(c=>c.used>c.quantity).map(c=>(c.used-c.quantity)+' '+c.unit).join('、')+'。请核实或调整预约，不能按预计数量放行');
 }
 export async function shippingBasisStatements(env, row, data, body, user, t) {
  if(data.cargo_groups)throw Error('分组计划请按已审核组的成果单位安排出库');
+ if(data.shipping_basis?.sources)throw Error('此单已按来源箱范围登记预计包装，请从预计包装修改，或取消原预约后重新安排');
  if (!workChainEnabled(env) || data.result || ['closed','cancelled'].includes(data.status)) throw Error('只能调整尚未完成的出库预约');
  if (!['manager','service'].includes(user.role)) throw Error('请由办公室调整出库数量与单位');
  if (data.operation_kind === 'direct_forward') throw Error('直接转发未加工，请按原货物单位安排出库');
@@ -77,7 +75,7 @@ export async function chainOutboundStatements(env, body, id, t) {
  if (Number(body.uses_stock_operation) === 1 || (str(body.instruction) && str(body.instruction) !== d.instructions) || body.lines?.length) throw Error('操作要求、货物明细请在作业需求中维护');
  const a = await chainAllocation(env,d), [allocation] = reserveShipping(a,[{quantity:body.sop_link_quantity,unit:body.sop_link_unit}]);
  const {quantity,unit}=allocation;
- d.links = [...(d.links || []), {outbound_id:id,quantity,unit,phase:d.result?'confirmed':'planned',shipping_output_version:d.shipping_output?.version||0,by:user.name,at:t}];
+ d.links = [...(d.links || []), {outbound_id:id,quantity,unit,phase:d.result?'confirmed':'planned',shipping_basis_version:d.shipping_basis?.version||0,shipping_output_version:d.shipping_output?.version||0,by:user.name,at:t}];
  if (d.result) d.status = shippingFullyAllocated(a,[allocation]) ? 'linked' : 'waiting_customer';
  return [...chainEvent(env,row,d,user,'LINK-'+id,'sop_need_schedule',t), q(env, `UPDATE v2_outbound_orders SET instruction=?,source_inbound_plan_id=?,wms_work_order_no=?,planned_box_count=?,planned_pallet_count=?,uses_stock_operation=0,stock_operation_status=?,stock_operation_result_json=?,updated_at=? WHERE id=?`, d.instructions,d.source_type==='inbound'?d.source_id:'',d.supply_chain_no||'',unit==='箱'?quantity:0,unit==='托'?quantity:0,d.result?'completed':'pending',d.result?JSON.stringify({...d.result,...(d.shipping_output?{shipping_output:d.shipping_output}:{})}):'',t,id)];
 }
@@ -95,7 +93,7 @@ export async function guardWorkChain(body, env) {
  if (!id) return null;
  const needs = await chainLinked(env,id);
  if (!needs.length && (load || body.status === 'issued') && !(body.action==='v2_outbound_load_finish'&&await legacyLoadClaim(env,body.job_id))) return '此出库计划缺少作业需求，请先关联作业需求';
- if (load && needs.some(n => !cargoReady(n.data,id))) return '关联作业尚未完成审核；直接转发须先确认收货和可发货数量';
+ if (load && (await Promise.all(needs.map(async n=>cargoReady(n.data,id,(await chainAllocation(env,n.data)).links)))).some(ready=>!ready)) return '关联作业尚未完成审核；直接转发须先确认收货和可发货数量';
  if (load) {const order=await q(env,'SELECT status,warehouse_ack_required FROM v2_outbound_orders WHERE id=?',id).first();if(!order||frozen.includes(order.status))return '出库计划已取消或已完成';if(Number(order.warehouse_ack_required))return '作业要求或资料已更新，请先确认最新变更再装货';}
  if (body.action === 'v2_outbound_order_update' && needs.length) {
   const old = await q(env,'SELECT * FROM v2_outbound_orders WHERE id=?',id).first();

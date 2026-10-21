@@ -1,8 +1,9 @@
+import {shippingReady} from './shipping-quantities.js';
 import {cargoLedger} from './cargo-capacity.js';
 import {allProcessesApproved} from './cargo-processes.js';
 // Read immutable allocation snapshots. Capacity is keyed by cargo group, never reset by a new output version.
-export function cargoReady(data,orderId){
- if(!data.cargo_groups)return !!data.result&&data.status!=='cancelled';
+export function cargoReady(data,orderId,activeLinks=data.links||[]){
+ if(!data.cargo_groups)return shippingReady(data,activeLinks);
  const link=(data.links||[]).find(l=>l.outbound_id===orderId),allocations=link?.cargo_allocations;
  return data.status!=='cancelled'&&Array.isArray(allocations)&&allocations.length>0&&allocations.every(a=>{
   const group=data.cargo_groups.groups.find(g=>g.id===a.group_id),output=group?.outputs?.find(o=>o.id===a.output_id&&o.version===a.output_version);

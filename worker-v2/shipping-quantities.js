@@ -18,7 +18,7 @@ export function shippingComponents(values) {
 }
 export function shippingCapacity(data,links) {
  const basis=data.result||data.shipping_basis;
- const components=data.shipping_output?.components||[{quantity:Number(basis?.quantity??data.planned_quantity)||0,unit:shippingUnit(basis?.unit||data.planned_unit)}];
+ const components=data.shipping_output?.components||data.result?.shipping_components||(!data.result&&data.shipping_basis?.components)||[{quantity:Number(basis?.quantity??data.planned_quantity)||0,unit:shippingUnit(basis?.unit||data.planned_unit)}];
  const units=new Map(components.map(c=>[shippingUnit(c.unit),{unit:shippingUnit(c.unit),quantity:Number(c.quantity),used:0}]));
  for(const link of links){const unit=shippingUnit(link.unit);if(!units.has(unit))units.set(unit,{unit,quantity:0,used:0});units.get(unit).used+=Number(link.quantity);}
  const by_unit=[...units.values()].map(c=>({...c,remaining:Math.max(0,c.quantity-c.used)}));
@@ -40,4 +40,26 @@ export const shippingFullyAllocated=(capacity,rows=[])=>capacity.by_unit.every(c
 export function assertShippingCapacity(components,links) {
  const a=shippingCapacity({shipping_output:{components}},links);
  if(a.by_unit.some(c=>c.used>c.quantity))throw Error('实际出货构成不能少于各单位已占用数量（含已发货）；请核对已有出库');
+}
+
+// Source ordinals identify cartons within this work requirement, never a conversion ratio.
+export function expectedShippingSources(data, values){
+ if(shippingUnit(data.planned_unit)!=='箱'||!Number.isSafeInteger(data.planned_quantity)||data.planned_quantity<1)throw Error('请先明确本作业来源箱数；其他来源单位沿用原流程');
+ if(!Array.isArray(values)||!values.length||values.length>20)throw Error('请填写1至20段来源箱范围及预计包装');
+ const sources=values.map(v=>{const start=Number(v.start),end=Number(v.end);if(!Number.isSafeInteger(start)||!Number.isSafeInteger(end)||start<1||end<start||end>data.planned_quantity)throw Error('来源箱序范围无效或超出本作业');const components=shippingComponents(v.components);if(components.some(c=>!['箱','托'].includes(c.unit)))throw Error('预计包装请填写箱或托');return {start,end,quantity:end-start+1,components};}).sort((a,b)=>a.start-b.start);
+ let next=1;for(const source of sources){if(source.start!==next)throw Error('来源箱范围必须完整覆盖本作业，不能重复占用或遗漏；余散箱请单列');next=source.end+1;}
+ if(next!==data.planned_quantity+1)throw Error('来源箱范围必须完整覆盖本作业；余散箱请单列');
+ const totals=new Map();for(const c of sources.flatMap(s=>s.components))totals.set(c.unit,(totals.get(c.unit)||0)+c.quantity);
+ return {sources,components:shippingComponents([...totals].map(([unit,quantity])=>({unit,quantity})))};
+}
+export function resultShippingComponents(result){
+ if(result.shipping_components)return shippingComponents(result.shipping_components);
+ const keys=[['shipping_box_count','箱'],['shipping_pallet_count','托']];
+ if(!keys.some(([key])=>result[key]!==undefined&&result[key]!==''))return null;
+ const components=[];for(const [key,unit] of keys){const quantity=Number(result[key]||0);if(!Number.isSafeInteger(quantity)||quantity<0)throw Error('实际独立出货包装须为非负整数');if(quantity)components.push({quantity,unit});}
+ return shippingComponents(components);
+}
+export function shippingReady(data,links){
+ if(!data.result||['cancelled','closed','assigned','pending'].includes(data.status))return false;
+ return shippingCapacity(data,links).by_unit.every(c=>Number.isSafeInteger(c.used)&&c.used>=0&&c.used<=c.quantity);
 }

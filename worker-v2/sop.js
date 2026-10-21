@@ -1,5 +1,6 @@
+import {shippingExpectation} from './shipping-expectation.js';
 import {shippingOutput} from './shipping-output.js';
-import {reserveShipping,shippingFullyAllocated} from './shipping-quantities.js';
+import {reserveShipping,shippingFullyAllocated,shippingCapacity,resultShippingComponents,expectedShippingSources} from './shipping-quantities.js';
 import {executionDepartment,executionDepartmentSQL} from './work-execution.js';
 import {dashboardBatches,simultaneous} from './bulk-batch-labor.js';
 import {bulkOwnerTransferStatements} from './bulk-work-batch.js';
@@ -202,6 +203,7 @@ export async function handleSop(b,env) {
   const cancelledDraft=await cancelCargoDraft(b,env,u);if(cancelledDraft)return cancelledDraft;
   const split=await cargoSplit(b,env,u);if(split)return split;
   const reservation=await cargoReservations(b,env,u);if(reservation)return reservation;
+  const expectedShipping=await shippingExpectation(b,env,u);if(expectedShipping)return expectedShipping;
   const correctedShipping=await shippingOutput(b,env,u);if(correctedShipping)return correctedShipping;
   const shipping=await cargoShipping(b,env,u);if(shipping)return shipping;
   const execution=await cargoExecution(b,env,u);if(execution)return execution;
@@ -472,10 +474,11 @@ export async function handleSop(b,env) {
     if(d.status!=='working')fail('只有作业中可以完成');
     const result=b.result||{}; const quantity=positive(result.quantity);const unit=required(result.unit,'成果单位');
     const counts={};for(const field of ['label_count','packed_count','operated_box_count','pallet_count','used_carton_large_count','used_carton_small_count','packed_sku_count','repaired_box_count','reboxed_count','forklift_location_count']){const v=Number(result[field]||0);if(!Number.isSafeInteger(v)||v<0)fail('工耗数量必须为非负整数');counts[field]=v;}
-    if(d.need_id){const need=await read(env,d.need_id);assertShippingResult({quantity,unit},workChainEnabled(env)?(await chainAllocation(env,need.data)).links:(need?.data.links||[]));}
+    if(d.need_id){const need=await read(env,d.need_id);assertShippingResult({quantity,unit,shipping_components:resultShippingComponents(result)},workChainEnabled(env)?(await chainAllocation(env,need.data)).links:(need?.data.links||[]));}
+    const shipping_components=resultShippingComponents(result);
     const photoIds=result.location_photos||[];if(!Array.isArray(photoIds)||photoIds.length>8||new Set(photoIds).size!==photoIds.length)fail('货位照片无效');
     const photos=[];for(const id of photoIds){const photo=await stmt(env,"SELECT id,file_key,file_name,content_type FROM v2_attachments WHERE id=? AND related_doc_id=? AND related_doc_type='sop_task' AND attachment_category='location_photo'",text(id),row.id).first();if(!photo||!['image/jpeg','image/png','image/webp'].includes(photo.content_type))fail('货位照片不存在或不属于本任务');photos.push(photo);}
-    d.result={quantity,unit,...counts,packed_box_count:counts.packed_count,total_operated_box_count:counts.operated_box_count,customer:d.customer||'',used_forklift:!!result.used_forklift,description:text(result.description),location:text(result.location),location_photos:photos,finished_at:t,by:u.name};
+    d.result={quantity,unit,...(shipping_components?{shipping_components}:{}),...counts,packed_box_count:counts.packed_count,total_operated_box_count:counts.operated_box_count,customer:d.customer||'',used_forklift:!!result.used_forklift,description:text(result.description),location:text(result.location),location_photos:photos,finished_at:t,by:u.name};
     d.status='awaiting_review';extra.push(...closeSegments(env,row.id,t,'operation_finished'),stmt(env,"UPDATE v2_ops_jobs SET status='awaiting_close',shared_result_json=?,updated_at=? WHERE id=?",JSON.stringify(d.result),t,row.id));
    }
    if(b.action==='sop_task_review'||b.action==='sop_task_complete_review') {
@@ -494,7 +497,7 @@ export async function handleSop(b,env) {
       }
       if(b.decision==='pass'&&nd.links?.some(l=>l.phase==='planned')){
        const activeLinks=workChainEnabled(env)?(await chainAllocation(env,nd)).links:nd.links;
-       nd.links=nd.links.map(l=>({...l,phase:'confirmed'}));nd.status=activeLinks.reduce((n,l)=>n+l.quantity,0)===d.result.quantity?'linked':'waiting_customer';
+       nd.links=nd.links.map(l=>({...l,phase:'confirmed'}));nd.status=shippingFullyAllocated(shippingCapacity(nd,activeLinks))?'linked':'waiting_customer';
        for(const l of activeLinks)extra.push(stmt(env,"UPDATE v2_outbound_orders SET stock_operation_status='completed',stock_operation_completed_at=?,stock_operation_result_json=?,updated_at=? WHERE id=?",t,JSON.stringify(d.result),t,l.outbound_id));
       }
       appendRelated(env,extra,key+'-need',u,need,nd,b.action,t);}}
@@ -528,7 +531,7 @@ export async function handleSop(b,env) {
     for(const l of a.links)extra.push(stmt(env,"UPDATE v2_outbound_orders SET stock_operation_status='completed',stock_operation_completed_at=?,stock_operation_result_json=?,updated_at=? WHERE id=?",t,JSON.stringify(d.result),t,l.outbound_id));
    } else if(b.action==='sop_need_update') {
     if(d.status!=='pending')fail('已派工需求须先暂停并撤回任务；完成后追加请新建关联需求');
-    if(workChainEnabled(env)&&b.planned_quantity!==undefined&&text(b.planned_quantity)!==''){const quantity=positive(b.planned_quantity),unit=required(b.planned_unit,'计划单位'),a=await chainAllocation(env,d);if(!d.shipping_basis&&(a.used>quantity||a.links.some(l=>l.unit!==unit)))fail('计划数量和单位不能小于或改变已分配的出库数量');d.planned_quantity=quantity;d.planned_unit=unit;}
+    if(workChainEnabled(env)&&b.planned_quantity!==undefined&&text(b.planned_quantity)!==''){const quantity=positive(b.planned_quantity),unit=required(b.planned_unit,'计划单位'),a=await chainAllocation(env,d);if(!d.shipping_basis&&(a.used>quantity||a.links.some(l=>l.unit!==unit)))fail('计划数量和单位不能小于或改变已分配的出库数量');if(d.shipping_basis?.sources)expectedShippingSources({...d,planned_quantity:quantity,planned_unit:unit},d.shipping_basis.sources);d.planned_quantity=quantity;d.planned_unit=unit;}
     d.requirement_version=(d.requirement_version||1)+1;d.instructions=required(b.instructions,'要求');d.needs_clarification=false;d.location=text(b.location);d.owner=required(b.owner,'责任人');d.deadline=env.SOP_ENVIRONMENT==='staging'?completionDate(b.deadline===undefined?d.deadline:b.deadline,d.deadline):text(b.deadline);
     for(const link of d.links||[])extra.push(stmt(env,'UPDATE v2_outbound_orders SET instruction=?,updated_at=? WHERE id=?',d.instructions,t,link.outbound_id));
     if(workChainEnabled(env))extra.push(...notifyMaterialChange(env,row,u,t,'作业要求已更新，请重新确认',{type:'requirement_update',diff:{instruction:{from:row.data.instructions,to:d.instructions}}}));
@@ -538,7 +541,7 @@ export async function handleSop(b,env) {
    } else if(b.action==='sop_need_plan_quantity') {
     const link=(d.links||[]).find(l=>l.outbound_id===b.outbound_id&&l.phase==='planned');if(!link||d.result)fail('只能调整尚未完成的预关联出库数量');
     const ob=await verifySource(env,'outbound',link.outbound_id,d.customer);if(['shipped','completed','cancelled'].includes(ob.status))fail('出库状态不能调整');
-    const quantity=positive(b.quantity);required(b.reason,'调整原因');const allocation=workChainEnabled(env)?await chainAllocation(env,d):{links:d.links,quantity:d.planned_quantity};if(allocation.links.reduce((n,l)=>n+(l.outbound_id===link.outbound_id?quantity:l.quantity),0)>allocation.quantity)fail('超过预计可出库数量');if(b.unit&&b.unit!==link.unit)fail('更改出库单位请使用调整出库数量与单位');link.quantity=quantity;link.adjustment_reason=text(b.reason);
+    const quantity=positive(b.quantity);required(b.reason,'调整原因');const allocation=workChainEnabled(env)?await chainAllocation(env,d):{links:d.links,quantity:d.planned_quantity};if(workChainEnabled(env)){reserveShipping({...allocation,by_unit:allocation.by_unit.map(c=>({...c,remaining:c.remaining+(c.unit===link.unit?Number(link.quantity):0)}))},[{quantity,unit:link.unit}]);}else if(allocation.links.reduce((n,l)=>n+(l.outbound_id===link.outbound_id?quantity:l.quantity),0)>allocation.quantity)fail('超过预计可出库数量');if(b.unit&&b.unit!==link.unit)fail('更改出库单位请使用调整出库数量与单位');link.quantity=quantity;link.adjustment_reason=text(b.reason);
     extra.push(stmt(env,'UPDATE v2_outbound_orders SET planned_box_count=?,planned_pallet_count=?,updated_at=? WHERE id=?',link.unit==='箱'?quantity:0,link.unit==='托'?quantity:0,t,link.outbound_id));
     if(workChainEnabled(env))extra.push(...notifyMaterialChange(env,row,u,t,'出库数量已调整：'+text(b.reason),{type:'shipping_adjustment',diff:id=>id===b.outbound_id?{shipping_quantity:{from:row.data.links.find(l=>l.outbound_id===id).quantity+' '+link.unit,to:quantity+' '+link.unit}}:{}}));
    } else if(b.action==='sop_need_details') {
@@ -683,7 +686,7 @@ export async function handleSop(b,env) {
   return await save(env,b,u,row,d,extra);
  }catch(e){
   // Shipping corrections validate their own payload and authorization on replay.
-  if(b.action.startsWith('sop_shipping_output_'))return {ok:false,error:/revision_conflict/.test(e.message)?'记录已更新，请刷新后再操作':e.message};
+  if((b.action.startsWith('sop_shipping_output_')||b.action==='sop_shipping_expectation_save'))return {ok:false,error:/revision_conflict/.test(e.message)?'记录已更新，请刷新后再操作':e.message};
   // A lost response retried with the same request id never applies the mutation twice.
   if(b.client_req_id){const cached=await stmt(env,'SELECT actor_id,action,result_json FROM sop_events WHERE request_id=?',b.client_req_id).first();if(cached&&cached.actor_id===u.id&&cached.action===b.action){const saved=JSON.parse(cached.result_json);if(b.action==='sop_need_create'&&saved._create_signature){try{return await needCreateReplay(b,env,u);}catch(error){return {ok:false,error:error.message};}}return saved;}}
   return {ok:false,error:/revision_conflict/.test(e.message)?'记录已更新，请刷新后再操作':e.message};

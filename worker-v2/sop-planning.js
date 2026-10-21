@@ -1,3 +1,4 @@
+import {expectedShippingSources,shippingCapacity,reserveShipping} from './shipping-quantities.js';
 import {cargoCreateStatements} from './cargo-create.js';
 import { workChainEnabled, chainDate } from './work-chain.js';
 import { nextOutboundDisplayNo } from './outbound-number.js';
@@ -18,18 +19,19 @@ export async function workPlanStatements(env,rows,source,actor,t){
   if(workChainEnabled(env)){data.operation_kind=item.operation_kind||'operation';if(!['operation','direct_forward'].includes(data.operation_kind))throw Error('作业类型无效');if(data.operation_kind==='direct_forward'&&!item.planned_quantity)throw Error('直接转发请填写货物数量和单位');}
   if(source.type==='inventory')required(data.supply_chain_no,'供应链系统单号');
   if(item.planned_quantity){data.planned_quantity=qty(item.planned_quantity);data.planned_unit=required(item.planned_unit,'计划单位');}
+  if(item.shipping_basis?.sources){if(env.SOP_ENVIRONMENT!=='staging'||!workChainEnabled(env)||data.operation_kind==='direct_forward'||item.cargo_groups)throw Error('预计包装仅用于测试站整单加工作业');const reason=required(item.shipping_basis.reason,'预计包装依据');data.shipping_basis={...expectedShippingSources(data,item.shipping_basis.sources),source_quantity:data.planned_quantity,source_unit:data.planned_unit,version:1,reason,by:actor.name,actor_id:actor.id,at:t};}
   const obs=item.outbounds||[];if(!Array.isArray(obs)||obs.length>20)throw Error('每条作业最多关联20个出库计划');
   for(const ob of obs){
    if(!data.planned_quantity)throw Error('同步出库时请填写本作业的计划数量和单位');
    const quantity=qty(ob.quantity),unit=required(ob.unit||data.planned_unit,'出库数量单位');
-   if(unit!==data.planned_unit)throw Error('出库分配单位须与作业计划单位一致');
+   reserveShipping(shippingCapacity(data,data.links),[{quantity,unit}]);
    if(!['warehouse_dispatch','customer_pickup','milk_express','milk_pallet','container_pickup'].includes(ob.outbound_mode))throw Error('请选择出库方式');
    const ship=required(ob.expected_ship_at,'预计出库日期');if(workChainEnabled(env))chainDate(ship);if(!/^\d{4}-\d{2}-\d{2}$/.test(ship)||Number.isNaN(Date.parse(ship)))throw Error('出库日期无效');
    const obid='OB-'+crypto.randomUUID(),display=await nextOutboundDisplayNo(env,data.customer,ship);
-   data.links.push({outbound_id:obid,quantity,unit,phase:'planned',by:actor.name,at:t});outbounds.push({id:obid,display_no:display,need_id:id});
+   data.links.push({outbound_id:obid,quantity,unit,phase:'planned',shipping_basis_version:data.shipping_basis?.version||0,by:actor.name,at:t});outbounds.push({id:obid,display_no:display,need_id:id});
    statements.push(sql(`INSERT INTO v2_outbound_orders(id,order_date,customer,biz_class,outbound_mode,instruction,status,source_inbound_plan_id,created_by,created_at,updated_at,display_no,expected_ship_at,wms_work_order_no,planned_box_count,planned_pallet_count,uses_stock_operation,stock_operation_status,outbound_requirement,destination,po_no) VALUES(?,?,?,?,?,?,'pending_issue',?,?,?,?,?,?,?,?,?,0,'pending',?,?,?)`,obid,new Date(Date.parse(t)+9*3600000).toISOString().slice(0,10),data.customer,department==='import'?'bulk':department,ob.outbound_mode,data.instructions,source.type==='inbound'?source.id:'',actor.name,t,t,display,ship,data.supply_chain_no,unit==='箱'?quantity:0,unit==='托'?quantity:0,str(ob.outbound_requirement),str(ob.destination),str(ob.po_no)));
   }
-  if(data.links.reduce((n,x)=>n+x.quantity,0)>(data.planned_quantity||0))throw Error('出库分配数量超过本作业计划数量');
+
   statements.push(...await cargoCreateStatements(env,item,data,id,actor,t));
   for(const link of data.links.filter(l=>l.cargo_reservation))outbounds.push({id:link.outbound_id,display_no:link.display_no,need_id:id});
   const state=JSON.stringify(data);
