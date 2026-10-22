@@ -1732,7 +1732,7 @@ async function submitOpsResult(btnEl) {
 }
 
 // Shared reporting controls: the loaded query owns its cutoff and snapshot.
-function reportDepartment(value){return ({bulk:'大货',direct_ship:'代发',import:'进口',other:'未归属 / 支持（待核）'})[value]||value;}
+function reportDepartment(value){return ({order_processing:'订单处理',customer_service:'客服',office:'办公室',management:'管理',bulk:'大货',direct_ship:'代发',import:'进口',other:'未归属 / 支持（待核）'})[value]||value;}
 function reportHint(res,basis){
  if(basis!=='actual_work')return '按建单日期（KST）选任务；工时、数量均为任务累计，不是所选期间实绩。';
  var m=res.metadata||{},s=res.summary||{};

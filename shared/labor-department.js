@@ -2,6 +2,7 @@
 // Defaults follow the warehouse SOP; a confirmed dispatch assignment takes priority.
 export const departments={bulk:'大货 / 대량',direct_ship:'代发 / 출고대행',import:'进口 / 수입'};
 export const jobDefinitions={
+ office_order_processing:['订单处理',''],
  unload:['卸货','bulk'],unplanned_unload:['临时卸货','bulk'],
  inbound_direct_tally:['代发理货','direct_ship'],inbound_direct_putaway:['代发上架','direct_ship'],inbound_direct:['代发入库','direct_ship'],inbound_bulk:['大货入库','bulk'],inbound_return:['退件入库','direct_ship'],
  inbound_change_order:['换单入库',''],pick_direct:['代发拣货','direct_ship'],bulk_op:['大货操作','bulk'],pack_direct:['代发打包 / 직배송 포장','direct_ship'],change_order:['换单操作','direct_ship'],
@@ -12,6 +13,7 @@ export const jobDefinitions={
 export const startJobTypes={v2_unload_job_start:'unload',v2_unplanned_unload_start:'unplanned_unload',v2_inbound_job_start:'',v2_import_delivery_job_start:'pickup_delivery_import',v2_outbound_load_start:'load_outbound',v2_outbound_stock_op_start:'outbound_stock_op',v2_issue_handle_start:'issue_handle',v2_pick_job_start:'pick_direct',v2_pick_job_start_by_docs:'pick_direct',v2_bulk_op_job_start:'bulk_op',v2_ops_job_start:'',v2_verify_job_start:'verify_scan'};
 const recognized=value=>Object.hasOwn(departments,String(value||'').trim())?String(value).trim():'';
 export function laborDepartment(job){
+ if(job.job_type==='office_order_processing'){const d=job.labor_department||job.assigned_department||job.biz_class;return ['bulk','direct_ship','import','order_processing','customer_service','office','management','other'].includes(d)?d:'other';}
  const confirmed=recognized(job.labor_department)||(job.assignment_kind==='task'?recognized(job.assigned_department):'');
  if(confirmed)return confirmed;
  const definition=jobDefinitions[String(job.job_type??'').trim()];

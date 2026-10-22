@@ -56,13 +56,14 @@ export function parseOpsResultForExport(job_type,resultRows=[],job={}){
  if(operation){for(const phase of ['start','finish'])for(const [key,unit,label] of [['inventory_count','单位未记录','盘点数量'],['pick_count','单位未记录','废弃拣货数量'],['location_count','货位','库内货位'],['qc_count','单位未记录','质检数量'],['return_order_count','单','退件入库单数'],['return_product_count','产品','入库产品数']]){
   const v=operation[phase]?.[key];if(numeric(v))add('internal_'+key,v,unit,label,phase);
  }}
- out.quantity_metrics=[...metrics.values()];out.quantity_state=out.quantity_metrics.length?'recorded':'missing';out.quantity_warnings=[...warnings];
+ out.quantity_metrics=[...metrics.values()];out.quantity_state=job_type==='office_order_processing'?'time_only':out.quantity_metrics.length?'recorded':'missing';out.quantity_warnings=[...warnings];
  out.result_notes=remarks.join(' | ');out.diff_notes=[...new Set(diffs)].join(' | ');out.result_submitters=[...submitters].join('、');out.readable_result_lines=readable.join(' || ');
  // Preserve every original encoding, including corrections, without truncation.
  out.raw_result_json_compact=JSON.stringify(resultRows.map(r=>({id:r.id,source:r.source,previous_result_id:r.previous_result_id,created_at:r.created_at,result_json:r.result_json,result_lines_json:r.result_lines_json,box_count:r.box_count,pallet_count:r.pallet_count})));
  out.result_summary=out.quantity_metrics.map(m=>m.label+' '+m.quantity+'（'+(m.metric==='location_count'?'整任务':m.unit+' / 整任务')+'）'+(m.phase==='start'?' 开始快照':'')).join('，')||'数量未记录（不等于零产出）';
  if(out.putaway_forklift!==null)out.result_summary+=' · 是否使用叉车 '+(out.putaway_forklift?'是':'否');
  if(operation||op.internal_record_phase)out.result_summary=operationSummary(job)+'；'+out.result_summary;
+ if(job_type==='office_order_processing'){out.quantity_metrics=[];out.result_summary='仅记录工时，无数量结果 / 근무시간만 기록';}
  if(remarks.length)out.result_summary+='；备注：'+out.result_notes;
  if(warnings.size)out.result_summary+='；'+[...warnings].join('；');
  return out;

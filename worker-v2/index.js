@@ -1,3 +1,4 @@
+import {handleOfficeDuty,protectOfficeDuty} from './office-duty.js';
 import {materialFileResponse} from './material-file-response.js';
 import {actualWorkReport,measureSegments} from './actual-work-report.js';
 import {parseOpsResultForExport} from './report-results.js';
@@ -489,6 +490,7 @@ const TIME_ONLY_JOB_TYPES = new Set([
   'qc',                 // 质检
   'inventory',          // 盘点
   'scan_pallet',        // 过机扫描
+  'office_order_processing', // 订单处理只计工时
   'verify_scan',        // 扫码核对（仅记工时；超过 48h 由 cleanup 自动结束）
   'issue_handle'        // 问题点处理 — 由 v2_issue_handle_finish 收尾，不参与本逻辑（兜底归类时间型）
 ]);
@@ -9554,7 +9556,7 @@ route("v2_admin_cleanup_job_statuses", async (body, env) => {
   const examples = [];
   for (const j of rows) {
     checked_count++;
-    if(internalEnabled(env)&&readOperation(j)){kept_active_count++;continue;}
+    if(internalEnabled(env)&&(readOperation(j)||j.job_type==='office_order_processing')){kept_active_count++;continue;}
     const openCnt = await env.DB.prepare(
       "SELECT COUNT(*) AS c FROM v2_ops_job_workers WHERE job_id=? AND left_at=''"
     ).bind(j.id).first();
@@ -12860,6 +12862,8 @@ export default {
     if(accessEnabled(env)){const adminAction=await accessAdminAction(body,env);if(adminAction)return adminAction;}
     // Resolve generated daily badge aliases before crew preparation and all admission guards.
     if(attendanceEnabled(env)){try{await ensureAttendance(env);await normalizeDailyBadgeRequest(env,body);}catch(e){return json({ok:false,error:e.message},409);}}
+    if(action.startsWith('sop_office_duty_')){try{return json(await handleOfficeDuty(body,env));}catch(e){return json({ok:false,error:e.status?e.message:'保存或查询未确认，请保留原请求并重试 / 저장·조회 미확인, 같은 요청으로 재시도'},e.status||500);}}
+    try{await protectOfficeDuty(body,env);}catch(e){return json({ok:false,error:e.message},409);}
     if(dailyDispatchEnabled(env)&&action.startsWith('sop_daily_dispatch_')){try{return json(await dailyDispatchAdmin(body,env));}catch(e){return json({ok:false,error:e.message},409);}}
     try{await guardDailyDispatch(body,env);}catch(e){return json({ok:false,error:e.message},403);}
     if(action.startsWith('sop_feedback_link_')){
