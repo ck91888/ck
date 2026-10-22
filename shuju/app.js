@@ -648,10 +648,36 @@ function ordersFilterParams() {
   };
 }
 
+// Presentation only: keep the API rows and CSV source intact, including recorded zeroes.
+function ordersResultMarkup(j) {
+  var metrics = (Array.isArray(j.quantity_metrics) ? j.quantity_metrics : []).filter(function(m) {
+    return m && m.quantity !== null && m.quantity !== undefined && String(m.quantity).trim() !== '' && Number.isFinite(Number(m.quantity));
+  });
+  var nonzero = metrics.filter(function(m) { return Number(m.quantity) !== 0; });
+  var zeroCount = metrics.filter(function(m) { return Number(m.quantity) === 0; }).length;
+  var preview = (nonzero.length ? nonzero : metrics).slice(0, 3);
+  var full = String(j.result_summary || '');
+  var metric = function(m) {
+    return '<span class="orders-metric"><span>' + esc(m.label || m.metric || '数量') + (m.phase === 'start' ? ' · 开始快照' : '') + '</span><b>' + esc(m.quantity) + ' <small>' + esc(m.unit || '单位未记录') + '</small></b></span>';
+  };
+  var content = preview.length ? preview.map(metric).join('') : '<span class="orders-result-text">' + esc(full || '未记录结果（不等于零产出）') + '</span>';
+  var scope = '<span class="orders-result-scope">整任务累计 · 非本期产量</span>';
+  if (!metrics.length && !full) return '<div class="orders-result-empty">' + scope + content + '</div>';
+  return '<details class="orders-result"><summary>' + scope + '<span class="orders-result-preview">' + content + '</span>' +
+    '<span class="orders-result-toggle"><span class="orders-expand">展开完整' + (metrics.length ? '（' + metrics.length + '项' + (zeroCount ? ' · 含' + zeroCount + '项零值' : '') + '）' : '结果') + '</span><span class="orders-collapse">收起结果</span></span></summary>' +
+    '<div class="orders-result-full" tabindex="0" role="region" aria-label="完整任务累计结果">' + metrics.map(metric).join('') + (full ? '<p class="orders-result-original">完整摘要 / 说明：' + esc(full) + '</p>' : '') + '</div></details>';
+}
+function ordersReferenceMarkup(j) {
+  var label = window.CKDocumentLabels.jobLabel(j), dispatcher = window.CKDocumentLabels.jobDispatcher(j);
+  var preview = '<b class="orders-clamp">' + esc(label) + '</b><span class="orders-dispatcher">派审员：' + esc(dispatcher) + '</span>';
+  if (label.length <= 40 && dispatcher.length <= 20) return preview;
+  return '<details class="orders-reference"><summary>' + preview + '<span class="orders-reference-toggle">展开单号 / 派审员</span></summary><div>' + esc(label) + '<br>派审员：' + esc(dispatcher) + '</div></details>';
+}
+
 async function loadOrders(btn, nextPage) {
   if(!nextPage){_ordersOffset=0;_ordersQuery=null;_ordersResult=null;}
   var tbody = document.getElementById("ordersBody");
-  tbody.innerHTML = '<tr><td colspan="12" class="muted" style="text-align:center;">加载中...</td></tr>';
+  tbody.innerHTML = '<tr><td colspan="10" class="muted" style="text-align:center;">加载中...</td></tr>';
   setBtnLoading(btn, true);
   var params = nextPage?Object.assign({},_ordersQuery):ordersFilterParams();
   params.offset=_ordersOffset;
@@ -659,7 +685,7 @@ async function loadOrders(btn, nextPage) {
   var res = await api(params);
   setBtnLoading(btn, false, "查询");
   if (!res || !res.ok) {
-    tbody.innerHTML = '<tr><td colspan="12" class="muted" style="text-align:center;">加载失败: ' + esc(res && (res.message || res.error)) + '</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="10" class="muted" style="text-align:center;">加载失败: ' + esc(res && (res.message || res.error)) + '</td></tr>';
     return;
   }
   _ordersItems = res.items || [];
@@ -667,26 +693,22 @@ async function loadOrders(btn, nextPage) {
   document.getElementById("ordersReportHint").textContent=reportHint(res,params.date_basis);
   document.getElementById("ordersTotal").textContent = (res.total || 0) + ' 条（第 ' + (_ordersOffset+1) + '–' + (_ordersOffset+_ordersItems.length) + '）';
   if (_ordersItems.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="12" class="muted" style="text-align:center;">暂无数据</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="10" class="muted" style="text-align:center;">暂无数据</td></tr>';
     return;
   }
   var html = '';
-  _ordersItems.forEach(function(j) {
-    var resultSummary = j.result_summary || '';
-    if (!resultSummary) resultSummary = '<span class="muted">--</span>';
+  _ordersItems.forEach(function(j, index) {
     html += '<tr>';
-    html += '<td>' + esc(workhourKstDate(j.created_at)) + '</td>';
-    html += '<td><b>' + esc(window.CKDocumentLabels.jobSummary(j)) + '</b></td>';
-    html += '<td>' + esc(flowLabel(j.flow_stage)) + '</td>';
-    html += '<td>' + esc(jobTypeLabel(j.job_type)) + '</td>';
-    html += '<td>' + esc(params.date_basis==='actual_work'?reportDepartment(j.department):bizLabel(j.biz_class)) + '</td>';
+    html += '<td class="orders-date">' + esc(workhourKstDate(j.created_at)) + '</td>';
+    html += '<td class="orders-doc">' + ordersReferenceMarkup(j) + '</td>';
+    html += '<td><span class="orders-clamp">' + esc(jobTypeLabel(j.job_type)) + '</span><small class="orders-secondary orders-clamp">' + esc(flowLabel(j.flow_stage)) + '</small></td>';
+    html += '<td><span class="orders-clamp">' + esc(params.date_basis==='actual_work'?reportDepartment(j.department):bizLabel(j.biz_class)) + '</span></td>';
     html += '<td>' + statusTag(j.status) + '</td>';
-    html += '<td>' + (j.worker_count || 0) + '</td>';
-    html += '<td>' + fmtMinutes(j.total_minutes) + (j.data_gaps?.length?'<small class=report-gap title="'+esc(j.data_gaps.join('；'))+'">待核 '+j.data_gaps.length+' 项 · 见详情</small>':'') + '</td>';
-    html += '<td>' + esc(fmtTime(j.started_at)) + '</td>';
-    html += '<td>' + esc(fmtTime(j.ended_at)) + '</td>';
-    html += '<td>' + (resultSummary.indexOf('<span') === 0 ? resultSummary : esc(resultSummary)) + '</td>';
-    html += '<td><button class="row-action" onclick="openOrderDetail(\'' + esc(j.id) + '\')">详情</button></td>';
+    html += '<td class="orders-number">' + esc(j.worker_count ?? 0) + '</td>';
+    html += '<td><span class="orders-hours">' + fmtMinutes(j.total_minutes) + '</span><small class="orders-secondary">' + (params.date_basis==='actual_work'?'本期工时':'任务累计工时') + '</small>' + (j.data_gaps?.length?'<small class="report-gap">待核 '+j.data_gaps.length+' 项 · 见详情</small>':'') + '</td>';
+    html += '<td class="orders-time"><span><small>始</small> ' + esc(fmtTime(j.started_at)) + '</span><span><small>终</small> ' + esc(fmtTime(j.ended_at)) + '</span><small class="orders-secondary">任务起止 · KST</small></td>';
+    html += '<td class="orders-results">' + ordersResultMarkup(j) + '</td>';
+    html += '<td class="orders-actions"><button class="row-action" onclick="openOrderDetail(_ordersItems[' + index + '].id)">详情</button></td>';
     html += '</tr>';
   });
   tbody.innerHTML = html;reportResponsiveTable(tbody);

@@ -130,17 +130,18 @@
         <button class="btn-secondary" onclick="exportOrders(this)">导出明细 CSV</button>
         <button class="btn-secondary" onclick="exportActualReport(ordersFilterParams(),'quantities').catch(e=>alert(e.message))">导出同类数量样本</button><span class="muted" id="ordersTotal" style="margin-left:auto;font-size:12px;"></span>
       </div>
-      <div class="section-hint" id="ordersReportHint">实际作业：按人员时段与 KST 区间交集统计；结束日期含当天，最多31天。数量是整任务累计结果，不是周内产量。未归属部门不表示闲置。</div><div class="filter-row"><button class="btn-secondary" onclick="ordersPage(-1)">上一页</button><button class="btn-secondary" onclick="ordersPage(1)">下一页</button></div><div style="overflow-x:auto;">
-        <table class="data-table">
+      <div class="section-hint" id="ordersReportHint">实际作业：按人员时段与 KST 区间交集统计；结束日期含当天，最多31天。数量是整任务累计结果，不是周内产量。未归属部门不表示闲置。</div><div class="filter-row orders-pager"><button class="btn-secondary" onclick="ordersPage(-1)">上一页</button><button class="btn-secondary" onclick="ordersPage(1)">下一页</button><span class="orders-scroll-hint">表格可横向滚动，右侧可查看详情；展开结果可查看零值与完整说明。</span></div><div class="orders-table-wrap" role="region" aria-label="单子数据表格，可横向滚动" tabindex="0">
+        <table class="data-table orders-table">
+          <colgroup><col class="orders-col-date"><col class="orders-col-doc"><col class="orders-col-type"><col class="orders-col-dept"><col class="orders-col-status"><col class="orders-col-people"><col class="orders-col-hours"><col class="orders-col-time"><col class="orders-col-results"><col class="orders-col-actions"></colgroup>
           <thead>
             <tr>
-              <th>创建日（KST）</th><th>单号</th><th>业务阶段</th><th>任务类型</th>
-              <th>用工部门 / 业务</th><th>状态</th><th>参与人数</th><th>工时</th>
-              <th>开始时间</th><th>结束时间</th><th>任务累计结果</th><th>操作</th>
+              <th scope="col">创建日（KST）</th><th scope="col">单号 / 派审员</th><th scope="col">任务类型 / 阶段</th>
+              <th scope="col">用工部门 / 业务</th><th scope="col">状态</th><th scope="col">人数</th><th scope="col">工时</th>
+              <th scope="col">任务起止（KST）</th><th scope="col">任务累计结果</th><th scope="col" class="orders-actions">操作</th>
             </tr>
           </thead>
           <tbody id="ordersBody">
-            <tr><td colspan="12" class="muted" style="text-align:center;">请点击「查询」</td></tr>
+            <tr><td colspan="10" class="muted" style="text-align:center;">请点击「查询」</td></tr>
           </tbody>
         </table>
       </div>
