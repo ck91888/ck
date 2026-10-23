@@ -3,7 +3,7 @@
  'use strict';
  const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
  const jobLabel=x=>window.CKDocumentLabels.jobLabel(x),jobDispatcher=x=>window.CKDocumentLabels.jobDispatcher(x),jobText=(value,context)=>window.CKDocumentLabels.jobHistoryText(String(value??''),context);
- const states={pending:'待派工 / 배정 대기',assigned:'已安排 / 배정 완료',working:'作业中 / 작업 중',paused:'已暂停 / 일시 중지',rework:'待整改 / 재작업',awaiting_close:'已暂停 · 待收尾 / 일시 중지·마감 대기',awaiting_review:'待审核 / 검수 대기',completed:'已完成 / 완료',waiting_customer:'等待客户安排',linked:'成果已关联出库',cancelled:'已取消'};
+ const states={pending:'待派工 / 배정 대기',assigned:'已安排 / 배정 완료',working:'作业中 / 작업 중',system_closed:'系统04:00强制结束 · 待核实 / 시스템 종료·확인 필요',paused:'已暂停 / 일시 중지',rework:'待整改 / 재작업',awaiting_close:'已暂停 · 待收尾 / 일시 중지·마감 대기',awaiting_review:'待审核 / 검수 대기',completed:'已完成 / 완료',waiting_customer:'等待客户安排',linked:'成果已关联出库',cancelled:'已取消'};
  const counts=[['packed_sku_count','品数 / 품목수'],['packed_count','打包箱数 / 포장박스'],['used_carton_large_count','大纸箱 / 대형박스'],['used_carton_small_count','小纸箱 / 소형박스'],['repaired_box_count','修补箱数 / 수리박스'],['reboxed_count','换箱数 / 교체박스'],['label_count','标签数 / 라벨수'],['operated_box_count','操作总箱数 / 총 박스'],['pallet_count','打托数 / 팔레트'],['forklift_location_count','叉车货位数 / 지게차 위치']];
  window.CKFieldWork=function(root,initial='',options={}){
   root.className='ck-bulk';
@@ -94,15 +94,15 @@
    if(!external&&t.owner_id!==CKSession.user?.id&&['assigned','working','paused','awaiting_review','rework'].includes(t.status)){
     const taskId=t.id;api('sop_owner_transfer_options',{id:taskId}).then(option=>{if(current?.task?.id===taskId&&option.can_claim)action('原负责人离岗 · 本人接班 / 담당자 부재 · 인계',async()=>{const fresh=await api('sop_owner_transfer_options',{id:taskId});if(!fresh.can_claim)throw Error('接班条件已变化，请刷新');await CKClaimOwner(fresh,()=>resolve(taskId));});}).catch(()=>{});
    }
-   if(external&&['pending','working','awaiting_close','paused'].includes(t.status)){
-    action(t.status==='paused'?'恢复整个任务 / 전체 작업 재개':'暂停整个任务 / 전체 작업 중지',async()=>CKToggleNativePause(current.native,()=>resolve(t.id)));
-    if(t.status==='paused'){action('个人休息／恢复 / 개인 휴식·복귀',()=>window.CKOpenFieldLabor?.());return;}
+   if(external&&['pending','working','awaiting_close','paused','system_closed'].includes(t.status)){
+    action(['paused','system_closed'].includes(t.status)?'恢复整个任务 / 전체 작업 재개':'暂停整个任务 / 전체 작업 중지',async()=>CKToggleNativePause(current.native,()=>resolve(t.id)));
+    if(['paused','system_closed'].includes(t.status)){action('个人休息／恢复 / 개인 휴식·복귀',()=>window.CKOpenFieldLabor?.());return;}
     action(live.length?'调整人员 / 인원 변경':'核对人员并开始 / 인원 확인·시작',()=>people('保存人员 / 인원 저장',t.workers,async staff=>{await write('sop_native_people',{job_id:t.id,revision:t.revision,...staff,reason:$('reason').value});await resolve(t.id);},true));
     action('个人休息／恢复 / 개인 휴식·복귀',()=>window.CKOpenFieldLabor?.());
 
     action('填写产出并审核结束 / 산출·검수 완료',()=>finish(t));return;
    }
-   if(['assigned','paused','rework'].includes(t.status))action('核对人员并开始 / 인원 확인·시작',()=>people('开始作业 / 작업 시작',t.workers,async staff=>{let revision=t.revision;if(JSON.stringify(staff.workers)!==JSON.stringify(t.workers)||staff.lead_id!==t.lead_id){const r=await write('sop_task_people',{id:t.id,revision,...staff,reason:'开工前核对到位人员'});revision=r.revision;}await write('sop_task_start',{id:t.id,revision});await resolve(t.id);}));
+   if(['assigned','paused','system_closed','rework'].includes(t.status))action('核对人员并开始 / 인원 확인·시작',()=>people('开始作业 / 작업 시작',t.workers,async staff=>{let revision=t.revision;if(JSON.stringify(staff.workers)!==JSON.stringify(t.workers)||staff.lead_id!==t.lead_id){const r=await write('sop_task_people',{id:t.id,revision,...staff,reason:'开工前核对到位人员'});revision=r.revision;}await write('sop_task_start',{id:t.id,revision});await resolve(t.id);}));
    if(t.status==='working'){
      action('调整人员 / 인원 변경',()=>people('保存人员 / 인원 저장',live.map(w=>({id:w.worker_id,name:w.worker_name})),async staff=>{await write('sop_task_people',{id:t.id,revision:t.revision,...staff,reason:$('reason').value});await resolve(t.id);},true));
     action('个人休息／恢复 / 개인 휴식·복귀',()=>window.CKOpenFieldLabor?.());action('暂停作业 / 작업 중지',()=>pause(t));if(!n?.cargo_groups)action('填写产出并审核结束 / 산출·검수 완료',()=>finish(t));

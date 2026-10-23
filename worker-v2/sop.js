@@ -446,13 +446,15 @@ export async function handleSop(b,env) {
    if(b.action!=='sop_task_review' && !allowedOwner)fail('仅本任务负责人或获授权人员可操作');
    if(b.action==='sop_task_start') {
     if(groupedNeed?.data.cargo_groups&&taskGroups(groupedNeed.data.cargo_groups,{id:row.id,data:d}).some(g=>g.ack_version!==(g.mapping_version||1)))fail('请先在资料分组中确认最新版本，再恢复作业');
-    if(!['assigned','paused','rework'].includes(d.status))fail('当前状态不能开始');
-    const present=await sourceActiveWorkers(env,row.id,d.workers);
+    if(!['assigned','paused','system_closed','rework'].includes(d.status))fail('当前状态不能开始');
+    const reviewOnly=d.status==='system_closed'&&d.system_cutoff?.previous_status==='awaiting_review';
+    const present=reviewOnly?[]:await sourceActiveWorkers(env,row.id,d.workers);
+    if(d.status==='system_closed')extra.push(stmt(env,"UPDATE v2_ops_jobs SET status='working',resumed_at=? WHERE id=? AND status='system_closed'",t,row.id));
     for(const w of present)extra.push(stmt(env,"INSERT INTO v2_ops_job_workers(id,job_id,worker_id,worker_name,joined_at) VALUES(?,?,?,?,?)",uid('WS'),row.id,canonicalDailyBadge(w.id),w.name,t));
-    d.status='working';d.started_at=d.started_at||t;d.pause_reason='';
+    d.status=reviewOnly?'awaiting_review':'working';d.started_at=d.started_at||t;d.pause_reason='';
     extra.push(stmt(env,"UPDATE v2_ops_jobs SET status='working',active_worker_count=?,updated_at=? WHERE id=?",present.length,t,row.id));
    } else if(b.action==='sop_task_people') {
-    if(!['assigned','working','paused','rework'].includes(d.status))fail('当前状态不能调整人员');
+    if(!['assigned','working','paused','system_closed','rework'].includes(d.status))fail('当前状态不能调整人员');
     const workers=validateWorkers(b.workers,b.lead_id);required(b.reason,'调整原因');
     if(d.status==='working') {
      const live=await all(env,"SELECT worker_id AS id FROM v2_ops_job_workers WHERE job_id=? AND left_at=''",row.id);

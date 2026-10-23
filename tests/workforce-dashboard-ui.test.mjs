@@ -43,6 +43,12 @@ test('labor combines company, department and current-unassigned filters, ignorin
  p.change('[data-department-filter]','bulk');assert.match(p.$('[data-rows]').textContent,/暂无/);p.change('[data-status-filter]','');assert.match(p.$('[data-rows]').textContent,/Fixture B/);
  p.change('[data-company]','포레인');assert.match(p.$('[data-rows]').textContent,/暂无/);assert.deepEqual(p.errors,[]);
 });
+for(const kind of ['labor','employee'])test(kind+' renders conflicting occupancy and keeps it out of the idle filter',domOptions,async t=>{
+ const x=item('CONFLICT','occupancy_conflict');x.occupancyWarnings=[{job_label:'Synthetic <clock>',has_business_reference:false,department:'direct_ship',jobState:'已暂停 / 일시 중지',startedAtLabel:'2026-10-07 09:00 KST',reason:'上个班次任务未退出 / 이전 근무 작업 미종료'}];
+ const p=await fixture(t,{kind,field:kind==='labor',initial:report([x,item('IDLE')])});
+ const warning=p.$('[data-occupancy-warning]');assert.ok(warning);assert.match(warning.textContent,/Synthetic <clock>/);assert.match(warning.textContent,/已暂停/);assert.match(warning.textContent,/上个班次/);assert.equal(warning.querySelector('clock'),null);
+ p.change(kind==='employee'?'[data-work-status-filter]':'[data-status-filter]','unassigned');assert.equal(p.$('[data-occupancy-warning]'),null);assert.doesNotMatch(p.root.textContent,/Fixture CONFLICT/);assert.deepEqual(p.errors,[]);
+});
 test('field labor filters daily assignment and employee profile department in one report',domOptions,async t=>{
  const daily=item('DAILY','working','import'),importEmployee=item('STAFF','rest'),management=item('MANAGER','unassigned'),orders=item('ORDERS','out'),unknown=item('UNKNOWN','unassigned');
  for(const [person,department] of [[importEmployee,'import'],[management,'management'],[orders,'order_processing'],[unknown,'']]){person.record.personType='employee';person.record.badgeId='EMP-'+person.record.id;person.record.employeeNo=person.record.id;person.record.department='bulk';person.record.profileDepartment=department;person.record.agency='bulk';}

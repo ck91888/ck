@@ -8,6 +8,6 @@ export function segmentMinutes(row,range,current=Date.now()){
  const a=Date.parse(row.joined_at),z=row.left_at?Date.parse(row.left_at):current;
  const invalid=!Number.isFinite(a)||!Number.isFinite(z)||z<a;
  const raw=invalid||!row.left_at?0:Math.max(0,(Math.min(z,current)-a)/60000);
- return {minutes:invalid||!row.left_at?0:Math.max(0,Math.min(z,current,range.end)-Math.max(a,range.start))/60000,raw_minutes:raw,invalid};
+ return {minutes:String(row.leave_reason||'').startsWith('system_cutoff:')||invalid||!row.left_at?0:Math.max(0,Math.min(z,current,range.end)-Math.max(a,range.start))/60000,raw_minutes:raw,invalid};
 }
 export const reportWorkerId=row=>String(row.worker_id||'').trim()||'UNIDENTIFIED:'+row.id;

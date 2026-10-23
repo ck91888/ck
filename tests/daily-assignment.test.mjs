@@ -121,21 +121,21 @@ test('a historical open segment with a later checkout audit cannot be requalifie
   try{s.DB.raw.prepare("UPDATE v2_ops_job_workers SET left_at='',minutes_worked=0 WHERE job_id=?").run(s.job.job_id);}
   finally{s.DB.raw.exec(guard.sql);}
   s.at('10:00');await s.correct('09:40');const r=await s.summary();
-  assert.equal((await s.card()).workers[0].id,s.record.badgeId);assert.equal(r.segments.length,1);assert.equal(r.status,'unassigned');assert.equal(r.totals.direct_ship,0);assert.deepEqual(r.currentJobs,[]);
+  assert.equal((await s.card()).workers[0].id,s.record.badgeId);assert.equal(r.segments.length,1);assert.equal(r.status,'occupancy_conflict');assert.equal(r.occupancyWarnings.length,1);assert.equal(r.totals.direct_ship,0);assert.deepEqual(r.currentJobs,[]);
   assert.equal(s.segments()[0].joined_at,instant('09:10'));assert.equal(s.segments()[0].left_at,'');
 });
 
 test('a same-day open remnant before arrival stays excluded without a qualifying correction audit',async t=>{
   const s=await setup(t);await s.start();s.DB.raw.prepare('UPDATE ck_attendance_days SET signed_in=? WHERE id=?').run(instant('09:20'),s.record.id);
   s.at('10:00');const before=s.workSnapshot(),r=await s.summary();
-  assert.equal(r.status,'unassigned');assert.equal(r.totals.direct_ship,0);assert.equal(r.totals.unassigned,40);assert.deepEqual(r.currentJobs,[]);assert.equal(r.segments.length,1);assert.equal((await s.card()).workers[0].id,s.record.badgeId);assert.deepEqual(s.workSnapshot(),before);
+  assert.equal(r.status,'occupancy_conflict');assert.equal(r.occupancyWarnings.length,1);assert.equal(r.totals.direct_ship,0);assert.equal(r.totals.unassigned,40);assert.deepEqual(r.currentJobs,[]);assert.equal(r.segments.length,1);assert.equal((await s.card()).workers[0].id,s.record.badgeId);assert.deepEqual(s.workSnapshot(),before);
 });
 
 test('previous KST-day open work remains excluded for a fresh fixed-badge attendance day',async t=>{
   const s=await setup(t,{permanent:true,arrival:instant('23:40','2026-10-11')});await s.start('23:50',{date:'2026-10-11'});
   const priorRecord=s.record;s.at('09:00');s.setRecord((await s.ok('sop_attendance_checkin',{badge:priorRecord.badgeId,agency:'가온'})).record);
   assert.notEqual(s.record.id,priorRecord.id);assert.equal(s.record.badgeId,priorRecord.badgeId);s.at('10:00');await s.correct('09:20');
-  const r=await s.summary();assert.equal(r.status,'unassigned');assert.equal(r.totals.direct_ship,0);assert.equal(r.totals.unassigned,40);assert.deepEqual(r.currentJobs,[]);assert.equal(r.segments.length,1);assert.equal((await s.card()).workers[0].id,s.record.badgeId);
+  const r=await s.summary();assert.equal(r.status,'occupancy_conflict');assert.equal(r.occupancyWarnings.length,1);assert.equal(r.totals.direct_ship,0);assert.equal(r.totals.unassigned,40);assert.deepEqual(r.currentJobs,[]);assert.equal(r.segments.length,1);assert.equal((await s.card()).workers[0].id,s.record.badgeId);
 });
 
 const invalidAuditCases=[
@@ -151,7 +151,7 @@ for(const [label,change] of invalidAuditCases)test(`correction evidence with ${l
   const s=await setup(t);await s.start();s.at('10:00');await s.correct('09:20');
   const original=s.rows('ck_attendance_events').find(e=>e.action==='sop_attendance_correct'),event=change(original);
   s.DB.raw.prepare('UPDATE ck_attendance_events SET record_id=?,before_json=?,after_json=?,at=? WHERE id=?').run(event.record_id,event.before_json,event.after_json,event.at,event.id);
-  const r=await s.summary();assert.equal(r.status,'unassigned');assert.equal(r.totals.direct_ship,0);assert.deepEqual(r.currentJobs,[]);assert.equal(s.segments()[0].joined_at,instant('09:10'));
+  const r=await s.summary();assert.equal(r.status,'occupancy_conflict');assert.equal(r.occupancyWarnings.length,1);assert.equal(r.totals.direct_ship,0);assert.deepEqual(r.currentJobs,[]);assert.equal(s.segments()[0].joined_at,instant('09:10'));
 });
 
 test('same-name workers retain distinct assignments and correction evidence never moves between IDs',async t=>{

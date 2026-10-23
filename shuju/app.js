@@ -1479,8 +1479,8 @@ async function loadManagement(btn) {
     { label: '总工时', value: s.total_hours + ' h', sub: s.total_minutes + ' 分' },
     { label: 'WMS 总数量', value: fmtNumber(s.total_qty) },
     { label: 'WMS 总箱数', value: fmtNumber(s.total_boxes) },
-    { label: '综合件/小时', value: s.qty_per_hour },
-    { label: '综合箱/小时', value: s.boxes_per_hour },
+    { label: '综合件/小时', value: s.efficiency_needs_review?'待核实':s.qty_per_hour },
+    { label: '综合箱/小时', value: s.efficiency_needs_review?'待核实':s.boxes_per_hour },
     { label: '活跃员工', value: s.worker_count || 0 },
     { label: '异常工时段', value: s.anomaly_count || 0, sub:'同人重叠 '+(s.overlap_seconds||0)+' 秒（记录工时含重复部分）；未结束排除 '+(s.excluded_open_count||0)+' 段' }
   ];
@@ -1501,8 +1501,8 @@ async function loadManagement(btn) {
     tb1 += '<td>' + (j.total_hours || 0) + '</td>';
     tb1 += '<td>' + fmtNumber(j.wms_qty) + '</td>';
     tb1 += '<td>' + fmtNumber(j.wms_boxes) + '</td>';
-    tb1 += '<td>' + (j.qty_per_hour || 0) + '</td>';
-    tb1 += '<td>' + (j.boxes_per_hour || 0) + '</td></tr>';
+    tb1 += '<td>' + (j.efficiency_needs_review?'待核实':(j.qty_per_hour || 0)) + '</td>';
+    tb1 += '<td>' + (j.efficiency_needs_review?'待核实':(j.boxes_per_hour || 0)) + '</td></tr>';
   });
   document.getElementById("mgmtByJobTypeBody").innerHTML = tb1;
 
@@ -1514,8 +1514,8 @@ async function loadManagement(btn) {
     tb2 += '<td>' + (w.total_hours || 0) + '</td>';
     tb2 += '<td>' + fmtNumber(w.wms_qty) + '</td>';
     tb2 += '<td>' + fmtNumber(w.wms_boxes) + '</td>';
-    tb2 += '<td>' + (w.qty_per_hour || 0) + '</td>';
-    tb2 += '<td>' + (w.boxes_per_hour || 0) + '</td></tr>';
+    tb2 += '<td>' + (w.efficiency_needs_review?'待核实':(w.qty_per_hour || 0)) + '</td>';
+    tb2 += '<td>' + (w.efficiency_needs_review?'待核实':(w.boxes_per_hour || 0)) + '</td></tr>';
   });
   document.getElementById("mgmtByWorkerBody").innerHTML = tb2;
   var unmatched = res.unmatched_wms || [], hint = document.getElementById('mgmtUnmatchedWms');

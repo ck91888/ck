@@ -19,12 +19,12 @@ const inside=(x,range,cutoff)=>Number.isFinite(Date.parse(x))&&Date.parse(x)>=ra
 // Keep milliseconds until final presentation; same-person overlap is reported, not silently allocated.
 export function measureSegments(source,range,cutoff){
  const measured=source.map(r=>{
-  const a=Date.parse(r.joined_at),z=Date.parse(r.left_at),open=!r.left_at,invalid=!Number.isFinite(a)||!open&&(!Number.isFinite(z)||z<a);
-  const start=Math.max(a,range.start),end=Math.min(z,range.end,cutoff),ms=invalid||open?0:Math.max(0,end-start);
-  const reasons=[];if(invalid)reasons.push('时间缺失/无效/倒序，不能归属');if(open)reasons.push('未结束时段排除，不估算');if(!r.worker_id)reasons.push('人员身份未记录，无法核对同人重叠');
+  const forced=String(r.leave_reason||'').startsWith('system_cutoff:'),a=Date.parse(r.joined_at),z=Date.parse(r.left_at),open=!r.left_at,invalid=!Number.isFinite(a)||!open&&(!Number.isFinite(z)||z<a);
+  const start=Math.max(a,range.start),end=Math.min(z,range.end,cutoff),ms=forced||invalid||open?0:Math.max(0,end-start);
+  const reasons=[];if(forced)reasons.push('系统04:00强制结束，工时待核实，排除有效工时与人效');if(invalid)reasons.push('时间缺失/无效/倒序，不能归属');if(open)reasons.push('未结束时段排除，不估算');if(!r.worker_id)reasons.push('人员身份未记录，无法核对同人重叠');
   if(!invalid&&!open&&(z-a)>=12*3600000)reasons.push('单段≥12小时，待核实');
   if(!invalid&&!open&&z>cutoff)reasons.push('结束晚于截止时间，仅计截止前部分（暂算）');
-  return {...r,worker_id:idOf(r),source_worker_id:r.worker_id||'',clipped_start:iso(start),clipped_end:ms>0?iso(end):'',seconds:ms/1000,minutes:ms/60000,raw_minutes:invalid||open?null:(z-a)/60000,active:open?1:0,provisional:!open&&z>cutoff?1:0,overlap_seconds:0,anomaly_reason:reasons.join('；'),anomaly:reasons.length?1:0,long_segment:ms>=240*60000?1:0,_a:start,_z:end};
+  return {...r,worker_id:idOf(r),source_worker_id:r.worker_id||'',clipped_start:iso(start),clipped_end:ms>0?iso(end):'',seconds:ms/1000,minutes:ms/60000,raw_minutes:invalid||open?null:(z-a)/60000,active:open?1:0,provisional:forced||!open&&z>cutoff?1:0,overlap_seconds:0,anomaly_reason:reasons.join('；'),anomaly:reasons.length?1:0,long_segment:ms>=240*60000?1:0,_a:start,_z:end};
  });
  // Sweep-line: mark every intersecting clock, including other tasks hidden by later filters.
  const groups=new Map();for(const s of measured)if(s.seconds>0){const list=groups.get(s.worker_id)||[];list.push(s);groups.set(s.worker_id,list);}
@@ -91,6 +91,7 @@ export async function actualWorkReport(body,env){
   if(ss.some(s=>s.anomaly))gaps.push('人员时段异常待核');
   if(p.quantity_state==='missing')gaps.push('数量未记录，不等于零产出');
   if(p.quantity_warnings.length)gaps.push(...p.quantity_warnings);
+  if(ws.some(w=>String(w.leave_reason||'').startsWith('system_cutoff:')))gaps.push('系统04:00强制结束工时待核实，排除人效');
   const completed= j.status==='completed'&&inside(j.finished_at,range,cutoff);
   const wholly=ws.length>0&&ws.every(w=>Number.isFinite(Date.parse(w.joined_at))&&Date.parse(w.joined_at)>=range.start&&w.left_at&&Date.parse(w.left_at)>=Date.parse(w.joined_at)&&Date.parse(w.left_at)<=Math.min(range.end,cutoff));
   if(rs.some(r=>r.source!=='manual_correction'&&!inside(r.created_at,range,cutoff)))gaps.push('结果记录跨期，无法与本期工时精确配对');

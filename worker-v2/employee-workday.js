@@ -28,7 +28,7 @@ export function employeeWorkdayAccess(env){
 function personalSegments(record,segments,asOf,date){
  const from=Math.max(Date.parse(date+'T00:00:00+09:00'),Date.parse(record.inAt));
  const to=Math.min(Date.parse(date+'T00:00:00+09:00')+86400000,Date.parse(asOf),record.outAt?Date.parse(record.outAt):Infinity);
- return segments.filter(s=>s.badgeId===record.badgeId).map(s=>{
+ return segments.filter(s=>s.badgeId===record.badgeId&&!String(s.reason||'').startsWith('system_cutoff:')).map(s=>{
   const a=Math.max(from,Date.parse(s.start)),z=Math.min(to,s.end?Date.parse(s.end):Date.parse(asOf));
   return {...s,worker_id:s.sourceWorkerId||s.badgeId,clipped_start:iso(a),clipped_end:iso(z),minutes:Number.isFinite(a)&&Number.isFinite(z)?Math.max(0,(z-a)/60000):0};
  }).filter(s=>s.minutes>0);
@@ -122,7 +122,7 @@ export async function employeeWorkdays(env,{date,asOf,items,validSegments,detail
   const workday={dispatched:{total:hasEvents?dispatched.length:null,inProgress:hasEvents?inProgress:null,completed:hasEvents?completed:null,cancelled:hasEvents?cancelled:null,other:hasEvents?dispatched.length-inProgress-completed-cancelled:null,carryover:hasEvents?carryover.length:null},own:{participated:own.length,completed:own.filter(j=>j.status==='completed').length,minutes:minutes(item.totals),conflictMinutes:item.totals.conflict},reviewed:{total:hasEvents?new Set(reviewed.map(r=>r.job_id)).size:null,operationCount:hasEvents?reviewed.length:null,passed:hasEvents?reviewed.filter(r=>r.decision==='pass').length:null,returned:hasEvents?reviewed.filter(r=>r.decision==='return').length:null},documents:{total:hasEvents||tables.has('ck_plan_operation_audit')?docs.length:null},coverage:{identity:identityKnown?'exact':'unresolved',officeActorsUnmapped:true,dispatchAuditAvailable:hasEvents,unresolvedReviewOperations:unresolved,notes}};
   workday.officeDuty={minutes:minutes(attendanceReport(item.record,ownSegments.filter(s=>byJob.get(s.jobId)?.job_type==='office_order_processing'),asOf,date)),quantity_state:'time_only'};
   item.workday=workday;
-  if(personId===detailPersonId)details.set(personId,{ok:true,date,asOf,record:item.record,status:item.status,currentJobs:item.currentJobs,workday,breaks:item.breaks,...(item.totals.accounting?{attendanceAccounting:item.totals.accounting}:{}),sections:{dispatched,carryover,own,reviewed,documents:docs},flags:item.totals.flags});
+  if(personId===detailPersonId)details.set(personId,{ok:true,date,asOf,record:item.record,status:item.status,currentJobs:item.currentJobs,pendingSystemClocks:(item.segments||[]).filter(s=>String(s.reason||'').startsWith('system_cutoff:')),workday,breaks:item.breaks,...(item.totals.accounting?{attendanceAccounting:item.totals.accounting}:{}),sections:{dispatched,carryover,own,reviewed,documents:docs},flags:item.totals.flags});
  }
  return details;
 }

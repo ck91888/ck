@@ -2,6 +2,7 @@
 import test from 'node:test';import assert from 'node:assert/strict';
 import worker from '../worker-v2/index.js';import {database} from './d1-adapter.mjs';
 import {historicalPickStart} from './pick-workload-fixture.mjs';
+import {latestCutoff} from '../worker-v2/system-cutoff.js';
 const plan=()=>({order_count:23,product_quantity:137,sku_count:11,location_count:7,forklift:false});
 async function fixture(t){
  const DB=database();t.after(()=>DB.raw.close());const env={DB,SOP_ENVIRONMENT:'staging',SOP_UPGRADE_ENABLED:'true',SOP_ATTENDANCE_ENABLED:'true',SOP_ACCESS_CONTROL:'true',SOP_ADMIN_PASSWORD:'Synthetic-Pick-Only',SOP_WORK_CHAIN_ENABLED:'true',SOP_ACCEPT_NEW:'true'};let cookie='',context='';
@@ -20,6 +21,13 @@ async function fixture(t){
 const makeNeed=async(f,n,groups=false)=>f.ok('sop_need_create',{department:'bulk',source_type:'inventory',supply_chain_no:'BATCH-'+n,customer:'合成批量客户'+n,title:'小单'+n,instructions:'分别登记实际产出',...(groups?{cargo_groups:{groups:[{range:'B'+n,box_count:1}]}}:{})});
 const selected=async(f,n=2,grouped=false)=>Promise.all(Array.from({length:n},async(_,i)=>{const r=await makeNeed(f,i,grouped);return {source_type:'need',id:r.id,revision:1};}));
 const create=(f,items,ps=[f.people[0]],extra={})=>f.call('sop_bulk_batch_create',{items,workers:f.crew(ps),lead_id:ps[0]?.badgeId||'',...extra});
+test('04:00 ends batch labor and child execution without results; explicit batch resume uses one new clock',async t=>{
+ const f=await fixture(t),created=must(await create(f,await selected(f))),old=new Date(Date.parse(latestCutoff(Date.now()))-3600000).toISOString(),guard=f.DB.raw.prepare("SELECT sql FROM sqlite_master WHERE name='ck_daily_badge_join_update'").get().sql;
+ f.DB.raw.exec('DROP TRIGGER ck_daily_badge_join_update');try{f.DB.raw.prepare('UPDATE v2_ops_job_workers SET joined_at=?').run(old);}finally{f.DB.raw.exec(guard);}
+ f.DB.raw.prepare('UPDATE v2_ops_jobs SET created_at=?').run(old);f.env.SOP_DAILY_CUTOFF_ENABLED='true';
+ let d=await detail(f,created.batch_id);assert.equal(d.batch.status,'system_closed');assert.equal(d.facts.minutes,0);assert.equal(live(f).length,0);assert.ok(d.items.every(x=>x.status==='system_closed'));const before=clocks(f);
+ const result=await f.call('sop_bulk_batch_resume',{id:d.batch.id,revision:d.batch.revision,job_id:d.items[0].id});must(result);d=await detail(f,created.batch_id);assert.equal(d.batch.status,'working');assert.equal(live(f).length,1);assert.ok(d.items.every(x=>x.status==='working'));for(const s of before)assert.deepEqual(clocks(f).find(x=>x.id===s.id),s);assert.equal(f.DB.raw.prepare('SELECT count(*) n FROM v2_ops_job_results').get().n,0);
+});
 const detail=(f,id)=>f.ok('sop_bulk_batch_get',{id});
 
 const clocks=f=>f.DB.raw.prepare('SELECT * FROM v2_ops_job_workers ORDER BY joined_at,id').all();

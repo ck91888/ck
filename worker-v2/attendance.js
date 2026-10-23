@@ -9,7 +9,7 @@ import { EMPLOYEE_SCHEMA, employeeDepartments, employeeAction, isEmployee } from
 import { laborDepartment } from '../shared/labor-department.js';
 import {sourceActiveWorkers,personHasPendingReturn} from './crew-borrow.js';
 import {ensurePermanentBadges,permanentPeopleSelect,updatePermanentBadge} from './permanent-badges.js';
-import {missingAttendanceMessage} from './attendance-dispatch-identity.js';
+import {missingAttendanceMessage,attendanceIdentityLabel} from './attendance-dispatch-identity.js';
 import {attendanceOpenSegment} from './attendance-segments.js';
 import {employeeWorkdayAccess,employeeWorkdays} from './employee-workday.js';
 import {canonicalDailyBadge,isSystemDailyBadge,isAttendanceBadge,sameWorkerBadge} from '../shared/badge-identity.js';
@@ -65,6 +65,15 @@ async function findRecord(env,b,t){let r=b.id?await readDay(env,b.id):await toda
 function currentDay(r,t){if(r.day!==kstDay(t))fail('仅能操作当天工牌；补卡请联系办公室 / 오늘 명찰만 사용할 수 있습니다');}
 function validVersion(b,r){if(Number(b.version)!==r.version)fail('记录已更新，请重新打开 / 기록이 변경되었습니다');}
 const countJobs=(env,jobIds,t)=>jobIds.map(id=>q(env,"UPDATE v2_ops_jobs SET active_worker_count=(SELECT COUNT(*) FROM v2_ops_job_workers WHERE job_id=? AND left_at=''),updated_at=? WHERE id=?",id,t,id));
+const clockStatus=status=>({working:'作业中 / 작업 중',pending:'待开始 / 시작 대기',awaiting_close:'待收尾 / 마감 대기',paused:'已暂停 / 일시 중지',completed:'已完成 / 완료',cancelled:'已取消 / 취소'}[status]||'任务资料或状态待核实 / 작업 기록 확인 필요');
+const clockStart=value=>Number.isFinite(Date.parse(value))?new Date(Date.parse(value)+32400000).toISOString().slice(0,16).replace('T',' ')+' KST':'开始时间待核实 / 시작 시각 확인 필요';
+function clockReason(segment,decision){
+ if(segment.jobStatus==='completed')return '历史已完成任务仍有未结束计时 / 완료 작업의 미종료 시간 기록';
+ if(segment.jobStatus==='paused')return '暂停任务仍有未结束计时 / 중지 작업의 미종료 시간 기록';
+ if(segment.jobStatus==='cancelled')return '已取消任务仍有未结束计时 / 취소 작업의 미종료 시간 기록';
+ if(!['working','pending','awaiting_close'].includes(segment.jobStatus))return '任务资料或状态待核实 / 작업 기록 확인 필요';
+ return ({previous_shift:'上个班次任务未退出 / 이전 근무 작업 미종료',unverified_before_checkin:'计时早于本次有效签到 / 유효 출근 전 시간 기록',closed_shift:'计时所属班次已签退 / 퇴근한 근무의 시간 기록'}[decision?.reason]||'计时与本次签到归属待核实 / 출근·작업 시간 확인 필요');
+}
 async function closePerson(env,r,t,reason){
  const open=await rows(env,`SELECT w.* FROM v2_ops_job_workers w WHERE ${workerBadgeMatch('w.worker_id','?')} AND w.left_at=''`,r.worker_id);
  if(new Set(open.map(w=>w.worker_id)).size>1)fail('工牌大小写存在重复活动段，请负责人核对 / 중복 작업 기록을 확인하세요');
@@ -85,9 +94,10 @@ async function overview(env,date,t,scope='daily',detailPersonId=''){
  const start=new Date(date+'T00:00:00+09:00').toISOString(),end=new Date(Date.parse(start)+86400000).toISOString();
  const days=await rows(env,attendanceDaySelect+' WHERE d.day=?'+filter+' ORDER BY d.signed_in,d.name,d.id',date);
  const employeeTables=scope==='employee'?new Set((await rows(env,"SELECT name FROM sqlite_master WHERE type='table'")).map(x=>x.name)):null,assignmentAvailable=!employeeTables||employeeTables.has('sop_records');
- let segments=await rows(env,`SELECT w.*,j.biz_class,j.job_type,j.status AS job_status,j.display_no,${assignmentAvailable?"s.kind AS assignment_kind,s.department AS assigned_department,s.state AS assignment_state":"'' AS assignment_kind,'' AS assigned_department,'{}' AS assignment_state"} FROM v2_ops_job_workers w JOIN v2_ops_jobs j ON j.id=w.job_id ${assignmentAvailable?"LEFT JOIN sop_records s ON s.id=j.id AND s.kind IN ('task','dispatch')":''} WHERE julianday(w.joined_at)<julianday(?) AND (w.left_at='' OR julianday(w.left_at)>julianday(?))`,end,start);
+ let segments=await rows(env,`SELECT w.*,j.biz_class,j.job_type,j.status AS job_status,j.display_no,CASE WHEN j.id IS NOT NULL AND julianday(w.joined_at)<julianday(?) AND (w.left_at='' OR julianday(w.left_at)>julianday(?)) THEN 1 ELSE 0 END AS in_report_window,${assignmentAvailable?"s.kind AS assignment_kind,s.department AS assigned_department,s.state AS assignment_state":"'' AS assignment_kind,'' AS assigned_department,'{}' AS assignment_state"} FROM v2_ops_job_workers w LEFT JOIN v2_ops_jobs j ON j.id=w.job_id ${assignmentAvailable?"LEFT JOIN sop_records s ON s.id=j.id AND s.kind IN ('task','dispatch')":''} WHERE (julianday(w.joined_at)<julianday(?) AND (w.left_at='' OR julianday(w.left_at)>julianday(?))) OR (?=1 AND w.left_at='')`,end,start,end,start,date===kstDay(t)?1:0);
  if(!employeeTables||assignmentAvailable&&employeeTables.has('sop_document_numbers'))segments=await jobNumbers(env,segments,'job_id');
  for(const s of segments){let assignment={};try{assignment=JSON.parse(s.assignment_state||'{}');}catch{}s.labor_department=assignment.labor_department||'';}
+ const reportSegmentIds=new Set(segments.filter(s=>s.in_report_window).map(s=>s.id));
  const breaks=await rows(env,'SELECT b.* FROM ck_attendance_breaks b JOIN ck_attendance_days d ON d.id=b.attendance_id WHERE d.day=?',date);
  const history=await rows(env,'SELECT e.* FROM ck_attendance_events e JOIN ck_attendance_days d ON d.id=e.record_id WHERE d.day=? ORDER BY e.version',date);
  const validSegments=new Map(),output=[],deletedItems=[],blockers=await attendanceVoidBlockers(env,date),identities=await dailyIdentityMap(env,days);
@@ -96,7 +106,7 @@ async function overview(env,date,t,scope='daily',detailPersonId=''){
   const identity=identities.get(d.id),own=(identity.conflict?[]:segments.filter(x=>sameWorkerBadge(x.worker_id,d.worker_id))).map(x=>({id:x.id,jobId:x.job_id,jobNo:x.display_business_no||x.job_label,...jobDisplayMetadata(x),jobType:x.job_type,jobStatus:x.job_status,badgeId:canonicalDailyBadge(x.worker_id),sourceWorkerId:x.worker_id,department:laborDepartment(x),start:x.joined_at,end:x.left_at,reason:x.leave_reason}));
   const identityConflict=identity.conflict||new Set(own.filter(s=>!s.end).map(s=>s.sourceWorkerId)).size>1;
   const events=history.filter(e=>e.record_id===d.id),decisions=new Map(own.filter(s=>!s.end).map(s=>[s.id,attendanceOpenSegment(record,s,events,t)]));
-  const verifiedWindow=own.filter(s=>s.end||decisions.get(s.id)?.eligible);
+  const verifiedWindow=own.filter(s=>reportSegmentIds.has(s.id)&&(s.end||decisions.get(s.id)?.eligible));
   validSegments.set(d.person_id,identityConflict?[]:verifiedWindow);
   const shiftEnabled=shiftPolicyEnabled(env,date),totals=shiftEnabled?shiftAttendanceReport(record,verifiedWindow,t,date,{needsWorkVerification:identityConflict||[...decisions.values()].some(s=>!s.eligible)}):attendanceReport(record,verifiedWindow,t,date);
   if(identityConflict){totals.bulk=totals.direct_ship=totals.import=totals.other=totals.unassigned=0;totals.conflict=Math.max(0,totals.presence-totals.rest);totals.flags.push('工牌大小写身份或活动记录冲突，工时待核实 / 명찰·작업 기록 충돌');}
@@ -105,8 +115,11 @@ async function overview(env,date,t,scope='daily',detailPersonId=''){
   if([...decisions.values()].some(s=>['unverified_before_checkin','closed_shift'].includes(s.reason)))totals.flags.push('作业与有效签到不一致，待负责人核实，本日暂不计入');
   if(own.some(s=>((s.reason||'').startsWith('attendance:checkout')&&s.jobStatus!=='completed')||(s.reason||'').startsWith('attendance_stale:')))totals.flags.push('签退/跨日关闭的作业段，待负责人核实');
   const live=identityConflict?[]:own.filter(s=>!s.end&&decisions.get(s.id)?.eligible&&['working','pending','awaiting_close'].includes(s.jobStatus));
-  const resting=br.some(x=>!x.ended_at),status=identityConflict?'identity_conflict':record.outAt?'out':resting?'rest':live.length?'working':'unassigned';
-  (record.voided?deletedItems:output).push({record,totals,segments:own,breaks:record.breaks,status:record.voided?'voided':status,identityConflict,canVoid:!identityConflict&&!record.voided&&!isEmployee(d.worker_id)&&!blockers.has(d.id),voidBlockedReason:identityConflict?'工牌身份记录冲突，请负责人核对':blockers.get(d.id)||'',currentJobs:live.map(s=>({id:s.jobId,no:s.display_business_no||s.job_label,...jobDisplayMetadata({...s,job_type:s.jobType,job_department:s.department}),department:s.department})),events:events.map(e=>({action:e.action,actor:e.actor,actorName:JSON.parse(e.after_json).audit_actor_name||e.actor,at:e.at,before:JSON.parse(e.before_json),after:JSON.parse(e.after_json)}))});
+  // Raw open clocks still block dispatch even when excluded from today's labor.
+  // Surface that discrepancy without counting it as work or changing any clock.
+  const occupancyWarnings=date===kstDay(t)?own.filter(s=>s.end===''&&!live.some(l=>l.id===s.id)).map(s=>({...s,jobState:clockStatus(s.jobStatus),startedAtLabel:clockStart(s.start),reason:clockReason(s,decisions.get(s.id))})):[];
+  const resting=br.some(x=>!x.ended_at),status=identityConflict?'identity_conflict':record.outAt?'out':resting?'rest':occupancyWarnings.length?'occupancy_conflict':live.length?'working':'unassigned';
+  (record.voided?deletedItems:output).push({record,totals,segments:own,breaks:record.breaks,status:record.voided?'voided':status,identityConflict,occupancyWarnings,canVoid:!identityConflict&&!record.voided&&!isEmployee(d.worker_id)&&!blockers.has(d.id),voidBlockedReason:identityConflict?'工牌身份记录冲突，请负责人核对':blockers.get(d.id)||'',currentJobs:live.map(s=>({id:s.jobId,no:s.display_business_no||s.job_label,...jobDisplayMetadata({...s,job_type:s.jobType,job_department:s.department}),department:s.department})),events:events.map(e=>({action:e.action,actor:e.actor,actorName:JSON.parse(e.after_json).audit_actor_name||e.actor,at:e.at,before:JSON.parse(e.before_json),after:JSON.parse(e.after_json)}))});
  }
  const stale=await rows(env,"SELECT d.id,d.worker_id,d.name,d.agency,d.day,d.signed_in FROM ck_attendance_days d WHERE d.day<? AND d.signed_out='' AND "+activeAttendanceSQL('d')+filter+" ORDER BY d.day DESC LIMIT 100",date);
  const identityWarnings=segments.filter(w=>isAttendanceBadge(w.worker_id)&&(scope!=='employee'||/^EMP-/i.test(w.worker_id))&&(scope==='employee'||scope==='all'||!/^EMP-/i.test(w.worker_id))).flatMap(w=>{const candidates=days.filter(d=>sameWorkerBadge(d.worker_id,w.worker_id));const d=candidates[0],reason=candidates.length!==1||!d?'作业工牌没有唯一的当天签到，待负责人核实':identities.get(d.id)?.conflict?'工牌身份记录冲突，待负责人核实':d.voided_at?'作业关联已删除签到，待负责人核实':'';return reason?[{worker_id:w.worker_id,worker_name:w.worker_name,job_id:w.job_id,job_label:w.display_business_no||w.job_label||w.display_no||w.job_id,reason}]:[];});
@@ -267,9 +280,12 @@ export async function guardAttendance(body,env){
  ]);
  const records=new Map(days.results.map(r=>[canonicalDailyBadge(r.worker_id),r])),resting=new Set(rests.results.map(r=>canonicalDailyBadge(r.worker_id))),retained=new Set(['sop_task_people','sop_native_people'].includes(action)?busy.results.filter(r=>r.job_id===jobId).map(r=>canonicalDailyBadge(r.worker_id)):[]);
  for(const w of daily){const id=canonicalDailyBadge(w.id),record=records.get(id);if(!record)return missingAttendanceMessage(w,day);if(isEmployee(id)&&(!record.employee_enabled||!record.employee_profile))return record.name+' 已停用或未登记，不能加入作业 / 비활성 직원입니다';if(id.startsWith('DAF-')&&!record.employee_enabled&&!retained.has(id))return record.name+' 工牌已停用，不能加入新作业 / 비활성 명찰은 새 작업에 배정할 수 없습니다';if(isSystemDailyBadge(id)&&!record.employee_enabled)return record.name+' 工牌已停用，不能加入作业';if(record.signed_out)return record.name+' 已签退，不能开始作业 / 이미 퇴근했습니다';if(resting.has(id))return record.name+' 正在休息，请先结束休息 / 휴식을 먼저 종료하세요';}
- const repaired=await retireCompletedWorkClocks(env,daily);if(repaired.length)env.SOP_COMPLETED_CLOCK_REPAIRS=repaired;busy.results=(await q(env,`SELECT DISTINCT w.worker_id,w.job_id,j.job_type,j.display_no,j.status AS job_status FROM v2_ops_job_workers w LEFT JOIN v2_ops_jobs j ON j.id=w.job_id WHERE ${canonicalWorkerSQL('w.worker_id')} IN (SELECT value FROM json_each(?)) AND w.left_at=''`,ids).all()).results;
+ const repaired=await retireCompletedWorkClocks(env,daily);if(repaired.length)env.SOP_COMPLETED_CLOCK_REPAIRS=repaired;busy.results=(await q(env,`SELECT DISTINCT w.worker_id,w.job_id,w.joined_at,j.job_type,j.display_no,j.status AS job_status FROM v2_ops_job_workers w LEFT JOIN v2_ops_jobs j ON j.id=w.job_id WHERE ${canonicalWorkerSQL('w.worker_id')} IN (SELECT value FROM json_each(?)) AND w.left_at=''`,ids).all()).results;
  const occupied=new Set(busy.results.filter(r=>r.job_id!==jobId).map(r=>canonicalDailyBadge(r.worker_id)));
- for(const w of daily){const id=canonicalDailyBadge(w.id),record=records.get(id);if(new Set(busy.results.filter(r=>sameWorkerBadge(r.worker_id,id)).map(r=>r.worker_id)).size>1)return record.name+' 工牌大小写存在重复活动记录，请负责人核对';if(occupied.has(id)&&!env.SOP_CREW_BORROW?.plans.some(p=>sameWorkerBadge(p.worker.id,id))){const source=busy.results.find(r=>sameWorkerBadge(r.worker_id,id)&&r.job_id!==jobId),kind=({pick_direct:'代发拣货',other_internal:'仓库整理',bulk_op:'大货操作',unload:'卸货',load_outbound:'出库装货'})[source?.job_type]||'作业';return record.name+' 已在另一任务，请先办理交接（'+kind+(source?.display_no?' · '+source.display_no:'')+(source?.job_status==='completed'?' · 历史已完成计时缺少可靠结束记录，请核实原任务':'')+'）';}}
+ for(const w of daily){const id=canonicalDailyBadge(w.id),record=records.get(id);if(new Set(busy.results.filter(r=>sameWorkerBadge(r.worker_id,id)).map(r=>r.worker_id)).size>1)return record.name+' 工牌大小写存在重复活动记录，请负责人核对';if(occupied.has(id)&&!env.SOP_CREW_BORROW?.plans.some(p=>sameWorkerBadge(p.worker.id,id))){
+  const sources=await jobNumbers(env,busy.results.filter(r=>sameWorkerBadge(r.worker_id,id)&&r.job_id!==jobId),'job_id');
+  return record.name+' 已在另一任务，请先办理交接（'+sources.map(s=>s.job_label+' · '+clockStatus(s.job_status)+' · '+clockStart(s.joined_at)+(s.job_status==='completed'?' · 历史已完成计时缺少可靠结束记录，请核实原任务':'')).join('；')+'）\n工牌 / 명찰: '+attendanceIdentityLabel(id);
+ }}
 
  return null;
 }

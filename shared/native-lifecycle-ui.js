@@ -21,7 +21,7 @@
  window.CKClaimOwner=(record,onSaved)=>CKTransferOwner(record,onSaved,true);
  window.CKToggleNativePause=async function(detail,onSaved){
   if(!detail?.can_manage_dispatch)throw Error('请由本任务派审员操作 / 담당자가 처리하세요');
-  const state=JSON.parse(detail.dispatch.state),paused=detail.job.status==='paused',id=detail.job.id;
+  const state=JSON.parse(detail.dispatch.state),paused=['paused','system_closed'].includes(detail.job.status),id=detail.job.id;
   let request=null;
   if(paused){
    const workers=state.paused_workers||[];
@@ -42,21 +42,21 @@
   bar.querySelector('[data-transfer]').onclick=async()=>{try{const r=await detail(),state=JSON.parse(r.dispatch.state);await CKTransferOwner({id:r.job.id,revision:r.dispatch.revision,owner_id:state.owner_id},()=>goPage('home'));}catch(e){alert(e.message);}};
   function accept(r){
    if(!r?.can_manage_dispatch||r.job?.id!==window._activeJobId)return;
-   current=r;const page=$('page-'+window._currentPage);if(!page||!['pending','working','awaiting_close','paused'].includes(r.job.status))return;
+   current=r;const page=$('page-'+window._currentPage);if(!page||!['pending','working','awaiting_close','paused','system_closed'].includes(r.job.status))return;
    const state=JSON.parse(r.dispatch?.state||'{}');
    bar.querySelector('[data-transfer]').hidden=state.owner_id!==CKSession.user?.id||CKSession.user?.can_dispatch===false;
-   bar.querySelector('[data-pause]').textContent=r.job.status==='paused'?'恢复整个任务 / 전체 작업 재개':'暂停整个任务 / 전체 작업 중지';bar.querySelector('[data-people]').disabled=r.job.status==='paused';window.CKSetNativeLead?.(state.workers?.find(w=>w.id===state.lead_id)||state.last_lead);
+   bar.querySelector('[data-pause]').textContent=['paused','system_closed'].includes(r.job.status)?'恢复整个任务 / 전체 작업 재개':'暂停整个任务 / 전체 작업 중지';bar.querySelector('[data-people]').disabled=['paused','system_closed'].includes(r.job.status);window.CKSetNativeLead?.(state.workers?.find(w=>w.id===state.lead_id)||state.last_lead);
    if(bar.parentElement!==page){const top=page.querySelector('.topbar');if(top)top.after(bar);else page.prepend(bar);}bar.hidden=false;
-   bar.querySelector('[data-job]').textContent=window.CKDocumentLabels.jobSummary(r)+(r.job.status==='paused'?' · 已暂停 / 중지: '+(state.pause_reason||''):'');
+   bar.querySelector('[data-job]').textContent=window.CKDocumentLabels.jobSummary(r)+(['paused','system_closed'].includes(r.job.status)?' · 已暂停 / 중지: '+(state.pause_reason||''):'');
    bar.querySelector('[data-crew]').textContent='正在作业 / 작업 중: '+(r.workers.filter(w=>!w.left_at).map(w=>w.worker_name).join('、')||'暂无人员 / 없음')+((r.borrowed_out||[]).length?' · 借出 / 지원 중: '+r.borrowed_out.map(b=>b.worker_name).join('、'):'');
    // The same response updates both the shared controls and original operation panels.
    for(const id of ['unloadWorkers','inboundWorkers','inboundReturnWorkers','idWorkers','loadWorkers','osoWorkers','pickWorkers','bulkWorkers','gjWorkers','gjIdleWorkers','vsWorkers'])if($(id))renderWorkers(id,r.workers);
    if($('gjWorkerCount'))$('gjWorkerCount').textContent=r.job.active_worker_count+' 人/명';
    if(window._currentPage==='generic_job'){
     const card=$('gjActiveTitle')?.closest('.card'),status=card?.querySelector('div[style*="flex-wrap"]>span>span');
-    if(status)status.textContent=r.job.status==='paused'?'已暂停 / 중지':r.job.active_worker_count?'作业中 / 작업 중':'当前无人计时 / 현재 작업 인원 없음';
+    if(status)status.textContent=['paused','system_closed'].includes(r.job.status)?'已暂停 / 중지':r.job.active_worker_count?'作业中 / 작업 중':'当前无人计时 / 현재 작업 인원 없음';
     if(card?.lastElementChild)card.lastElementChild.textContent='仅实际在岗人员累计有效工时；休息和整任务暂停不计入。 / 실제 작업 구간만 합산합니다.';
-    for(const id of ['gjFinishBtn','gjLeaveBtn'])if($(id))$(id).disabled=r.job.status==='paused';
+    for(const id of ['gjFinishBtn','gjLeaveBtn'])if($(id))$(id).disabled=['paused','system_closed'].includes(r.job.status);
    }
    const pick=$('pickWorkingPicker');if(r.job.job_type==='pick_direct'&&pick)pick.textContent=r.workers.filter(w=>!w.left_at).map(w=>w.worker_name).join('、')||'—';
   }

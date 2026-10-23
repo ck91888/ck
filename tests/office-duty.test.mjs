@@ -1,7 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {officeDutyFixture} from './office-duty-fixture.mjs';
+import {latestCutoff} from '../worker-v2/system-cutoff.js';
 const NativeDate=Date;
+test('daily cutoff releases office duty, excludes unverified seconds and permits an explicit fresh resume',async t=>{
+ const f=await officeDutyFixture(t),started=await f.change('start'),cut=Date.parse(latestCutoff(Date.now())),old=new Date(cut-3600000).toISOString(),guard=f.DB.raw.prepare("SELECT sql FROM sqlite_master WHERE name='ck_daily_badge_join_update'").get().sql;
+ f.DB.raw.exec('DROP TRIGGER ck_daily_badge_join_update');try{f.DB.raw.prepare('UPDATE v2_ops_job_workers SET joined_at=? WHERE job_id=?').run(old,started.job.id);}finally{f.DB.raw.exec(guard);}
+ f.DB.raw.prepare('UPDATE v2_ops_jobs SET created_at=? WHERE id=?').run(old,started.job.id);f.env.SOP_DAILY_CUTOFF_ENABLED='true';
+ let ended=await f.get();assert.equal(ended.job.status,'system_closed');assert.equal(ended.job.seconds,0);assert.equal(ended.job.needs_review,true);const pending=f.clocks()[0];assert.equal(pending.left_at,new Date(cut).toISOString());
+ const date=new Date(Date.parse(old)+9*3600000).toISOString().slice(0,10),performance=await f.ok('office','v2_dashboard_management_summary',{start_date:date,end_date:date});assert.equal(performance.summary.qty_per_hour,null);assert.equal(performance.summary.boxes_per_hour,null);assert.equal(performance.summary.efficiency_needs_review,true);
+ const correction={segment_id:pending.id,expected_end:pending.left_at,end_at:new Date(Date.parse(old)+1800000).toISOString(),reason:'Synthetic verified supervisor log'};assert.equal((await f.call('A','sop_system_cutoff_correct',correction)).ok,false);await f.ok('office','sop_system_cutoff_correct',correction);ended=await f.get();assert.equal(ended.job.seconds,1800);const before=f.clocks()[0];
+ const resumed=await f.change('resume',ended);assert.equal(resumed.job.status,'working');assert.equal(f.clocks().filter(s=>!s.left_at).length,1);assert.deepEqual(f.clocks().find(s=>s.id===before.id),before);assert.equal(f.DB.raw.prepare('SELECT count(*) n FROM v2_ops_job_results').get().n,0);
+});
 function clock(t,value='2026-10-22T08:00:00+09:00'){
  let n=NativeDate.parse(value);globalThis.Date=class extends NativeDate{constructor(...args){super(...(args.length?args:[n]));}static now(){return n;}};t.after(()=>{globalThis.Date=NativeDate;});return value=>{n=NativeDate.parse(value);};
 }

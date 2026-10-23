@@ -41,7 +41,7 @@ const staging={async fetch(request,env,ctx){
  }catch(error){return response({ok:false,error:'测试维护状态读取失败，请稍后重试 / 잠시 후 다시 시도하세요'},503);}
  return app.fetch(request,env,ctx);
 }};
-export default {async fetch(request,env,ctx){
+export default {async scheduled(controller,env,ctx){return app.scheduled(controller,env,ctx);},async fetch(request,env,ctx){
  if(!isApiPath(new URL(request.url).pathname))return staging.fetch(request,env,ctx);
  const started=performance.now(),result=await staging.fetch(request,env,ctx);
  const headers=new Headers(result.headers);

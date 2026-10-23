@@ -6,6 +6,7 @@ import * as documentCode from '../shared/document-code.js';
 import * as badgeIdentity from '../shared/badge-identity.js';
 import * as courierRules from '../shared/courier-rules.js';
 import * as laborDepartment from '../shared/labor-department.js';
+import * as internalOperations from '../shared/internal-operations.js';
 const runtime=process.env.CK_JSDOM_MODULE?await import(process.env.CK_JSDOM_MODULE):null;
 const assets=path.resolve('worker-v2/.sop-staging-assets');
 async function fixture(){
@@ -19,9 +20,10 @@ async function fixture(){
   const resources={interceptors:[requestInterceptor(req=>{const u=new URL(req.url);if(u.origin!=='https://fixture.test')throw Error('External request rejected: '+u.origin);let source=fs.readFileSync(path.join(assets,u.pathname),'utf8');source=source.replace(/import\('\/shared\/([a-z-]+)\.js'\)/g,(_m,name)=>'Promise.resolve(window.__fixtureModules["'+name+'"])');return new Response(source,{headers:{'Content-Type':u.pathname.endsWith('.js')?'application/javascript':'text/css'}});})]};
   const u=new URL(url,'https://fixture.test');const html=fs.readFileSync(path.join(assets,u.pathname,'index.html'),'utf8');
   const dom=new JSDOM(html,{url:u.href,runScripts:'dangerously',resources,virtualConsole:vc,pretendToBeVisual:true,beforeParse(w){
+   w.structuredClone=structuredClone;
    for(const [k,v] of Object.entries(storage))w.sessionStorage.setItem(k,v);
    w.CKDocumentCode=documentCode;
-   w.__fixtureModules={'document-code':documentCode,'badge-identity':badgeIdentity,'courier-rules':courierRules,'labor-department':laborDepartment};
+   w.__fixtureModules={'document-code':documentCode,'badge-identity':badgeIdentity,'courier-rules':courierRules,'labor-department':laborDepartment,'internal-operations':internalOperations};
    w.fetch=async(url,options={})=>{const endpoint=new URL(url,w.location.href);assert.equal(endpoint.origin,'https://fixture.test');assert.ok(['/api','/001/api','/attendance/api'].includes(endpoint.pathname));return request(JSON.parse(options.body));};
    w.alert=message=>errors.push('alert: '+message);w.confirm=()=>true;w.prompt=()=>{throw Error('Unexpected login/name prompt')};w.scrollTo=()=>{};w.matchMedia=()=>({matches:false,addEventListener(){},removeEventListener(){}});
    w.HTMLDialogElement.prototype.showModal=function(){this.open=true};w.HTMLDialogElement.prototype.close=function(){this.open=false};
@@ -34,6 +36,35 @@ async function fixture(){
 }
 async function until(condition,errors=[]){for(let i=0;i<100;i++){if(condition())return;await new Promise(r=>setTimeout(r,10));}throw Error('DOM condition timeout: '+errors.join('; '));}
 const opts={skip:!runtime};
+test('change-order conflict restores the start button and crew; retry and refresh never duplicate work',opts,async()=>{
+ const f=await fixture(),call=async(action,data={})=>{const r=await(await f.request({action,client_req_id:crypto.randomUUID(),...data})).json();assert.equal(r.ok,true,JSON.stringify(r));return r;};
+ const person=(await call('sop_attendance_checkin',{name:'Synthetic change-order worker',agency:'동인천'})).record;
+ const start=new Date().toISOString();
+ f.env.DB.raw.prepare("INSERT INTO v2_ops_jobs(id,job_type,biz_class,status) VALUES('SYNTHETIC-OLD','change_order','direct_ship','completed')").run();
+ f.env.DB.raw.prepare("INSERT INTO v2_ops_job_workers(id,job_id,worker_id,worker_name,joined_at) VALUES('SYNTHETIC-OLD-CLOCK','SYNTHETIC-OLD',?,?,?)").run(person.badgeId,person.name,start);
+ const snapshot=()=>f.env.DB.raw.prepare("SELECT * FROM v2_ops_job_workers WHERE id='SYNTHETIC-OLD-CLOCK'").get(),before=snapshot();
+ const p=await f.page('/001/');try{
+  p.w.goPage('generic_job',{flow_stage:'outbound',biz_class:'direct_ship',job_type:'change_order',title:'换单操作 / 송장 교체'});
+  const button=p.d.querySelector('#gjStateIdle button[onclick*="startGenericJob"]');assert.ok(button);
+  const press=()=>p.w.startGenericJob(button);press();press();await until(()=>p.d.querySelector('dialog[open] [data-staff-add]'),p.errors);
+  assert.equal(button.disabled,true);assert.equal(p.d.querySelectorAll('dialog[open] [data-staff-add]').length,1);
+  let form=p.d.querySelector('dialog[open] form');form.querySelector('[data-staff-badge]').value=person.badgeId+'|'+person.name;form.querySelector('[data-staff-add]').click();await until(()=>form.querySelector('[data-staff-lead]').value,p.errors);
+  form.elements.minutes.value='17';form.querySelector('[type=submit]').click();await until(()=>p.errors.some(x=>x.includes('另一任务')),p.errors);await until(()=>!button.disabled,p.errors);
+  assert.deepEqual(snapshot(),before);assert.equal(f.env.DB.raw.prepare("SELECT count(*) n FROM v2_ops_jobs WHERE status='working'").get().n,0);
+  press();await until(()=>p.d.querySelector('dialog[open] [data-staff-add]'),p.errors);form=p.d.querySelector('dialog[open] form');
+  assert.match(form.querySelector('[data-staff-people]').textContent,/Synthetic change-order worker/);assert.equal(form.querySelector('[data-staff-lead]').value,person.badgeId);assert.equal(form.elements.minutes.value,'17');
+  // A verified completion timestamp enables the existing audited repair.
+  f.env.DB.raw.prepare("UPDATE v2_ops_jobs SET finished_at=? WHERE id='SYNTHETIC-OLD'").run(new Date().toISOString());
+  const request=p.w.CKSession.request,attempts=[];let lose=true;p.w.CKSession.request=async(action,data)=>{const r=await request(action,data);if(action==='sop_native_start'){attempts.push(JSON.stringify(data));if(lose){lose=false;throw new TypeError('Synthetic committed response lost');}}return r;};
+  form.querySelector('[type=submit]').click();await until(()=>p.errors.some(x=>x.includes('response lost')),p.errors);await until(()=>!button.disabled,p.errors);
+  press();await until(()=>attempts.length===2&&!button.disabled,p.errors);assert.equal(attempts[0],attempts[1]);assert.equal(p.d.querySelector('dialog[open] [data-staff-add]'),null);
+  assert.equal(f.env.DB.raw.prepare("SELECT count(*) n FROM v2_ops_job_workers WHERE left_at='' AND worker_id=?").get(person.badgeId).n,1);
+  assert.equal(f.env.DB.raw.prepare('SELECT count(*) n FROM ck_completed_clock_repairs').get().n,1);
+  const jobs=f.env.DB.raw.prepare('SELECT * FROM v2_ops_jobs ORDER BY id').all();
+  const refreshed=await f.page('/001/');try{await refreshed.w.loadDispatchTasks();assert.deepEqual(f.env.DB.raw.prepare('SELECT * FROM v2_ops_jobs ORDER BY id').all(),jobs);assert.deepEqual(refreshed.errors,[]);}finally{refreshed.w.close();}
+  assert.equal(p.errors.filter(x=>x.startsWith('alert:')).length,2);
+ }finally{p.w.close();f.env.DB.raw.close();}
+});
 test('shared batch file controls confirm whole-plan removal, preserve retry identity and restore localized rows',opts,async()=>{
  const f=await fixture();f.env.SOP_WORK_CHAIN_ENABLED='true';
  const call=async(action,b={})=>{const r=await(await f.request({action,client_req_id:crypto.randomUUID(),...b})).json();assert.equal(r.ok,true,r.error);return r;};

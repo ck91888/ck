@@ -42,6 +42,7 @@ import {handleCourier,validateCourierLines,courierPlanStatements,courierProgress
 import {ensureCourierClaims} from './courier-claims.js';
 import { inboundFlowEnabled, inboundCode, inboundCodes, inboundReferenceValue, inboundCodeProgress, selectInboundReference, validateInboundCode, resolveInboundPlan, putawayTaskBiz, completeUnloadedDispositions, bindInboundCode, inboundLabels, inboundReferenceData, departmentCodes, putawayClasses } from './inbound-flow.js';
 import { handleAttendance, guardAttendance, ensureAttendance, attendanceEnabled } from './attendance.js';
+import {runSystemCutoff,guardSystemCutoffMutation,correctSystemCutoff,forcedClock} from './system-cutoff.js';
 import {normalizeDailyBadgeRequest,workerBadgeMatch,canonicalWorkerSQL,resolveDailyBadge} from './daily-badge-identity.js';
 import {canonicalDailyBadge,sameWorkerBadge} from '../shared/badge-identity.js';
 import {crewBorrowEnabled,ensureCrewBorrow,prepareCrewBorrow,crewAvailability,crewStatus,crewRetry,canCrewDestination,reconcileCrewReturns,reconcilePersonReturns,borrowedOut} from './crew-borrow.js';
@@ -438,6 +439,7 @@ async function sumJobWorkerMinutes(env, jobId, fallbackEndAt, closeOpen, prefetc
     let leftAt = closed ? r.left_at : fallback;
     let leftMs = Date.parse(leftAt);
     let minutes = 0;
+    if (forcedClock(r)) { segments.push({...r,minutes_worked:0,needs_review:true});continue; }
     if (closed) {
       const stored = Number(r.minutes_worked);
       if (Number.isFinite(stored) && stored > 0) {
@@ -3855,8 +3857,8 @@ async function markInboundBizTaskCompleted(env, plan_id, biz_class, payload) {
     if(progress?.total>1){
       if(progress.completed<progress.total)return;
       const ids=progress.items.map(x=>x.job_id);
-      const workers=(await env.DB.prepare('SELECT worker_name,minutes_worked,joined_at FROM v2_ops_job_workers WHERE job_id IN ('+ids.map(()=>'?').join(',')+')').bind(...ids).all()).results||[];
-      payload={...payload,worker_names:[...new Set(workers.map(x=>x.worker_name).filter(Boolean))].join('、'),total_minutes:Math.round(workers.reduce((s,x)=>s+(Number(x.minutes_worked)||0),0)),started_at:workers.map(x=>x.joined_at).filter(Boolean).sort()[0]||payload?.started_at};
+      const workers=(await env.DB.prepare('SELECT worker_name,minutes_worked,joined_at,leave_reason FROM v2_ops_job_workers WHERE job_id IN ('+ids.map(()=>'?').join(',')+')').bind(...ids).all()).results||[];
+      payload={...payload,worker_names:[...new Set(workers.map(x=>x.worker_name).filter(Boolean))].join('、'),total_minutes:Math.round(workers.reduce((s,x)=>s+(forcedClock(x)?0:Number(x.minutes_worked)||0),0)),started_at:workers.map(x=>x.joined_at).filter(Boolean).sort()[0]||payload?.started_at};
     }
   }
   const t = now();
@@ -4143,7 +4145,7 @@ route("v2_inbound_plan_detail", async (body, env) => {
       env.DB.prepare('SELECT * FROM v2_inbound_plan_lines WHERE plan_id=? ORDER BY line_no').bind(id),
       env.DB.prepare("SELECT * FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? ORDER BY created_at DESC").bind(id),
       inboundFlowEnabled(env)?inboundAttachmentRead(env,id):env.DB.prepare("SELECT * FROM v2_attachments WHERE related_doc_type='inbound_plan' AND related_doc_id=? ORDER BY created_at DESC").bind(id),
-      env.DB.prepare('SELECT job_id,worker_name,minutes_worked,left_at FROM v2_ops_job_workers WHERE job_id IN ('+inPlan+') ORDER BY joined_at').bind(id),
+      env.DB.prepare('SELECT job_id,worker_name,minutes_worked,left_at,leave_reason FROM v2_ops_job_workers WHERE job_id IN ('+inPlan+') ORDER BY joined_at').bind(id),
       env.DB.prepare('SELECT * FROM (SELECT job_id,result_lines_json,diff_note,remark,result_json,created_at,ROW_NUMBER() OVER (PARTITION BY job_id ORDER BY created_at DESC,rowid DESC) AS latest FROM v2_ops_job_results WHERE job_id IN ('+inPlan+')) WHERE latest=1').bind(id),
       env.DB.prepare('SELECT job_id,result_json FROM ck_unload_plan_links WHERE plan_id=?').bind(id),
       env.DB.prepare('SELECT id, display_no, status, customer, biz_class, outbound_mode, expected_ship_at, planned_box_count, planned_pallet_count, order_date, uses_stock_operation FROM v2_outbound_orders WHERE source_inbound_plan_id=? ORDER BY created_at ASC').bind(id),
@@ -4176,7 +4178,7 @@ route("v2_inbound_plan_detail", async (body, env) => {
   for (const job of (jobs.results || [])) {
     const workerRows = workersByJob.get(job.id) || [];
     const names = [...new Set(workerRows.map(w => w.worker_name).filter(Boolean))];
-    const totalMin = workerRows.reduce((s, w) => s + (Number(w.minutes_worked) || 0), 0);
+    const totalMin = workerRows.reduce((s, w) => s + (forcedClock(w)?0:Number(w.minutes_worked)||0), 0);
     const maxLeft = workerRows.reduce((m, w) => (w.left_at && w.left_at > m ? w.left_at : m), "");
     const latestResult = resultsByJob.get(job.id);
 
@@ -5937,11 +5939,11 @@ route("v2_inbound_job_finish", async (body, env) => {
         if (biz_for_task) {
           // 汇总参与人员 + 总分钟，写入 biz_task
           const wkRs = await env.DB.prepare(
-            "SELECT worker_name, minutes_worked, joined_at FROM v2_ops_job_workers WHERE job_id=? ORDER BY joined_at"
+            "SELECT worker_name, minutes_worked, joined_at,leave_reason FROM v2_ops_job_workers WHERE job_id=? ORDER BY joined_at"
           ).bind(job_id).all();
           const wkRows = wkRs.results || [];
           const names = [...new Set(wkRows.map(w => w.worker_name).filter(Boolean))].join('、');
-          const total_min = Math.round(wkRows.reduce((s, w) => s + (Number(w.minutes_worked) || 0), 0));
+          const total_min = Math.round(wkRows.reduce((s, w) => s + (forcedClock(w)?0:Number(w.minutes_worked)||0), 0));
           const startedAt = wkRows.reduce((m, w) => (!m || (w.joined_at && w.joined_at < m)) ? w.joined_at : m, '');
           await markInboundBizTaskCompleted(env, pid, biz_for_task, {
             job_id,
@@ -8091,7 +8093,7 @@ route("v2_pick_job_finalize", async (body, env) => {
     const totalsRs = await env.DB.prepare(
       `SELECT COUNT(DISTINCT worker_id) as worker_count,
               COUNT(*) as pwd_count,
-              COALESCE(SUM(minutes_worked), 0) as total_minutes
+              COALESCE(SUM(CASE WHEN leave_reason LIKE 'system_cutoff:%' THEN 0 ELSE minutes_worked END), 0) as total_minutes
        FROM v2_ops_job_workers WHERE job_id=?`
     ).bind(job_id).first();
     const result_id = "RES-" + uid();
@@ -8585,7 +8587,7 @@ route("v2_order_ops_job_list", async (body, env) => {
 
   const [workersRs, pickDocsRs, resultsRs] = await Promise.all([
     env.DB.prepare(
-      `SELECT job_id, worker_name, minutes_worked FROM v2_ops_job_workers WHERE job_id IN (${placeholders}) ORDER BY joined_at`
+      `SELECT job_id, worker_name, minutes_worked,leave_reason FROM v2_ops_job_workers WHERE job_id IN (${placeholders}) ORDER BY joined_at`
     ).bind(...jobIds).all(),
     env.DB.prepare(
       `SELECT job_id, pick_doc_no FROM v2_ops_job_pick_docs WHERE job_id IN (${placeholders}) ORDER BY created_at`
@@ -8613,7 +8615,7 @@ route("v2_order_ops_job_list", async (body, env) => {
   const items = jobs.map(job => {
     const workerRows = workersByJob[job.id] || [];
     const names = [...new Set(workerRows.map(w => w.worker_name).filter(Boolean))];
-    const totalMin = workerRows.reduce((s, w) => s + (Number(w.minutes_worked) || 0), 0);
+    const totalMin = workerRows.reduce((s, w) => s + (forcedClock(w)?0:Number(w.minutes_worked)||0), 0);
     const pickDocs = (job.job_type === 'pick_direct') ? (pickDocsByJob[job.id] || []) : [];
     const lr = latestResultByJob[job.id];
     let resultData = null, remark = "";
@@ -10514,7 +10516,7 @@ route("v2_dashboard_order_list", async (body, env) => {
       j.id, j.display_no, j.related_doc_type, j.related_doc_id, j.linked_outbound_order_id,
       j.flow_stage, j.biz_class, j.job_type, j.status, j.shared_result_json, j.created_at, j.updated_at,
       (SELECT COUNT(DISTINCT w2.worker_id) FROM v2_ops_job_workers w2 WHERE w2.job_id=j.id) AS worker_count,
-      (SELECT COALESCE(SUM(w2.minutes_worked),0) FROM v2_ops_job_workers w2 WHERE w2.job_id=j.id) AS total_minutes,
+      (SELECT COALESCE(SUM(CASE WHEN w2.leave_reason LIKE 'system_cutoff:%' THEN 0 ELSE w2.minutes_worked END),0) FROM v2_ops_job_workers w2 WHERE w2.job_id=j.id) AS total_minutes,
       (SELECT MIN(w2.joined_at) FROM v2_ops_job_workers w2 WHERE w2.job_id=j.id) AS started_at,
       (SELECT MAX(w2.left_at) FROM v2_ops_job_workers w2 WHERE w2.job_id=j.id AND w2.left_at!='') AS ended_at
     FROM v2_ops_jobs j ${where}
@@ -10766,7 +10768,7 @@ route("v2_dashboard_order_export", async (body, env) => {
     const ps = pickByJob[j.id] || [];
 
     const workerNames = [...new Set(ws.map(w => w.worker_name).filter(Boolean))].join('、');
-    const total_minutes = round1(ws.reduce((s, w) => s + (Number(w.minutes_worked) || 0), 0));
+    const total_minutes = round1(ws.reduce((s, w) => s + (forcedClock(w)?0:Number(w.minutes_worked)||0), 0));
     const started_at_iso = ws.reduce((m, w) => (!m || (w.joined_at && w.joined_at < m)) ? w.joined_at : m, '');
     const ended_at_iso = ws.reduce((m, w) => (w.left_at && w.left_at > m) ? w.left_at : m, '');
 
@@ -10995,7 +10997,8 @@ route("v2_dashboard_workhour_summary", async (body, env) => {
     const joinedKstDate = kstDateOf(r.joined_at);
     const crossDayActive = !closed && joinedKstDate && joinedKstDate < todayKst;
     let anomaly = 0, anomaly_reason = '';
-    if (counted.invalid) { anomaly=1; anomaly_reason='时间无效或倒序'; }
+    if (forcedClock(r)) { anomaly=1;anomaly_reason='系统04:00强制结束，工时待核实，排除有效工时与人效'; }
+    else if (counted.invalid) { anomaly=1; anomaly_reason='时间无效或倒序'; }
     else if (closed && rawMinutes <= 0) { anomaly = 1; anomaly_reason = '已结束但工时为 0/负'; }
     else if (closed && rawMinutes >= 720) { anomaly = 1; anomaly_reason = '已结束 ≥12 小时'; }
     else if (!closed && rawMinutes >= 720) { anomaly = 1; anomaly_reason = '进行中 ≥12 小时'; }
@@ -11197,7 +11200,7 @@ route("v2_dashboard_management_summary", async (body, env) => {
   if (endRange)   { where += " AND julianday(w.joined_at)<julianday(?)"; binds.push(endRange.endUtc); }
 
   const segRs = await env.DB.prepare(`
-    SELECT w.id,w.job_id, w.worker_id, w.worker_name, w.joined_at, w.left_at, w.minutes_worked,
+    SELECT w.id,w.job_id, w.worker_id, w.worker_name, w.joined_at, w.left_at, w.minutes_worked,w.leave_reason,
            j.flow_stage, j.biz_class, j.job_type
     FROM v2_ops_job_workers w
     JOIN v2_ops_jobs j ON j.id = w.job_id
@@ -11222,6 +11225,7 @@ route("v2_dashboard_management_summary", async (body, env) => {
   let total_minutes = 0, anomaly_count = 0;
   const workerMins = Object.create(null), jobTypeMins = Object.create(null), workerJobTypeMins = Object.create(null), workerNames=Object.create(null),nameIds=new Map();
   const measured=measureSegments(segs,range,actual?Date.parse(actual.metadata.as_of):Date.now());
+  const cutoffWorkers=new Set(measured.filter(forcedClock).map(reportWorkerId)),cutoffTypes=new Set(measured.filter(forcedClock).map(r=>r.job_type||'--'));
   measured.forEach(r => {
     const closed = !!r.left_at;
     const counted={invalid:r.anomaly,raw_minutes:r.raw_minutes},m=r.minutes;
@@ -11274,8 +11278,9 @@ route("v2_dashboard_management_summary", async (body, env) => {
       total_hours: hours,
       wms_qty: qty,
       wms_boxes: boxes,
-      qty_per_hour: hours > 0 ? Math.round((qty / hours) * 10) / 10 : 0,
-      boxes_per_hour: hours > 0 ? Math.round((boxes / hours) * 10) / 10 : 0
+      ...(cutoffTypes.has(jt)?{efficiency_needs_review:true}:{}),
+      qty_per_hour: cutoffTypes.has(jt)?null:hours > 0 ? Math.round((qty / hours) * 10) / 10 : 0,
+      boxes_per_hour: cutoffTypes.has(jt)?null:hours > 0 ? Math.round((boxes / hours) * 10) / 10 : 0
     };
   }).sort((a, b) => b.total_minutes - a.total_minutes);
 
@@ -11295,8 +11300,9 @@ route("v2_dashboard_management_summary", async (body, env) => {
       total_hours: hours,
       wms_qty: qty,
       wms_boxes: boxes,
-      qty_per_hour: hours > 0 ? Math.round((qty / hours) * 10) / 10 : 0,
-      boxes_per_hour: hours > 0 ? Math.round((boxes / hours) * 10) / 10 : 0
+      ...(cutoffWorkers.has(wk)?{efficiency_needs_review:true}:{}),
+      qty_per_hour: cutoffWorkers.has(wk)?null:hours > 0 ? Math.round((qty / hours) * 10) / 10 : 0,
+      boxes_per_hour: cutoffWorkers.has(wk)?null:hours > 0 ? Math.round((boxes / hours) * 10) / 10 : 0
     };
   }).sort((a, b) => b.total_minutes - a.total_minutes);
 
@@ -11313,8 +11319,9 @@ route("v2_dashboard_management_summary", async (body, env) => {
       total_hours,
       total_qty: Math.round(total_qty * 10) / 10,
       total_boxes: Math.round(total_boxes * 10) / 10,
-      qty_per_hour: total_hours > 0 ? Math.round((total_qty / total_hours) * 10) / 10 : 0,
-      boxes_per_hour: total_hours > 0 ? Math.round((total_boxes / total_hours) * 10) / 10 : 0,
+      ...(cutoffWorkers.size?{efficiency_needs_review:true,efficiency_reason:'系统强制结束工时待核实，不混合计算WMS人效'}:{}),
+      qty_per_hour: cutoffWorkers.size?null:total_hours > 0 ? Math.round((total_qty / total_hours) * 10) / 10 : 0,
+      boxes_per_hour: cutoffWorkers.size?null:total_hours > 0 ? Math.round((total_boxes / total_hours) * 10) / 10 : 0,
       worker_count: Object.keys(workerMins).length,
       anomaly_count
     },
@@ -12771,6 +12778,7 @@ route('v2_003_purchase_order_close', async (body, env) => {
 // Worker fetch entry
 // =====================================================
 export default {
+  async scheduled(controller,env){await ensureMigrated(env.DB);return runSystemCutoff(env,Math.max(Number(controller.scheduledTime)||0,Date.now()));},
   async fetch(request, env) {
     if (request.method === "OPTIONS") {
       return new Response(null, { headers: CORS });
@@ -12783,6 +12791,7 @@ export default {
       await ensureInboundDocuments(env);
       await ensureBatchMaterialState(env);
       await ensureReferenceHistory(env);
+      await runSystemCutoff(env);
     } catch (e) {
       return json({ ok: false, error: "migration failed: " + e.message }, 500);
     }
@@ -12851,6 +12860,8 @@ export default {
     await officeOperationContext(request,env);
     const operatorResponse=await confirmOfficeOperator(body,env,request);if(operatorResponse)return operatorResponse;
     const operationBlock=officeOperationGuard(body,env,request);if(operationBlock)return operationBlock;
+    if(action==='sop_system_cutoff_correct'){try{return json(await correctSystemCutoff(body,env));}catch(e){return json({ok:false,error:e.message},409);}}
+    try{await guardSystemCutoffMutation(body,env);}catch(e){return json({ok:false,error:e.message},409);}
     await ensureDocumentNumbers(env);
     await ensureLoadSchema(env);
     const authResponse = await sessionAction(body, env,request);

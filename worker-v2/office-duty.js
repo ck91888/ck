@@ -23,7 +23,7 @@ async function snapshot(e,p,id){
  const segments=job?await rows(e,'SELECT id,joined_at,left_at,leave_reason FROM v2_ops_job_workers WHERE job_id=? ORDER BY joined_at,id',job.id):[];
  const loans=job?await borrowedOut(e,job.id):[];
  const asOf=new Date().toISOString();
- return {ok:true,person:{id:p.id,badgeId:p.badge_id,name:p.name,department:p.department,department_label:employeeDepartments[p.department],enabled:!!p.enabled},job:job?{id:job.id,status:job.status,revision:job.revision,department:JSON.parse(job.state).labor_department,segments,borrowed:loans.length>0,seconds:segments.reduce((n,s)=>n+Math.max(0,(Date.parse(s.left_at||asOf)-Date.parse(s.joined_at))/1000),0)}:null,as_of:asOf};
+ return {ok:true,person:{id:p.id,badgeId:p.badge_id,name:p.name,department:p.department,department_label:employeeDepartments[p.department],enabled:!!p.enabled},job:job?{id:job.id,status:job.status,revision:job.revision,department:JSON.parse(job.state).labor_department,segments,needs_review:segments.some(s=>String(s.leave_reason||'').startsWith('system_cutoff:')),borrowed:loans.length>0,seconds:segments.filter(s=>!String(s.leave_reason||'').startsWith('system_cutoff:')).reduce((n,s)=>n+Math.max(0,(Date.parse(s.left_at||asOf)-Date.parse(s.joined_at))/1000),0)}:null,as_of:asOf};
 }
 export async function handleOfficeDuty(b,e){
  const u=e.SOP_REQUEST_USER;
@@ -52,7 +52,7 @@ export async function handleOfficeDuty(b,e){
   before=JSON.parse(record.state);
   if(record.revision!==Number(b.revision))fail('任务已变化，请刷新后核对');
   if((await borrowedOut(e,id)).length)fail('该职员正在借调或待归还，请先在原装卸任务办理归还');
-  const allowed=b.action==='sop_office_duty_resume'?['paused','awaiting_close']:b.action==='sop_office_duty_pause'?['working']:['working','paused','awaiting_close'];
+  const allowed=b.action==='sop_office_duty_resume'?['paused','system_closed','awaiting_close']:b.action==='sop_office_duty_pause'?['working']:['working','paused','awaiting_close'];
   if(!allowed.includes(job.status))fail('当前状态不能执行此操作，请刷新');
  }
  const status=open?'working':b.action==='sop_office_duty_pause'?'paused':'completed',revision=start?0:record.revision;

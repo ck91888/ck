@@ -48,3 +48,5 @@ dialog.ck-workflow{margin:auto!important;width:min(640px,calc(100vw - 28px))!imp
 
 /* Permanent badge management fits office dialogs; phones scroll only the table. */
 .ck-permanent-table{min-width:550px;table-layout:fixed}.ck-permanent-table td,.ck-permanent-table th{padding:12px 8px;white-space:normal;overflow-wrap:anywhere}.ck-permanent-table td:first-child,.ck-permanent-table th:first-child{width:32%}.ck-permanent-table td:last-child,.ck-permanent-table th:last-child{width:29%}.ck-permanent-table .ck-row-actions{flex-wrap:wrap;justify-content:flex-start}.ck-permanent-table .ck-row-actions button{min-height:40px}
+
+.ck-work-status[data-status=occupancy_conflict]{color:#923d31;background:#fff1e5}.ck-system [data-occupancy-warning]{display:block;white-space:normal;overflow-wrap:anywhere;margin-top:4px}

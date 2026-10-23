@@ -6,6 +6,7 @@
   title.textContent=window.CKDocumentLabels.jobLabel(job);
   info.textContent=[window.CKDocumentLabels.jobHistoryText(job.title,job)||window.CKDocumentLabels.jobType(job),job.customer].filter(Boolean).join(' · ');
   crew.textContent=(job.bulk_batch_id?'一人多单 · 作业人员 / 작업자: ':'作业人员 / 작업자: ')+((job.workers||[]).map(w=>w.name).join('、')||(job.status==='assigned'?'待开始 / 시작 대기':'暂无人员 / 인원 없음'));
+  if(job.status==='system_closed')crew.textContent+=' · 系统04:00强制结束 · 待核实 / 시스템 종료·확인 필요';
   if(job.bulk_batch_id&&!(job.workers||[]).length)crew.textContent+=' · 指派 '+((job.assigned_workers||[]).map(w=>w.name).join('、'))+' · 待切单计时';
   const dispatcher=document.createElement('small');dispatcher.className='ck-task-dispatcher';dispatcher.textContent='派审员 / 배정·검수 담당자：'+window.CKDocumentLabels.jobDispatcher(job);b.append(title,info,dispatcher,crew);
   if(job.can_claim){const hint=document.createElement('small');hint.textContent='原派审员离岗 · 点击明确接班 / 기존 담당자 부재 · 인계 확인';b.append(hint);}
@@ -43,7 +44,7 @@
      const r=await api({action:'v2_ops_job_detail',job_id:job.id});
     if(r?.ok&&r.can_view_resting&&!r.can_manage_dispatch){window.CKViewRestingJob(r);return;}
     if(!r?.ok||!r.can_manage_dispatch)throw Error(r?.error||'你已不在此任务中，请联系派工人 / 배정 담당자에게 문의하세요');
-    if(!['pending','working','awaiting_close','paused'].includes(r.job.status))throw Error('任务已结束，请刷新列表 / 작업 종료, 목록을 새로고침하세요');
+    if(!['pending','working','awaiting_close','paused','system_closed'].includes(r.job.status))throw Error('任务已结束，请刷新列表 / 작업 종료, 목록을 새로고침하세요');
     if(job.job_type==='courier_receiving')return window.CKOpenCourierBatch(job.id);
     const state=JSON.parse(r.dispatch.state),crew=r.workers.filter(w=>!w.left_at).map(w=>({id:w.worker_id,name:w.worker_name}));
     // Viewing a resting crew must not create a work segment or widen access.
@@ -62,7 +63,7 @@
   // The manager dispatches several crews; the backend still checks every worker's occupancy.
   window.hasOtherActiveJob=()=>false;
   window.checkMyActiveJob=async()=>{};window.restoreActiveJob=()=>{};
-  const original=window.api;const retries=new Map();
+  const original=window.api;const retries=new Map(),selections=new Map();
   window.api=async function(body){
    if(!startActions.has(body.action))return original(body);
    // Freeze document numbers before the staff camera can start.
@@ -74,10 +75,10 @@
    const fingerprint=JSON.stringify(Object.fromEntries(Object.entries(body).filter(([k])=>!['client_req_id','worker_id','worker_name','handler_id','handler_name'].includes(k)).sort(([a],[b])=>a.localeCompare(b))));
    let pending=retries.get(fingerprint);
    try{
-   if(!pending){const {startDepartment,departments}=await import('/shared/labor-department.js');const staff=await chooseStaff(startDepartment(body),departments,body);if(!staff)return {ok:false,error:'已取消派工'};pending={payload:{...body,...(staff.planned_pick_workload?{planned_pick_workload:staff.planned_pick_workload}:{}),client_req_id:body.client_req_id||crypto.randomUUID()},staff};retries.set(fingerprint,pending);}
+   if(!pending){const {startDepartment,departments}=await import('/shared/labor-department.js');const staff=await chooseStaff(startDepartment(body),departments,body,selections.get(fingerprint));if(!staff)return {ok:false,error:'已取消派工'};if(body.action==='v2_ops_job_start'&&body.job_type==='change_order')selections.set(fingerprint,staff);pending={payload:{...body,...(staff.planned_pick_workload?{planned_pick_workload:staff.planned_pick_workload}:{}),client_req_id:body.client_req_id||crypto.randomUUID()},staff};retries.set(fingerprint,pending);}
    const staff=pending.staff;
     const r=await CKSession.request('sop_native_start',{payload:pending.payload,...staff});
-    retries.delete(fingerprint);lead=r.lead||staff.workers.find(x=>x.id===staff.lead_id);sessionStorage.setItem('ck_test_active_lead',JSON.stringify(lead));
+    retries.delete(fingerprint);selections.delete(fingerprint);lead=r.lead||staff.workers.find(x=>x.id===staff.lead_id);sessionStorage.setItem('ck_test_active_lead',JSON.stringify(lead));
     return r;
    }catch(e){if(e.businessError&&!(body.job_type==='inbound_direct_putaway'&&e.httpStatus>=500)&&!e.message.includes('任务已建立'))retries.delete(fingerprint);return {ok:false,error:e.message};}
   };
@@ -95,7 +96,7 @@
   form.onsubmit=async e=>{e.preventDefault();if(button.disabled||done)return;busy=true;update();try{await picker.ready();if(done)return;const result=await options.onSubmit(picker.read(),form);await close(result);}catch(e){if(!done)error.textContent=e.message;}finally{busy=false;update();}};
   return {dialog,form,picker,promise,close};
  };
- async function chooseStaff(department,departments,payload){
+ async function chooseStaff(department,departments,payload,previous){
   const picking=['v2_pick_job_start','v2_pick_job_start_by_docs'].includes(payload?.action);
   const scannedDocs=Array.isArray(payload.pick_doc_nos)?payload.pick_doc_nos:String(payload.pick_doc_nos||'').split(',').filter(Boolean);
   let context={pick_workload_required:true,task_pick_doc_nos:scannedDocs};
@@ -105,6 +106,8 @@
   }
   const pickFields=picking?(context.pick_workload_required?CKPickWorkload.fields(context.task_pick_doc_nos):CKPickWorkload.summary(context.planned_pick_workload)):'';
   const borrowable=['v2_unload_job_start','v2_unplanned_unload_start','v2_outbound_load_start'].includes(payload?.action)||payload?.action==='v2_ops_job_start'&&payload.job_type==='load_outbound';
-  return CKNativePeopleDialog({className:picking?'ck-pick-start':'',cancelLight:picking,title:picking?'拣货开工确认 / 피킹 시작 확인':'负责人分配本次作业人员',description:'扫描实际操作人员工牌；确认后按原业务流程开始计时。',beforeFields:'<label>本次用工部门 / 작업 부서<select name="labor_department" required><option value="">请选择 / 선택하세요</option>'+Object.entries(departments).map(([k,v])=>'<option value="'+k+'" '+(k===department?'selected':'')+'>'+v+'</option>').join('')+'</select></label>',afterFields:pickFields+'<label>预计操作分钟<input name="minutes" type="number" min="1" step="1" value="30" required></label>',submitLabel:picking?'确认并开始 / 확인·시작':'确认人员并开始',cancelLabel:picking?'取消 / 취소':undefined,borrowContext:borrowable?{payload}:null,onSubmit:(staff,form)=>({...staff,labor_department:form.elements.labor_department.value,estimated_minutes:Number(form.elements.minutes.value),...(picking&&context.pick_workload_required?{planned_pick_workload:CKPickWorkload.read(form)}:{})})}).promise;
+  const dialog=CKNativePeopleDialog({workers:previous?.workers,leadId:previous?.lead_id,className:picking?'ck-pick-start':'',cancelLight:picking,title:picking?'拣货开工确认 / 피킹 시작 확인':'负责人分配本次作业人员',description:'扫描实际操作人员工牌；确认后按原业务流程开始计时。',beforeFields:'<label>本次用工部门 / 작업 부서<select name="labor_department" required><option value="">请选择 / 선택하세요</option>'+Object.entries(departments).map(([k,v])=>'<option value="'+k+'" '+(k===(previous?.labor_department||department)?'selected':'')+'>'+v+'</option>').join('')+'</select></label>',afterFields:pickFields+'<label>预计操作分钟<input name="minutes" type="number" min="1" step="1" value="30" required></label>',submitLabel:picking?'确认并开始 / 확인·시작':'确认人员并开始',cancelLabel:picking?'取消 / 취소':undefined,borrowContext:borrowable?{payload}:null,onSubmit:(staff,form)=>({...staff,labor_department:form.elements.labor_department.value,estimated_minutes:Number(form.elements.minutes.value),...(picking&&context.pick_workload_required?{planned_pick_workload:CKPickWorkload.read(form)}:{})})});
+  if(previous)dialog.form.elements.minutes.value=previous.estimated_minutes;
+  return dialog.promise;
  }
 })();

@@ -55,7 +55,7 @@ export async function nativePeople(body,env,{resume=false}={}){
  if(old){if(old.action!==action||old.actor_id!==env.SOP_REQUEST_USER.id||old.record_id!==body.job_id||resume&&!sameBadgeSignature(JSON.parse(old.after_json)._resume_signature,resumeSignature))fail('请求已被使用');return JSON.parse(old.result_json);}
  const row=await q(env,"SELECT * FROM sop_records WHERE id=? AND kind='dispatch'",body.job_id).first();
  const job=await q(env,'SELECT * FROM v2_ops_jobs WHERE id=?',body.job_id).first();
- if(!row||!job||!(resume?['paused']:['pending','working','awaiting_close']).includes(job.status))fail('任务已结束，请刷新 / 작업이 종료되었습니다');
+ if(!row||!job||!(resume?['paused','system_closed']:['pending','working','awaiting_close']).includes(job.status))fail('任务已结束，请刷新 / 작업이 종료되었습니다');
  if(Number(body.revision)!==row.revision)fail('人员已被其他操作更新，请重新打开 / 인원 정보가 변경되었습니다');
  const workers=body.workers;
  if(resume&&(!Array.isArray(workers)||!workers.length))fail('请确认实际恢复作业的人员 / 재개할 인원을 확인하세요');
@@ -68,7 +68,8 @@ export async function nativePeople(body,env,{resume=false}={}){
  if(resume&&!workers.some(w=>!away.has(canonicalDailyBadge(w.id))))fail('所选人员仍在借调中，请确认实际到位人员 / 지원 중인 인원은 먼저 복귀를 확인하세요');
  const result={ok:true,job_id:job.id,revision:row.revision+1,lead:next.last_lead,...(env.SOP_CREW_BORROW?{has_crew_borrows:true}:{})};
  const sql=[q(env,'INSERT INTO sop_events VALUES(?,?,?,?,?,?,?,?,?,?)',request,job.id,row.revision,action,env.SOP_REQUEST_USER.id,env.SOP_REQUEST_USER.name,row.state,JSON.stringify(next),JSON.stringify(result),t),q(env,'UPDATE sop_records SET state=?,revision=revision+1,updated_at=? WHERE id=?',JSON.stringify(next),t,job.id)];
- if(resume)sql.push(q(env,"UPDATE v2_ops_jobs SET status='working',resumed_at=?,updated_at=? WHERE id=? AND status='paused'",t,t,job.id));
+ if(resume)sql.push(q(env,"UPDATE v2_ops_jobs SET status='working',resumed_at=?,updated_at=? WHERE id=? AND status IN ('paused','system_closed')",t,t,job.id));
+ if(resume&&job.status==='system_closed'&&job.job_type==='issue_handle')sql.push(q(env,"UPDATE v2_issue_handle_runs SET run_status='working' WHERE job_id=? AND run_status='system_closed'",job.id));
  for(const s of active.filter(s=>!workers.some(w=>sameWorkerBadge(w.id,s.worker_id)))){
   const minutes=Math.max(0,Math.round((Date.parse(t)-Date.parse(s.joined_at))/6000)/10);
   sql.push(q(env,"UPDATE v2_ops_job_workers SET left_at=?,minutes_worked=?,leave_reason='dispatcher_change' WHERE id=? AND left_at=''",t,minutes,s.id));
@@ -129,14 +130,15 @@ export async function finishNativeOutbound(body,env,{legacy=false}={}){
 
 // Native pause preserves assignment; an empty crew edit is not a task pause.
 export async function ensureNativePauseGuards(env){
- await ensureSchema(env.DB,'native-pause-v2',()=>env.DB.batch([
+ await ensureSchema(env.DB,'native-pause-v3-system-cutoff',()=>env.DB.batch([
+ q(env,'DROP TRIGGER IF EXISTS ck_native_pause_event'),
  q(env,`CREATE TRIGGER IF NOT EXISTS ck_pause_completion BEFORE UPDATE OF status ON v2_ops_jobs WHEN OLD.status='paused' AND NEW.status='completed' AND EXISTS(SELECT 1 FROM sop_records WHERE id=OLD.id AND kind='dispatch') BEGIN SELECT RAISE(ABORT,'resume_before_completing'); END`),
  q(env,`CREATE TRIGGER IF NOT EXISTS ck_pause_result BEFORE INSERT ON v2_ops_job_results WHEN EXISTS(SELECT 1 FROM v2_ops_jobs j JOIN sop_records s ON s.id=j.id WHERE j.id=NEW.job_id AND j.status='paused' AND s.kind='dispatch') BEGIN SELECT RAISE(ABORT,'resume_before_result'); END`),
  q(env,`CREATE TRIGGER IF NOT EXISTS ck_pause_unload_link BEFORE INSERT ON ck_unload_plan_links WHEN EXISTS(SELECT 1 FROM v2_inbound_plan_jobs WHERE plan_id=NEW.plan_id AND job_type='unload' AND status='paused' AND id!=NEW.job_id) BEGIN SELECT RAISE(ABORT,'unload_plan_paused'); END`),
  q(env,`CREATE TRIGGER IF NOT EXISTS ck_pause_inbound_reference BEFORE UPDATE OF external_inbound_no,bulk_external_inbound_no,status,is_deleted ON v2_inbound_plans WHEN EXISTS(SELECT 1 FROM v2_inbound_plan_jobs WHERE plan_id=OLD.id AND status='paused') AND (NEW.external_inbound_no IS NOT OLD.external_inbound_no OR NEW.bulk_external_inbound_no IS NOT OLD.bulk_external_inbound_no OR NEW.status='cancelled' OR NEW.is_deleted=1) BEGIN SELECT RAISE(ABORT,'inbound_task_paused'); END`),
  q(env,`CREATE TRIGGER IF NOT EXISTS ck_pause_outbound_document BEFORE UPDATE OF planned_box_count,planned_pallet_count,status ON v2_outbound_orders WHEN EXISTS(SELECT 1 FROM v2_ops_jobs j WHERE j.status='paused' AND (j.related_doc_id=OLD.id OR j.linked_outbound_order_id=OLD.id OR EXISTS(SELECT 1 FROM ck_load_order_links l WHERE l.order_id=OLD.id AND l.job_id=j.id))) AND (NEW.planned_box_count IS NOT OLD.planned_box_count OR NEW.planned_pallet_count IS NOT OLD.planned_pallet_count OR NEW.status IN ('cancelled','shipped')) BEGIN SELECT RAISE(ABORT,'outbound_task_paused'); END`),
 
- q(env,`CREATE TRIGGER IF NOT EXISTS ck_native_pause_event BEFORE INSERT ON sop_events WHEN NEW.action IN ('sop_native_pause','sop_native_resume') BEGIN SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM v2_ops_jobs WHERE id=NEW.record_id AND ((NEW.action='sop_native_pause' AND status IN ('working','awaiting_close')) OR (NEW.action='sop_native_resume' AND status='paused'))) THEN RAISE(ABORT,'pause_state_changed') END; END`),
+ q(env,`CREATE TRIGGER IF NOT EXISTS ck_native_pause_event_v3 BEFORE INSERT ON sop_events WHEN NEW.action IN ('sop_native_pause','sop_native_resume') BEGIN SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM v2_ops_jobs WHERE id=NEW.record_id AND ((NEW.action='sop_native_pause' AND status IN ('working','awaiting_close')) OR (NEW.action='sop_native_resume' AND status IN ('paused','system_closed')))) THEN RAISE(ABORT,'pause_state_changed') END; END`),
  q(env,`CREATE TRIGGER IF NOT EXISTS ck_native_paused_clock BEFORE INSERT ON v2_ops_job_workers WHEN NEW.left_at='' AND EXISTS(SELECT 1 FROM v2_ops_jobs j JOIN sop_records s ON s.id=j.id WHERE j.id=NEW.job_id AND s.kind='dispatch' AND j.status IN ('paused','completed','cancelled')) BEGIN SELECT RAISE(ABORT,'task_not_running'); END`)
  ]));
 }

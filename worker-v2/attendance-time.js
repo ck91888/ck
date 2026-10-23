@@ -17,14 +17,15 @@
     result.presence=(end-start)/60000;
     const intervals=[],bounds=new Set([start,end]);
     const add=(s,e,type,department)=>{const rawS=Date.parse(s),rawE=e?Date.parse(e):now;if(!Number.isFinite(rawS)||!Number.isFinite(rawE)||rawE<rawS){result.flags.push('作业时间异常');return;}if(type==='job'&&(rawS<arrival||(record.outAt&&rawE>departure)))result.flags.push('任务超出签到区间');const a=Math.max(start,rawS),b=Math.min(end,rawE);if(b>a){intervals.push({a,b,type,department});bounds.add(a);bounds.add(b);}};
-    for(const s of segments.filter(s=>s.badgeId===record.badgeId)){if(!s.end&&record.outAt)result.flags.push('已签退但作业未退出');add(s.start,s.end,'job',s.department);}
+    for(const s of segments.filter(s=>s.badgeId===record.badgeId)){if(!s.end&&record.outAt)result.flags.push('已签退但作业未退出');add(s.start,s.end,String(s.reason||s.leave_reason||'').startsWith('system_cutoff:')?'unverified':'job',s.department);}
     for(const r of record.breaks||[])add(r.start,r.end,'rest','');
     const sorted=[...bounds].sort((a,b)=>a-b);
     for(let i=0;i<sorted.length-1;i++){
       const a=sorted[i],b=sorted[i+1],minutes=(b-a)/60000,active=intervals.filter(x=>x.a<b&&x.b>a);
       const jobs=active.filter(x=>x.type==='job'),rest=active.some(x=>x.type==='rest');
       const departments=new Set(jobs.map(x=>DEPTS.includes(x.department)?x.department:'other'));
-      if((rest&&jobs.length)||departments.size>1){result.conflict+=minutes;result.flags.push(rest?'休息与作业重叠':'跨部门时间重叠');}
+      if(active.some(x=>x.type==='unverified')){result.conflict+=minutes;result.systemCutoffMinutes=(result.systemCutoffMinutes||0)+minutes;result.flags.push('系统04:00强制结束工时待核实，排除有效工时与人效');}
+      else if((rest&&jobs.length)||departments.size>1){result.conflict+=minutes;result.flags.push(rest?'休息与作业重叠':'跨部门时间重叠');}
       else if(rest)result.rest+=minutes;
       else if(departments.size===1)result[[...departments][0]]+=minutes;
       else result.unassigned+=minutes;
