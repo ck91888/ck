@@ -124,7 +124,28 @@
         <label>问题描述 / 문제 설명 <span style="color:#d32f2f;">*</span></label>
         <textarea id="ic-desc" rows="5" required placeholder="请直接描述问题（如：单号xxx少3箱 / 标签错误 / 客户反馈未发出）&#10;문제를 직접 입력하세요 (예: 주문번호 xxx 3박스 부족 / 라벨 오류 / 고객 미출고 문의)"></textarea>
       </div>
-      <button class="btn btn-primary btn-full mt-10" onclick="submitIssue(this)">提交</button>
+      <section id="ic-attachments" class="ic-attachments" aria-labelledby="ic-attachments-title" hidden>
+        <div class="ic-attachment-heading"><h3 id="ic-attachments-title" data-i18n="ic_attachments">附件</h3><span id="ic-file-count"></span></div>
+        <p class="ic-file-help" data-i18n="ic_limits">最多20个附件，每个20MB。支持JPG、PNG、WebP、PDF、Excel和CSV。</p>
+        <div class="ic-file-actions">
+          <button type="button" class="btn btn-outline" onclick="document.getElementById('ic-photos').click()" data-i18n="ic_photos">选择照片</button>
+          <button type="button" class="btn btn-outline" onclick="document.getElementById('ic-camera').click()" data-i18n="ic_camera">拍照</button>
+          <button type="button" class="btn btn-outline" onclick="document.getElementById('ic-documents').click()" data-i18n="ic_documents">选择文档</button>
+        </div>
+        <input id="ic-photos" type="file" accept=".jpg,.jpeg,.png,.webp" multiple hidden onchange="pickIssueFiles(this)">
+        <input id="ic-camera" type="file" accept="image/jpeg,image/png,image/webp" capture="environment" hidden onchange="pickIssueFiles(this)">
+        <input id="ic-documents" type="file" accept=".pdf,.xls,.xlsx,.csv" multiple hidden onchange="pickIssueFiles(this)">
+        <div id="ic-dropzone" class="ic-dropzone" role="group" aria-labelledby="ic-drop-title" aria-describedby="ic-drop-help">
+          <p id="ic-drop-title" class="ic-drop-title" data-i18n="ic_drop">将照片或文件拖到这里</p>
+          <p id="ic-drop-help" class="ic-drop-help" data-i18n="ic_drop_help">可多选、混合拖入或继续追加，也可使用上方按钮。</p>
+          <div id="ic-file-list" class="ic-file-list"></div>
+        </div>
+        <p class="ic-file-help" data-i18n="ic_upload_hint">提交时上传；成功后与问题一起保存，办公室和对应现场可查看。</p>
+        <p id="ic-file-notice" class="ic-file-notice" role="status" aria-live="polite"></p>
+        <p id="ic-file-error" class="ic-file-error" role="alert"></p>
+        <p id="ic-submit-status" class="ic-submit-status" role="status" aria-live="polite"></p>
+      </section>
+      <button id="ic-submit" class="btn btn-primary btn-full mt-10" onclick="submitIssue(this)">提交</button>
     </div>
   </div>
 
@@ -354,6 +375,13 @@
         </div>
         <div style="font-size:11px;color:#888;">至少选择一个业务类型；若同时选择多个，全部完成后整单才算入库完成。</div>
       </div>
+      <!-- Plan lines -->
+      <div class="card-title mt-10" id="ibcLinesTitle">货物明细</div>
+      <table class="line-table" id="ibcLinesTable">
+        <thead><tr><th>类型</th><th>计划数量</th><th>备注</th><th></th></tr></thead>
+        <tbody id="ibcLinesBody"></tbody>
+      </table>
+      <button class="btn btn-outline btn-sm mt-10" onclick="addIbcLine()">+ 添加明细</button>
       <div class="form-group">
         <label>货物摘要</label>
         <input id="ibc-cargo" type="text" placeholder="简要描述货物">
@@ -378,13 +406,6 @@
         <div class="muted" style="font-size:12px;margin-top:4px;">支持 Excel / PDF / CSV / 图片，单文件不超过 20MB（可分多次选择，文件会累加而不是覆盖）/ 다회 선택 시 누적 추가</div>
         <div id="ibcMaterialsList" style="margin-top:6px;"></div>
       </div>
-      <!-- Plan lines -->
-      <div class="card-title mt-10" id="ibcLinesTitle">货物明细</div>
-      <table class="line-table" id="ibcLinesTable">
-        <thead><tr><th>类型</th><th>计划数量</th><th>备注</th><th></th></tr></thead>
-        <tbody id="ibcLinesBody"></tbody>
-      </table>
-      <button class="btn btn-outline btn-sm mt-10" onclick="addIbcLine()">+ 添加明细</button>
       <!-- P1-4 关联出库计划（可创建 0..N 条，每条独立配置）-->
       <div class="form-group mt-10">
         <label><input type="checkbox" id="ibc-link-ob" onchange="toggleIbcLinkOb()"> 关联出库计划（创建一个或多个）/ 출고 계획 연결</label>
@@ -536,6 +557,9 @@
   onVerifyFilePick / 表格导出流程。
 -->
 <script src="../shared/xlsx.full.min.js"></script>
+<script src="../shared/document-labels.js"></script>
 <script src="app.js?v=20260609a-unload-done-date"></script>
+<script src="../shared/sop-rollout.js?v=20260917"></script>
+<script src="../shared/sop-entry.js?v=20260917"></script>
 </body>
 </html>

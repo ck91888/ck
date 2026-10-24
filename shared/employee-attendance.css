@@ -1,0 +1,162 @@
+.ck-attendance-kind{width:min(864px,calc(100% - 40px));margin:0 auto 14px;display:flex;border-bottom:1px solid #c7d7ce;gap:22px}.ck-attendance-kind button{border:0!important;border-radius:0!important;background:transparent;color:#52675f;padding:10px 4px;min-height:48px;font-size:18px}.ck-attendance-kind button[aria-pressed=true]{color:#18564a;box-shadow:inset 0 -3px #18564a;font-weight:700}.ck-attendance-kind small{font-size:13px;margin-left:8px;font-weight:400}.ck-employee-terminal .mode-tabs button[aria-pressed=true]{background:white;color:#18564a;border-bottom:4px solid #18564a}.ck-employee-terminal h1 small{font-size:16px;font-weight:400;display:block;color:#52675f;margin-top:4px}.ck-employee-terminal .helper-row{flex-wrap:wrap;gap:8px 20px}.ck-employee-dashboard{max-width:1320px;margin:auto;padding:22px 28px 40px;color:#223c36}.ck-employee-dashboard .ck-section-heading h2{margin:0;font-size:23px}.ck-employee-tabs{display:flex;gap:20px;border-bottom:1px solid #d1ded8;margin:12px 0 18px}.ck-employee-tabs button{border:0!important;background:none;padding:10px 0;border-radius:0!important;color:#52675f}.ck-employee-tabs button[aria-pressed=true]{font-weight:700;color:#18564a;box-shadow:inset 0 -3px #18564a}.ck-employee-dashboard .ck-metrics{grid-template-columns:repeat(3,1fr)}.ck-employee-dashboard td{padding:10px 12px}.ck-employee-dashboard td small{display:block;color:#52675f}.ck-employee-dashboard .ck-editor{width:min(520px,calc(100% - 24px));max-height:90dvh;overflow:auto}.ck-employee-dashboard .ck-editor label{display:block;margin:12px 0}.ck-employee-dashboard .ck-editor input,.ck-employee-dashboard .ck-editor select,.ck-employee-dashboard .ck-editor textarea{display:block;width:100%;margin-top:5px}.ck-employee-dashboard .ck-editor input[readonly]{background:#f1f5f3}.ck-employee-dashboard .ck-editor::backdrop{background:#172f2966}@media(max-width:600px){.ck-attendance-kind{width:calc(100% - 24px);gap:16px}.ck-attendance-kind button{flex:1;font-size:17px}.ck-attendance-kind small{display:block;margin:2px 0 0;font-size:12px}.ck-employee-dashboard{padding:16px 12px}.ck-employee-dashboard .ck-section-heading{align-items:flex-start;flex-direction:column}.ck-employee-dashboard .ck-metrics article{padding:12px 8px}.ck-employee-dashboard .ck-metrics strong{font-size:22px}}
+
+.ck-employee-import{margin:16px 0 20px;padding:18px 0;border-block:1px solid #c7d7ce}.ck-employee-import[hidden]{display:none}.ck-import-heading,.ck-import-footer,.ck-import-file{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}.ck-import-heading h3{margin:0;font-size:18px}.ck-import-file{justify-content:flex-start}.ck-import-file label{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.ck-employee-import input[type=file]{width:auto;max-width:100%;padding:6px}.ck-import-table{max-height:390px;overflow:auto}.ck-import-table th{position:sticky;top:0;z-index:1;background:#f0f6f3}.ck-import-table td{vertical-align:top}.ck-import-error td{background:#fff1ec}.ck-import-error td:last-child,.ck-employee-import [role=alert]{color:#923719}.ck-import-footer{margin-top:14px}.ck-import-footer p{margin:0;flex:1;min-width:220px}.ck-import-counts{font-size:14px}.ck-import-table small{display:block;color:#63766f}.ck-employee-dashboard .ck-actions a.ck-small{border:1px solid #c7d7ce;border-radius:6px;padding:8px 12px;text-decoration:none}
+.ck-employee-dashboard .ck-employee-work-status{text-align:left;white-space:normal;min-width:160px;max-width:280px}.ck-employee-dashboard .ck-employee-work-status .ck-current-status{margin:0}.ck-employee-dashboard .ck-table td:nth-child(3),.ck-employee-dashboard .ck-table th:nth-child(3){text-align:left}.ck-employee-dashboard .ck-filters label[data-status-wrap]{max-width:290px}@media(max-width:600px){.ck-employee-dashboard .ck-filters label{min-width:130px;max-width:none;flex:1 1 135px}.ck-employee-dashboard .ck-filters>button{width:100%}}
+
+.ck-badge-camera{margin:12px 0}.ck-badge-camera>button{width:100%;min-height:48px}.ck-badge-camera [data-camera-panel]{margin:12px 0;padding:10px;border:1px solid #b9cfc2;border-radius:12px;background:#f1f6f3}.ck-badge-camera [data-camera-panel][hidden]{display:none}.ck-badge-camera [data-camera-reader]{width:100%;max-width:440px;margin:auto;overflow:hidden}.ck-badge-camera video{max-width:100%;border-radius:8px}.ck-badge-camera [data-camera-close]{width:100%;min-height:44px;margin-top:10px}.ck-badge-camera [data-camera-status]{overflow-wrap:anywhere;line-height:1.6}
+
+/* Employee workday: compact data rows; bilingual labels have a deliberate hierarchy. */
+.ck-employee-dashboard{container-type:inline-size;container-name:employee-workday}
+.ck-employee-dashboard .ck-employee-bi{display:inline-flex;flex-direction:column;gap:2px;line-height:1.35;max-width:100%;font-weight:inherit}
+.ck-employee-dashboard .ck-employee-bi>small{display:block;font-size:11px;font-weight:400;color:#63766f;line-height:1.35;margin:0;word-break:keep-all;overflow-wrap:break-word}
+.ck-employee-dashboard .ck-employee-bi>[lang=zh]{word-break:normal;overflow-wrap:break-word}
+.ck-employee-dashboard :is(th,button,.ck-work-status,.ck-employee-stat-label) .ck-employee-bi>*{white-space:nowrap;overflow-wrap:normal}
+.ck-employee-dashboard .ck-section-heading{margin:12px 0}
+.ck-employee-dashboard .ck-section-heading p span{display:block;font-size:12px;margin-top:3px;word-break:keep-all}
+.ck-employee-dashboard .ck-filters{margin:16px 0 10px}
+.ck-employee-dashboard [data-report-freshness]{font-size:11px;line-height:1.5;margin:6px 0;color:#63766f;word-break:keep-all;overflow-wrap:break-word}
+.ck-employee-dashboard [data-workday-scope]{margin:8px 0;font-size:12px;line-height:1.4}
+.ck-employee-dashboard [data-note]:empty{display:none}
+.ck-employee-dashboard .ck-metrics{gap:12px;margin:14px 0}
+.ck-employee-dashboard .ck-metrics article{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 16px;border-radius:7px}
+.ck-employee-dashboard .ck-metrics strong{font-size:24px;margin:0;white-space:nowrap}
+.ck-employee-dashboard .ck-metrics span{font-size:12px;word-break:keep-all}
+.ck-employee-dashboard .ck-employee-attendance-table{min-width:0;width:100%;table-layout:fixed;border-collapse:collapse}
+.ck-employee-attendance-table .ck-col-person{width:18%}.ck-employee-attendance-table .ck-col-status{width:12%}.ck-employee-attendance-table .ck-col-work{width:29%}.ck-employee-attendance-table .ck-col-punch{width:11%}.ck-employee-attendance-table .ck-col-duration{width:11%}.ck-employee-attendance-table .ck-col-actions{width:19%}
+.ck-employee-dashboard .ck-employee-attendance-table :is(th,td){text-align:left;padding:12px 10px;vertical-align:middle;white-space:normal;font-size:13px;line-height:1.45;border-bottom:1px solid #e1e9e4}
+.ck-employee-dashboard .ck-employee-attendance-table th{font-size:12px;background:#f3f7f5;font-weight:600;padding-top:13px;padding-bottom:13px}
+.ck-employee-dashboard .ck-employee-attendance-table tr:last-child td{border-bottom:0}
+.ck-employee-attendance-table tbody tr:hover{background:#f9fbfa}
+.ck-employee-attendance-table .ck-employee-person>strong{display:block;font-size:15px;line-height:1.4;overflow-wrap:anywhere;margin-bottom:5px}
+.ck-employee-attendance-table .ck-employee-person .ck-employee-id{display:inline-block;font-size:11px;margin:0 8px 0 0;color:#63766f;vertical-align:top;overflow-wrap:anywhere;max-width:100%}
+.ck-employee-attendance-table .ck-employee-department{display:inline-block;font-size:11px;color:#52675f;vertical-align:top}
+.ck-employee-attendance-table .ck-employee-department .ck-employee-bi{flex-direction:row;flex-wrap:wrap;gap:3px 5px}
+.ck-employee-attendance-table .ck-employee-department .ck-employee-bi>*{font-size:11px;white-space:normal}
+.ck-employee-dashboard .ck-employee-attendance-table .ck-employee-work-status{min-width:0;max-width:none}
+.ck-employee-dashboard .ck-work-status{border-radius:5px;padding:5px 8px;max-width:100%;font-size:12px;line-height:1.35}
+.ck-employee-dashboard .ck-work-status[data-status=unassigned]{background:#eef2ef;color:#52675f}
+.ck-employee-dashboard .ck-work-status .ck-employee-bi>small{font-size:10px;color:inherit;opacity:.85}
+.ck-employee-dashboard .ck-employee-stat-head,.ck-employee-dashboard .ck-employee-work-summary{display:grid;grid-template-columns:.8fr .8fr 1.3fr 1.1fr;gap:6px;align-items:center;text-align:center}
+.ck-employee-dashboard .ck-employee-work-summary{line-height:1.4}
+.ck-employee-dashboard .ck-employee-stat>strong{font-size:20px;font-weight:650;color:#223c36;font-variant-numeric:tabular-nums;white-space:nowrap}
+.ck-employee-stat[data-work-metric=minutes]>strong{color:#18564a}
+.ck-employee-dashboard .ck-employee-stat-label,.ck-employee-dashboard .ck-employee-cell-label{display:none}
+.ck-employee-dashboard .ck-employee-time-pair{display:flex;align-items:center;gap:5px;white-space:nowrap;font-size:12px;font-variant-numeric:tabular-nums}
+.ck-employee-time-pair>[aria-hidden]{color:#8b9b94;font-size:10px}
+.ck-employee-duration .ck-employee-time-pair>span:last-child{color:#63766f}
+.ck-employee-row-actions>div{display:flex;align-items:center;justify-content:flex-start;gap:6px;flex-wrap:nowrap}
+.ck-employee-dashboard .ck-employee-row-actions button{display:inline-flex;align-items:center;justify-content:center;min-width:76px;min-height:44px;padding:5px 8px;white-space:nowrap;font-size:12px;border-radius:6px}
+.ck-employee-dashboard .ck-employee-row-actions .ck-employee-detail-button{background:#eaf3ee;border-color:#c1d5c9;color:#18564a}
+.ck-employee-dashboard .ck-employee-row-actions .ck-employee-correct-button{background:white;color:#52675f;border-color:#d8e2dc}
+.ck-employee-dashboard .ck-employee-row-actions button small{color:inherit;font-size:10px}
+.ck-employee-work-detail .ck-detail-heading{position:sticky;top:-26px;z-index:1;background:white;padding:8px 0 14px;border-bottom:1px solid #d1ded8}
+.ck-employee-work-detail .ck-detail-heading>div{min-width:0}
+.ck-employee-work-detail .ck-detail-heading h2{font-size:23px;margin-top:4px}
+.ck-employee-detail-eyebrow{font-size:12px;color:#63766f}.ck-employee-detail-eyebrow [lang=ko]{font-size:11px;margin-left:8px;white-space:nowrap}
+.ck-employee-work-detail .ck-detail-heading p{font-size:12px;margin:5px 0 0}
+.ck-employee-work-detail .ck-detail-heading>button{min-width:56px;min-height:44px;padding:5px 9px;font-size:12px}
+.ck-employee-detail-meta{display:flex;justify-content:space-between;align-items:center;gap:12px;margin:14px 0}
+.ck-employee-detail-meta p{font-size:11px;line-height:1.5}.ck-employee-detail-meta time{display:inline-block;white-space:nowrap}
+.ck-workday-metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:0;margin:14px 0;background:#f1f6f3;border:1px solid #e1e9e4;border-radius:8px;overflow:hidden}
+.ck-workday-metrics article{padding:14px 16px;min-width:0;border-right:1px solid #dce7df}
+.ck-workday-metrics article:last-child{border-right:0}
+.ck-workday-metrics article>.ck-employee-bi{font-size:12px;color:#52675f}
+.ck-workday-metrics strong{display:block;margin-top:8px;font-size:27px;font-weight:650;line-height:1.2;font-variant-numeric:tabular-nums;white-space:nowrap}
+.ck-employee-detail-notice{font-size:12px;color:#52675f;line-height:1.5;margin:12px 0 8px}
+.ck-employee-work-detail details.ck-employee-coverage{border:0;padding:0 0 12px;font-size:12px;border-bottom:1px solid #e1e9e4}
+.ck-employee-coverage summary{color:#18564a;font-size:12px;padding:2px 0;list-style-position:outside;margin-left:14px}
+.ck-employee-coverage summary .ck-employee-bi{display:inline-flex;flex-direction:row;gap:8px;flex-wrap:wrap;vertical-align:middle}
+.ck-employee-coverage[open] summary{margin-bottom:10px}
+.ck-workday-coverage{border-left:2px solid #8eaf9c;padding-left:12px;margin:8px 0}
+.ck-employee-work-detail h3{display:flex;align-items:center;gap:10px;margin:20px 0 8px;font-size:15px}
+.ck-employee-section-count{font-size:12px;font-weight:600;border-radius:20px;padding:2px 8px;background:#eef3f0;white-space:nowrap}
+.ck-workday-jobs{list-style:none;padding:0;margin:0}
+.ck-workday-jobs li{padding:10px 0;border-bottom:1px solid #e6eeea;overflow-wrap:anywhere}
+.ck-workday-jobs li>strong,.ck-workday-jobs li>span,.ck-workday-jobs li>small{display:block;line-height:1.6}
+.ck-workday-jobs li>strong{font-size:14px}.ck-workday-jobs li>span,.ck-workday-jobs li>small{font-size:12px;color:#52675f;word-break:keep-all;overflow-wrap:break-word}
+.ck-workday-jobs li.ck-muted{font-size:12px;padding:6px 0;color:#63766f}
+.ck-workday-team-result{font-size:12px;background:#f1f6f3;padding:8px 10px;margin:8px 0 0;line-height:1.6;word-break:keep-all;overflow-wrap:break-word}
+.ck-employee-work-detail [data-work-detail-content]{min-height:100px}
+.ck-employee-work-detail .ck-timeline{margin:10px 0}
+.ck-employee-work-detail .ck-timeline time{font-size:11px;max-width:230px;flex:0 0 210px}
+.ck-employee-work-detail .ck-timeline li>span{font-size:12px;min-width:0;word-break:keep-all;overflow-wrap:break-word}
+@container employee-workday (max-width:1050px){
+ .ck-employee-dashboard [data-table]:has(.ck-employee-attendance-table){border:0;background:transparent;overflow:visible}
+ .ck-employee-dashboard .ck-employee-attendance-table{display:block;width:100%;min-width:0}
+ .ck-employee-attendance-table colgroup,.ck-employee-attendance-table thead{display:none}
+ .ck-employee-attendance-table tbody{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+ .ck-employee-dashboard .ck-employee-attendance-table tbody>tr{display:grid;grid-template-columns:minmax(0,1fr) auto;align-content:start;border:1px solid #d1ded8;border-radius:8px;background:white;padding:16px;gap:12px 10px;min-width:0}
+ .ck-employee-dashboard .ck-employee-attendance-table td{display:block;padding:0;border:0;min-width:0;max-width:none}
+ .ck-employee-attendance-table .ck-employee-person{grid-column:1;grid-row:1}
+ .ck-employee-attendance-table .ck-employee-work-status{grid-column:2;grid-row:1;align-self:start}
+ .ck-employee-attendance-table .ck-employee-workday,.ck-employee-attendance-table .ck-employee-row-actions,.ck-employee-attendance-table td[colspan]{grid-column:1/-1}
+ .ck-employee-dashboard .ck-employee-work-summary{border-block:1px solid #e6eeea;padding:12px 0;align-items:start}
+ .ck-employee-dashboard .ck-employee-stat-label{display:block;font-size:11px;margin-bottom:6px;color:#63766f}
+ .ck-employee-dashboard .ck-employee-stat-label small{font-size:10px}
+ .ck-employee-dashboard .ck-employee-cell-label{display:block;font-size:11px;margin-bottom:5px;color:#63766f}
+ .ck-employee-dashboard .ck-employee-cell-label .ck-employee-bi{flex-direction:row;gap:5px;flex-wrap:wrap}
+ .ck-employee-dashboard .ck-employee-time-pair{font-size:13px}
+ .ck-employee-punch{grid-column:1}.ck-employee-duration{grid-column:2}
+ .ck-employee-row-actions>div{justify-content:flex-end;gap:8px}
+ .ck-employee-dashboard .ck-employee-row-actions button{min-width:82px}
+}
+@container employee-workday (max-width:650px){
+ .ck-employee-attendance-table tbody{grid-template-columns:1fr}
+ .ck-employee-dashboard .ck-metrics article{display:block;padding:10px}
+ .ck-employee-dashboard .ck-metrics strong{display:block;margin-top:6px;font-size:22px}
+ .ck-employee-dashboard .ck-metrics span{font-size:11px}
+ .ck-employee-dashboard .ck-employee-attendance-table tbody>tr{padding:14px}
+ .ck-employee-row-actions>div{justify-content:stretch}
+ .ck-employee-dashboard .ck-employee-row-actions button{flex:1}
+}
+@container employee-workday (max-width:300px){
+ .ck-employee-dashboard .ck-employee-work-summary{grid-template-columns:1fr 1fr;gap:12px}
+ .ck-employee-dashboard .ck-employee-stat{display:flex;flex-direction:column;align-items:center}
+}
+@media(max-width:700px){
+ .ck-employee-dashboard{padding:12px 0 24px}
+ .ck-employee-dashboard .ck-section-heading h2{font-size:20px}
+ .ck-employee-dashboard .ck-actions{gap:8px}
+ .ck-employee-dashboard .ck-actions :is(button,a){font-size:12px;word-break:keep-all;white-space:normal}
+ .ck-employee-dashboard .ck-filters label{min-width:0;flex-basis:calc(50% - 8px);max-width:none;font-size:12px;word-break:keep-all}
+ .ck-employee-dashboard .ck-filters label[data-status-wrap]{flex-basis:100%;max-width:none}
+ .ck-employee-dashboard .ck-filters>button{width:100%}
+ .ck-employee-work-detail .ck-detail-heading{top:-18px}
+ .ck-employee-work-detail .ck-detail-heading h2{font-size:20px}
+ .ck-workday-metrics article{padding:12px 10px}
+ .ck-workday-metrics article>.ck-employee-bi{font-size:11px}
+ .ck-workday-metrics article>.ck-employee-bi small{font-size:10px}
+ .ck-workday-metrics strong{font-size:23px}
+ .ck-employee-work-detail .ck-timeline li{flex-direction:column;gap:5px}
+ .ck-employee-work-detail .ck-timeline time{max-width:none;flex:none}
+}
+@media(max-width:380px){
+ .ck-workday-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}
+ .ck-workday-metrics article:nth-child(2){border-right:0}
+ .ck-workday-metrics article:nth-child(-n+2){border-bottom:1px solid #dce7df}
+ .ck-employee-detail-meta{align-items:flex-start;flex-direction:column;gap:8px}
+}
+.ck-employee-work-detail details.ck-workday-section{margin-top:16px;padding-top:14px;border-top:1px solid #e1e9e4}
+.ck-employee-work-detail .ck-workday-section>summary{margin-left:14px;list-style-position:outside;cursor:pointer;color:#52675f}
+.ck-employee-work-detail .ck-workday-section>summary>h3{display:inline-flex;margin:0;vertical-align:middle;color:#223c36}
+.ck-employee-work-detail .ck-workday-section[open]>summary{margin-bottom:10px}
+.ck-employee-status-counts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:12px 0;font-size:12px;color:#63766f}
+.ck-employee-status-counts>span{display:flex;align-items:center;gap:10px}
+.ck-employee-status-counts b{font-size:16px;color:#223c36;font-variant-numeric:tabular-nums}
+@media(max-width:500px){.ck-employee-status-counts{grid-template-columns:repeat(2,minmax(0,1fr))}}
+/* Override the legacy shuju table rules by component, never by column index. */
+.ck-system[data-app="shuju"] .ck-employee-attendance-table .ck-employee-stat>strong{font-size:20px}
+.ck-system[data-app="shuju"] .ck-employee-attendance-table .ck-employee-person>strong{font-size:15px}
+.ck-system[data-app="shuju"] .ck-employee-attendance-table .ck-employee-bi>small{margin-top:0}
+@container employee-workday (max-width:1050px){.ck-system[data-app="shuju"] .ck-employee-attendance-table td{padding:0}}
+.ck-system[data-app="shuju"] .ck-employee-dashboard>.ck-section-heading{flex-wrap:wrap;align-items:center}
+.ck-employee-dashboard>.ck-section-heading>div:first-child{flex:1 0 250px;min-width:0}
+.ck-employee-dashboard>.ck-section-heading>.ck-actions{max-width:100%}
+.ck-employee-dashboard>.ck-section-heading h2{word-break:keep-all}
+.ck-employee-work-detail .ck-employee-detail-identity{display:flex;flex-wrap:wrap;gap:4px 10px}
+.ck-employee-detail-identity>span{overflow-wrap:anywhere}
+.ck-employee-detail-identity>time{white-space:nowrap}
+@media(max-width:700px){
+ .ck-system[data-app="shuju"] .ck-employee-dashboard>.ck-section-heading{align-items:flex-start}
+ .ck-employee-dashboard>.ck-section-heading>div:first-child{flex:none;width:100%}
+}

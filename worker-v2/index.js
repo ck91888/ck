@@ -1,3 +1,60 @@
+import {handleOfficeDuty,protectOfficeDuty} from './office-duty.js';
+import {materialFileResponse} from './material-file-response.js';
+import {actualWorkReport,measureSegments} from './actual-work-report.js';
+import {parseOpsResultForExport} from './report-results.js';
+import {cancelPutaway,putawayReferences} from './multi-putaway.js';
+import {isInternal,readOperation,operationExport} from '../shared/internal-operations.js';
+import {internalEnabled,protectInternalMutation} from './internal-operations.js';
+import {handleDailyScan} from './import-daily-scan.js';
+import {resolveInboundEntry,independentInbound} from './independent-inbound.js';
+import {stagedInbound,putawayType,putawayMetrics,stagedPlanStatement} from './inbound-stages.js';
+import {executionDepartment} from './work-execution.js';
+import {withInboundCreateReceipt,inboundCreateStatus,inboundReceiptStatements} from './inbound-create-receipt.js';
+import {handleBulkBatch,guardBulkBatchMutation} from './bulk-work-batch.js';
+import {inboundArrivalFilter,inboundArrivalOrder} from './inbound-arrival-filter.js';
+import {dailyDispatchEnabled,dailyDispatchAdmin,guardDailyDispatch} from './daily-dispatch-permissions.js';
+import {checkWorkbenchEnabled,scanCheck,finishCheck} from './check-workbench.js';
+import {pickWorkloadContext,readPickWorkload} from './pick-workload.js';
+import {uploadIssueDraft,cancelIssueDraft,removeIssueDraftFile,createIssueWithAttachments} from './issue-create.js';
+import {uploadCargoDraft} from './cargo-create.js';
+import {restingDispatch} from './dispatch-access.js';
+import {pauseNative} from './native-lifecycle.js';
+import {ensureDocumentNumbers,jobNumbers,jobNumberSQL,jobDisplayMetadata,decorateJobNumber,businessReference,jobBusinessFilter} from './document-numbers.js';
+import {documentCodeError} from '../shared/document-code.js';
+import {effectiveResults} from './effective-results.js';
+import {dashboardRange,segmentMinutes,reportWorkerId} from './dashboard-time.js';
+import {atomicNativeFinish} from './atomic-native-finish.js';
+import {atomicBulkFinish} from './atomic-bulk-finish.js';
+import {ensureInboundReferenceGuard} from './inbound-reference-guard.js';
+import {referenceWriteBatch,ensureReferenceHistory} from './inbound-reference-history.js';
+import {ensureInboundDocuments,inboundDocumentStates,inboundDocumentStateRead,documentStatesFromRows,confirmInboundIssue} from './inbound-documents.js';
+import {adoptLegacyLoad} from './legacy-load.js';
+import {uploadBatchMaterial} from './batch-work-materials.js';
+import {accessEnabled,accessGuard,accessAdminAction,accessFileAllowed,issueAttachmentAllowed} from './access-control.js';
+import {officeOperationContext,confirmOfficeOperator,officeOperationGuard,planAuditStatements,planOperationAudit} from './office-operator.js';
+import {uploadUnloadPhoto,unloadPhotos,inboundAttachmentRead} from './unload-photos.js';
+import {handleFeedbackLink,feedbackLinkDetail,feedbackLinkRead,feedbackLinkActor,feedbackSource,reconcileFeedbackLink} from './feedback-link.js';
+import {feedbackCreatePreview,prepareFeedbackCreate,feedbackCreateStatements,existingFeedbackPlan,feedbackExistingResult} from './feedback-create.js';
+import {validateNativeMutation, nativePeople, finishNativePick, finishNativeOutbound} from './native-lifecycle.js';
+import {findUnloadPlan, startUnloadTrip, finishUnloadTrip, tripPlans} from './unload-trip.js';
+import {ensureLoadSchema,loadTripEnabled,loadCandidates,resolveLoadOrder,loadOrdersForJob,finishLoadTrip,validateLegacyLoadFinish} from './outbound-load-trip.js';
+import {handleCourier,validateCourierLines,courierPlanStatements,courierProgress,courierProgressRead,courierProgressRows,courierReady,protectCourierEdit,syncCourierArrival} from './courier.js';
+import {ensureCourierClaims} from './courier-claims.js';
+import { inboundFlowEnabled, inboundCode, inboundCodes, inboundReferenceValue, inboundCodeProgress, selectInboundReference, validateInboundCode, resolveInboundPlan, putawayTaskBiz, completeUnloadedDispositions, bindInboundCode, inboundLabels, inboundReferenceData, departmentCodes, putawayClasses } from './inbound-flow.js';
+import { handleAttendance, guardAttendance, ensureAttendance, attendanceEnabled } from './attendance.js';
+import {runSystemCutoff,guardSystemCutoffMutation,correctSystemCutoff,forcedClock} from './system-cutoff.js';
+import {normalizeDailyBadgeRequest,workerBadgeMatch,canonicalWorkerSQL,resolveDailyBadge} from './daily-badge-identity.js';
+import {canonicalDailyBadge,sameWorkerBadge} from '../shared/badge-identity.js';
+import {crewBorrowEnabled,ensureCrewBorrow,prepareCrewBorrow,crewAvailability,crewStatus,crewRetry,canCrewDestination,reconcileCrewReturns,reconcilePersonReturns,borrowedOut} from './crew-borrow.js';
+import { workChainEnabled, guardWorkChain, chainLinked, workMaterials, uploadWorkMaterial, workMaterialCountFor } from './work-chain.js';
+import {ensureBatchMaterialState,batchVisibleSql,batchStateEnabled} from './batch-material-state.js';
+import {createOutboundBookingBatch} from './outbound-booking-batch.js';
+import { workPlanStatements } from './sop-planning.js';
+import { nextOutboundDisplayNo } from './outbound-number.js';
+import { handleSop, guardLegacy, linkedNeeds, linkedCheck, outboundNeedStatements } from './sop.js';
+import { sessionUser, sessionAction } from './sop-session.js';
+import { prepareDemo } from './sop-demo.js';
+import { startNative, nativeOwner } from './sop-dispatch.js';
 /**
  * CK Warehouse V2 — Backend Workerer
  * Independent from V1. Uses v2_ table prefix in same D1 database.
@@ -128,10 +185,10 @@ function buildOutboundDiff(oldRow, newValues, editableFields) {
 }
 
 // 写入一条出库修改日志（在事务外调用即可，调用方负责升 revision）
-async function insertOutboundChangeLog(env, params) {
+function outboundChangeLogStatement(env, params) {
   const { order_id, revision_no, change_type, changed_by, diff, summary, t } = params;
   const log_id = uid();
-  await env.DB.prepare(`
+  return env.DB.prepare(`
     INSERT INTO v2_outbound_order_change_logs(
       id, order_id, revision_no, change_type, changed_by, changed_at,
       diff_json, summary_text, warehouse_ack_required, warehouse_ack_by, warehouse_ack_at, ack_source, created_at
@@ -141,9 +198,9 @@ async function insertOutboundChangeLog(env, params) {
     changed_by || '', t,
     JSON.stringify(diff || {}), summary || '',
     t
-  ).run();
-  return log_id;
+  );
 }
+async function insertOutboundChangeLog(env,params){await outboundChangeLogStatement(env,params).run();}
 
 // KST 日期 → UTC 范围 [startUtc, endUtc)
 // 输入 "2026-04-27" → { startUtc: "2026-04-26T15:00:00.000Z", endUtc: "2026-04-27T15:00:00.000Z" }
@@ -173,312 +230,11 @@ async function batchSelectInGlobal(env, sqlTemplate, ids) {
 // 解析 v2_ops_job_results → 业务可读摘要 + 各项数量累加
 // 输入：job_type, results rows
 // 输出：result_summary / 累加字段 / raw_result_json_compact
-function parseOpsResultForExport(job_type, resultRows) {
-  const out = {
-    result_summary: '',
-    result_notes: '',
-    diff_notes: '',
-    box_count_sum: 0,
-    pallet_count_sum: 0,
-    // 入库理货数量（按 unit_type 分桶 + 总和）
-    putaway_qty_sum: 0,
-    putaway_carton_qty_sum: 0,
-    putaway_pallet_qty_sum: 0,
-    // 卸货 / 通用实际数量（fallback：line 没有 putaway_qty 但有 actual_qty）
-    actual_qty_sum: 0,
-    actual_carton_qty_sum: 0,
-    actual_pallet_qty_sum: 0,
-    // 入库 extra_ops（理货顺手做的）
-    sort_qty_sum: 0,           // 单独整理数量
-    repair_box_qty_sum: 0,     // extra_ops.repair_box_qty（与 repaired_box_count 区分写入端）
-    packed_sku_count_sum: 0,
-    packed_box_count_sum: 0,
-    total_operated_box_count_sum: 0,
-    label_count_sum: 0,
-    repaired_box_count_sum: 0,
-    reboxed_count_sum: 0,
-    used_carton_large_count_sum: 0,
-    used_carton_small_count_sum: 0,
-    verify_ok_count_sum: 0,
-    verify_ng_count_sum: 0,
-    result_submitters: '',
-    result_submitted_at: '',
-    readable_result_lines: '',
-    result_lines_count: 0,
-    raw_result_json_compact: ''
-  };
-  const rows = resultRows || [];
-  const remarks = [], diffs = [], rawObjs = [], readableLines = [], submitters = new Set();
-  let lastCreatedAt = '';
 
-  // 累加单行 line 中的 putaway_qty / actual_qty 到分桶（unit_type 兼容 carton/pallet/box）
-  const aggregateLine = (item) => {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) return;
-    const unit = String(item.unit_type || item.unit || '').toLowerCase();
-    const isCarton = (unit === 'carton' || unit === 'box' || unit === 'cartons' || unit === 'boxes');
-    const isPallet = (unit === 'pallet' || unit === 'pallets' || unit === 'plt' || unit === 'tray');
-    const pq = Number(item.putaway_qty);
-    const aq = Number(item.actual_qty);
-    if (Number.isFinite(pq) && pq > 0) {
-      out.putaway_qty_sum += pq;
-      if (isCarton) out.putaway_carton_qty_sum += pq;
-      else if (isPallet) out.putaway_pallet_qty_sum += pq;
-    }
-    if (Number.isFinite(aq) && aq > 0) {
-      out.actual_qty_sum += aq;
-      if (isCarton) out.actual_carton_qty_sum += aq;
-      else if (isPallet) out.actual_pallet_qty_sum += aq;
-    }
-    // 行内附带的 label_count / repaired_box_count 等也尝试累加
-    const ln = Number(item.label_count); if (Number.isFinite(ln) && ln > 0) out.label_count_sum += ln;
-    const rb = Number(item.repaired_box_count); if (Number.isFinite(rb) && rb > 0) out.repaired_box_count_sum += rb;
-    const rx = Number(item.reboxed_count); if (Number.isFinite(rx) && rx > 0) out.reboxed_count_sum += rx;
-  };
-
-  // result_lines_json 单行 → 可读文本
-  const renderLine = (item) => {
-    if (item == null) return '';
-    if (typeof item !== 'object') return String(item);
-    if (Array.isArray(item)) return item.join(' / ');
-    const id = item.sku || item.barcode || item.item || item.product_name || item.name || '';
-    const parts = [];
-    if (id) parts.push('SKU ' + id);
-    const planned = item.planned_qty ?? item.plan_qty ?? item['计划'] ?? null;
-    const actual = item.actual_qty ?? item.qty ?? item['实际'] ?? null;
-    const putaway = item.putaway_qty ?? item['入库'] ?? null;
-    const diff = item.diff_qty ?? item.diff ?? null;
-    if (item.unit_type) {
-      const u = String(item.unit_type).toLowerCase();
-      const unitLbl = (u === 'carton' || u === 'box') ? '箱' : (u === 'pallet' ? '托' : item.unit_type);
-      parts.push(unitLbl);
-    }
-    if (planned != null && planned !== '') parts.push('计划 ' + planned);
-    if (actual != null && actual !== '') parts.push('实际 ' + actual);
-    if (putaway != null && putaway !== '') parts.push('理货 ' + putaway);
-    if (diff != null && diff !== '') parts.push('差异 ' + diff);
-    if (item.box_count != null && item.box_count !== '') parts.push('箱 ' + item.box_count);
-    if (item.pallet_count != null && item.pallet_count !== '') parts.push('板 ' + item.pallet_count);
-    if (item.remark) parts.push('备注 ' + item.remark);
-    if (parts.length === 0) {
-      try { return JSON.stringify(item); } catch (e) { return ''; }
-    }
-    return parts.join(' / ');
-  };
-
-  // 从 result_json 顶层兼容老 shorthand：{carton:4}/{pallet:3}/{box_count:4}
-  const aggregateShorthand = (rj) => {
-    if (!rj || typeof rj !== 'object' || Array.isArray(rj)) return;
-    const c = Number(rj.carton);
-    if (Number.isFinite(c) && c > 0) {
-      out.putaway_qty_sum += c;
-      out.putaway_carton_qty_sum += c;
-    }
-    const p = Number(rj.pallet);
-    if (Number.isFinite(p) && p > 0) {
-      out.putaway_qty_sum += p;
-      out.putaway_pallet_qty_sum += p;
-    }
-  };
-
-  rows.forEach(r => {
-    out.box_count_sum += Number(r.box_count) || 0;
-    out.pallet_count_sum += Number(r.pallet_count) || 0;
-    if (r.remark) remarks.push(String(r.remark));
-    if (r.diff_note) diffs.push(String(r.diff_note));
-    if (r.created_by) submitters.add(String(r.created_by));
-    if (r.created_at && r.created_at > lastCreatedAt) lastCreatedAt = r.created_at;
-
-    let rj = null;
-    if (r.result_json) {
-      try { rj = JSON.parse(r.result_json); } catch (e) { rj = null; }
-    }
-    if (rj && typeof rj === 'object' && !Array.isArray(rj)) {
-      const addNum = (k, target) => {
-        const v = Number(rj[k]);
-        if (Number.isFinite(v)) out[target] += v;
-      };
-      addNum('packed_sku_count', 'packed_sku_count_sum');
-      addNum('packed_box_count', 'packed_box_count_sum');
-      addNum('total_operated_box_count', 'total_operated_box_count_sum');
-      addNum('label_count', 'label_count_sum');
-      addNum('repaired_box_count', 'repaired_box_count_sum');
-      addNum('reboxed_count', 'reboxed_count_sum');
-      addNum('used_carton_large_count', 'used_carton_large_count_sum');
-      addNum('used_carton_small_count', 'used_carton_small_count_sum');
-      addNum('verify_ok_count', 'verify_ok_count_sum');
-      addNum('verify_ng_count', 'verify_ng_count_sum');
-      if (!r.pallet_count && Number(rj.pallet_count) > 0) {
-        out.pallet_count_sum += Number(rj.pallet_count);
-      }
-      // 入库 extra_ops（理货顺手贴标/修箱/整理）— 与 packing 端的 *_count 区分但归入同一摘要桶
-      if (rj.extra_ops && typeof rj.extra_ops === 'object') {
-        const eo = rj.extra_ops;
-        const sq = Number(eo.sort_qty); if (Number.isFinite(sq) && sq > 0) out.sort_qty_sum += sq;
-        const lq = Number(eo.label_qty); if (Number.isFinite(lq) && lq > 0) out.label_count_sum += lq;
-        const rq = Number(eo.repair_box_qty);
-        if (Number.isFinite(rq) && rq > 0) {
-          out.repair_box_qty_sum += rq;
-          out.repaired_box_count_sum += rq;
-        }
-        if (eo.other_op_remark) remarks.push(String(eo.other_op_remark));
-      }
-      // result_json 顶层"单行式" e.g. {unit_type:'carton', putaway_qty:4}
-      if (rj.unit_type) aggregateLine(rj);
-      // result_json 内嵌 result_lines / lines
-      const innerLines = Array.isArray(rj.result_lines) ? rj.result_lines
-                       : Array.isArray(rj.lines) ? rj.lines
-                       : null;
-      if (innerLines) {
-        innerLines.forEach(aggregateLine);
-        if (out.result_lines_count === 0 && innerLines.length > 0) {
-          // 仅当 result_lines_json 不存在时才用 inner 计数（避免重复）
-          if (!r.result_lines_json) out.result_lines_count += innerLines.length;
-        }
-      }
-      // 老 shorthand：{carton:4}/{pallet:3}
-      aggregateShorthand(rj);
-      const diffVal = rj.diff_note || rj.diff_notes || rj.diff || rj['差异'] || rj['差异说明'] || '';
-      if (diffVal) diffs.push(String(diffVal));
-      rawObjs.push(rj);
-    } else if (r.result_json) {
-      rawObjs.push(r.result_json);
-    }
-
-    // 解析 result_lines_json
-    if (r.result_lines_json) {
-      let lines = null;
-      try { lines = JSON.parse(r.result_lines_json); } catch (e) { lines = null; }
-      const arr = Array.isArray(lines)
-        ? lines
-        : (lines && Array.isArray(lines.lines)) ? lines.lines
-        : (lines && Array.isArray(lines.result_lines)) ? lines.result_lines
-        : (lines ? [lines] : []);
-      out.result_lines_count += arr.length;
-      arr.forEach(item => {
-        aggregateLine(item);
-        const txt = renderLine(item);
-        if (txt) readableLines.push(txt);
-      });
-    }
-  });
-
-  out.result_notes = remarks.join(' | ');
-  // 去重 diff_notes
-  out.diff_notes = [...new Set(diffs.filter(Boolean))].join(' | ');
-  out.result_submitters = [...submitters].join('、');
-  out.result_submitted_at = fmtKst(lastCreatedAt);
-
-  let linesStr = readableLines.join(' || ');
-  if (linesStr.length > 2000) linesStr = linesStr.slice(0, 2000) + '...已截断';
-  out.readable_result_lines = linesStr;
-
-  let rawStr = '';
-  try { rawStr = JSON.stringify(rawObjs); } catch (e) { rawStr = ''; }
-  if (rawStr.length > 1000) rawStr = rawStr.slice(0, 1000) + '...已截断';
-  out.raw_result_json_compact = rawStr;
-
-  // 生成业务摘要
-  const parts = [];
-  const isInboundJob = (job_type || '').indexOf('inbound') === 0; // inbound_direct / inbound_bulk / inbound_change_order / inbound_return
-  if (job_type === 'pack_direct') {
-    if (out.packed_sku_count_sum > 0) parts.push('打包SKU ' + out.packed_sku_count_sum);
-    if (out.packed_box_count_sum > 0) parts.push('打包箱 ' + out.packed_box_count_sum);
-    if (out.label_count_sum > 0) parts.push('贴标 ' + out.label_count_sum);
-    if (out.total_operated_box_count_sum > 0) parts.push('总操作箱 ' + out.total_operated_box_count_sum);
-    if (out.pallet_count_sum > 0) parts.push('托盘 ' + out.pallet_count_sum);
-    if (out.repaired_box_count_sum > 0) parts.push('修箱 ' + out.repaired_box_count_sum);
-    if (out.reboxed_count_sum > 0) parts.push('换箱 ' + out.reboxed_count_sum);
-    if (out.used_carton_large_count_sum > 0) parts.push('大纸箱 ' + out.used_carton_large_count_sum);
-    if (out.used_carton_small_count_sum > 0) parts.push('小纸箱 ' + out.used_carton_small_count_sum);
-  } else if (job_type === 'change_order') {
-    parts.push('仅计时，无数量结果');
-  } else if (job_type === 'verify_scan') {
-    if (out.verify_ok_count_sum > 0) parts.push('核对OK ' + out.verify_ok_count_sum);
-    if (out.verify_ng_count_sum > 0) parts.push('核对NG ' + out.verify_ng_count_sum);
-    if (out.box_count_sum > 0) parts.push('箱 ' + out.box_count_sum);
-    if (out.pallet_count_sum > 0) parts.push('板 ' + out.pallet_count_sum);
-  } else if (isInboundJob) {
-    // 入库类：理货箱数/理货托数 优先；无 putaway 时 fallback actual
-    if (out.putaway_carton_qty_sum > 0) parts.push('理货箱数 ' + out.putaway_carton_qty_sum);
-    if (out.putaway_pallet_qty_sum > 0) parts.push('理货托数 ' + out.putaway_pallet_qty_sum);
-    if (out.putaway_qty_sum > 0 && out.putaway_carton_qty_sum === 0 && out.putaway_pallet_qty_sum === 0) {
-      parts.push('理货数量 ' + out.putaway_qty_sum);
-    }
-    if (out.putaway_qty_sum === 0) {
-      if (out.actual_carton_qty_sum > 0) parts.push('实际箱数 ' + out.actual_carton_qty_sum);
-      if (out.actual_pallet_qty_sum > 0) parts.push('实际托数 ' + out.actual_pallet_qty_sum);
-    }
-    if (out.sort_qty_sum > 0) parts.push('整理 ' + out.sort_qty_sum);
-    if (out.label_count_sum > 0) parts.push('贴标 ' + out.label_count_sum);
-    if (out.repaired_box_count_sum > 0) parts.push('修箱 ' + out.repaired_box_count_sum);
-    if (out.box_count_sum > 0) parts.push('箱 ' + out.box_count_sum);
-    if (out.pallet_count_sum > 0) parts.push('板 ' + out.pallet_count_sum);
-  } else if (job_type === 'unload') {
-    // 卸货：以行内 actual_qty 为准；按 unit 分桶
-    if (out.actual_carton_qty_sum > 0) parts.push('卸货箱数 ' + out.actual_carton_qty_sum);
-    if (out.actual_pallet_qty_sum > 0) parts.push('卸货托数 ' + out.actual_pallet_qty_sum);
-    if (out.actual_qty_sum > 0 && out.actual_carton_qty_sum === 0 && out.actual_pallet_qty_sum === 0) {
-      parts.push('卸货数量 ' + out.actual_qty_sum);
-    }
-    if (out.box_count_sum > 0) parts.push('箱 ' + out.box_count_sum);
-    if (out.pallet_count_sum > 0) parts.push('板 ' + out.pallet_count_sum);
-  } else {
-    // 默认：出库/库内/拣货 等
-    if (out.box_count_sum > 0) parts.push('箱 ' + out.box_count_sum);
-    if (out.pallet_count_sum > 0) parts.push('板 ' + out.pallet_count_sum);
-    if (out.actual_qty_sum > 0 && out.box_count_sum === 0 && out.pallet_count_sum === 0) {
-      parts.push('实际数量 ' + out.actual_qty_sum);
-    }
-  }
-
-  // 任意一个数量字段 > 0 都不应再判定"无数量结果"
-  const hasAnyQty = (
-    out.box_count_sum > 0 ||
-    out.pallet_count_sum > 0 ||
-    out.putaway_qty_sum > 0 ||
-    out.putaway_carton_qty_sum > 0 ||
-    out.putaway_pallet_qty_sum > 0 ||
-    out.actual_qty_sum > 0 ||
-    out.actual_carton_qty_sum > 0 ||
-    out.actual_pallet_qty_sum > 0 ||
-    out.sort_qty_sum > 0 ||
-    out.repair_box_qty_sum > 0 ||
-    out.packed_sku_count_sum > 0 ||
-    out.packed_box_count_sum > 0 ||
-    out.total_operated_box_count_sum > 0 ||
-    out.label_count_sum > 0 ||
-    out.repaired_box_count_sum > 0 ||
-    out.reboxed_count_sum > 0 ||
-    out.used_carton_large_count_sum > 0 ||
-    out.used_carton_small_count_sum > 0 ||
-    out.verify_ok_count_sum > 0 ||
-    out.verify_ng_count_sum > 0
-  );
-
-  if (parts.length === 0) {
-    if (out.result_notes && job_type !== 'change_order') {
-      out.result_summary = '备注：' + out.result_notes;
-    } else if (job_type === 'change_order') {
-      out.result_summary = '仅计时，无数量结果';
-    } else if (!hasAnyQty) {
-      out.result_summary = '仅记录工时，无数量结果';
-    } else {
-      out.result_summary = '';
-    }
-  } else {
-    out.result_summary = parts.join('，');
-    if (out.result_notes && job_type !== 'change_order') {
-      out.result_summary += '；备注：' + out.result_notes;
-    }
-  }
-
-  if (out.result_summary.length > 500) {
-    out.result_summary = out.result_summary.slice(0, 500) + '...';
-  }
-  return out;
-}
 
 function isAuth(body, env) {
+  if(accessEnabled(env))return env.SOP_REQUEST_USER?.scope==='office'&&env.SOP_REQUEST_USER.role==='manager';
+  if (env.SOP_ENVIRONMENT === 'staging' && env.SOP_REQUEST_USER?.role === 'manager') return true;
   const k = String(body.k || "").trim();
   const secret = String(env.ADMINKEY || "").trim();
   if (secret && k && k === secret) return true;
@@ -488,6 +244,8 @@ function isAuth(body, env) {
 }
 
 function isAdmin(body, env) {
+  if(accessEnabled(env))return env.SOP_REQUEST_USER?.scope==='office'&&env.SOP_REQUEST_USER.role==='manager';
+  if (env.SOP_ENVIRONMENT === 'staging' && env.SOP_REQUEST_USER?.role === 'manager') return true;
   const k = String(body.k || "").trim();
   const secret = String(env.ADMINKEY || "").trim();
   return !!(secret && k && k === secret);
@@ -502,6 +260,7 @@ function isOpsKey(body, env) {
 
 // isOpsAuth = ADMINKEY | VIEWKEY | OPSKEY（ops 接口用）
 function isOpsAuth(body, env) {
+  if(accessEnabled(env))return isAuth(body,env)||env.SOP_REQUEST_USER?.scope==='field'&&env.SOP_REQUEST_USER.role==='dispatcher';
   return isAuth(body, env) || isOpsKey(body, env);
 }
 
@@ -581,7 +340,7 @@ async function withIdem(env, body, action, fn) {
     result = await fn();
   } catch (e) {
     // 异常不缓存，让客户端可以重试
-    return json({ ok: false, error: e.message || "internal error" }, 500);
+    return json({ ok: false, error: String(e.message||'').includes('ck_external_reference_conflict')?'外部入库单号已被另一计划占用，请刷新核对 / 입고번호가 이미 사용 중입니다':e.message || "internal error" }, String(e.message||'').includes('ck_external_reference_conflict')?409:500);
   }
   if (key && result && typeof result === 'object') {
     try {
@@ -593,17 +352,22 @@ async function withIdem(env, body, action, fn) {
   return json(result);
 }
 
+// Daily aliases are scoped to the staging attendance rollout.
+const badgeSQL=(env,a,b)=>attendanceEnabled(env)?workerBadgeMatch(a,b):`${a}=${b}`;
+const badgeKey=(env,id)=>attendanceEnabled(env)?canonicalDailyBadge(id):id;
+const badgeColumn=(env,id)=>attendanceEnabled(env)?canonicalWorkerSQL(id):id;
+
 // ===== Worker dedup helpers =====
 // 查找某 worker 在某 job 中是否有未关闭的参与段
 async function findOpenSeg(env, jobId, workerId) {
   return env.DB.prepare(
-    "SELECT * FROM v2_ops_job_workers WHERE job_id=? AND worker_id=? AND left_at='' ORDER BY joined_at DESC LIMIT 1"
+    `SELECT * FROM v2_ops_job_workers WHERE job_id=? AND ${badgeSQL(env,'worker_id','?')} AND left_at='' ORDER BY joined_at DESC LIMIT 1`
   ).bind(jobId, workerId).first();
 }
 
 async function checkWorkerBusy(env, workerId, allowJobId) {
   const seg = await env.DB.prepare(
-    "SELECT w.job_id, j.job_type, j.flow_stage FROM v2_ops_job_workers w JOIN v2_ops_jobs j ON j.id=w.job_id WHERE w.worker_id=? AND w.left_at='' AND j.status IN ('pending','working','awaiting_close') ORDER BY w.joined_at DESC LIMIT 1"
+    `SELECT w.job_id, j.job_type, j.flow_stage FROM v2_ops_job_workers w JOIN v2_ops_jobs j ON j.id=w.job_id WHERE ${badgeSQL(env,'w.worker_id','?')} AND w.left_at='' AND j.status IN ('pending','working','awaiting_close') ORDER BY w.joined_at DESC LIMIT 1`
   ).bind(workerId).first();
   if (!seg) return null;
   if (allowJobId && seg.job_id === allowJobId) return null;
@@ -613,7 +377,7 @@ async function checkWorkerBusy(env, workerId, allowJobId) {
 // 关闭某 worker 在某 job 中的所有 open segments（自愈）
 async function closeAllOpenSegs(env, jobId, workerId, t, reason) {
   const segs = await env.DB.prepare(
-    "SELECT * FROM v2_ops_job_workers WHERE job_id=? AND worker_id=? AND left_at=''"
+    `SELECT * FROM v2_ops_job_workers WHERE job_id=? AND ${badgeSQL(env,'worker_id','?')} AND left_at=''`
   ).bind(jobId, workerId).all();
   const rows = segs.results || [];
   for (const seg of rows) {
@@ -658,10 +422,10 @@ async function closeOpenWorkerSegmentsForJob(env, jobId, t, reason) {
 // - closed segment：直接用 minutes_worked；若为 0/缺失则用 left_at-joined_at 兜底
 // - open segment：用 fallbackEndAt - joined_at 计算（不写库）；如果传 closeOpen=true 则同步关闭
 // 返回 { total_minutes, worker_names, worker_count, segments }
-async function sumJobWorkerMinutes(env, jobId, fallbackEndAt, closeOpen) {
+async function sumJobWorkerMinutes(env, jobId, fallbackEndAt, closeOpen, prefetchedRows) {
   if (!jobId) return { total_minutes: 0, worker_names: '', worker_count: 0, segments: [] };
   const fallback = fallbackEndAt || now();
-  const rs = await env.DB.prepare(
+  const rs = prefetchedRows && !closeOpen ? {results:prefetchedRows} : await env.DB.prepare(
     "SELECT id, worker_id, worker_name, joined_at, left_at, minutes_worked, leave_reason FROM v2_ops_job_workers WHERE job_id=? ORDER BY joined_at ASC"
   ).bind(jobId).all();
   const rows = rs.results || [];
@@ -675,6 +439,7 @@ async function sumJobWorkerMinutes(env, jobId, fallbackEndAt, closeOpen) {
     let leftAt = closed ? r.left_at : fallback;
     let leftMs = Date.parse(leftAt);
     let minutes = 0;
+    if (forcedClock(r)) { segments.push({...r,minutes_worked:0,needs_review:true});continue; }
     if (closed) {
       const stored = Number(r.minutes_worked);
       if (Number.isFinite(stored) && stored > 0) {
@@ -727,6 +492,7 @@ const TIME_ONLY_JOB_TYPES = new Set([
   'qc',                 // 质检
   'inventory',          // 盘点
   'scan_pallet',        // 过机扫描
+  'office_order_processing', // 订单处理只计工时
   'verify_scan',        // 扫码核对（仅记工时；超过 48h 由 cleanup 自动结束）
   'issue_handle'        // 问题点处理 — 由 v2_issue_handle_finish 收尾，不参与本逻辑（兜底归类时间型）
 ]);
@@ -734,7 +500,7 @@ const TIME_ONLY_JOB_TYPES = new Set([
 const RESULT_REQUIRED_JOB_TYPES = new Set([
   'unload', 'unplanned_unload',
   'load_outbound', 'outbound_stock_op',
-  'inbound_direct', 'inbound_bulk', 'inbound_change_order',
+  'inbound_direct_tally','inbound_direct_putaway','inbound_direct', 'inbound_bulk', 'inbound_change_order',
   'bulk_op', 'pick_direct',
   'load_import', 'pickup_delivery_import'
 ]);
@@ -753,7 +519,7 @@ async function autoCloseJobIfNoOpenWorkers(env, jobId, t) {
   if (!jobId) return null;
   const closeAt = t || now();
   const job = await env.DB.prepare(
-    "SELECT id, status, job_type FROM v2_ops_jobs WHERE id=?"
+    "SELECT id, status, job_type,shared_result_json FROM v2_ops_jobs WHERE id=?"
   ).bind(jobId).first();
   if (!job) return null;
   if (job.status === 'completed' || job.status === 'cancelled') return job;
@@ -764,6 +530,10 @@ async function autoCloseJobIfNoOpenWorkers(env, jobId, t) {
   const openCount = Number((openCnt && openCnt.c) || 0);
   if (openCount > 0) return job;
 
+  if(internalEnabled(env)&&readOperation(job)){
+    await env.DB.prepare("UPDATE v2_ops_jobs SET status='awaiting_close',active_worker_count=0,updated_at=? WHERE id=? AND status IN ('pending','working','awaiting_close')").bind(closeAt,jobId).run();
+    return {...job,status:'awaiting_close'};
+  }
   if (isTimeOnlyJobType(job.job_type)) {
     const defaultSummary = (job.job_type === 'verify_scan')
       ? '扫码核对：仅记录工时，无数量结果'
@@ -821,28 +591,28 @@ async function repairInboundPlanWorkState(env, planId, reason) {
 
   // 查 active unload / putaway job
   const activeUnload = await env.DB.prepare(
-    `SELECT id FROM v2_ops_jobs
-       WHERE related_doc_type='inbound_plan' AND related_doc_id=?
+    `SELECT id FROM v2_inbound_plan_jobs
+       WHERE related_doc_type='inbound_plan' AND plan_id=?
          AND job_type='unload' AND status IN ('pending','working','awaiting_close')
        LIMIT 1`
   ).bind(planId).first();
   const activePutaway = await env.DB.prepare(
-    `SELECT id FROM v2_ops_jobs
-       WHERE related_doc_type='inbound_plan' AND related_doc_id=?
-         AND job_type IN ('inbound_direct','inbound_bulk','inbound_change_order')
+    `SELECT id FROM v2_inbound_plan_jobs
+       WHERE related_doc_type='inbound_plan' AND plan_id=?
+         AND job_type IN ('inbound_direct_tally','inbound_direct_putaway','inbound_direct','inbound_bulk','inbound_change_order')
          AND status IN ('pending','working','awaiting_close')
        LIMIT 1`
   ).bind(planId).first();
   const hasUnloadCompleted = await env.DB.prepare(
-    `SELECT id FROM v2_ops_jobs
-       WHERE related_doc_type='inbound_plan' AND related_doc_id=?
+    `SELECT id FROM v2_inbound_plan_jobs
+       WHERE related_doc_type='inbound_plan' AND plan_id=?
          AND job_type='unload' AND status='completed'
        LIMIT 1`
   ).bind(planId).first();
   const hasPutawayCompleted = await env.DB.prepare(
-    `SELECT id FROM v2_ops_jobs
-       WHERE related_doc_type='inbound_plan' AND related_doc_id=?
-         AND job_type IN ('inbound_direct','inbound_bulk','inbound_change_order')
+    `SELECT id FROM v2_inbound_plan_jobs
+       WHERE related_doc_type='inbound_plan' AND plan_id=?
+         AND job_type IN ('inbound_direct_tally','inbound_direct_putaway','inbound_direct','inbound_bulk','inbound_change_order')
          AND status='completed'
        LIMIT 1`
   ).bind(planId).first();
@@ -948,12 +718,12 @@ async function _completeVerifyBatchIfLinked(env, jobId, closeAt, source) {
 // 从表中重算某 job 的 active_worker_count
 async function recalcActiveCount(env, jobId, t) {
   const cnt = await env.DB.prepare(
-    "SELECT COUNT(DISTINCT worker_id) as c FROM v2_ops_job_workers WHERE job_id=? AND left_at=''"
+    `SELECT COUNT(DISTINCT ${badgeColumn(env,'worker_id')}) as c FROM v2_ops_job_workers WHERE job_id=? AND left_at=''`
   ).bind(jobId).first();
   const real = cnt ? cnt.c : 0;
   await env.DB.prepare(
-    "UPDATE v2_ops_jobs SET active_worker_count=?, updated_at=? WHERE id=?"
-  ).bind(real, t, jobId).run();
+    "UPDATE v2_ops_jobs SET active_worker_count=? WHERE id=? AND active_worker_count!=?"
+  ).bind(real, jobId, real).run();
   return real;
 }
 
@@ -1028,31 +798,16 @@ async function nextPickTripNo(env) {
   return 'PK-' + dateStr + '-' + Date.now().toString(36).slice(-4);
 }
 
-// ===== Outbound Display No helper =====
-// CHU-YYYYMMDD-001 format
-async function nextOutboundDisplayNo(env, orderDate) {
-  const dateStr = String(orderDate || kstToday()).replace(/-/g, '');
-  const prefix = 'CHU-' + dateStr + '-';
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const row = await env.DB.prepare(
-      "SELECT display_no FROM v2_outbound_orders WHERE display_no LIKE ? ORDER BY display_no DESC LIMIT 1"
-    ).bind(prefix + '%').first();
-    let seq = 1;
-    if (row && row.display_no) {
-      const tail = row.display_no.split('-').pop();
-      seq = (parseInt(tail, 10) || 0) + 1;
-    }
-    const no = prefix + String(seq).padStart(3, '0');
-    const dup = await env.DB.prepare(
-      "SELECT 1 FROM v2_outbound_orders WHERE display_no=? LIMIT 1"
-    ).bind(no).first();
-    if (!dup) return no;
-  }
-  return 'CHU-' + dateStr + '-' + Date.now().toString(36).slice(-4);
-}
-
 // ===== Auto-migration =====
 const MIGRATIONS = [
+  `CREATE TABLE IF NOT EXISTS ck_courier_receipts(id TEXT PRIMARY KEY,tracking_no TEXT NOT NULL UNIQUE,owner TEXT NOT NULL,received_at TEXT NOT NULL,scanner_id TEXT NOT NULL,scanner_name TEXT NOT NULL,actor_id TEXT NOT NULL,actor_name TEXT NOT NULL,location TEXT NOT NULL DEFAULT '',note TEXT NOT NULL DEFAULT '',shipment_id TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'received' CHECK(status IN ('received','handed_over')),handed_to TEXT NOT NULL DEFAULT '',handed_at TEXT NOT NULL DEFAULT '',version INTEGER NOT NULL DEFAULT 1)`,
+  `CREATE INDEX IF NOT EXISTS idx_ck_courier_received ON ck_courier_receipts(received_at,id)`,
+  `CREATE INDEX IF NOT EXISTS idx_ck_courier_owner_received ON ck_courier_receipts(owner,received_at,id)`,
+  `CREATE TABLE IF NOT EXISTS ck_courier_plan_items(tracking_no TEXT PRIMARY KEY,plan_id TEXT NOT NULL,line_id TEXT NOT NULL)`,
+  `CREATE INDEX IF NOT EXISTS idx_ck_courier_plan ON ck_courier_plan_items(plan_id,line_id)`,
+  `CREATE TABLE IF NOT EXISTS ck_courier_events(id TEXT PRIMARY KEY,receipt_id TEXT NOT NULL,kind TEXT NOT NULL,actor_id TEXT NOT NULL,actor_name TEXT NOT NULL,detail TEXT NOT NULL,created_at TEXT NOT NULL)`,
+  `CREATE INDEX IF NOT EXISTS idx_ck_courier_event ON ck_courier_events(receipt_id,created_at)`,
+
   // v2_inbound_plans
   `CREATE TABLE IF NOT EXISTS v2_inbound_plans (
     id TEXT PRIMARY KEY,
@@ -1294,7 +1049,85 @@ const MIGRATIONS = [
 
   // ---- external WMS inbound number (for standard inbound started from external no) ----
   `ALTER TABLE v2_inbound_plans ADD COLUMN external_inbound_no TEXT DEFAULT ''`,
+  `ALTER TABLE v2_inbound_plans ADD COLUMN bulk_external_inbound_no TEXT DEFAULT ''`,
   `CREATE INDEX IF NOT EXISTS idx_v2_inbound_external_no ON v2_inbound_plans(external_inbound_no) WHERE external_inbound_no != ''`,
+  `ALTER TABLE v2_ops_jobs ADD COLUMN inbound_external_no TEXT DEFAULT ''`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_inbound_job_reference ON v2_ops_jobs(related_doc_id,inbound_external_no)
+    WHERE related_doc_type='inbound_plan' AND inbound_external_no!='' AND job_type IN ('inbound_direct','inbound_bulk') AND status IN ('pending','working','awaiting_close','completed')`,
+  `CREATE TRIGGER IF NOT EXISTS trg_v2_inbound_job_reference BEFORE INSERT ON v2_ops_jobs
+    WHEN NEW.inbound_external_no!='' AND NEW.related_doc_type='inbound_plan' AND NEW.job_type IN ('inbound_direct','inbound_bulk')
+    AND NOT EXISTS(SELECT 1 FROM v2_inbound_plans p WHERE p.id=NEW.related_doc_id AND p.status NOT IN ('completed','cancelled') AND COALESCE(p.is_deleted,0)=0
+      AND instr(char(10)||COALESCE(p.external_inbound_no,'')||char(10),char(10)||NEW.inbound_external_no||char(10))>0)
+    BEGIN SELECT RAISE(ABORT,'external inbound reference changed; refresh before starting'); END`,
+  `CREATE TRIGGER IF NOT EXISTS trg_v2_inbound_job_department BEFORE INSERT ON v2_ops_jobs
+    WHEN NEW.inbound_external_no!='' AND NEW.related_doc_type='inbound_plan' AND NEW.job_type IN ('inbound_direct','inbound_bulk')
+    AND EXISTS(SELECT 1 FROM v2_inbound_plans p WHERE p.id=NEW.related_doc_id AND COALESCE(p.bulk_external_inbound_no,'')!=''
+      AND ((NEW.job_type='inbound_bulk') != (instr(char(10)||p.bulk_external_inbound_no||char(10),char(10)||NEW.inbound_external_no||char(10))>0)))
+    BEGIN SELECT RAISE(ABORT,'inbound department changed; refresh before starting'); END`,
+
+  `CREATE TABLE IF NOT EXISTS ck_putaway_links(job_id TEXT NOT NULL,plan_id TEXT NOT NULL,external_no TEXT NOT NULL,tally_job_id TEXT NOT NULL,position INTEGER NOT NULL,PRIMARY KEY(job_id,plan_id,external_no),UNIQUE(job_id,position))`,
+  `CREATE INDEX IF NOT EXISTS ck_putaway_plan_lookup ON ck_putaway_links(plan_id,external_no,job_id)`,
+  `CREATE VIEW IF NOT EXISTS v2_inbound_references AS
+    SELECT j.id,j.related_doc_type,COALESCE(l.plan_id,j.related_doc_id) AS plan_id,COALESCE(l.external_no,j.inbound_external_no) AS inbound_external_no,j.job_type,j.status,j.created_at,j.updated_at
+    FROM v2_ops_jobs j LEFT JOIN ck_putaway_links l ON l.job_id=j.id WHERE j.related_doc_type='inbound_plan'`,
+  // Staged jobs have separate uniqueness; historical combined jobs remain intact.
+  `CREATE UNIQUE INDEX IF NOT EXISTS ck_inbound_stage_unique ON v2_ops_jobs(related_doc_id,inbound_external_no,job_type)
+    WHERE related_doc_type='inbound_plan' AND job_type IN ('inbound_direct_tally','inbound_direct_putaway') AND status!='cancelled'`,
+  `CREATE TRIGGER IF NOT EXISTS ck_inbound_stage_start BEFORE INSERT ON v2_ops_jobs
+    WHEN NEW.job_type IN ('inbound_direct_tally','inbound_direct_putaway') BEGIN
+    SELECT CASE WHEN NEW.related_doc_type!='inbound_plan' OR COALESCE(NEW.inbound_external_no,'')='' OR NOT EXISTS(
+      SELECT 1 FROM v2_inbound_plans p WHERE p.id=NEW.related_doc_id AND COALESCE(p.is_deleted,0)=0
+      AND p.status IN ('unloading','unloading_putting_away','arrived_pending_putaway','putting_away','tallied_pending_putaway','direct_putting_away','partially_completed')
+      AND instr(char(10)||COALESCE(p.external_inbound_no,'')||char(10),char(10)||NEW.inbound_external_no||char(10))>0
+      AND instr(char(10)||COALESCE(p.bulk_external_inbound_no,'')||char(10),char(10)||NEW.inbound_external_no||char(10))=0
+      AND (p.biz_class='direct_ship' OR EXISTS(SELECT 1 FROM json_each(p.biz_classes_json) WHERE value='direct_ship'))
+      AND NOT EXISTS(SELECT 1 FROM v2_inbound_plan_biz_tasks b WHERE b.plan_id=p.id AND b.biz_class='direct_ship' AND b.status='completed'))
+      THEN RAISE(ABORT,'inbound stage reference or plan changed') END;
+    SELECT CASE WHEN EXISTS(SELECT 1 FROM v2_ops_jobs j WHERE j.related_doc_type='inbound_plan' AND j.related_doc_id=NEW.related_doc_id
+      AND (j.inbound_external_no=NEW.inbound_external_no OR COALESCE(j.inbound_external_no,'')='') AND j.job_type='inbound_direct' AND j.status!='cancelled')
+      THEN RAISE(ABORT,'continue legacy combined inbound task') END;
+    SELECT CASE WHEN NEW.job_type='inbound_direct_putaway' AND NOT EXISTS(SELECT 1 FROM v2_ops_jobs j WHERE j.related_doc_type='inbound_plan' AND j.related_doc_id=NEW.related_doc_id AND j.inbound_external_no=NEW.inbound_external_no AND j.job_type='inbound_direct_tally' AND j.status='completed')
+      THEN RAISE(ABORT,'tally must finish before putaway') END;
+    END`,
+  `DROP TRIGGER IF EXISTS ck_inbound_legacy_after_stage`,
+  `CREATE TRIGGER IF NOT EXISTS ck_inbound_legacy_after_stage BEFORE INSERT ON v2_ops_jobs
+    WHEN NEW.job_type='inbound_direct' AND EXISTS(SELECT 1 FROM v2_inbound_references j WHERE j.related_doc_type='inbound_plan' AND j.plan_id=NEW.related_doc_id
+      AND (j.inbound_external_no=NEW.inbound_external_no OR COALESCE(NEW.inbound_external_no,'')='') AND j.job_type IN ('inbound_direct_tally','inbound_direct_putaway') AND j.status!='cancelled')
+    BEGIN SELECT RAISE(ABORT,'use staged inbound task'); END`,
+
+  `DROP TRIGGER IF EXISTS ck_inbound_stage_reference_locked`,
+  `CREATE TRIGGER IF NOT EXISTS ck_inbound_stage_reference_locked BEFORE UPDATE OF external_inbound_no,bulk_external_inbound_no ON v2_inbound_plans
+    WHEN EXISTS(SELECT 1 FROM v2_inbound_references j WHERE j.related_doc_type='inbound_plan' AND j.plan_id=OLD.id AND j.job_type IN ('inbound_direct_tally','inbound_direct_putaway') AND j.status!='cancelled'
+      AND (instr(char(10)||COALESCE(NEW.external_inbound_no,'')||char(10),char(10)||j.inbound_external_no||char(10))=0
+        OR instr(char(10)||COALESCE(NEW.bulk_external_inbound_no,'')||char(10),char(10)||j.inbound_external_no||char(10))>0))
+    BEGIN SELECT RAISE(ABORT,'staged inbound reference cannot change'); END`,
+
+  `DROP TRIGGER IF EXISTS ck_inbound_stage_completion_gate`,
+  `CREATE TRIGGER IF NOT EXISTS ck_inbound_stage_completion_gate BEFORE UPDATE OF status ON v2_inbound_plans
+    WHEN NEW.status='completed' AND EXISTS(SELECT 1 FROM v2_inbound_references t WHERE t.related_doc_type='inbound_plan' AND t.plan_id=NEW.id AND t.job_type='inbound_direct_tally' AND t.status!='cancelled'
+      AND NOT EXISTS(SELECT 1 FROM v2_inbound_references p WHERE p.related_doc_type='inbound_plan' AND p.plan_id=t.plan_id AND p.inbound_external_no=t.inbound_external_no AND p.job_type='inbound_direct_putaway' AND p.status='completed'))
+    BEGIN SELECT RAISE(ABORT,'putaway stage is not complete'); END`,
+
+  // New independent tally sessions reuse job relationships, never a collaboration RU plan.
+  `CREATE UNIQUE INDEX IF NOT EXISTS ck_independent_inbound_number ON v2_inbound_plans(external_inbound_no) WHERE source_type='direct_tally_session'`,
+  `DROP TRIGGER IF EXISTS ck_independent_inbound_create`,
+  `CREATE TRIGGER IF NOT EXISTS ck_independent_inbound_create BEFORE INSERT ON v2_inbound_plans WHEN NEW.source_type='direct_tally_session' BEGIN
+    SELECT CASE WHEN COALESCE(NEW.external_inbound_no,'')='' OR NEW.display_no!='' OR trim(COALESCE(NEW.customer,''))='' OR length(NEW.customer)>120 OR NEW.biz_class!='direct_ship' OR NEW.biz_classes_json!='["direct_ship"]' OR COALESCE(NEW.bulk_external_inbound_no,'')!='' OR NEW.status!='putting_away'
+      THEN RAISE(ABORT,'invalid independent tally session') END;
+    SELECT CASE WHEN EXISTS(SELECT 1 FROM v2_inbound_plans p WHERE p.id=NEW.external_inbound_no OR p.display_no=NEW.external_inbound_no OR instr(char(10)||COALESCE(p.external_inbound_no,'')||char(10),char(10)||NEW.external_inbound_no||char(10))>0)
+      THEN RAISE(ABORT,'inbound number already registered; refresh before dispatch') END;
+  END`,
+  `CREATE TRIGGER IF NOT EXISTS ck_independent_inbound_collision_insert BEFORE INSERT ON v2_inbound_plans WHEN NEW.source_type!='direct_tally_session' AND EXISTS(SELECT 1 FROM v2_inbound_plans s WHERE s.source_type='direct_tally_session' AND (s.external_inbound_no=NEW.id OR s.external_inbound_no=NEW.display_no OR instr(char(10)||COALESCE(NEW.external_inbound_no,'')||char(10),char(10)||s.external_inbound_no||char(10))>0)) BEGIN SELECT RAISE(ABORT,'inbound number belongs to an independent tally session'); END`,
+  `CREATE TRIGGER IF NOT EXISTS ck_independent_inbound_collision_update BEFORE UPDATE OF external_inbound_no,display_no,id ON v2_inbound_plans WHEN OLD.source_type!='direct_tally_session' AND EXISTS(SELECT 1 FROM v2_inbound_plans s WHERE s.source_type='direct_tally_session' AND (s.external_inbound_no=NEW.id OR s.external_inbound_no=NEW.display_no OR instr(char(10)||COALESCE(NEW.external_inbound_no,'')||char(10),char(10)||s.external_inbound_no||char(10))>0)) BEGIN SELECT RAISE(ABORT,'inbound number belongs to an independent tally session'); END`,
+  `DROP TRIGGER IF EXISTS ck_independent_inbound_identity`,
+  `CREATE TRIGGER IF NOT EXISTS ck_independent_inbound_identity BEFORE UPDATE ON v2_inbound_plans WHEN (OLD.source_type='direct_tally_session' OR NEW.source_type='direct_tally_session') AND (NEW.source_type IS NOT OLD.source_type OR NEW.id IS NOT OLD.id OR NEW.external_inbound_no IS NOT OLD.external_inbound_no OR NEW.bulk_external_inbound_no IS NOT OLD.bulk_external_inbound_no OR NEW.biz_class IS NOT OLD.biz_class OR NEW.biz_classes_json IS NOT OLD.biz_classes_json OR NEW.display_no IS NOT OLD.display_no OR (NEW.customer IS NOT OLD.customer AND (trim(COALESCE(NEW.customer,''))='' OR length(NEW.customer)>120 OR OLD.status!='putting_away' OR NOT EXISTS(SELECT 1 FROM v2_ops_jobs j WHERE j.related_doc_type='inbound_plan' AND j.related_doc_id=OLD.id AND j.job_type='inbound_direct_tally' AND j.status IN ('working','awaiting_close')) OR EXISTS(SELECT 1 FROM v2_ops_jobs j WHERE j.related_doc_type='inbound_plan' AND j.related_doc_id=OLD.id AND j.job_type='inbound_direct_tally' AND j.status='completed'))) OR NEW.unload_completed_at IS NOT OLD.unload_completed_at) BEGIN SELECT RAISE(ABORT,'independent tally identity cannot change'); END`,
+  `DROP TRIGGER IF EXISTS ck_independent_inbound_terminal`,
+  `CREATE TRIGGER IF NOT EXISTS ck_independent_inbound_terminal BEFORE UPDATE OF status,is_deleted ON v2_inbound_plans WHEN OLD.source_type='direct_tally_session' BEGIN
+    SELECT CASE WHEN NEW.status='completed' AND NOT EXISTS(SELECT 1 FROM v2_inbound_references j WHERE j.related_doc_type='inbound_plan' AND j.plan_id=OLD.id AND j.job_type='inbound_direct_putaway' AND j.status='completed') THEN RAISE(ABORT,'putaway stage is not complete') END;
+    SELECT CASE WHEN (NEW.status='cancelled' OR NEW.is_deleted=1) AND EXISTS(SELECT 1 FROM v2_inbound_references j WHERE j.related_doc_type='inbound_plan' AND j.plan_id=OLD.id AND j.status NOT IN ('completed','cancelled')) THEN RAISE(ABORT,'independent inbound has active work') END;
+    SELECT CASE WHEN OLD.status IN ('completed','cancelled') AND NEW.status IS NOT OLD.status THEN RAISE(ABORT,'independent inbound is closed') END;
+  END`,
+  `CREATE TRIGGER IF NOT EXISTS ck_independent_inbound_job BEFORE INSERT ON v2_ops_jobs WHEN NEW.related_doc_type='inbound_plan' AND EXISTS(SELECT 1 FROM v2_inbound_plans p WHERE p.id=NEW.related_doc_id AND p.source_type='direct_tally_session') AND NEW.job_type NOT IN ('inbound_direct_tally','inbound_direct_putaway') BEGIN SELECT RAISE(ABORT,'independent inbound requires tally and putaway stages'); END`,
 
   // ---- idempotency keys for create/start/convert class writes ----
   `CREATE TABLE IF NOT EXISTS v2_idempotency_keys (
@@ -1371,9 +1204,10 @@ const MIGRATIONS = [
   `ALTER TABLE v2_outbound_orders ADD COLUMN actual_pallet_count INTEGER DEFAULT 0`,
   `CREATE INDEX IF NOT EXISTS idx_v2_outbound_wms_wo ON v2_outbound_orders(wms_work_order_no) WHERE wms_work_order_no != ''`,
 
-  // ---- display_no for outbound orders (CHU-YYYYMMDD-NNN) ----
+  // ---- display_no for outbound orders (CHU-客户拼音首字母-预计出库日期[-序号]) ----
   `ALTER TABLE v2_outbound_orders ADD COLUMN display_no TEXT DEFAULT ''`,
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_outbound_display_no ON v2_outbound_orders(display_no) WHERE display_no != ''`,
+  `CREATE TABLE IF NOT EXISTS ck_outbound_display_sequences(base TEXT PRIMARY KEY,sequence INTEGER NOT NULL CHECK(sequence>=0))`,
 
   // ---- 强关联：bulk_op job → 出库单主键 ----
   `ALTER TABLE v2_ops_jobs ADD COLUMN linked_outbound_order_id TEXT DEFAULT ''`,
@@ -1968,14 +1802,75 @@ const MIGRATIONS = [
     ON v2_003_material_txns(department, txn_type, created_at)`,
   `CREATE INDEX IF NOT EXISTS idx_v2_003_asset_keeper_department
     ON v2_003_assets(keeper_department, status)`,
+
+  // Retrospective attribution preserves the original completed job and its labor.
+  `CREATE TABLE IF NOT EXISTS ck_feedback_plan_links(feedback_id TEXT PRIMARY KEY,plan_id TEXT NOT NULL UNIQUE,job_id TEXT NOT NULL UNIQUE,feedback_version TEXT NOT NULL,plan_version TEXT NOT NULL,job_version TEXT NOT NULL,linked_by TEXT NOT NULL,linked_name TEXT NOT NULL,linked_at TEXT NOT NULL,snapshot_json TEXT NOT NULL)`,
+  // Vehicle unloading: one native labor job, separately linked plan receipts.
+  `CREATE TABLE IF NOT EXISTS ck_unload_trips(job_id TEXT PRIMARY KEY,request_id TEXT NOT NULL UNIQUE,plan_ids_json TEXT NOT NULL,owner_id TEXT NOT NULL,created_at TEXT NOT NULL,finished_at TEXT NOT NULL DEFAULT '')`,
+  `CREATE TABLE IF NOT EXISTS ck_unload_plan_links(job_id TEXT NOT NULL,plan_id TEXT NOT NULL,position INTEGER NOT NULL,plan_version TEXT NOT NULL,lines_snapshot TEXT NOT NULL,result_json TEXT NOT NULL DEFAULT '',PRIMARY KEY(job_id,plan_id))`,
+  `CREATE INDEX IF NOT EXISTS ck_unload_plan_lookup ON ck_unload_plan_links(plan_id,job_id)`,
+  // Used only by plan-scoped reads. Global labor/output queries continue to use v2_ops_jobs.
+  `DROP VIEW IF EXISTS v2_inbound_plan_jobs`,
+  `CREATE VIEW IF NOT EXISTS v2_inbound_plan_jobs AS SELECT j.*,COALESCE(l.plan_id,p.plan_id,j.related_doc_id) AS plan_id FROM v2_ops_jobs j LEFT JOIN ck_unload_plan_links l ON l.job_id=j.id LEFT JOIN (SELECT DISTINCT job_id,plan_id FROM ck_putaway_links) p ON p.job_id=j.id WHERE j.related_doc_type='inbound_plan'`,
+  `CREATE TRIGGER IF NOT EXISTS ck_unload_link_guard BEFORE INSERT ON ck_unload_plan_links BEGIN
+    SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM v2_inbound_plans p WHERE p.id=NEW.plan_id AND p.status='pending' AND COALESCE(p.is_deleted,0)=0 AND p.updated_at=NEW.plan_version) THEN RAISE(ABORT,'unload_plan_changed') END;
+    SELECT CASE WHEN EXISTS(SELECT 1 FROM v2_inbound_plan_jobs j WHERE j.plan_id=NEW.plan_id AND j.id!=NEW.job_id AND j.job_type='unload' AND j.status IN ('pending','working','awaiting_close','completed')) THEN RAISE(ABORT,'unload_plan_busy') END;
+  END`,
+  `CREATE TRIGGER IF NOT EXISTS ck_feedback_link_guard BEFORE INSERT ON ck_feedback_plan_links BEGIN
+    SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM v2_field_feedbacks f JOIN v2_ops_jobs j ON j.id=f.related_doc_id WHERE f.id=NEW.feedback_id AND f.updated_at=NEW.feedback_version AND f.status IN ('unloaded_pending_info','open') AND f.feedback_type IN ('unplanned_unload','unload_no_doc') AND COALESCE(f.is_deleted,0)=0 AND COALESCE(f.inbound_plan_id,'')='' AND j.id=NEW.job_id AND j.related_doc_type='field_feedback' AND j.related_doc_id=f.id AND j.status='completed' AND j.updated_at=NEW.job_version AND j.job_type='unload') THEN RAISE(ABORT,'feedback_link_changed') END;
+    SELECT CASE WHEN EXISTS(SELECT 1 FROM v2_ops_job_workers WHERE job_id=NEW.job_id AND COALESCE(left_at,'')='') OR EXISTS(SELECT 1 FROM v2_inbound_plans WHERE source_feedback_id=NEW.feedback_id) THEN RAISE(ABORT,'feedback_link_changed') END;
+    SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM v2_inbound_plans p WHERE p.id=NEW.plan_id AND p.updated_at=NEW.plan_version AND p.status='pending' AND COALESCE(p.is_deleted,0)=0 AND COALESCE(p.accounted,0)=0 AND COALESCE(p.unload_completed_at,'')='' AND p.source_type NOT IN ('return_session','external_inbound')) THEN RAISE(ABORT,'feedback_link_changed') END;
+    SELECT CASE WHEN EXISTS(SELECT 1 FROM v2_inbound_plan_jobs WHERE plan_id=NEW.plan_id AND status IN ('pending','working','awaiting_close','completed')) THEN RAISE(ABORT,'feedback_link_changed') END;
+  END`,
+  `CREATE TRIGGER IF NOT EXISTS ck_feedback_no_duplicate_plan BEFORE INSERT ON v2_inbound_plans WHEN EXISTS(SELECT 1 FROM ck_feedback_plan_links WHERE feedback_id=NEW.source_feedback_id) BEGIN SELECT RAISE(ABORT,'feedback_already_linked'); END`,
+  `CREATE TRIGGER IF NOT EXISTS ck_feedback_keep_link BEFORE UPDATE OF status,inbound_plan_id ON v2_field_feedbacks WHEN EXISTS(SELECT 1 FROM ck_feedback_plan_links l WHERE l.feedback_id=OLD.id AND (NEW.status!='converted' OR NEW.inbound_plan_id!=l.plan_id OR NEW.inbound_plan_id IS NULL)) BEGIN SELECT RAISE(ABORT,'feedback_already_linked'); END`,
+  `CREATE TRIGGER IF NOT EXISTS ck_feedback_keep_job BEFORE DELETE ON v2_ops_jobs WHEN EXISTS(SELECT 1 FROM ck_feedback_plan_links WHERE job_id=OLD.id) BEGIN SELECT RAISE(ABORT,'feedback_already_linked'); END`,
+  `CREATE TRIGGER IF NOT EXISTS ck_feedback_keep_workers BEFORE DELETE ON v2_ops_job_workers WHEN EXISTS(SELECT 1 FROM ck_feedback_plan_links WHERE job_id=OLD.job_id) BEGIN SELECT RAISE(ABORT,'feedback_already_linked'); END`,
+  `CREATE TRIGGER IF NOT EXISTS ck_feedback_keep_results BEFORE DELETE ON v2_ops_job_results WHEN EXISTS(SELECT 1 FROM ck_feedback_plan_links WHERE job_id=OLD.job_id) BEGIN SELECT RAISE(ABORT,'feedback_already_linked'); END`,
+  `CREATE TRIGGER IF NOT EXISTS ck_feedback_keep_source BEFORE DELETE ON v2_field_feedbacks WHEN EXISTS(SELECT 1 FROM ck_feedback_plan_links WHERE feedback_id=OLD.id) BEGIN SELECT RAISE(ABORT,'feedback_already_linked'); END`,
+  `CREATE TRIGGER IF NOT EXISTS ck_unload_legacy_guard BEFORE INSERT ON v2_ops_jobs WHEN NEW.job_type='unload' AND NEW.related_doc_type='inbound_plan' AND EXISTS(SELECT 1 FROM ck_unload_plan_links l JOIN v2_ops_jobs j ON j.id=l.job_id WHERE l.plan_id=NEW.related_doc_id AND j.status IN ('pending','working','awaiting_close','completed')) BEGIN SELECT RAISE(ABORT,'unload_plan_busy'); END`,
+  // Each member is checked again in the transaction; a conflicting member aborts the entire dispatch.
+  `CREATE TRIGGER IF NOT EXISTS ck_putaway_link_guard BEFORE INSERT ON ck_putaway_links BEGIN
+    SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM v2_ops_jobs j WHERE j.id=NEW.job_id AND j.job_type='inbound_direct_putaway' AND j.status='working') THEN RAISE(ABORT,'上架任务状态已变化 / 적치 작업 상태 변경') END;
+    SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM v2_inbound_plans p JOIN v2_ops_jobs t ON t.id=NEW.tally_job_id
+      WHERE p.id=NEW.plan_id AND p.status IN ('tallied_pending_putaway','direct_putting_away','partially_completed','putting_away') AND COALESCE(p.is_deleted,0)=0
+      AND t.related_doc_id=p.id AND t.inbound_external_no=NEW.external_no AND t.job_type='inbound_direct_tally' AND t.status='completed'
+      AND instr(char(10)||p.external_inbound_no||char(10),char(10)||NEW.external_no||char(10))>0
+      AND instr(char(10)||COALESCE(p.bulk_external_inbound_no,'')||char(10),char(10)||NEW.external_no||char(10))=0
+      AND (p.biz_class='direct_ship' OR EXISTS(SELECT 1 FROM json_each(p.biz_classes_json) WHERE value='direct_ship'))
+      AND NOT EXISTS(SELECT 1 FROM v2_inbound_plan_biz_tasks b WHERE b.plan_id=p.id AND b.biz_class='direct_ship' AND b.status='completed'))
+      THEN RAISE(ABORT,'入库单或理货状态已变化，整组未开始 / 입고·검수 상태 변경') END;
+    SELECT CASE WHEN EXISTS(SELECT 1 FROM v2_inbound_references r WHERE r.plan_id=NEW.plan_id AND r.id!=NEW.job_id AND (r.inbound_external_no=NEW.external_no OR COALESCE(r.inbound_external_no,'')='') AND r.job_type IN ('inbound_direct','inbound_direct_putaway','inbound_bulk') AND r.status!='cancelled') THEN RAISE(ABORT,'入库单已占用或已上架，整组未开始 / 이미 배정·완료된 입고번호') END;
+  END`,
+  `CREATE TRIGGER IF NOT EXISTS ck_putaway_legacy_conflict BEFORE INSERT ON v2_ops_jobs WHEN NEW.job_type IN ('inbound_direct','inbound_direct_tally','inbound_direct_putaway','inbound_bulk') AND EXISTS(SELECT 1 FROM ck_putaway_links l JOIN v2_ops_jobs j ON j.id=l.job_id WHERE l.plan_id=NEW.related_doc_id AND (l.external_no=NEW.inbound_external_no OR COALESCE(NEW.inbound_external_no,'')='') AND j.status!='cancelled') BEGIN SELECT RAISE(ABORT,'入库单已占用或已上架 / 이미 배정·완료된 입고번호'); END`,
+  `CREATE TRIGGER IF NOT EXISTS ck_putaway_link_identity BEFORE UPDATE ON ck_putaway_links BEGIN SELECT RAISE(ABORT,'putaway membership is immutable'); END`,
+  `CREATE TRIGGER IF NOT EXISTS ck_putaway_plan_lock BEFORE UPDATE OF status,is_deleted,external_inbound_no,bulk_external_inbound_no,biz_class,biz_classes_json ON v2_inbound_plans
+    WHEN EXISTS(SELECT 1 FROM ck_putaway_links l JOIN v2_ops_jobs j ON j.id=l.job_id WHERE l.plan_id=OLD.id AND j.status IN ('pending','working','awaiting_close','paused'))
+    AND (NEW.status IN ('cancelled','completed') OR NEW.is_deleted=1 OR NEW.external_inbound_no IS NOT OLD.external_inbound_no OR NEW.bulk_external_inbound_no IS NOT OLD.bulk_external_inbound_no OR NEW.biz_class IS NOT OLD.biz_class OR NEW.biz_classes_json IS NOT OLD.biz_classes_json)
+    BEGIN SELECT RAISE(ABORT,'共同上架任务进行中，请先处理原任务 / 공동 적치 작업 진행 중'); END`,
+  `CREATE TRIGGER IF NOT EXISTS ck_putaway_finish_guard BEFORE INSERT ON v2_ops_job_results WHEN EXISTS(SELECT 1 FROM ck_putaway_links WHERE job_id=NEW.job_id) BEGIN
+    SELECT CASE WHEN EXISTS(SELECT 1 FROM ck_putaway_links l LEFT JOIN v2_inbound_plans p ON p.id=l.plan_id LEFT JOIN v2_ops_jobs t ON t.id=l.tally_job_id WHERE l.job_id=NEW.job_id AND
+      (p.id IS NULL OR COALESCE(p.is_deleted,0)!=0 OR p.status NOT IN ('direct_putting_away','tallied_pending_putaway','partially_completed','putting_away') OR t.status IS NOT 'completed'
+       OR instr(char(10)||p.external_inbound_no||char(10),char(10)||l.external_no||char(10))=0
+       OR EXISTS(SELECT 1 FROM v2_inbound_plan_jobs u WHERE u.plan_id=l.plan_id AND u.job_type='unload' AND u.status IN ('pending','working','awaiting_close','paused'))
+       OR EXISTS(SELECT 1 FROM ck_courier_plan_items ci WHERE ci.plan_id=l.plan_id AND NOT EXISTS(SELECT 1 FROM ck_courier_receipts cr WHERE cr.tracking_no=ci.tracking_no))))
+    THEN RAISE(ABORT,'关联入库单状态已变化，整组未完成，请刷新核对 / 연결 입고 상태 변경, 전체 미완료') END;
+  END`,
+
 ];
 
 // 每次发布迁移变化时手动 +1（patch 段），冷启动只比对一次字符串即可跳过整段 MIGRATIONS
-const CURRENT_SCHEMA_VERSION = 'v2.20260808c';
+const CURRENT_SCHEMA_VERSION = 'v2.20261021-inbound-owner';
 
-let _migrated = false;
-async function ensureMigrated(db) {
-  if (_migrated) return;
+const migratedDatabases = new WeakSet(), migratingDatabases = new WeakMap();
+async function ensureMigrated(db){
+ if(migratedDatabases.has(db))return;
+ if(migratingDatabases.has(db))return migratingDatabases.get(db);
+ const pending=runMigrations(db);migratingDatabases.set(db,pending);
+ try{await pending;}finally{migratingDatabases.delete(db);}
+}
+async function runMigrations(db) {
+  if (migratedDatabases.has(db)) return;
   // 1. 先确保 v2_schema_meta 存在（轻量幂等 DDL）
   try {
     await db.prepare(`CREATE TABLE IF NOT EXISTS v2_schema_meta (
@@ -1991,15 +1886,18 @@ async function ensureMigrated(db) {
       "SELECT value FROM v2_schema_meta WHERE key='schema_version'"
     ).first();
     if (row && row.value === CURRENT_SCHEMA_VERSION) {
-      _migrated = true;
+      migratedDatabases.add(db);
       return;
     }
   } catch (e) { /* 表刚建好/读失败一律走完整迁移 */ }
 
   // 3. 版本不匹配（首次部署 / 升级），跑全量迁移
-  for (const sql of MIGRATIONS) {
+  for (let i=0;i<MIGRATIONS.length;i++) {
+    const sql=MIGRATIONS[i];
     try {
-      await db.prepare(sql).run();
+      // Replacing a view/guard must not expose a missing schema between requests.
+      if(/^DROP (?:VIEW|TRIGGER)/.test(sql.trim())&&/^CREATE (?:VIEW|TRIGGER)/.test(MIGRATIONS[i+1]?.trim()||'')){await db.batch([db.prepare(sql),db.prepare(MIGRATIONS[++i])]);}
+      else await db.prepare(sql).run();
     } catch (e) {
       // ALTER TABLE may fail if column already exists — ignore
       if (!sql.trim().toUpperCase().startsWith("ALTER")) throw e;
@@ -2013,7 +1911,7 @@ async function ensureMigrated(db) {
     ).bind(CURRENT_SCHEMA_VERSION, now()).run();
   } catch (e) { /* 写入失败不影响功能 */ }
 
-  _migrated = true;
+  migratedDatabases.add(db);
 }
 
 // ===== Route dispatcher =====
@@ -2089,15 +1987,15 @@ route("v2_dashboard_summary", async (body, env) => {
     // ---- inbounds（待执行入库 / 多业务计划部分完成也算"待执行"）----
     env.DB.prepare(
       `SELECT COUNT(*) AS c FROM v2_inbound_plans
-        WHERE source_type != 'return_session'
+        WHERE source_type NOT IN ('return_session','direct_tally_session')
           AND COALESCE(is_deleted,0)=0
-          AND status IN ('pending','unloading','unloading_putting_away','arrived_pending_putaway','putting_away','partially_completed')`
+          AND status IN ('pending','unloading','unloading_putting_away','arrived_pending_putaway','putting_away','tallied_pending_putaway','direct_putting_away','partially_completed')`
     ).first(),
     env.DB.prepare(
       `SELECT * FROM v2_inbound_plans
-        WHERE source_type != 'return_session'
+        WHERE source_type NOT IN ('return_session','direct_tally_session')
           AND COALESCE(is_deleted,0)=0
-          AND status IN ('pending','unloading','unloading_putting_away','arrived_pending_putaway','putting_away','partially_completed')
+          AND status IN ('pending','unloading','unloading_putting_away','arrived_pending_putaway','putting_away','tallied_pending_putaway','direct_putting_away','partially_completed')
         ORDER BY plan_date ASC, created_at ASC LIMIT 3`
     ).all(),
 
@@ -2118,7 +2016,7 @@ route("v2_dashboard_summary", async (body, env) => {
     env.DB.prepare(
       `SELECT * FROM v2_inbound_plans
         WHERE plan_date>=? AND plan_date<=?
-          AND source_type != 'return_session'
+          AND source_type NOT IN ('return_session','direct_tally_session')
           AND COALESCE(is_deleted,0)=0
           AND status NOT IN ('completed','cancelled','deleted')
         ORDER BY plan_date ASC, created_at ASC`
@@ -2142,6 +2040,10 @@ route("v2_dashboard_summary", async (body, env) => {
 // =====================================================
 route("v2_issue_create", async (body, env) => {
   if (!isAuth(body, env)) return err("unauthorized", 401);
+  if (body.issue_attachments) {
+    try { return json(await createIssueWithAttachments(body,env)); }
+    catch(e) { return json({ok:false,error:e.message},409); }
+  }
   return withIdem(env, body, "v2_issue_create", async () => {
     const desc = String(body.issue_description || "").trim();
     if (!desc) return { ok: false, error: "issue_description is required" };
@@ -2164,6 +2066,15 @@ route("v2_issue_create", async (body, env) => {
     ).run();
     return { ok: true, id };
   });
+});
+
+route("v2_issue_draft_remove", async (body,env)=>{
+  if(!isAuth(body,env))return err("unauthorized",401);
+  try{return json(await removeIssueDraftFile(body,env));}catch(e){return json({ok:false,error:e.message},409);}
+});
+route("v2_issue_draft_cancel", async (body,env)=>{
+  if(!isAuth(body,env))return err("unauthorized",401);
+  try{return json(await cancelIssueDraft(body,env));}catch(e){return json({ok:false,error:e.message},409);}
 });
 
 route("v2_issue_list", async (body, env) => {
@@ -2199,15 +2110,21 @@ route("v2_issue_list", async (body, env) => {
     const kw = "%" + related_doc_q + "%";
     binds.push(kw, kw, kw);
   }
-  const orderBy = sort === "oldest_first" ? " ORDER BY created_at ASC" : " ORDER BY created_at DESC";
+  const direction = sort === "oldest_first" ? "ASC" : "DESC";
+  const orderBy = " ORDER BY created_at " + direction + ", id " + direction;
+  // The collaboration list displays a short title, never the full history/feedback.
+  // Opt in so legacy consumers retain their full response; search still uses full columns.
+  const columns = body.list_summary === true
+    ? "id,biz_class,customer,status,submitted_by,created_at,total_minutes_worked,accounting_required,accounted,substr(issue_description,1,512) AS issue_description,substr(issue_summary,1,512) AS issue_summary"
+    : "*";
   const countSql = "SELECT COUNT(*) AS c FROM v2_issue_tickets" + where;
-  const listSql = "SELECT * FROM v2_issue_tickets" + where + orderBy + " LIMIT ? OFFSET ?";
+  const listSql = "SELECT " + columns + " FROM v2_issue_tickets" + where + orderBy + " LIMIT ? OFFSET ?";
   try {
-    const countRow = binds.length > 0
-      ? await env.DB.prepare(countSql).bind(...binds).first()
-      : await env.DB.prepare(countSql).first();
-    const total = Number((countRow && countRow.c) || 0);
-    const rs = await env.DB.prepare(listSql).bind(...binds, limit, offset).all();
+    const [count, rs] = await env.DB.batch([
+      env.DB.prepare(countSql).bind(...binds),
+      env.DB.prepare(listSql).bind(...binds, limit, offset)
+    ]);
+    const total = Number(count.results?.[0]?.c || 0);
     return json({ ok: true, items: rs.results || [], ...pageMeta(total, limit, offset) });
   } catch (e) {
     // 让前端拿到真实错误而不是只看到"加载失败"
@@ -2224,52 +2141,28 @@ route("v2_issue_list", async (body, env) => {
 
 route("v2_issue_detail", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  if(accessEnabled(env)&&!await issueAttachmentAllowed(env,env.SOP_REQUEST_USER,"issue_ticket",String(body.id||"")))return err("无此问题权限 / 문제 접근 권한이 없습니다",403);
   const id = String(body.id || "").trim();
   if (!id) return err("missing id");
-  const row = await env.DB.prepare("SELECT * FROM v2_issue_tickets WHERE id=?").bind(id).first();
+  const [ticketRs, runsRs, rwksRs] = await env.DB.batch([
+    env.DB.prepare("SELECT * FROM v2_issue_tickets WHERE id=?").bind(id),
+    env.DB.prepare("SELECT * FROM v2_issue_handle_runs WHERE issue_id=? ORDER BY started_at ASC").bind(id),
+    env.DB.prepare("SELECT * FROM v2_issue_rework_requests WHERE issue_id=? ORDER BY created_at ASC").bind(id)
+  ]);
+  const row = ticketRs.results?.[0];
   if (!row) return err("not found", 404);
-
-  // 处理轮次（升序，便于 timeline；前端需要倒序时自己反转）
-  const runsRs = await env.DB.prepare(
-    "SELECT * FROM v2_issue_handle_runs WHERE issue_id=? ORDER BY started_at ASC"
-  ).bind(id).all();
-  const runs = runsRs.results || [];
-  const runIds = runs.map(r => r.id).filter(Boolean);
-  const jobIds = runs.map(r => r.job_id).filter(Boolean);
-
-  // 客服追加处理需求（升序）
-  const rwksRs = await env.DB.prepare(
-    "SELECT * FROM v2_issue_rework_requests WHERE issue_id=? ORDER BY created_at ASC"
-  ).bind(id).all();
-  const reworks = rwksRs.results || [];
-
-  // 三类附件查询（issue_ticket / issue_handle_run / ops_job）+ 旧数据兼容（issue / job / issue_handle）
-  // 注意：旧 BUG 把照片写到 related_doc_type='issue_ticket' related_doc_id=job_id，这里也要捞回来
-  const allAtts = [];
-  // 1) issue_ticket / issue / issue_handle 同 issue_id
-  {
-    const r = await env.DB.prepare(
-      "SELECT * FROM v2_attachments WHERE related_doc_type IN ('issue_ticket','issue','issue_handle') AND related_doc_id=?"
-    ).bind(id).all();
-    for (const a of (r.results || [])) allAtts.push(a);
-  }
-  // 2) issue_handle_run + run_ids
-  if (runIds.length > 0) {
-    const rows2 = await batchSelectInGlobal(env,
-      "SELECT * FROM v2_attachments WHERE related_doc_type IN ('issue_handle_run','issue_handle') AND related_doc_id IN (PLACEHOLDER)",
-      runIds);
-    for (const a of rows2) allAtts.push(a);
-  }
-  // 3) ops_job / job + job_ids（attachment_category='issue_handle_photo' 或 'issue_attachment'，为兼容老数据放宽）
-  if (jobIds.length > 0) {
-    const rows3 = await batchSelectInGlobal(env,
-      "SELECT * FROM v2_attachments WHERE related_doc_type IN ('ops_job','job','issue_ticket') AND related_doc_id IN (PLACEHOLDER)",
-      jobIds);
-    for (const a of rows3) {
-      // 旧 bug 路径：related_doc_type='issue_ticket' 且 related_doc_id=job_id（不会和 issue_id=ISS-xxx 冲突，因 job_id 是 JOB-xxx）
-      allAtts.push(a);
-    }
-  }
+  const runs = runsRs.results || [], reworks = rwksRs.results || [];
+  const runIds = [...new Set(runs.map(r=>r.id).filter(Boolean))];
+  const jobIds = [...new Set(runs.map(r=>r.job_id).filter(Boolean))];
+  // Two bounded round trips regardless of handling history. Each legacy relation
+  // uses the existing attachment index; JSON ID sets avoid D1 bind limits.
+  const reads = [env.DB.prepare("SELECT * FROM v2_attachments WHERE related_doc_type IN ('issue_ticket','issue','issue_handle') AND related_doc_id=?").bind(id)];
+  if(runIds.length) reads.push(env.DB.prepare("SELECT * FROM v2_attachments WHERE related_doc_type IN ('issue_handle_run','issue_handle') AND related_doc_id IN (SELECT value FROM json_each(?))").bind(JSON.stringify(runIds)));
+  if(jobIds.length) reads.push(env.DB.prepare("SELECT * FROM v2_attachments WHERE related_doc_type IN ('ops_job','job','issue_ticket') AND related_doc_id IN (SELECT value FROM json_each(?))").bind(JSON.stringify(jobIds)));
+  const attachmentReadCount=reads.length;
+  if(jobIds.length) reads.push(env.DB.prepare("SELECT job_id,id,worker_id,worker_name,joined_at,left_at,minutes_worked,leave_reason FROM v2_ops_job_workers WHERE job_id IN (SELECT value FROM json_each(?)) ORDER BY joined_at ASC").bind(JSON.stringify(jobIds)));
+  const results=await env.DB.batch(reads),allAtts=results.slice(0,attachmentReadCount).flatMap(r=>r.results||[]),segmentsByJob=new Map();
+  for(const segment of results[attachmentReadCount]?.results||[]){const list=segmentsByJob.get(segment.job_id)||[];list.push(segment);segmentsByJob.set(segment.job_id,list);}
   // 去重（按 id）
   const seenAtt = {};
   const attachmentsAll = [];
@@ -2319,7 +2212,7 @@ route("v2_issue_detail", async (body, env) => {
     let segments = [];
     let worker_names = r.handler_name || '';
     if (r.job_id) {
-      const sum = await sumJobWorkerMinutes(env, r.job_id, r.ended_at || now(), false);
+      const sum = await sumJobWorkerMinutes(env, r.job_id, r.ended_at || now(), false, segmentsByJob.get(r.job_id)||[]);
       segments = sum.segments;
       if (segments.length > 0) {
         actual_minutes = sum.total_minutes;
@@ -2548,14 +2441,30 @@ route("v2_issue_ops_list", async (body, env) => {
   const status = String(body.status || "").trim();
   const biz_class = String(body.biz_class || "").trim();
   const sort = String(body.sort || "").trim();
-  let sql = "SELECT * FROM v2_issue_tickets WHERE 1=1";
+  let where = " WHERE 1=1";
   const binds = [];
-  if (status) { sql += " AND status=?"; binds.push(status); }
-  if (biz_class) { sql += " AND biz_class=?"; binds.push(biz_class); }
-  // 现场默认 oldest_first（FIFO，最早等待最先看到）；显式 newest_first 才反过来
-  sql += sort === "newest_first" ? " ORDER BY created_at DESC LIMIT 200" : " ORDER BY created_at ASC LIMIT 200";
-  const stmt = env.DB.prepare(sql);
-  const rs = binds.length > 0 ? await stmt.bind(...binds).all() : await stmt.all();
+  const statuses = sort === "latest_activity" ? status.split(",").filter(Boolean) : status ? [status] : [];
+  if (statuses.length === 1) { where += " AND t.status=?"; binds.push(statuses[0]); }
+  else if (statuses.length > 1) { where += " AND t.status IN (" + statuses.map(() => "?").join(",") + ")"; binds.push(...statuses); }
+  if (biz_class) { where += " AND t.biz_class=?"; binds.push(biz_class); }
+  if (sort === "latest_activity") {
+    // Only business events count. In particular, opening a ticket can create a
+    // sop_issue_adopt link, which must never move it to the top of this list.
+    const valid = col => `CASE WHEN julianday(${col}) IS NOT NULL THEN ${col} ELSE '' END`;
+    const latest = (table, date, condition) => `(SELECT MAX(${valid(date)}) FROM ${table} WHERE ${condition})`;
+    const runs = "SELECT id FROM v2_issue_handle_runs WHERE issue_id=t.id";
+    const jobs = "SELECT job_id FROM v2_issue_handle_runs WHERE issue_id=t.id";
+    const attachments = latest("v2_attachments a", "a.created_at", `((a.related_doc_type IN ('issue_ticket','issue','issue_handle') AND a.related_doc_id=t.id) OR (a.related_doc_type IN ('issue_handle_run','issue_handle') AND a.related_doc_id IN (${runs})) OR (a.related_doc_type IN ('ops_job','job','issue_ticket') AND a.related_doc_id IN (${jobs})))`);
+    const activity = `MAX(${valid('t.created_at')},${valid('t.updated_at')},COALESCE(${latest('sop_events e','e.created_at',"e.record_id='ISSUE-'||t.id AND e.action!='sop_issue_adopt'")},''),COALESCE(${latest('v2_issue_handle_runs r','r.started_at','r.issue_id=t.id')},''),COALESCE(${latest('v2_issue_handle_runs r','r.ended_at','r.issue_id=t.id')},''),COALESCE(${latest('v2_issue_rework_requests w','w.created_at','w.issue_id=t.id')},''),COALESCE(${latest('v2_issue_rework_requests w','w.resolved_at','w.issue_id=t.id')},''),COALESCE(${latest('v2_ops_jobs j','j.updated_at',`j.id IN (${jobs})`)},''),COALESCE(${attachments},''))`;
+    const {limit,offset}=pageParams(body);
+    const count=await env.DB.prepare('SELECT COUNT(*) AS c FROM v2_issue_tickets t'+where).bind(...binds).first();
+    const sql=`SELECT t.*, ${activity} AS last_business_at FROM v2_issue_tickets t${where} ORDER BY julianday(last_business_at) DESC, julianday(t.created_at) DESC, t.id DESC LIMIT ? OFFSET ?`;
+    const rs=await env.DB.prepare(sql).bind(...binds,limit,offset).all();
+    return json({ok:true,items:rs.results||[],...pageMeta(count?.c,limit,offset)});
+  }
+  // Preserve the legacy sort for other consumers.
+  const sql="SELECT t.* FROM v2_issue_tickets t"+where+(sort === "newest_first" ? " ORDER BY t.created_at DESC LIMIT 200" : " ORDER BY t.created_at ASC LIMIT 200");
+  const rs=await env.DB.prepare(sql).bind(...binds).all();
   return json({ ok: true, items: rs.results || [] });
 });
 
@@ -2703,10 +2612,14 @@ route("v2_issue_handle_finish", async (body, env) => {
 // =====================================================
 // OUTBOUND ORDERS — Collab side
 // =====================================================
+route('v2_outbound_order_batch_create',async(body,env)=>{
+  if(!isAuth(body,env))return err('unauthorized',401);
+  return json(await createOutboundBookingBatch(body,env));
+});
 route("v2_outbound_order_create", async (body, env) => {
   if (!isAuth(body, env)) return err("unauthorized", 401);
   // 业务分类必填（direct_ship/bulk/return）
-  const VALID_BIZ = ['direct_ship','bulk','return'];
+  const VALID_BIZ = ['direct_ship','bulk_putaway','bulk','return','change_order'];
   const biz_class = String(body.biz_class || "").trim();
   if (!biz_class || VALID_BIZ.indexOf(biz_class) === -1) {
     return err("biz_class 必须是 direct_ship/bulk/return / 업무 분류는 direct_ship/bulk/return 중 하나여야 합니다");
@@ -2722,13 +2635,13 @@ route("v2_outbound_order_create", async (body, env) => {
     const expected_ship_at = normalizeDateOnly(body.expected_ship_at);
     const _esaDate = expected_ship_at; // 已是 YYYY-MM-DD 或 ''
     const order_date = String(body.order_date || _esaDate || kstToday());
-    const display_no = await nextOutboundDisplayNo(env, order_date);
+    const display_no = await nextOutboundDisplayNo(env, body.customer, expected_ship_at || order_date);
     // 库内操作型：初始状态 operation_reserved；普通：pending_issue
     const initStatus = uses_stock_operation === 1 ? 'operation_reserved' : 'pending_issue';
     const initStockOpStatus = uses_stock_operation === 1 ? 'reserved' : '';
     const outbound_requirement = String(body.outbound_requirement || "").trim();
     const source_inbound_plan_id = String(body.source_inbound_plan_id || "").trim();
-    await env.DB.prepare(`
+    const creationStatements = [env.DB.prepare(`
       INSERT INTO v2_outbound_orders(id, order_date, customer, biz_class, operation_mode,
         outbound_mode, instruction, remark, status, source_inbound_plan_id, created_by, created_at, updated_at,
         destination, po_no, wms_work_order_no,
@@ -2756,24 +2669,27 @@ route("v2_outbound_order_create", async (body, env) => {
       initStockOpStatus,
       expected_ship_at,
       outbound_requirement
-    ).run();
+    )];
 
     const lines = body.lines || [];
     for (let i = 0; i < lines.length; i++) {
       const ln = lines[i];
       // 行级 wms_order_no 已废弃；单头承载 wms_work_order_no，这里写空保留兼容列
-      await env.DB.prepare(`
+      creationStatements.push(env.DB.prepare(`
         INSERT INTO v2_outbound_order_lines(id, order_id, line_no, wms_order_no, sku, quantity, remark)
         VALUES(?,?,?,'',?,?,?)
-      `).bind("OBL-" + uid(), id, i + 1, String(ln.sku || ""), Number(ln.quantity || 0), String(ln.remark || "")).run();
+      `).bind("OBL-" + uid(), id, i + 1, String(ln.sku || ""), Number(ln.quantity || 0), String(ln.remark || "")));
     }
 
+    creationStatements.push(...await outboundNeedStatements(env,body,id,display_no,t));
+    await env.DB.batch([...creationStatements,...planAuditStatements(env,'outbound',id,'create',t)]);
     return { ok: true, id, display_no };
   });
 });
 
 route("v2_outbound_order_list", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  if(loadTripEnabled(env)&&body.scene==='load_trip')return json(await loadCandidates(env,body));
   const start = String(body.start_date || "").trim();
   const end = String(body.end_date || "").trim();
   // date_basis：'expected_ship_at'（默认，按预计出库日期）/ 'order_date'（兼容旧调用）
@@ -2801,29 +2717,27 @@ route("v2_outbound_order_list", async (body, env) => {
   if (customer_keyword) { where += " AND customer LIKE ?"; binds.push('%' + customer_keyword + '%'); }
   if (usesStockRaw === "1") { where += " AND uses_stock_operation=1"; }
   else if (usesStockRaw === "0") { where += " AND (uses_stock_operation IS NULL OR uses_stock_operation=0)"; }
-  if (hasMaterialRaw === "1") {
+  if(workChainEnabled(env)&&['0','1'].includes(hasMaterialRaw)) {where+=' AND '+workMaterialCountFor(env)+(hasMaterialRaw==='1'?'>0':'=0');}
+  else if (hasMaterialRaw === "1") {
     where += " AND EXISTS (SELECT 1 FROM v2_attachments a WHERE a.related_doc_type='outbound_order' AND a.related_doc_id=v2_outbound_orders.id AND a.attachment_category='outbound_material')";
   } else if (hasMaterialRaw === "0") {
     where += " AND NOT EXISTS (SELECT 1 FROM v2_attachments a WHERE a.related_doc_type='outbound_order' AND a.related_doc_id=v2_outbound_orders.id AND a.attachment_category='outbound_material')";
   }
-  const countRow = binds.length > 0
-    ? await env.DB.prepare("SELECT COUNT(*) AS c FROM v2_outbound_orders" + where).bind(...binds).first()
-    : await env.DB.prepare("SELECT COUNT(*) AS c FROM v2_outbound_orders" + where).first();
-  const total = Number((countRow && countRow.c) || 0);
-  const listSql = "SELECT * FROM v2_outbound_orders" + where + " ORDER BY " + _dateExpr + " DESC, created_at DESC LIMIT ? OFFSET ?";
-  const rs = await env.DB.prepare(listSql).bind(...binds, limit, offset).all();
+  const listSql = "SELECT *"+(workChainEnabled(env)?", "+workMaterialCountFor(env)+" AS material_count":"")+" FROM v2_outbound_orders" + where + " ORDER BY " + _dateExpr + " DESC, created_at DESC LIMIT ? OFFSET ?";
+  const [countRs,rs]=await env.DB.batch([env.DB.prepare('SELECT COUNT(*) AS c FROM v2_outbound_orders'+where).bind(...binds),env.DB.prepare(listSql).bind(...binds,limit,offset)]);
+  const total=Number(countRs.results?.[0]?.c||0);
   const items = rs.results || [];
   // 注入 material_count（CHUNK=80 防 D1 too many SQL variables）
   if (items.length > 0) {
     const ids = items.map(o => o.id);
-    const matRows = await batchSelectInGlobal(env,
+    const matRows = workChainEnabled(env)?[]:await batchSelectInGlobal(env,
       `SELECT related_doc_id AS id, COUNT(*) AS c FROM v2_attachments
         WHERE related_doc_type='outbound_order' AND attachment_category='outbound_material'
           AND related_doc_id IN (PLACEHOLDER) GROUP BY related_doc_id`,
       ids);
     const map = {};
     for (const r of matRows) map[r.id] = Number(r.c || 0);
-    for (const it of items) it.material_count = Number(map[it.id] || 0);
+    if(!workChainEnabled(env))for (const it of items) it.material_count = Number(map[it.id] || 0);
 
     // 注入 latest_change_summary（每单最新一条 change_log 摘要，用于列表 hover/小字显示）
     const ackIds = items.filter(o => Number(o.warehouse_ack_required) === 1).map(o => o.id);
@@ -2851,38 +2765,18 @@ route("v2_outbound_order_detail", async (body, env) => {
   if (!id) return err("missing id");
   const row = await env.DB.prepare("SELECT * FROM v2_outbound_orders WHERE id=?").bind(id).first();
   if (!row) return err("not found", 404);
-  const lines = await env.DB.prepare(
-    "SELECT * FROM v2_outbound_order_lines WHERE order_id=? ORDER BY line_no"
-  ).bind(id).all();
-  // Get related jobs（含 outbound_load 和 bulk_op 两种关联方式）
-  const jobs = await env.DB.prepare(
-    "SELECT * FROM v2_ops_jobs WHERE (related_doc_type='outbound_order' AND related_doc_id=?) OR linked_outbound_order_id=? ORDER BY created_at DESC"
-  ).bind(id, id).all();
-  const jobIds = (jobs.results || []).map(j => j.id);
-  let allAtts = [];
-  const orderAtts = await env.DB.prepare(
-    "SELECT * FROM v2_attachments WHERE related_doc_type='outbound_order' AND related_doc_id=? ORDER BY created_at DESC"
-  ).bind(id).all();
-  allAtts = allAtts.concat(orderAtts.results || []);
-  for (const jid of jobIds) {
-    const jAtts = await env.DB.prepare(
-      "SELECT * FROM v2_attachments WHERE related_doc_id=? ORDER BY created_at DESC"
-    ).bind(jid).all();
-    allAtts = allAtts.concat(jAtts.results || []);
-  }
-  // 注入 material_count
-  const materialCount = (orderAtts.results || []).filter(a => a.attachment_category === 'outbound_material').length;
-  row.material_count = materialCount;
-
-  // 修改日志（按 revision_no DESC）
-  const changeLogRs = await env.DB.prepare(
-    `SELECT id, revision_no, change_type, changed_by, changed_at,
-            diff_json, summary_text, warehouse_ack_required, warehouse_ack_by, warehouse_ack_at, ack_source
-       FROM v2_outbound_order_change_logs
-      WHERE order_id=?
-      ORDER BY revision_no DESC, changed_at DESC
-      LIMIT 50`
-  ).bind(id).all();
+  const [reads,needs] = await Promise.all([
+    env.DB.batch([
+      env.DB.prepare('SELECT * FROM v2_outbound_order_lines WHERE order_id=? ORDER BY line_no').bind(id),
+      env.DB.prepare("SELECT * FROM v2_ops_jobs j WHERE (related_doc_type='outbound_order' AND related_doc_id=?) OR linked_outbound_order_id=?"+(loadTripEnabled(env)?" OR EXISTS(SELECT 1 FROM ck_load_order_links l WHERE l.job_id=j.id AND l.order_id=?)":"")+" ORDER BY created_at DESC").bind(id,id,...(loadTripEnabled(env)?[id]:[])),
+      env.DB.prepare("SELECT * FROM v2_attachments WHERE (related_doc_type='outbound_order' AND related_doc_id=?) OR related_doc_id IN (SELECT id FROM v2_ops_jobs j WHERE (related_doc_type='outbound_order' AND related_doc_id=?) OR linked_outbound_order_id=?"+(loadTripEnabled(env)?" OR EXISTS(SELECT 1 FROM ck_load_order_links l WHERE l.job_id=j.id AND l.order_id=?)":"")+") ORDER BY created_at DESC").bind(id,id,id,...(loadTripEnabled(env)?[id]:[])),
+      env.DB.prepare('SELECT * FROM v2_outbound_order_change_logs WHERE order_id=? ORDER BY revision_no DESC,changed_at DESC LIMIT 50').bind(id)
+    ]),env.SOP_UPGRADE_ENABLED==='true'?chainLinked(env,id):[]
+  ]);
+  const [lines,jobs,orderAtts,changeLogRs]=reads;
+  let allAtts=orderAtts.results||[];
+  if(workChainEnabled(env)){const files=await workMaterials(env,needs,id);const byId=new Map(allAtts.map(f=>[f.id,f]));for(const f of files)byId.set(f.id,{...f,attachment_category:'outbound_material',canonical_material:true});allAtts=[...byId.values()];}
+  row.material_count=allAtts.filter(a=>a.attachment_category==='outbound_material').length;
   const change_logs = (changeLogRs.results || []).map(r => {
     let diff = {};
     try { diff = JSON.parse(r.diff_json || '{}'); } catch (e) {}
@@ -2902,12 +2796,16 @@ route("v2_outbound_order_detail", async (body, env) => {
   });
   const pending_change_logs = change_logs.filter(x => x.warehouse_ack_required === 1);
   const latest_change_log = change_logs.length > 0 ? change_logs[0] : null;
+  const loadHistory=loadTripEnabled(env)?(await env.DB.prepare('SELECT job_id,result_json FROM ck_load_order_links WHERE order_id=? ORDER BY job_id').bind(id).all()).results.map(x=>({job_id:x.job_id,result:x.result_json?JSON.parse(x.result_json):null})):[];
 
   return json({
     ok: true,
     order: row,
+    operation_audit: await planOperationAudit(env,'outbound',id),
+    sop_needs: await linkedNeeds(env,id,needs),
     lines: lines.results || [],
-    jobs: jobs.results || [],
+    jobs: (await jobNumbers(env,jobs.results||[])).map(j=>{const own=loadHistory.find(x=>x.job_id===j.id)?.result;return own?{...j,shared_result_json:JSON.stringify({box_count:own.box_count,pallet_count:own.pallet_count,remark:JSON.parse(j.shared_result_json||'{}').remark||'',order_id:id})}:j;}),
+    load_history: loadHistory,
     attachments: allAtts,
     change_logs,
     pending_change_logs,
@@ -2950,9 +2848,9 @@ route("v2_outbound_order_update_status", async (body, env) => {
     const loadedJob = await env.DB.prepare(
       `SELECT id FROM v2_ops_jobs
        WHERE job_type='load_outbound' AND status='completed'
-         AND (related_doc_id=? OR linked_outbound_order_id=?)
+         AND (related_doc_id=? OR linked_outbound_order_id=?${loadTripEnabled(env)?' OR EXISTS(SELECT 1 FROM ck_load_order_links l WHERE l.job_id=v2_ops_jobs.id AND l.order_id=?)':''})
        LIMIT 1`
-    ).bind(id, id).first();
+    ).bind(id, id,...(loadTripEnabled(env)?[id]:[])).first();
     if (loadedJob) {
       return json({ ok: false, error: "outbound_already_shipped_cannot_reopen",
         message: "该出库作业单已完成出库，不能设为待再操作 / 해당 출고작업단은 이미 출고 완료되어 재작업 대기로 변경할 수 없습니다" });
@@ -2965,9 +2863,9 @@ route("v2_outbound_order_update_status", async (body, env) => {
       `SELECT id FROM v2_ops_jobs
        WHERE status IN ('working','awaiting_close','pending')
          AND (linked_outbound_order_id=?
-           OR (related_doc_type='outbound_order' AND related_doc_id=?))
+           OR (related_doc_type='outbound_order' AND related_doc_id=?)${loadTripEnabled(env)?' OR EXISTS(SELECT 1 FROM ck_load_order_links l WHERE l.job_id=v2_ops_jobs.id AND l.order_id=?)':''})
        LIMIT 1`
-    ).bind(id, id).first();
+    ).bind(id, id,...(loadTripEnabled(env)?[id]:[])).first();
     if (activeJob) {
       return json({ ok: false, error: "has_active_job",
         message: "当前有进行中的现场作业，不能取消" });
@@ -3068,22 +2966,9 @@ route("v2_outbound_order_update_ship_plan", async (body, env) => {
       sets.push("warehouse_ack_at=''");
     }
     binds.push(id);
-    await env.DB.prepare(
-      "UPDATE v2_outbound_orders SET " + sets.join(", ") + " WHERE id=?"
-    ).bind(...binds).run();
-
-    if (diffResult.changedFields.length > 0) {
-      const newRevision = Number(order.revision_no || 0) + 1;
-      await insertOutboundChangeLog(env, {
-        order_id: id,
-        revision_no: newRevision,
-        change_type: 'ship_plan',
-        changed_by: by,
-        diff: diffResult.diff,
-        summary: diffResult.summary,
-        t
-      });
-    }
+    const statements=[env.DB.prepare("UPDATE v2_outbound_orders SET " + sets.join(", ") + " WHERE id=?").bind(...binds)];
+    if(diffResult.changedFields.length){statements.push(...planAuditStatements(env,'outbound',id,'update',t),outboundChangeLogStatement(env,{order_id:id,revision_no:Number(order.revision_no||0)+1,change_type:'ship_plan',changed_by:by,diff:diffResult.diff,summary:diffResult.summary,t}));}
+    await env.DB.batch(statements);
 
     return { ok: true, status: nextStatus, no_change: diffResult.changedFields.length === 0 };
   });
@@ -3163,12 +3048,9 @@ route("v2_outbound_order_update", async (body, env) => {
     }
     sets.push("updated_at=?"); binds.push(t);
     binds.push(id);
-    await env.DB.prepare(
+    await env.DB.batch([env.DB.prepare(
       "UPDATE v2_outbound_orders SET " + sets.join(", ") + " WHERE id=?"
-    ).bind(...binds).run();
-
-    // 写入修改明细日志（仅当有变化时）
-    await insertOutboundChangeLog(env, {
+    ).bind(...binds),...planAuditStatements(env,'outbound',id,'update',t),outboundChangeLogStatement(env, {
       order_id: id,
       revision_no: newRevision,
       change_type: pickupTouched && diffResult.changedFields.every(f => f.indexOf('pickup_') === 0)
@@ -3178,7 +3060,7 @@ route("v2_outbound_order_update", async (body, env) => {
       diff: diffResult.diff,
       summary: diffResult.summary,
       t
-    });
+    })]);
 
     return { ok: true, id, revision_no: newRevision, summary_text: diffResult.summary };
   });
@@ -3192,21 +3074,16 @@ route("v2_outbound_order_ack_change", async (body, env) => {
   return withIdem(env, body, "v2_outbound_order_ack_change", async () => {
     const order = await env.DB.prepare("SELECT id, warehouse_ack_required, revision_no FROM v2_outbound_orders WHERE id=?").bind(id).first();
     if (!order) return { ok: false, error: "not_found" };
+    const revision=Number(order.revision_no||0);
+    if(workChainEnabled(env)&&(!Number.isSafeInteger(body.revision_no)||body.revision_no!==revision))return {ok:false,error:'出库计划又有新修改，请刷新查看后再确认 / 변경 내용을 새로고침 후 확인하세요'};
     const alreadyAcked = Number(order.warehouse_ack_required) !== 1;
-    const t = now();
-    const worker = String(body.worker_name || body.by || "");
-    const ack_source = String(body.source || '').trim() || 'warehouse';
-
-    if (!alreadyAcked) {
-      await env.DB.prepare(
-        "UPDATE v2_outbound_orders SET warehouse_ack_required=0, warehouse_ack_by=?, warehouse_ack_at=?, updated_at=? WHERE id=?"
-      ).bind(worker, t, t, id).run();
-    }
-    // 清掉该 order_id 所有 pending change_logs（即便主表已 ack 也确保日志同步）
-    const updRs = await env.DB.prepare(
-      "UPDATE v2_outbound_order_change_logs SET warehouse_ack_required=0, warehouse_ack_by=?, warehouse_ack_at=?, ack_source=? WHERE order_id=? AND warehouse_ack_required=1"
-    ).bind(worker, t, ack_source, id).run();
-    const acked_count = (updRs && updRs.meta && Number(updRs.meta.changes || 0)) || 0;
+    const t=now(),worker=env.SOP_REQUEST_USER?.name||String(body.worker_name||body.by||''),ack_source=env.SOP_REQUEST_USER?.scope==='field'?'warehouse':String(body.source||'warehouse');
+    const results=await env.DB.batch([
+      env.DB.prepare("UPDATE v2_outbound_orders SET warehouse_ack_required=0,warehouse_ack_by=?,warehouse_ack_at=?,updated_at=? WHERE id=? AND COALESCE(revision_no,0)=?").bind(worker,t,t,id,revision),
+      env.DB.prepare("UPDATE v2_outbound_order_change_logs SET warehouse_ack_required=0,warehouse_ack_by=?,warehouse_ack_at=?,ack_source=? WHERE order_id=? AND warehouse_ack_required=1 AND revision_no<=? AND EXISTS(SELECT 1 FROM v2_outbound_orders WHERE id=? AND COALESCE(revision_no,0)=?)").bind(worker,t,ack_source,id,revision,id,revision)
+    ]);
+    if(!results[0].meta?.changes)return {ok:false,error:'出库计划又有新修改，请刷新查看后再确认'};
+    const acked_count=Number(results[1].meta?.changes||0);
 
     return {
       ok: true,
@@ -3224,13 +3101,16 @@ route("v2_outbound_pickup_confirm", async (body, env) => {
   const id = String(body.id || "").trim();
   if (!id) return err("missing id");
   return withIdem(env, body, "v2_outbound_pickup_confirm", async () => {
-    const order = await env.DB.prepare("SELECT id, pickup_confirm_required FROM v2_outbound_orders WHERE id=?").bind(id).first();
+    const order = await env.DB.prepare("SELECT id, pickup_confirm_required, revision_no FROM v2_outbound_orders WHERE id=?").bind(id).first();
     if (!order) return { ok: false, error: "not_found" };
+    const revision=Number(order.revision_no||0);
+    if(workChainEnabled(env)&&(!Number.isSafeInteger(body.revision_no)||body.revision_no!==revision))return {ok:false,error:'提货安排又有新修改，请刷新查看后再确认 / 픽업 정보가 변경되었습니다'};
     const t = now();
-    const worker = String(body.worker_name || body.by || "");
-    await env.DB.prepare(
-      "UPDATE v2_outbound_orders SET pickup_confirm_required=0, pickup_confirmed_by=?, pickup_confirmed_at=?, updated_at=? WHERE id=?"
-    ).bind(worker, t, t, id).run();
+    const worker = env.SOP_REQUEST_USER?.name||String(body.worker_name || body.by || "");
+    const saved=await env.DB.prepare(
+      "UPDATE v2_outbound_orders SET pickup_confirm_required=0, pickup_confirmed_by=?, pickup_confirmed_at=?, updated_at=? WHERE id=? AND COALESCE(revision_no,0)=?"
+    ).bind(worker, t, t, id,revision).run();
+    if(!saved.meta?.changes)return {ok:false,error:'提货安排又有新修改，请刷新查看后再确认'};
     return { ok: true, id };
   });
 });
@@ -3323,6 +3203,7 @@ route("v2_outbound_order_admin_realign_order_date", async (body, env) => {
 // =====================================================
 route("v2_outbound_order_resolve_code", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  if(loadTripEnabled(env)&&body.scene==='load_trip')return json(await resolveLoadOrder(env,body));
   const code = String(body.code || "").trim();
   if (!code) return err("missing code");
 
@@ -3369,6 +3250,7 @@ route("v2_outbound_order_resolve_code", async (body, env) => {
 });
 
 route("v2_outbound_load_start", async (body, env) => {
+  const chainError=await guardWorkChain(body,env);if(chainError)return err(chainError);
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
   const order_id = String(body.order_id || "").trim();
   const worker_id = String(body.worker_id || "").trim();
@@ -3380,7 +3262,7 @@ route("v2_outbound_load_start", async (body, env) => {
     let job = null;
     if (order_id) {
       const existing = await env.DB.prepare(
-        "SELECT * FROM v2_ops_jobs WHERE related_doc_type='outbound_order' AND related_doc_id=? AND status IN ('pending','working') LIMIT 1"
+        "SELECT * FROM v2_ops_jobs WHERE job_type='load_outbound' AND related_doc_type='outbound_order' AND related_doc_id=? AND status IN ('pending','working') LIMIT 1"
       ).bind(order_id).first();
       if (existing) job = existing;
     }
@@ -3424,7 +3306,17 @@ route("v2_outbound_load_start", async (body, env) => {
 });
 
 route("v2_outbound_load_finish", async (body, env) => {
+  if(loadTripEnabled(env)){
+    if(!isOpsAuth(body,env))return err('unauthorized',401);
+    const result=await finishLoadTrip(env,body);if(result)return json(result);
+    const old=await validateLegacyLoadFinish(env,body);if(old)return json(old);
+  }
+  const chainError=await guardWorkChain(body,env);if(chainError)return err(chainError);
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  if(env.SOP_GROUP_FINISH && body.complete_job===true){
+    try{return json(await finishNativeOutbound(body,env));}
+    catch(error){if(loadTripEnabled(env))await validateLegacyLoadFinish(env,body);throw error;}
+  }
   const job_id = String(body.job_id || "").trim();
   const worker_id = String(body.worker_id || "").trim();
   if (!job_id) return err("missing job_id");
@@ -3464,7 +3356,7 @@ route("v2_outbound_load_finish", async (body, env) => {
 
   // Complete job if requested — 基于 realCount 判断
   if (complete_job) {
-    if (realCount <= 0) {
+    if (realCount <= 0 || env.SOP_GROUP_FINISH) {
       // 防御性收口：关闭所有遗留 open segment（多人任务即使 realCount=0 也确保 left_at 全部写入）
       await closeOpenWorkerSegmentsForJob(env, job_id, t, 'job_completed');
       await env.DB.prepare(
@@ -3574,6 +3466,7 @@ route("v2_outbound_stock_op_start", async (body, env) => {
 // 仓库完成库内操作（写 result，关闭 segs，推 order.status='pending_outbound_update'）
 route("v2_outbound_stock_op_finish", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  if(env.SOP_GROUP_FINISH && body.complete_job!==false)return json(await finishNativeOutbound(body,env));
   const job_id = String(body.job_id || "").trim();
   const worker_id = String(body.worker_id || "").trim();
   const worker_name = String(body.worker_name || "").trim();
@@ -3596,6 +3489,10 @@ route("v2_outbound_stock_op_finish", async (body, env) => {
     }
     const order_id = jobCheck.related_doc_id || "";
 
+    if(inboundFlowEnabled(env)&&body.complete_job!==false){
+     const other=await env.DB.prepare(`SELECT COUNT(*) AS n FROM v2_ops_job_workers WHERE job_id=? AND NOT ${badgeSQL(env,'worker_id','?')} AND left_at=''`).bind(job_id,worker_id).first();
+     if(!Number(other?.n))return finishNativeOutbound(body,env,{legacy:true});
+    }
     // 关闭该 worker 全部 open segs
     if (worker_id) await closeAllOpenSegs(env, job_id, worker_id, t, 'finished');
     const realCount = await recalcActiveCount(env, job_id, t);
@@ -3619,7 +3516,7 @@ route("v2_outbound_stock_op_finish", async (body, env) => {
 
     const complete_job = body.complete_job !== false; // 默认完成
 
-    if (complete_job && realCount <= 0) {
+    if (complete_job && (realCount <= 0 || env.SOP_GROUP_FINISH)) {
       // 防御性收口：关闭所有遗留 open segment
       await closeOpenWorkerSegmentsForJob(env, job_id, t, 'job_completed');
       // 关闭 job
@@ -3683,27 +3580,41 @@ route("v2_outbound_stock_op_finish", async (body, env) => {
 // =====================================================
 // INBOUND PLANS — Collab side
 // =====================================================
-route("v2_inbound_plan_create", async (body, env) => {
-  if (!isAuth(body, env)) return err("unauthorized", 401);
+route("v2_inbound_plan_create_status", (body,env)=>inboundCreateStatus(body,env));
+route("v2_inbound_plan_create", (body,env)=>withInboundCreateReceipt(body,env,receipt=>createInboundPlan(body,env,receipt)));
+async function createInboundPlan(body, env, receipt=null) {
+  const fromFeedback=body.feedback_context!==undefined;
+  if(fromFeedback){feedbackLinkActor(env);if(!String(body.customer||'').trim())return err('请客服确认并填写客户 / 고객을 확인해 입력하세요');}
+  else if (!isAuth(body, env)) return err("unauthorized", 401);
   // 业务类型多选：必须至少 1 项合法 (direct_ship/bulk/return)
   const bizNorm = normalizeInboundBizClasses(body);
   if (bizNorm.list.length === 0) {
     return err("biz_classes 至少选择一个业务类型（代发/大货/退件）/ 업무 유형을 1개 이상 선택하세요");
   }
-  return withIdem(env, body, "v2_inbound_plan_create", async () => {
+  if(fromFeedback){
+    const requestKey=typeof body.client_req_id==='string'?body.client_req_id.trim():'';
+    if(!requestKey||requestKey.length>200)return err('缺少或无效的创建请求编号');
+    body={...body,client_req_id:requestKey};
+    const prior=await env.DB.prepare('SELECT action,response_json FROM v2_idempotency_keys WHERE idem_key=?').bind(String(body.client_req_id)).first();
+    if(prior&&(prior.action!=='v2_inbound_plan_create'||JSON.parse(prior.response_json).feedback_id!==body.feedback_context?.feedback_id))return err('请求编号已用于其他操作，请重新打开表单');
+  }
+  const response=await withIdem(env, body, "v2_inbound_plan_create", async () => {
+    const feedback=fromFeedback?await prepareFeedbackCreate(env,body.feedback_context):null;
+    if(feedback?.existing)return feedbackExistingResult(feedback.existing);
+    const {externalNo,bulkExternalNo} = await inboundReferenceData(env,bizNorm.list,body);
     const id = "IB-" + uid();
     const t = now();
-    const plan_date = String(body.plan_date || kstToday());
+    const plan_date = env.SOP_ENVIRONMENT==='staging'&&env.SOP_UPGRADE_ENABLED==='true' ? kstToday() : String(body.plan_date || kstToday());
     const customer = String(body.customer || "");
     const biz_class = bizNorm.primary; // 兼容旧字段，存第一个
     const biz_classes_json = JSON.stringify(bizNorm.list);
     const created_by = String(body.created_by || "");
     const display_no = await nextDisplayNo(env, plan_date);
 
-    await env.DB.prepare(`
+    const inboundStatements = [env.DB.prepare(`
       INSERT INTO v2_inbound_plans(id, plan_date, customer, biz_class, biz_classes_json, cargo_summary,
-        expected_arrival, purpose, remark, status, created_by, created_at, updated_at, display_no)
-      VALUES(?,?,?,?,?,?,?,?,?,'pending',?,?,?,?)
+        expected_arrival, purpose, remark, status, created_by, created_at, updated_at, display_no, external_inbound_no, bulk_external_inbound_no)
+      VALUES(?,?,?,?,?,?,?,?,?,'pending',?,?,?,?,?,?)
     `).bind(
       id, plan_date,
       customer, biz_class, biz_classes_json,
@@ -3711,26 +3622,28 @@ route("v2_inbound_plan_create", async (body, env) => {
       normalizeDateOnly(body.expected_arrival),
       String(body.purpose || ""),
       String(body.remark || ""),
-      created_by, t, t, display_no
-    ).run();
+      created_by, t, t, display_no, externalNo, bulkExternalNo
+    )];
 
     // 为每个业务类型创建一条 biz_task（pending）
     for (const biz of bizNorm.list) {
       const taskId = "IBT-" + uid();
-      await env.DB.prepare(`
+      inboundStatements.push(env.DB.prepare(`
         INSERT OR IGNORE INTO v2_inbound_plan_biz_tasks
           (id, plan_id, biz_class, job_type, status, created_at, updated_at)
         VALUES(?,?,?,?, 'pending', ?, ?)
-      `).bind(taskId, id, biz, mapInboundBizToJobType(biz), t, t).run();
+      `).bind(taskId, id, biz, mapInboundBizToJobType(biz), t, t));
     }
 
-    const lines = body.lines || [];
+    const lines = await validateCourierLines(env,body.lines),savedLines=[];
     for (let i = 0; i < lines.length; i++) {
-      const ln = lines[i];
-      await env.DB.prepare(`
+      const ln = lines[i], lineId = "IPL-" + uid();
+      inboundStatements.push(env.DB.prepare(`
         INSERT INTO v2_inbound_plan_lines(id, plan_id, line_no, unit_type, planned_qty, remark)
         VALUES(?,?,?,?,?,?)
-      `).bind("IPL-" + uid(), id, i + 1, String(ln.unit_type || ""), Number(ln.planned_qty || 0), String(ln.remark || "")).run();
+      `).bind(lineId, id, i + 1, String(ln.unit_type || ""), Number(ln.planned_qty || 0), String(ln.remark || "")));
+      inboundStatements.push(...courierPlanStatements(env,id,lineId,ln));
+      savedLines.push({id:lineId,plan_id:id,line_no:i+1,unit_type:String(ln.unit_type||''),planned_qty:Number(ln.planned_qty||0),actual_qty:0,remark:String(ln.remark||'')});
     }
 
     let outbound_id = null;
@@ -3738,9 +3651,9 @@ route("v2_inbound_plan_create", async (body, env) => {
     if (body.auto_create_outbound) {
       outbound_id = "OB-" + uid();
       const ob_date = String(body.plan_date || kstToday());
-      outbound_display_no = await nextOutboundDisplayNo(env, ob_date);
+      outbound_display_no = await nextOutboundDisplayNo(env, customer, String(body.ob_expected_ship_at || ob_date));
       // 口径调整：auto-create outbound 同步新字段；biz_class 固定 'bulk'，不再接 op_mode/remark
-      await env.DB.prepare(`
+      inboundStatements.push(env.DB.prepare(`
         INSERT INTO v2_outbound_orders(id, order_date, customer, biz_class, operation_mode,
           outbound_mode, instruction, remark, status, source_inbound_plan_id, created_by, created_at, updated_at,
           destination, po_no, wms_work_order_no,
@@ -3759,19 +3672,39 @@ route("v2_inbound_plan_create", async (body, env) => {
         Number(body.ob_planned_box_count || 0),
         Number(body.ob_planned_pallet_count || 0),
         outbound_display_no
-      ).run();
+      ));
     }
 
-    return { ok: true, id, display_no, outbound_id, outbound_display_no };
+    let workBundle={needs:[],outbounds:[],statements:[]};
+    if(body.work_requests?.length){
+      if(env.SOP_UPGRADE_ENABLED!=='true'||env.SOP_ACCEPT_NEW==='false')throw Error('作业需求功能未开启');
+      workBundle=await workPlanStatements(env,body.work_requests,{type:'inbound',id,customer},env.SOP_REQUEST_USER||{id:'service',name:created_by},t);
+    }
+    const result={ ok: true, id, display_no, outbound_id, outbound_display_no, needs:workBundle.needs.map(n=>({id:n.id,title:n.title})), outbounds:workBundle.outbounds,...(feedback?{inbound_plan_id:id,feedback_id:feedback.src.fb.id,job_id:feedback.src.job.id}:{}) };
+    const grouped=body.work_requests?.some(n=>n.cargo_groups||n.plan_materials),claim=[];if(grouped||feedback||receipt){if(!body.client_req_id)throw Error('缺少创建请求编号');claim.push(env.DB.prepare('INSERT INTO v2_idempotency_keys(idem_key,action,response_json,created_at) VALUES(?,?,?,?)').bind(body.client_req_id,'v2_inbound_plan_create',JSON.stringify(result),t));}
+    const linking=feedback?feedbackCreateStatements(env,feedback,{id,display_no,plan_date,customer,biz_class,biz_classes_json,status:'pending',updated_at:t,external_inbound_no:externalNo,bulk_external_inbound_no:bulkExternalNo},savedLines,t):[];
+    const receiptCommit=inboundReceiptStatements(env,receipt,result);
+    try{await env.DB.batch([...receiptCommit.before,...claim,...inboundStatements,...workBundle.statements,...linking,...planAuditStatements(env,'inbound',id,'create',t),...receiptCommit.after]);}catch(error){
+      if(grouped||feedback||receipt){const old=await env.DB.prepare('SELECT response_json FROM v2_idempotency_keys WHERE idem_key=? AND action=?').bind(body.client_req_id,'v2_inbound_plan_create').first();if(old){const cached=JSON.parse(old.response_json);if(feedback&&cached.feedback_id!==feedback.src.fb.id)throw Error('请求编号已用于其他操作，请重新打开表单');return cached;}}
+      if(feedback){const existing=await existingFeedbackPlan(env,feedback.src.fb.id);if(existing)return feedbackExistingResult(existing);}
+      throw error;
+    }
+    if(!feedback&&lines.some(x=>x.unit_type==='courier'))await syncCourierArrival(env,id,recalcInboundPlanCompletion);
+    return result;
   });
-});
+  if(fromFeedback){
+    const saved=await response.clone().json();
+    if(saved.ok){const linked=await existingFeedbackPlan(env,body.feedback_context.feedback_id);if(linked?.canonical&&linked.plan_id===saved.id){const reconciled=await reconcileFeedbackLink(env,linked,{ensureTasks:ensureInboundPlanBizTasks,recalc:recalcInboundPlanCompletion,syncCourier:syncCourierArrival});return json({...saved,status:reconciled.status});}}
+  }
+  return response;
+}
 
 // ===== Helper: check if an inbound plan is fully completed =====
 // Returns { allDone: bool, unloadDone: bool, putawayDone: bool }
 async function checkPlanFullyCompleted(env, plan_id) {
   // 1. Check unload is done: no active unload jobs
   const activeUnload = await env.DB.prepare(
-    "SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type='unload' AND status IN ('pending','working') LIMIT 1"
+    "SELECT id FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type='unload' AND status IN ('pending','working') LIMIT 1"
   ).bind(plan_id).first();
   const unloadDone = !activeUnload;
 
@@ -3800,15 +3733,16 @@ async function checkPlanFullyCompleted(env, plan_id) {
 // 入库业务分类 — 注意：本 change_order 是【入库换单】（biz_class=change_order，
 // 对应 job_type=inbound_change_order），与按单/出库已有的 job_type=change_order
 // （换单操作）是不同概念，禁止互相复用。
-const INBOUND_BIZ_VALID = ['direct_ship', 'bulk', 'return', 'change_order'];
+const INBOUND_BIZ_VALID = ['direct_ship', 'bulk_putaway', 'bulk', 'return', 'change_order'];
 const INBOUND_BIZ_TO_JOB_TYPE = {
   direct_ship: 'inbound_direct',
+  bulk_putaway: 'inbound_bulk',
   bulk: 'inbound_bulk',
   return: 'inbound_return',
   change_order: 'inbound_change_order'
 };
 const INBOUND_JOB_TYPE_TO_BIZ = {
-  inbound_direct: 'direct_ship',
+  inbound_direct_tally: 'direct_ship', inbound_direct_putaway: 'direct_ship', inbound_direct: 'direct_ship',
   inbound_bulk: 'bulk',
   inbound_return: 'return',
   inbound_change_order: 'change_order'
@@ -3867,13 +3801,13 @@ function extractPlanBizClasses(plan) {
 
 // 懒加载创建 biz_tasks：plan 第一次被读到 / 操作时确保 task 行齐全
 // 旧已 completed 的计划：自动把 task 标 completed，避免显示"未完成"
-async function ensureInboundPlanBizTasks(env, plan) {
+async function ensureInboundPlanBizTasks(env, plan, knownTasks) {
   if (!plan || !plan.id) return [];
   // return_session 不是协同中心口径，不生成 biz_task
   if (plan.source_type === 'return_session') return [];
   const list = extractPlanBizClasses(plan);
   if (list.length === 0) return [];
-  const existing = await env.DB.prepare(
+  const existing = knownTasks ? {results:knownTasks} : await env.DB.prepare(
     "SELECT biz_class FROM v2_inbound_plan_biz_tasks WHERE plan_id=?"
   ).bind(plan.id).all();
   const has = {};
@@ -3916,6 +3850,17 @@ async function listInboundPlanBizTasks(env, plan_id) {
 // 把某个业务类型的 task 标完成（idempotent — 已 completed 不重复写）
 async function markInboundBizTaskCompleted(env, plan_id, biz_class, payload) {
   if (!plan_id || !biz_class) return;
+  if(inboundFlowEnabled(env)&&putawayClasses.includes(biz_class)){
+    const plan=await env.DB.prepare('SELECT * FROM v2_inbound_plans WHERE id=?').bind(plan_id).first();
+    const progress=await inboundCodeProgress(env,plan,undefined,biz_class);
+    if(progress?.missing_departments?.length)return;
+    if(progress?.total>1){
+      if(progress.completed<progress.total)return;
+      const ids=progress.items.map(x=>x.job_id);
+      const workers=(await env.DB.prepare('SELECT worker_name,minutes_worked,joined_at,leave_reason FROM v2_ops_job_workers WHERE job_id IN ('+ids.map(()=>'?').join(',')+')').bind(...ids).all()).results||[];
+      payload={...payload,worker_names:[...new Set(workers.map(x=>x.worker_name).filter(Boolean))].join('、'),total_minutes:Math.round(workers.reduce((s,x)=>s+(forcedClock(x)?0:Number(x.minutes_worked)||0),0)),started_at:workers.map(x=>x.joined_at).filter(Boolean).sort()[0]||payload?.started_at};
+    }
+  }
   const t = now();
   const row = await env.DB.prepare(
     "SELECT id, status FROM v2_inbound_plan_biz_tasks WHERE plan_id=? AND biz_class=?"
@@ -3961,17 +3906,17 @@ async function markInboundBizTaskCompleted(env, plan_id, biz_class, payload) {
 async function recalcInboundPlanCompletion(env, plan_id, t, opts) {
   const ts = t || now();
   const plan = await env.DB.prepare(
-    "SELECT id, status, source_type FROM v2_inbound_plans WHERE id=?"
+    "SELECT * FROM v2_inbound_plans WHERE id=?"
   ).bind(plan_id).first();
   if (!plan) return null;
   if (plan.status === 'cancelled') return plan.status;
   if (plan.source_type === 'return_session') return plan.status;
 
   const activeUnload = await env.DB.prepare(
-    "SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type='unload' AND status IN ('pending','working') LIMIT 1"
+    "SELECT id FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type='unload' AND status IN ('pending','working','awaiting_close','paused') LIMIT 1"
   ).bind(plan_id).first();
   const otherInbound = await env.DB.prepare(
-    "SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type IN ('inbound_direct','inbound_bulk','inbound_return','inbound_change_order') AND status IN ('pending','working') LIMIT 1"
+    "SELECT id FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type IN ('inbound_direct_tally','inbound_direct_putaway','inbound_direct','inbound_bulk','inbound_return','inbound_change_order') AND status IN ('pending','working','awaiting_close','paused') LIMIT 1"
   ).bind(plan_id).first();
 
   // 卸货还在 → 不进入完成态。若仍有理货并行 → unloading_putting_away；否则 unloading
@@ -3979,19 +3924,27 @@ async function recalcInboundPlanCompletion(env, plan_id, t, opts) {
     const next = otherInbound ? 'unloading_putting_away' : 'unloading';
     if (plan.status !== next) {
       await env.DB.prepare(
-        "UPDATE v2_inbound_plans SET status=?, updated_at=? WHERE id=?"
+        "UPDATE v2_inbound_plans SET status=?, updated_at=? WHERE id=? AND status!='cancelled'"
       ).bind(next, ts, plan_id).run();
     }
     return next;
   }
 
+  // A truck milestone cannot complete a mixed plan while declared parcels are missing.
+  if(!await courierReady(env,plan_id)){
+    const next=plan.unload_completed_at?(otherInbound?'putting_away':'arrived_pending_putaway'):plan.status;
+    if(next!==plan.status)await env.DB.prepare(`UPDATE v2_inbound_plans SET status=?,updated_at=? WHERE id=? AND status!='cancelled'`).bind(next,ts,plan_id).run();
+    return next;
+  }
+  await completeUnloadedDispositions(env,plan_id,ts);
+  const referenceProgress=await inboundCodeProgress(env,plan);
   const tasks = await listInboundPlanBizTasks(env, plan_id);
   if (tasks.length > 0) {
     const completedCnt = tasks.filter(x => x.status === 'completed').length;
-    const allCompleted = (completedCnt === tasks.length);
-    const someCompleted = (completedCnt > 0);
+    const allCompleted = (completedCnt === tasks.length)&&!referenceProgress?.missing_departments?.length&&(!referenceProgress?.total||referenceProgress.completed===referenceProgress.total);
+    const someCompleted = (completedCnt > 0)||(referenceProgress?.completed>0);
     let next;
-    if (allCompleted) {
+    if (allCompleted && !otherInbound) {
       // 所有 biz 已完成 → 整单 completed
       next = 'completed';
     } else if (someCompleted) {
@@ -4004,10 +3957,11 @@ async function recalcInboundPlanCompletion(env, plan_id, t, opts) {
     }
     if (plan.status !== next) {
       await env.DB.prepare(
-        "UPDATE v2_inbound_plans SET status=?, updated_at=? WHERE id=?"
+        "UPDATE v2_inbound_plans SET status=?, updated_at=? WHERE id=? AND status!='cancelled'"
       ).bind(next, ts, plan_id).run();
     }
-    return next;
+    await stagedPlanStatement(env,plan_id,ts).run();
+    return (await env.DB.prepare('SELECT status FROM v2_inbound_plans WHERE id=?').bind(plan_id).first()).status;
   }
 
   // 老数据无 biz_task：沿用 putaway_qty 口径
@@ -4018,7 +3972,7 @@ async function recalcInboundPlanCompletion(env, plan_id, t, opts) {
   else next = 'arrived_pending_putaway';
   if (plan.status !== next) {
     await env.DB.prepare(
-      "UPDATE v2_inbound_plans SET status=?, updated_at=? WHERE id=?"
+      "UPDATE v2_inbound_plans SET status=?, updated_at=? WHERE id=? AND status!='cancelled'"
     ).bind(next, ts, plan_id).run();
   }
   return next;
@@ -4038,13 +3992,15 @@ route("v2_inbound_plan_list", async (body, env) => {
   // 卸货完成日期（KST 自然日 → UTC 范围 [from, toExclusive)）
   const unload_done_from = String(body.unload_done_date_from || "").trim();
   const unload_done_to = String(body.unload_done_date_to || "").trim();
-  const VALID_BIZ = ['direct_ship','bulk','return'];
+  const VALID_BIZ = ['direct_ship','bulk_putaway','bulk','return','change_order'];
   const { limit, offset } = pageParams(body);
 
   // 排除退件入库会话：return_session 不属于正式入库计划口径
   // 软删除单：列表/导出永远排除（即便用户显式筛 cancelled 也不显示 deleted）
-  let where = " WHERE source_type != 'return_session' AND COALESCE(is_deleted,0)=0";
+  let where = " WHERE source_type NOT IN ('return_session','direct_tally_session') AND COALESCE(is_deleted,0)=0";
   const binds = [];
+  let arrivalFilter;try{arrivalFilter=inboundArrivalFilter(body);}catch(e){return err(e.message,400);}
+  where += arrivalFilter.sql;binds.push(...arrivalFilter.binds);
   if (start) { where += " AND plan_date>=?"; binds.push(start); }
   if (end) { where += " AND plan_date<=?"; binds.push(end); }
   if (status) { where += " AND status=?"; binds.push(status); }
@@ -4078,7 +4034,8 @@ route("v2_inbound_plan_list", async (body, env) => {
   //     COUNT 仅按 WHERE 子句口径，对协同中心场景准确，对 001 候选场景不显示 pager 不影响业务。
   const countRow = await env.DB.prepare("SELECT COUNT(*) AS c FROM v2_inbound_plans" + where).bind(...binds).first();
   const total = Number((countRow && countRow.c) || 0);
-  const listSql = "SELECT * FROM v2_inbound_plans" + where + " ORDER BY plan_date DESC, created_at DESC LIMIT ? OFFSET ?";
+  const orderBy = required_biz_class ? "plan_date DESC, created_at DESC" : inboundArrivalOrder;
+  const listSql = "SELECT * FROM v2_inbound_plans" + where + " ORDER BY " + orderBy + " LIMIT ? OFFSET ?";
   const rs = await env.DB.prepare(listSql).bind(...binds, limit, offset).all();
   const rows = rs.results || [];
 
@@ -4129,7 +4086,7 @@ route("v2_inbound_plan_list", async (body, env) => {
 
   // 5) 物理卸货是否完成（同一 plan 仅一次卸货 → 任意 unload job completed = 卸货已完成）
   const unloadDoneRows = await batchSelectInGlobal(env,
-    "SELECT related_doc_id AS plan_id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND job_type='unload' AND status='completed' AND related_doc_id IN (PLACEHOLDER) GROUP BY related_doc_id",
+    "SELECT plan_id AS plan_id FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND job_type='unload' AND status='completed' AND plan_id IN (PLACEHOLDER) GROUP BY plan_id",
     planIds);
   const unloadDoneByPlan = {};
   for (const r of unloadDoneRows) unloadDoneByPlan[r.plan_id] = 1;
@@ -4147,7 +4104,7 @@ route("v2_inbound_plan_list", async (body, env) => {
       if (pending.indexOf(required_biz_class) === -1) continue;
     }
     // 卸货完成口径：(a) 有 completed unload job  或  (b) 整单 status 已越过卸货阶段
-    const postUnloadStatuses = ['arrived_pending_putaway','putting_away','partially_completed','completed'];
+    const postUnloadStatuses = ['arrived_pending_putaway','putting_away','tallied_pending_putaway','direct_putting_away','partially_completed','completed'];
     const unload_completed = unloadDoneByPlan[p.id]
       ? 1
       : (postUnloadStatuses.indexOf(p.status) !== -1 ? 1 : 0);
@@ -4165,6 +4122,8 @@ route("v2_inbound_plan_list", async (body, env) => {
       inbound_material_count: materialCountByPlan[p.id] || 0
     });
   }
+  const documentStates=await inboundDocumentStates(env,items.map(x=>x.id));
+  for(const p of items)if(documentStates.has(p.id))p.issue_state=documentStates.get(p.id);
   return json({ ok: true, items, ...pageMeta(total, limit, offset) });
 });
 
@@ -4172,49 +4131,72 @@ route("v2_inbound_plan_detail", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
   const id = String(body.id || "").trim();
   if (!id) return err("missing id");
+  const documentBefore=(await inboundDocumentStates(env,[id])).get(id);
   const row = await env.DB.prepare("SELECT * FROM v2_inbound_plans WHERE id=?").bind(id).first();
   if (!row) return err("not found", 404);
   // 退件入库会话不属于正式入库计划口径，协同中心不应打开
   if (row.source_type === 'return_session') return err("not found", 404);
-  await ensureInboundPlanBizTasks(env, row);
-  const biz_tasks = await listInboundPlanBizTasks(env, id);
+  // Independent detail reads share one D1 round trip. Job history is fetched in
+  // sets, so the number of queries does not grow with the number of jobs.
+  const inPlan = "SELECT id FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=?";
+  const [reads, sop_needs] = await Promise.all([
+    env.DB.batch([
+      env.DB.prepare('SELECT * FROM v2_inbound_plan_biz_tasks WHERE plan_id=? ORDER BY biz_class').bind(id),
+      env.DB.prepare('SELECT * FROM v2_inbound_plan_lines WHERE plan_id=? ORDER BY line_no').bind(id),
+      env.DB.prepare("SELECT * FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? ORDER BY created_at DESC").bind(id),
+      inboundFlowEnabled(env)?inboundAttachmentRead(env,id):env.DB.prepare("SELECT * FROM v2_attachments WHERE related_doc_type='inbound_plan' AND related_doc_id=? ORDER BY created_at DESC").bind(id),
+      env.DB.prepare('SELECT job_id,worker_name,minutes_worked,left_at,leave_reason FROM v2_ops_job_workers WHERE job_id IN ('+inPlan+') ORDER BY joined_at').bind(id),
+      env.DB.prepare('SELECT * FROM (SELECT job_id,result_lines_json,diff_note,remark,result_json,created_at,ROW_NUMBER() OVER (PARTITION BY job_id ORDER BY created_at DESC,rowid DESC) AS latest FROM v2_ops_job_results WHERE job_id IN ('+inPlan+')) WHERE latest=1').bind(id),
+      env.DB.prepare('SELECT job_id,result_json FROM ck_unload_plan_links WHERE plan_id=?').bind(id),
+      env.DB.prepare('SELECT id, display_no, status, customer, biz_class, outbound_mode, expected_ship_at, planned_box_count, planned_pallet_count, order_date, uses_stock_operation FROM v2_outbound_orders WHERE source_inbound_plan_id=? ORDER BY created_at ASC').bind(id),
+      inboundFlowEnabled(env)?courierProgressRead(env,id):env.DB.prepare('SELECT 1 WHERE 0'),
+      inboundFlowEnabled(env)?feedbackLinkRead(env,id):env.DB.prepare('SELECT 1 WHERE 0'),
+      env.SOP_UPGRADE_ENABLED==='true'?env.DB.prepare(jobNumberSQL(env)+' WHERE j.id IN ('+inPlan+')').bind(id):env.DB.prepare('SELECT 1 WHERE 0'),
+      env.DB.prepare('SELECT l.*,p.display_no,p.customer FROM ck_putaway_links l JOIN v2_inbound_plans p ON p.id=l.plan_id WHERE l.job_id IN ('+inPlan+') ORDER BY l.position').bind(id)
+    ]),
+    linkedNeeds(env,id)
+  ]);
+  const [taskRows, planLines, jobs, atts, workers, results, unloadLinks, linkedObRs,courierRows,feedbackRows,jobNumberRows,putawayRows] = reads;
+  const putawayLinks=putawayRows.results||[];
+  const courier_progress=inboundFlowEnabled(env)?courierProgressRows(courierRows.results||[]):null,existing_feedback_link=feedbackRows.results?.[0]||null;
+  let biz_tasks = taskRows.results || [];
   const biz_classes = extractPlanBizClasses(row);
-  const planLines = await env.DB.prepare(
-    "SELECT * FROM v2_inbound_plan_lines WHERE plan_id=? ORDER BY line_no"
-  ).bind(id).all();
-  const jobs = await env.DB.prepare(
-    "SELECT * FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? ORDER BY created_at DESC"
-  ).bind(id).all();
-  const atts = await env.DB.prepare(
-    "SELECT * FROM v2_attachments WHERE related_doc_type='inbound_plan' AND related_doc_id=? ORDER BY created_at DESC"
-  ).bind(id).all();
-
-  // Enrich each job with workers + results summary
+  // Older plans still receive missing business tasks; ordinary reads never write.
+  if(biz_classes.some(biz=>!biz_tasks.some(task=>task.biz_class===biz))){
+    await ensureInboundPlanBizTasks(env,row,biz_tasks);
+    biz_tasks = await listInboundPlanBizTasks(env,id);
+  }
+  const inbound_progress = await inboundCodeProgress(env,row,(jobs.results||[]).flatMap(j=>{const refs=putawayLinks.filter(l=>l.job_id===j.id&&l.plan_id===id);return refs.length?refs.map(l=>({...j,inbound_external_no:l.external_no})):[j];}));
+  const workersByJob = new Map();
+  for(const worker of workers.results || []){
+    if(!workersByJob.has(worker.job_id))workersByJob.set(worker.job_id,[]);
+    workersByJob.get(worker.job_id).push(worker);
+  }
+  const resultsByJob = new Map((results.results || []).map(r=>[r.job_id,r]));
+  const unloadByJob = new Map((unloadLinks.results || []).map(r=>[r.job_id,r]));
   const enrichedJobs = [];
   for (const job of (jobs.results || [])) {
-    const workers = await env.DB.prepare(
-      "SELECT worker_name, minutes_worked, left_at FROM v2_ops_job_workers WHERE job_id=? ORDER BY joined_at"
-    ).bind(job.id).all();
-    const workerRows = workers.results || [];
+    const workerRows = workersByJob.get(job.id) || [];
     const names = [...new Set(workerRows.map(w => w.worker_name).filter(Boolean))];
-    const totalMin = workerRows.reduce((s, w) => s + (Number(w.minutes_worked) || 0), 0);
+    const totalMin = workerRows.reduce((s, w) => s + (forcedClock(w)?0:Number(w.minutes_worked)||0), 0);
     const maxLeft = workerRows.reduce((m, w) => (w.left_at && w.left_at > m ? w.left_at : m), "");
-
-    const latestResult = await env.DB.prepare(
-      "SELECT result_lines_json, diff_note, remark, result_json, created_at FROM v2_ops_job_results WHERE job_id=? ORDER BY created_at DESC LIMIT 1"
-    ).bind(job.id).first();
+    const latestResult = resultsByJob.get(job.id);
 
     let resultLines = [];
     if (latestResult && latestResult.result_lines_json) {
       try { resultLines = JSON.parse(latestResult.result_lines_json); } catch(e) {}
     }
+    const ownUnload = job.job_type==='unload' ? unloadByJob.get(job.id) : null;
+    if(ownUnload?.result_json){const own=JSON.parse(ownUnload.result_json);resultLines=own.result_lines||[];if(latestResult)latestResult.diff_note=own.diff_note||'';}
     let resultNote = "";
     let extraOps = null;
+    let putawayWorkload = null;
     let isReturnFlag = false;
     if (latestResult && latestResult.result_json) {
       try {
         const rj = JSON.parse(latestResult.result_json);
         resultNote = rj.result_note || "";
+        if(job.job_type===putawayType&&rj.location_count!=null)putawayWorkload={location_count:rj.location_count,used_forklift:rj.used_forklift};
         if (rj.extra_ops && typeof rj.extra_ops === 'object') extraOps = rj.extra_ops;
         if (rj.is_return === true) isReturnFlag = true;
       } catch(e) {}
@@ -4231,6 +4213,9 @@ route("v2_inbound_plan_detail", async (body, env) => {
       remark: (latestResult && latestResult.remark) || "",
       result_note: resultNote,
       extra_ops: extraOps,
+      putaway_workload: putawayWorkload,
+      putaway_refs: putawayLinks.filter(l=>l.job_id===job.id),
+      putaway_scope: putawayLinks.filter(l=>l.job_id===job.id).length>1?'shared_task':'single',
       is_return: isReturnFlag || (job.job_type === 'inbound_return')
     });
   }
@@ -4261,24 +4246,29 @@ route("v2_inbound_plan_detail", async (body, env) => {
     diff_note: lastCompletedUnload ? (lastCompletedUnload.diff_note || '') : ''
   };
 
-  // P1-4：关联出库单（source_inbound_plan_id 反查）
-  const linkedObRs = await env.DB.prepare(
-    "SELECT id, display_no, status, customer, biz_class, outbound_mode, expected_ship_at, planned_box_count, planned_pallet_count, order_date, uses_stock_operation FROM v2_outbound_orders WHERE source_inbound_plan_id=? ORDER BY created_at ASC"
-  ).bind(id).all();
-
+  const inboundFiles=workChainEnabled(env)?await workMaterials(env,sop_needs):[];
+  const arrival_photos=(atts.results||[]).filter(a=>a.attachment_category==='unload_photo');
+  const allInboundAttachments=[...new Map([...(atts.results||[]),...inboundFiles.map(f=>({...f,attachment_category:'inbound_material',canonical_material:true}))].map(f=>[f.id,f])).values()];
+  const finalReads=inboundFlowEnabled(env)?await env.DB.batch([inboundDocumentStateRead(env,[id]),env.DB.prepare('SELECT * FROM ck_inbound_reference_history WHERE plan_id=? ORDER BY created_at,biz_class').bind(id)]):[];
+  const documentAfter=documentStatesFromRows(finalReads[0]?.results||[]).get(id);
+  if(documentBefore?.revision!==documentAfter?.revision)return err('入库计划已变化，请重新读取当前版本');
   return json({
     ok: true,
-    plan: { ...row, biz_classes },
+    plan: { ...row, biz_classes, ...(inboundFlowEnabled(env)?{external_inbound_nos:inboundCodes(row.external_inbound_no),inbound_progress,courier_progress,external_reference_history:finalReads[1]?.results||[],issue_state:documentAfter}:{}) },
+    operation_audit: await planOperationAudit(env,'inbound',id),
     biz_tasks,
     biz_classes,
     completed_biz_classes,
     pending_biz_classes,
     missing_biz_classes: pending_biz_classes,
     unload_summary,
+    arrival_photos,
+    existing_feedback_link,
     lines: planLines.results || [],
-    jobs: enrichedJobs,
-    attachments: atts.results || [],
-    inbound_materials: (atts.results || []).filter(a => a.attachment_category === 'inbound_material'),
+    jobs: env.SOP_UPGRADE_ENABLED==='true'?enrichedJobs.map(j=>decorateJobNumber(j,jobNumberRows.results.find(n=>n.id===j.id))):enrichedJobs,
+    attachments: allInboundAttachments,
+    inbound_materials: allInboundAttachments.filter(a => a.attachment_category === 'inbound_material'),
+    sop_needs,
     linked_outbound_orders: linkedObRs.results || []
   });
 });
@@ -4288,6 +4278,7 @@ route("v2_inbound_plan_find_by_code", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
   const code = String(body.code || "").trim();
   if (!code) return err("missing code");
+  if(inboundFlowEnabled(env)&&body.scene==='unload_trip')return json(await findUnloadPlan(env,code));
   // 先查"是否存在但已被软删除"——给现场一个友好提示，而不是笼统的 not_found
   const probeSel = "SELECT id, display_no, status, is_deleted FROM v2_inbound_plans WHERE (display_no=? OR id=?) ORDER BY created_at DESC LIMIT 1";
   const probe = await env.DB.prepare(probeSel).bind(code, code).first();
@@ -4336,16 +4327,21 @@ route("v2_inbound_plan_ops_candidates", async (body, env) => {
   let statusFilter;
   if (scene === 'putaway') {
     // partially_completed 也属于"还能继续入库"的状态
-    statusFilter = "('unloading','unloading_putting_away','arrived_pending_putaway','putting_away','partially_completed')";
+    statusFilter = "('unloading','unloading_putting_away','arrived_pending_putaway','putting_away','tallied_pending_putaway','direct_putting_away','partially_completed')";
   } else if (scene === 'unload') {
     statusFilter = "('pending','unloading','unloading_putting_away')";
   } else {
     return err("scene must be putaway or unload");
   }
 
-  let sql = `SELECT id, display_no, external_inbound_no, customer, cargo_summary, status, biz_class, biz_classes_json, plan_date, source_type, manual_completed_at, manual_completed_by, updated_at
+  let sql = `SELECT id, display_no, external_inbound_no, bulk_external_inbound_no, customer, cargo_summary, status, biz_class, biz_classes_json, plan_date, source_type, manual_completed_at, manual_completed_by, updated_at
     FROM v2_inbound_plans WHERE status IN ${statusFilter} AND source_type != 'return_session' AND COALESCE(is_deleted,0)=0`;
   const binds = [];
+  if(scene==='putaway'&&inboundFlowEnabled(env)){
+    const task=(required_biz_class||'direct_ship')==='bulk'?'bulk_putaway':(required_biz_class||'direct_ship');
+    sql += " AND (biz_class=? OR EXISTS(SELECT 1 FROM json_each(CASE WHEN json_valid(biz_classes_json) THEN biz_classes_json ELSE '[]' END) WHERE value=?)) AND NOT EXISTS(SELECT 1 FROM v2_inbound_plan_biz_tasks t WHERE t.plan_id=v2_inbound_plans.id AND t.biz_class=? AND t.status='completed')";
+    binds.push(task,task,task);
+  }
   if (keyword) {
     sql += " AND (display_no LIKE ? OR external_inbound_no LIKE ? OR customer LIKE ?)";
     const kw = "%" + keyword + "%";
@@ -4364,8 +4360,8 @@ route("v2_inbound_plan_ops_candidates", async (body, env) => {
     for (const p of rows) {
       if (p.status === 'unloading' || p.status === 'unloading_putting_away') {
         const hasActive = await env.DB.prepare(
-          `SELECT id FROM v2_ops_jobs
-             WHERE related_doc_type='inbound_plan' AND related_doc_id=?
+          `SELECT id FROM v2_inbound_plan_jobs
+             WHERE related_doc_type='inbound_plan' AND plan_id=?
                AND job_type='unload' AND status IN ('pending','working','awaiting_close') LIMIT 1`
         ).bind(p.id).first();
         if (!hasActive) {
@@ -4385,22 +4381,25 @@ route("v2_inbound_plan_ops_candidates", async (body, env) => {
   for (const p of rows) {
     // 修复后若不再属于 unload 候选状态 → 跳过
     if (scene === 'unload' && ['pending','unloading','unloading_putting_away'].indexOf(p.status) === -1) continue;
-    if (scene !== 'unload' && required_biz_class) {
+    const taskBiz=scene==='putaway'?putawayTaskBiz(env,p,required_biz_class||'direct_ship'):required_biz_class;
+    if(scene==='putaway'&&inboundFlowEnabled(env)&&!taskBiz)continue;
+    if (scene !== 'unload' && taskBiz) {
       await ensureInboundPlanBizTasks(env, p);
       const biz_classes = extractPlanBizClasses(p);
-      if (biz_classes.indexOf(required_biz_class) === -1) {
+      if (biz_classes.indexOf(taskBiz) === -1) {
         // 老数据兼容：如果 plan.biz_class 命中但不在 list（例如 import），跳过
-        if (p.biz_class !== required_biz_class) continue;
+        if (p.biz_class !== taskBiz) continue;
       }
       const tasks = await listInboundPlanBizTasks(env, p.id);
       const pending = tasks.filter(x => x.status !== 'completed').map(x => x.biz_class);
       // 如果存在 task：要求 required_biz_class 仍 pending
       // 如果无 task（极旧老数据）：放行（沿用旧 biz_class= 比对）
-      if (tasks.length > 0 && pending.indexOf(required_biz_class) === -1) continue;
+      if (tasks.length > 0 && pending.indexOf(taskBiz) === -1) continue;
     }
     items.push({
       ...p,
-      biz_classes: extractPlanBizClasses(p)
+      biz_classes: extractPlanBizClasses(p),
+      ...(inboundFlowEnabled(env)&&scene==='putaway'?{external_inbound_nos:departmentCodes(p,taskBiz),inbound_progress:await inboundCodeProgress(env,p,undefined,taskBiz)}:{})
     });
     if (items.length >= limit) break;
   }
@@ -4408,11 +4407,20 @@ route("v2_inbound_plan_ops_candidates", async (body, env) => {
 });
 
 // ===== Resolve inbound code: identify system plan vs external no =====
+// Search registered names only; free text follows the existing external-inbound model.
+route("v2_inbound_owner_lookup", async (body,env) => {
+  if(!isOpsAuth(body,env)||!inboundFlowEnabled(env))return err('unauthorized',401);
+  const search=String(body.q||'').trim().slice(0,120);
+  const names=await env.DB.prepare("SELECT DISTINCT trim(customer) AS customer FROM v2_inbound_plans WHERE COALESCE(is_deleted,0)=0 AND trim(COALESCE(customer,''))!='' AND instr(lower(customer),lower(?))>0 ORDER BY customer LIMIT 20").bind(search).all();
+  return json({ok:true,items:names.results||[]});
+});
+
 route("v2_inbound_resolve_code", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
   const code = String(body.code || "").trim();
   const biz_class = String(body.biz_class || "").trim();
   if (!code) return err("missing code");
+  if(inboundFlowEnabled(env))return json(await resolveInboundEntry(env,code,biz_class,String(body.job_type||'')));
 
   // 先探测：是否存在但已被软删除（"误转正回滚"产物）→ 现场扫码给清晰提示
   const probeDel = await env.DB.prepare(
@@ -4460,7 +4468,7 @@ route("v2_inbound_resolve_code", async (body, env) => {
   }
 
   // Check status is putaway-able（partially_completed 也允许继续，因为还有未完成的 biz）
-  const putawayStatuses = ['unloading', 'unloading_putting_away', 'arrived_pending_putaway', 'putting_away', 'partially_completed'];
+  const putawayStatuses = ['unloading', 'unloading_putting_away', 'arrived_pending_putaway', 'putting_away', 'tallied_pending_putaway', 'direct_putting_away', 'partially_completed'];
   if (putawayStatuses.indexOf(plan.status) === -1) {
     return json({ ok: true, kind: 'status_not_allowed', plan: planEnriched, message: "该系统入库单当前状态（" + plan.status + "）不可开始入库" });
   }
@@ -4494,7 +4502,7 @@ route("v2_inbound_plan_list_upcoming", async (body, env) => {
   const first = dates[0];
   const last = dates[dates.length - 1];
   const rs = await env.DB.prepare(
-    "SELECT * FROM v2_inbound_plans WHERE plan_date>=? AND plan_date<=? AND status NOT IN ('completed','cancelled','deleted') AND source_type != 'return_session' AND COALESCE(is_deleted,0)=0 ORDER BY plan_date ASC, created_at ASC"
+    "SELECT * FROM v2_inbound_plans WHERE plan_date>=? AND plan_date<=? AND status NOT IN ('completed','cancelled','deleted') AND source_type NOT IN ('return_session','direct_tally_session') AND COALESCE(is_deleted,0)=0 ORDER BY plan_date ASC, created_at ASC"
   ).bind(first, last).all();
   return json({ ok: true, items: rs.results || [], dates });
 });
@@ -4508,9 +4516,11 @@ route("v2_inbound_plan_update_status", async (body, env) => {
   if (status === 'cancelled') return err("请使用 v2_inbound_plan_cancel 取消入库计划");
   // 禁止通过此接口直接设 completed —— 必须走 v2_inbound_mark_completed（含 biz_task 校验）
   if (status === 'completed') return err("请使用 v2_inbound_mark_completed 完成入库计划（需所有业务类型已完成）");
-  await env.DB.prepare(
+  if(independentInbound(await env.DB.prepare('SELECT source_type FROM v2_inbound_plans WHERE id=?').bind(id).first()))return err('独立单号状态由理货、上架任务更新');
+  const t=now();
+  await env.DB.batch([env.DB.prepare(
     "UPDATE v2_inbound_plans SET status=?, updated_at=? WHERE id=?"
-  ).bind(status, now(), id).run();
+  ).bind(status,t,id),...planAuditStatements(env,'inbound',id,'update',t)]);
   return json({ ok: true });
 });
 
@@ -4523,12 +4533,14 @@ route("v2_inbound_plan_update", async (body, env) => {
   return withIdem(env, body, "v2_inbound_plan_update", async () => {
     const plan = await env.DB.prepare("SELECT * FROM v2_inbound_plans WHERE id=?").bind(id).first();
     if (!plan) return { ok: false, error: "not_found" };
+    await protectCourierEdit(env,id);
+    if(Array.isArray(body.lines))body.lines=await validateCourierLines(env,body.lines,id);
     if (plan.status !== 'pending') {
       return { ok: false, error: "cannot_edit_after_started", message: "已开工/完成的入库单不能修改：" + plan.status };
     }
     // 关联的已 active/completed inbound job → 拒（兜底）
     const anyJob = await env.DB.prepare(
-      "SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND status IN ('working','pending','awaiting_close','completed') LIMIT 1"
+      "SELECT id FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND status IN ('working','pending','awaiting_close','completed') LIMIT 1"
     ).bind(id).first();
     if (anyJob) {
       return { ok: false, error: "has_jobs_cannot_edit", message: "该入库单已有现场作业关联，不能修改" };
@@ -4541,20 +4553,24 @@ route("v2_inbound_plan_update", async (body, env) => {
     }
     const biz_class = bizNorm.primary;
     const biz_classes_json = JSON.stringify(bizNorm.list);
+    const {externalNo,bulkExternalNo} = await inboundReferenceData(env,bizNorm.list,body,plan);
 
-    await env.DB.prepare(
+    const statements=[];
+    // Fire the courier edit guard inside the same transaction as all changes.
+    if(inboundFlowEnabled(env))statements.push(env.DB.prepare('UPDATE ck_courier_plan_items SET line_id=line_id WHERE plan_id=?').bind(id));
+    statements.push(env.DB.prepare(
       `UPDATE v2_inbound_plans SET plan_date=?, customer=?, biz_class=?, biz_classes_json=?,
-        cargo_summary=?, expected_arrival=?, purpose=?, remark=?, updated_at=? WHERE id=?`
+        cargo_summary=?, expected_arrival=?, purpose=?, remark=?, external_inbound_no=?, bulk_external_inbound_no=?, updated_at=? WHERE id=?`
     ).bind(
-      String(body.plan_date || plan.plan_date),
+      env.SOP_ENVIRONMENT==='staging'&&env.SOP_UPGRADE_ENABLED==='true' ? plan.plan_date : String(body.plan_date || plan.plan_date),
       String(body.customer || plan.customer),
       biz_class, biz_classes_json,
       String(body.cargo_summary != null ? body.cargo_summary : (plan.cargo_summary || "")),
       normalizeDateOnly(body.expected_arrival != null ? body.expected_arrival : (plan.expected_arrival || "")),
       String(body.purpose != null ? body.purpose : (plan.purpose || "")),
       String(body.remark != null ? body.remark : (plan.remark || "")),
-      t, id
-    ).run();
+      externalNo, bulkExternalNo, t, id
+    ));
 
     // biz_tasks 同步：pending 可增删；completed 不允许删
     const existing = await env.DB.prepare(
@@ -4571,36 +4587,44 @@ route("v2_inbound_plan_update", async (body, env) => {
         if (er.status === 'completed') {
           return { ok: false, error: "completed_biz_cannot_remove", message: "业务类型 " + biz + " 已有完成记录，不能移除" };
         }
-        await env.DB.prepare("DELETE FROM v2_inbound_plan_biz_tasks WHERE id=?").bind(er.id).run();
+        statements.push(env.DB.prepare("DELETE FROM v2_inbound_plan_biz_tasks WHERE id=?").bind(er.id));
       }
     }
     // 新增：target 中 existing 没有 → INSERT pending
     for (const biz of bizNorm.list) {
       if (!existSet[biz]) {
-        await env.DB.prepare(
+        statements.push(env.DB.prepare(
           `INSERT OR IGNORE INTO v2_inbound_plan_biz_tasks (id, plan_id, biz_class, job_type, status, created_at, updated_at)
            VALUES(?,?,?,?, 'pending', ?, ?)`
-        ).bind("IBT-" + uid(), id, biz, mapInboundBizToJobType(biz), t, t).run();
+        ).bind("IBT-" + uid(), id, biz, mapInboundBizToJobType(biz), t, t));
       }
     }
 
-    // lines 全量替换（如果传了）
+    // Replace expected waybills and lines atomically.
     if (Array.isArray(body.lines)) {
-      await env.DB.prepare("DELETE FROM v2_inbound_plan_lines WHERE plan_id=?").bind(id).run();
-      for (let i = 0; i < body.lines.length; i++) {
-        const ln = body.lines[i];
-        await env.DB.prepare(
-          `INSERT INTO v2_inbound_plan_lines(id, plan_id, line_no, unit_type, planned_qty, remark)
-           VALUES(?,?,?,?,?,?)`
-        ).bind("IPL-" + uid(), id, i + 1, String(ln.unit_type || ""), Number(ln.planned_qty || 0), String(ln.remark || "")).run();
+      statements.push(env.DB.prepare("DELETE FROM ck_courier_plan_items WHERE plan_id=?").bind(id),env.DB.prepare("DELETE FROM v2_inbound_plan_lines WHERE plan_id=?").bind(id));
+      for(let i=0;i<body.lines.length;i++){
+        const ln=body.lines[i],lineId="IPL-"+uid();
+        statements.push(env.DB.prepare("INSERT INTO v2_inbound_plan_lines(id,plan_id,line_no,unit_type,planned_qty,remark) VALUES(?,?,?,?,?,?)").bind(lineId,id,i+1,String(ln.unit_type||''),Number(ln.planned_qty||0),String(ln.remark||'')),...courierPlanStatements(env,id,lineId,ln));
       }
     }
+    await referenceWriteBatch(env,id,[...statements,...planAuditStatements(env,'inbound',id,'update',t)]);
+    if(body.lines?.some(x=>x.unit_type==='courier'))await syncCourierArrival(env,id,recalcInboundPlanCompletion);
 
     return { ok: true, id, biz_classes: bizNorm.list };
   });
 });
 
 // ===== 入库计划：记账标记 =====
+route("v2_inbound_plan_bind_external", async (body, env) => {
+  if (!inboundFlowEnabled(env) || !isAdmin(body,env)) return err("unauthorized",401);
+  return withIdem(env,body,"v2_inbound_plan_bind_external",()=>bindInboundCode(env,body));
+});
+route('v2_inbound_plan_confirm_issue',async(body,env)=>{
+  if(!inboundFlowEnabled(env)||!isAuth(body,env))return err('unauthorized',401);
+  return json(await confirmInboundIssue(env,body));
+});
+
 route("v2_inbound_plan_mark_accounted", async (body, env) => {
   if (!isAuth(body, env)) return err("unauthorized", 401);
   const id = String(body.id || "").trim();
@@ -4634,15 +4658,18 @@ route("v2_inbound_plan_cancel", async (body, env) => {
   const plan = await env.DB.prepare("SELECT * FROM v2_inbound_plans WHERE id=?").bind(id).first();
   if (!plan) return err("plan not found", 404);
 
+  if(inboundFlowEnabled(env)&&plan.status==='cancelled')return json({ok:true,duplicate:true,operator,cancelled_at:plan.updated_at});
+
   // 只允许 pending / arrived_pending_putaway 取消
-  const allowCancel = ['pending', 'arrived_pending_putaway'];
+  const allowCancel = independentInbound(plan)?['arrived_pending_putaway','tallied_pending_putaway']:['pending', 'arrived_pending_putaway'];
+  if(independentInbound(plan)&&!reason)return err('独立单号取消须填写原因');
   if (!allowCancel.includes(plan.status)) {
     return json({ ok: false, error: "cancel_not_allowed", message: "当前状态（" + plan.status + "）不允许取消，只有待到库和已到库待入库可以取消" });
   }
 
   // 检查是否有进行中的 unload 或 inbound job
   const activeJob = await env.DB.prepare(
-    "SELECT id, job_type FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND status IN ('pending','working','awaiting_close') LIMIT 1"
+    "SELECT id, job_type FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND status NOT IN ('completed','cancelled') LIMIT 1"
   ).bind(id).first();
   if (activeJob) {
     return json({ ok: false, error: "active_job_exists", message: "当前仍有进行中的现场任务（" + (activeJob.job_type || "") + "），不能取消" });
@@ -4657,7 +4684,18 @@ route("v2_inbound_plan_cancel", async (body, env) => {
   }
   updateSql += " WHERE id=?";
   binds.push(id);
-  await env.DB.prepare(updateSql).bind(...binds).run();
+  if(inboundFlowEnabled(env)){
+    // Recheck after concurrent dispatch. A retry cannot append the reason twice.
+    updateSql += " AND (status IN ('pending','arrived_pending_putaway') OR (source_type='direct_tally_session' AND status='tallied_pending_putaway')) AND NOT EXISTS(SELECT 1 FROM v2_inbound_plan_jobs j WHERE j.plan_id=v2_inbound_plans.id AND j.status NOT IN ('completed','cancelled'))";
+    const statements=[env.DB.prepare(updateSql).bind(...binds)],context=env.SOP_OPERATION_CONTEXT;
+    if(context?.operator_name)statements.push(env.DB.prepare('INSERT INTO ck_plan_operation_audit SELECT ?,?,?,?,?,?,? WHERE changes()=1').bind(crypto.randomUUID(),'inbound',id,'cancel',env.SOP_REQUEST_USER.id,context.operator_name,t));
+    const results=await env.DB.batch(statements);
+    if(!results[0].meta.changes){
+      const current=await env.DB.prepare('SELECT status,updated_at FROM v2_inbound_plans WHERE id=?').bind(id).first();
+      if(current?.status==='cancelled')return json({ok:true,duplicate:true,operator,cancelled_at:current.updated_at});
+      return json({ok:false,error:'cancel_state_changed',message:'计划状态或现场任务已变化，请刷新后核对 / 계획 또는 작업 상태가 변경되었습니다'});
+    }
+  }else await env.DB.prepare(updateSql).bind(...binds).run();
 
   return json({ ok: true, operator, cancelled_at: t });
 });
@@ -4674,16 +4712,17 @@ route("v2_inbound_plan_delete", async (body, env) => {
     if (plan.status !== 'cancelled') {
       return { ok: false, error: "only_cancelled_can_delete", message: "只能删除已取消的入库计划，请先取消" };
     }
+    if(inboundFlowEnabled(env)&&await env.DB.prepare('SELECT 1 FROM ck_courier_plan_items WHERE plan_id=? UNION ALL SELECT 1 FROM ck_courier_plan_item_history WHERE plan_id=? LIMIT 1').bind(id,id).first())return {ok:false,error:'courier_history_cannot_delete',message:'此计划保留快递关联历史，不能删除 / 택배 이력이 있어 삭제할 수 없습니다'};
     // 在制 / 待续作业 → 拒（按规范要求二次校验）
     const activeJob = await env.DB.prepare(
-      "SELECT id, job_type FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND status IN ('pending','working','awaiting_close') LIMIT 1"
+      "SELECT id, job_type FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND status IN ('pending','working','awaiting_close') LIMIT 1"
     ).bind(id).first();
     if (activeJob) {
       return { ok: false, error: "active_job_exists", message: "仍有进行中的现场任务，不能删除" };
     }
     // 已存在 completed ops 历史 → 拒，避免误删正式数据
     const histJob = await env.DB.prepare(
-      "SELECT id, job_type FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND status='completed' LIMIT 1"
+      "SELECT id, job_type FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND status='completed' LIMIT 1"
     ).bind(id).first();
     if (histJob) {
       return { ok: false, error: "has_ops_history_cannot_delete", message: "该入库计划存在已完成作业历史，不允许删除" };
@@ -4740,7 +4779,7 @@ route("v2_inbound_plan_delete_converted_feedback", async (body, env) => {
     }
     // 在制作业 → 拒（保护现场正在进行的任务）
     const activeJob = await env.DB.prepare(
-      "SELECT id, job_type FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND status IN ('pending','working','awaiting_close') LIMIT 1"
+      "SELECT id, job_type FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND status IN ('pending','working','awaiting_close') LIMIT 1"
     ).bind(id).first();
     if (activeJob) {
       return { ok: false, error: "active_job_exists",
@@ -4845,6 +4884,8 @@ route("v2_inbound_dynamic_finalize", async (body, env) => {
     const bizNorm = normalizeInboundBizClasses({ biz_classes: body.biz_classes, biz_class: body.biz_class || plan.biz_class });
     const biz_class = bizNorm.primary || String(body.biz_class || plan.biz_class || "").trim();
     const biz_classes_json = bizNorm.list.length > 0 ? JSON.stringify(bizNorm.list) : (plan.biz_classes_json || '[]');
+    const {externalNo,bulkExternalNo}=await inboundReferenceData(env,bizNorm.list,body,plan);
+    if(inboundFlowEnabled(env)&&!bizNorm.list.length)throw Error("请选择入库业务分类");
     const cargo_summary = String(body.cargo_summary || plan.cargo_summary || "").trim();
     const expected_arrival = normalizeDateOnly(body.expected_arrival || plan.expected_arrival || "");
     const purpose = String(body.purpose || plan.purpose || "").trim();
@@ -4852,9 +4893,10 @@ route("v2_inbound_dynamic_finalize", async (body, env) => {
 
     await env.DB.prepare(`
       UPDATE v2_inbound_plans SET customer=?, biz_class=?, biz_classes_json=?, cargo_summary=?,
-        expected_arrival=?, purpose=?, remark=?, status='completed',
+        expected_arrival=?, purpose=?, remark=?, status=?, external_inbound_no=?, bulk_external_inbound_no=?,
         needs_info_update=0, updated_at=? WHERE id=?
-    `).bind(customer, biz_class, biz_classes_json, cargo_summary, expected_arrival, purpose, remark, t, id).run();
+    `).bind(customer, biz_class, biz_classes_json, cargo_summary, expected_arrival, purpose, remark,
+        inboundFlowEnabled(env)?'arrived_pending_putaway':'completed',externalNo,bulkExternalNo,t,id).run();
 
     const newLines = body.lines || [];
     if (newLines.length > 0) {
@@ -4870,7 +4912,9 @@ route("v2_inbound_dynamic_finalize", async (body, env) => {
     // 同步 biz_task：写完毕（与 status='completed' 对齐）
     const updatedPlan = await env.DB.prepare("SELECT * FROM v2_inbound_plans WHERE id=?").bind(id).first();
     await ensureInboundPlanBizTasks(env, updatedPlan);
-    for (const biz of extractPlanBizClasses(updatedPlan)) {
+    if(inboundFlowEnabled(env)){
+      await recalcInboundPlanCompletion(env,id,t);
+    }else for (const biz of extractPlanBizClasses(updatedPlan)) {
       await markInboundBizTaskCompleted(env, id, biz, {
         completed_by: '(legacy_dynamic_finalize)'
       });
@@ -4998,7 +5042,7 @@ route("v2_unplanned_unload_finish", async (body, env) => {
       return { ok: true, left: true };
     }
 
-    if (realCount > 0) {
+    if (realCount > 0 && !env.SOP_GROUP_FINISH) {
       return { ok: false, error: "others_still_working",
         message: "您已退出此任务，还有 " + realCount + " 人继续作业",
         active_worker_count: realCount };
@@ -5128,7 +5172,7 @@ route("v2_unplanned_unload_active_list", async (body, env) => {
       parent_job_id: fb.parent_job_id || ''
     });
   }
-  return json({ ok: true, items });
+  return json({ ok: true, items:await jobNumbers(env,items,'job_id') });
 });
 
 // Join an existing unplanned unload task
@@ -5165,7 +5209,27 @@ route("v2_unplanned_unload_join", async (body, env) => {
 });
 
 // Step 3: Finalize feedback → create formal inbound plan with lines
+// Old office clients use the same atomic attribution as the standard form in staging.
+// Keep their already-converted rejection; only their own request may replay success.
+async function finalizeCompletedFeedback(body,env){
+  feedbackLinkActor(env);
+  const id=String(body.feedback_id||'').trim(),key=String(body.client_req_id||'').trim();
+  if(!id||!key)return err('缺少反馈或创建请求编号');
+  if(!String(body.customer||'').trim())return err('请客服确认并填写客户 / 고객을 확인해 입력하세요');
+  const cached=await env.DB.prepare('SELECT action,response_json FROM v2_idempotency_keys WHERE idem_key=?').bind(key).first();
+  if(cached){
+    const result=JSON.parse(cached.response_json);
+    if(cached.action!=='v2_inbound_plan_create'||result.feedback_id!==id)return err('请求编号已用于其他操作，请重新打开表单');
+    return HANDLERS.v2_inbound_plan_create({...body,client_req_id:key,feedback_context:{feedback_id:id}},env);
+  }
+  if(await existingFeedbackPlan(env,id))return err('此反馈已生成入库计划，请勿重复关联');
+  const src=await feedbackSource(env,id);
+  const lines=Array.isArray(body.lines)&&body.lines.length?body.lines.map(line=>({...line,planned_qty:line.planned_qty??src.totals.get(line.unit_type==='box'?'carton':line.unit_type)??0})):[...src.totals].map(([unit_type,actual_qty])=>({unit_type,planned_qty:actual_qty}));
+  return HANDLERS.v2_inbound_plan_create({...body,client_req_id:key,lines,
+    feedback_context:{feedback_id:id,feedback_version:src.fb.updated_at,job_version:src.job.updated_at}},env);
+}
 route("v2_feedback_finalize_to_inbound", async (body, env) => {
+  if(inboundFlowEnabled(env))return finalizeCompletedFeedback(body,env);
   if (!isAuth(body, env)) return err("unauthorized", 401);
   const feedback_id = String(body.feedback_id || "").trim();
   if (!feedback_id) return err("missing feedback_id");
@@ -5186,6 +5250,8 @@ route("v2_feedback_finalize_to_inbound", async (body, env) => {
     const bizNorm = normalizeInboundBizClasses({ biz_classes: body.biz_classes, biz_class: body.biz_class });
     const biz_class = bizNorm.primary || String(body.biz_class || "").trim();
     const biz_classes_json = bizNorm.list.length > 0 ? JSON.stringify(bizNorm.list) : '[]';
+    const {externalNo,bulkExternalNo}=await inboundReferenceData(env,bizNorm.list,body);
+    if(inboundFlowEnabled(env)&&!bizNorm.list.length)throw Error("请选择入库业务分类");
     const cargo_summary = String(body.cargo_summary || "").trim();
     const expected_arrival = normalizeDateOnly(body.expected_arrival);
     const purpose = String(body.purpose || "").trim();
@@ -5194,11 +5260,11 @@ route("v2_feedback_finalize_to_inbound", async (body, env) => {
 
     await env.DB.prepare(`
       INSERT INTO v2_inbound_plans(id, plan_date, customer, biz_class, biz_classes_json, cargo_summary,
-        expected_arrival, purpose, remark, status, source_feedback_id, created_by, created_at, updated_at, display_no, source_type)
-      VALUES(?,?,?,?,?,?,?,?,?,'arrived_pending_putaway',?,?,?,?,?,'from_feedback')
+        expected_arrival, purpose, remark, status, source_feedback_id, created_by, created_at, updated_at, display_no, source_type, external_inbound_no, bulk_external_inbound_no, unload_completed_at, unload_completed_by)
+      VALUES(?,?,?,?,?,?,?,?,?,'arrived_pending_putaway',?,?,?,?,?,'from_feedback',?,?,?,?)
     `).bind(plan_id, plan_date, customer, biz_class, biz_classes_json, cargo_summary,
         expected_arrival, purpose, remark,
-        feedback_id, created_by, t, t, display_no).run();
+        feedback_id, created_by, t, t, display_no, externalNo, bulkExternalNo, fb.completed_at||t, fb.completed_by||created_by).run();
 
     // 初始化 biz_tasks（pending）
     for (const biz of bizNorm.list) {
@@ -5225,6 +5291,7 @@ route("v2_feedback_finalize_to_inbound", async (body, env) => {
       UPDATE v2_field_feedbacks SET status='converted', inbound_plan_id=?, updated_at=? WHERE id=?
     `).bind(plan_id, t, feedback_id).run();
 
+    if(inboundFlowEnabled(env))await recalcInboundPlanCompletion(env,plan_id,t);
     return { ok: true, inbound_plan_id: plan_id, display_no };
   });
 });
@@ -5268,6 +5335,7 @@ route("v2_unload_dynamic_start", async (body, env) => {
 });
 
 route("v2_unload_job_start", async (body, env) => {
+  if(inboundFlowEnabled(env)&&Array.isArray(body.plan_ids)){if(!isOpsAuth(body,env))return err('unauthorized',401);return json(await startUnloadTrip(env,body));}
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
   const plan_id = String(body.plan_id || "").trim();
   const worker_id = String(body.worker_id || "").trim();
@@ -5282,7 +5350,7 @@ route("v2_unload_job_start", async (body, env) => {
     const plan = await env.DB.prepare("SELECT status FROM v2_inbound_plans WHERE id=?").bind(plan_id).first();
     if (!plan) return { ok: false, error: "plan not found" };
     // 已经卸过货的状态：不允许再次创建卸货任务（除非管理员强制重开）
-    const unloadDoneStatuses = ['arrived_pending_putaway', 'putting_away', 'partially_completed', 'completed'];
+    const unloadDoneStatuses = ['arrived_pending_putaway', 'putting_away', 'tallied_pending_putaway', 'direct_putting_away', 'partially_completed', 'completed'];
     const forceReopen = body.force_reopen === true;
     if (unloadDoneStatuses.indexOf(plan.status) !== -1 && !forceReopen) {
       return {
@@ -5299,7 +5367,7 @@ route("v2_unload_job_start", async (body, env) => {
 
     let job = null;
     const existing = await env.DB.prepare(
-      "SELECT * FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type='unload' AND status IN ('pending','working') LIMIT 1"
+      "SELECT * FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type='unload' AND status IN ('pending','working') LIMIT 1"
     ).bind(plan_id).first();
     if (existing) job = existing;
 
@@ -5362,6 +5430,7 @@ route("v2_unload_job_start", async (body, env) => {
 });
 
 route("v2_unload_job_finish", async (body, env) => {
+  if(inboundFlowEnabled(env)){if(!isOpsAuth(body,env))return err('unauthorized',401);const trip=await finishUnloadTrip(env,body,{ensureTasks:ensureInboundPlanBizTasks,recalc:recalcInboundPlanCompletion,syncCourier:syncCourierArrival});if(trip)return json(trip);}
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
   const job_id = String(body.job_id || "").trim();
   const worker_id = String(body.worker_id || "").trim();
@@ -5412,7 +5481,7 @@ route("v2_unload_job_finish", async (body, env) => {
     const job = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
     if (!job) return { ok: false, error: "job not found" };
 
-    if (realCount > 0) {
+    if (realCount > 0 && !env.SOP_GROUP_FINISH) {
       return { ok: false, error: "others_still_working",
         message: "您已退出此任务，还有 " + realCount + " 人继续作业",
         active_worker_count: realCount };
@@ -5526,6 +5595,7 @@ route("v2_unload_job_finish", async (body, env) => {
         await ensureInboundPlanBizTasks(env, await env.DB.prepare(
           "SELECT id, status, biz_class, biz_classes_json, source_type FROM v2_inbound_plans WHERE id=?"
         ).bind(plan_id).first());
+        await syncCourierArrival(env,plan_id,recalcInboundPlanCompletion);
         await recalcInboundPlanCompletion(env, plan_id, t);
       }
     }
@@ -5568,11 +5638,13 @@ route("v2_inbound_job_start", async (body, env) => {
   const start_remark = String(body.start_remark || "").trim();
   if (!worker_id) return err("missing worker_id");
 
-  const VALID_JOB_TYPES = ['inbound_direct', 'inbound_bulk', 'inbound_return', 'inbound_change_order'];
+  const VALID_JOB_TYPES = ['inbound_direct_tally','inbound_direct_putaway','inbound_direct', 'inbound_bulk', 'inbound_return', 'inbound_change_order'];
   if (VALID_JOB_TYPES.indexOf(job_type) === -1) return err("invalid job_type: " + job_type);
+  if(stagedInbound(job_type))return err('请从正常派工入口开始理货或上架 / 담당자가 배정하여 시작하세요');
   const isReturn = (job_type === 'inbound_return');
+  if(internalEnabled(env)&&isReturn)return err('请从退件入库派工入口开始 / 반품 입고 배정으로 시작하세요',409);
   // 入库换单（biz_class=change_order）走标准计划路径，与代发/大货同流程
-  const isStandard = (job_type === 'inbound_direct' || job_type === 'inbound_bulk' || job_type === 'inbound_change_order');
+  const isStandard = (job_type === 'inbound_direct_tally' || job_type === 'inbound_direct_putaway' || job_type === 'inbound_direct' || job_type === 'inbound_bulk' || job_type === 'inbound_change_order');
 
   if (isReturn && biz_class && biz_class !== 'return') {
     return err("biz_class mismatch for inbound_return: " + biz_class);
@@ -5586,6 +5658,13 @@ route("v2_inbound_job_start", async (body, env) => {
 
   return withIdem(env, body, "v2_inbound_job_start", async () => {
     let plan_id = String(body.plan_id || "").trim();
+    let selectedExternal='';
+    if(inboundFlowEnabled(env)&&isStandard&&!plan_id){
+      const found=await resolveInboundPlan(env,external_inbound_no,biz_class);
+      if(found.kind!=='system')return {ok:false,error:'inbound_reference_invalid',message:found.message};
+      plan_id=found.plan.id;
+    }
+    if(inboundFlowEnabled(env)&&job_type==='inbound_change_order')return {ok:false,error:'inbound_change_order_removed',message:'换单计划卸货完成后自动入库，无需再次理货'};
     const t = now();
     const today = kstToday();
 
@@ -5593,14 +5672,22 @@ route("v2_inbound_job_start", async (body, env) => {
     if (plan_id && isStandard) {
       const plan = await env.DB.prepare("SELECT * FROM v2_inbound_plans WHERE id=?").bind(plan_id).first();
       if (!plan) return { ok: false, error: "plan not found" };
-      const inboundStartAllowed = ['unloading', 'unloading_putting_away', 'arrived_pending_putaway', 'putting_away', 'partially_completed'];
+      const inboundStartAllowed = ['unloading', 'unloading_putting_away', 'arrived_pending_putaway', 'putting_away', 'tallied_pending_putaway', 'direct_putting_away', 'partially_completed'];
       if (inboundStartAllowed.indexOf(plan.status) === -1) {
         return { ok: false, error: "plan_status_invalid", message: "当前状态不可开始理货 / 현재 상태에서 입고 불가, current: " + plan.status };
       }
       // 业务类型校验：当前 biz 必须在计划的 biz_classes_json 内（或老数据 biz_class 单值匹配）
+      if(inboundFlowEnabled(env)&&Number(plan.is_deleted||0))return {ok:false,error:'plan_deleted'};
+      const taskBiz=putawayTaskBiz(env,plan,biz_class);
+      if(inboundFlowEnabled(env)&&!taskBiz)return {ok:false,error:'putaway_not_required',message:'此计划没有本部门的理货上架'};
+      if(inboundFlowEnabled(env)){
+        try{selectedExternal=await selectInboundReference(env,plan,external_inbound_no,taskBiz);}catch(error){return {ok:false,error:'external_code_mismatch',message:error.message};}
+        const activeOther=await env.DB.prepare("SELECT id,job_type FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND inbound_external_no=? AND job_type!=? AND status IN ('pending','working','awaiting_close') LIMIT 1").bind(plan_id,selectedExternal,job_type).first();
+        if(activeOther)return {ok:false,error:'external_code_working',message:'此外部单号已有理货任务，请继续原任务',active_job_id:activeOther.id};
+      }
       const biz_classes = extractPlanBizClasses(plan);
-      const inList = biz_classes.indexOf(biz_class) !== -1;
-      const legacyMatch = (plan.biz_class === biz_class);
+      const inList = biz_classes.indexOf(taskBiz) !== -1;
+      const legacyMatch = (plan.biz_class === taskBiz);
       if (!inList && !legacyMatch) {
         const have = biz_classes.length ? biz_classes.join('/') : (plan.biz_class || '');
         return { ok: false, error: "biz_class_mismatch", message: "plan biz_classes mismatch: plan=" + have + " req=" + biz_class };
@@ -5609,7 +5696,7 @@ route("v2_inbound_job_start", async (body, env) => {
       await ensureInboundPlanBizTasks(env, plan);
       const taskRow = await env.DB.prepare(
         "SELECT status FROM v2_inbound_plan_biz_tasks WHERE plan_id=? AND biz_class=?"
-      ).bind(plan_id, biz_class).first();
+      ).bind(plan_id, taskBiz).first();
       if (taskRow && taskRow.status === 'completed') {
         return { ok: false, error: "biz_task_already_completed", message: "该入库计划的此业务类型已完成入库" };
       }
@@ -5681,7 +5768,7 @@ route("v2_inbound_job_start", async (body, env) => {
         ).bind(plan_id).first();
         if (!rp) return { ok: false, error: "return session not found" };
         if (rp.status !== 'putting_away') return { ok: false, error: "return session status invalid: " + rp.status };
-        if (rp.biz_class !== 'return') return { ok: false, error: "not a return session" };
+        if (rp.biz_class !== 'return' || (inboundFlowEnabled(env) && rp.source_type !== 'return_session')) return { ok: false, error: "not a return session" };
       }
     } else {
       return { ok: false, error: "missing plan_id" };
@@ -5690,8 +5777,8 @@ route("v2_inbound_job_start", async (body, env) => {
     // ===== Find / create job bound to plan_id =====
     let job = null;
     const existing = await env.DB.prepare(
-      "SELECT * FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type=? AND status IN ('pending','working') LIMIT 1"
-    ).bind(plan_id, job_type).first();
+      "SELECT * FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type=? AND status IN ('pending','working','awaiting_close') AND (?='' OR inbound_external_no=? OR COALESCE(inbound_external_no,'')='') LIMIT 1"
+    ).bind(plan_id, job_type,selectedExternal,selectedExternal).first();
     if (existing) job = existing;
 
     const busy = await checkWorkerBusy(env, worker_id, job ? job.id : null);
@@ -5700,6 +5787,7 @@ route("v2_inbound_job_start", async (body, env) => {
     let job_id, is_new_job = false;
     if (job) {
       job_id = job.id;
+      if(selectedExternal&&!job.inbound_external_no)await env.DB.prepare("UPDATE v2_ops_jobs SET inbound_external_no=? WHERE id=? AND COALESCE(inbound_external_no,'')=''").bind(selectedExternal,job_id).run();
       const dup = await findOpenSeg(env, job_id, worker_id);
       if (dup) return { ok: true, job_id, worker_seg_id: dup.id, is_new_job: false, already_joined: true, plan_id };
       await env.DB.prepare(
@@ -5710,9 +5798,9 @@ route("v2_inbound_job_start", async (body, env) => {
       is_new_job = true;
       await env.DB.prepare(`
         INSERT INTO v2_ops_jobs(id, flow_stage, biz_class, job_type, related_doc_type, related_doc_id,
-          status, created_by, created_at, updated_at, active_worker_count)
-        VALUES(?, 'inbound', ?, ?, 'inbound_plan', ?, 'working', ?, ?, ?, 1)
-      `).bind(job_id, biz_class, job_type, plan_id, worker_id, t, t).run();
+          status, created_by, created_at, updated_at, active_worker_count,inbound_external_no)
+        VALUES(?, 'inbound', ?, ?, 'inbound_plan', ?, 'working', ?, ?, ?, 1,?)
+      `).bind(job_id, biz_class, job_type, plan_id, worker_id, t, t,selectedExternal).run();
       if (isStandard) {
         // Parallel: if unloading → unloading_putting_away; if arrived_pending_putaway → putting_away
         await env.DB.prepare(
@@ -5730,7 +5818,7 @@ route("v2_inbound_job_start", async (body, env) => {
       VALUES(?,?,?,?,?)
     `).bind(seg_id, job_id, worker_id, worker_name, t).run();
 
-    return { ok: true, job_id, worker_seg_id: seg_id, is_new_job, plan_id };
+    return { ok: true, job_id, worker_seg_id: seg_id, is_new_job, plan_id,external_inbound_no:selectedExternal };
   });
 });
 
@@ -5759,7 +5847,7 @@ route("v2_inbound_job_finish", async (body, env) => {
     if (!leave_only) {
       const jobCheck = await env.DB.prepare("SELECT status, job_type FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
       if (jobCheck && jobCheck.status === 'completed') {
-        const cleaned = await closeOpenWorkerSegmentsForJob(env, job_id, t, 'already_completed_cleanup');
+        const cleaned = internalEnabled(env)&&isInternal(jobCheck.job_type)?0:await closeOpenWorkerSegmentsForJob(env, job_id, t, 'already_completed_cleanup');
         return { ok: true, already_completed: true, error: "already_completed", cleaned_open_segments: cleaned, message: "任务已完成" };
       }
     }
@@ -5767,8 +5855,12 @@ route("v2_inbound_job_finish", async (body, env) => {
     const jobRow = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
     if (!jobRow) return { ok: false, error: "job not found" };
     const isReturnJob = (jobRow.job_type === 'inbound_return');
+    if(stagedInbound(jobRow.job_type)&&!await env.DB.prepare("SELECT id FROM sop_records WHERE id=? AND kind='dispatch'").bind(job_id).first())return {ok:false,error:'阶段任务派工信息缺失，请核实原任务'};
+    if(stagedInbound(jobRow.job_type)&&!leave_only&&!complete_job)return {ok:false,error:'请通过完成按钮提交本阶段实际产出'};
+    if(jobRow.job_type===putawayType&&!leave_only)putawayMetrics(body);
 
     if (complete_job && !leave_only && !isReturnJob) {
+      if(jobRow.related_doc_id&&!await courierReady(env,jobRow.related_doc_id))return {ok:false,error:"courier_not_received",message:"关联快递尚未收齐，不能完成理货 / 택배 수령이 완료되지 않았습니다"};
       if (jobRow.related_doc_id) {
         const planCheck = await env.DB.prepare("SELECT status FROM v2_inbound_plans WHERE id=?").bind(jobRow.related_doc_id).first();
         // Hard block: unload not done → cannot finish inbound
@@ -5777,13 +5869,23 @@ route("v2_inbound_job_finish", async (body, env) => {
           return { ok: false, error: "unload_not_finished", message: "卸货未完成，无法完成理货 / 하차가 아직 완료되지 않아 입고 완료 처리할 수 없습니다" };
         }
         // partially_completed 也允许：还有别的 biz 未完成，但本 biz 自己可以完成
-        const inboundFinishAllowed = ['putting_away', 'partially_completed'];
+        const inboundFinishAllowed = ['putting_away', 'tallied_pending_putaway', 'direct_putting_away', 'partially_completed'];
         if (planCheck && inboundFinishAllowed.indexOf(planCheck.status) === -1) {
           return { ok: false, error: "inbound_plan_status_invalid", message: "当前入库计划状态不允许完成入库（当前: " + planCheck.status + "）" };
         }
       }
     }
 
+    if(inboundFlowEnabled(env)&&complete_job&&!leave_only){
+      const others=await env.DB.prepare(`SELECT COUNT(*) AS n FROM v2_ops_job_workers WHERE job_id=? AND NOT ${badgeSQL(env,'worker_id','?')} AND left_at=''`).bind(job_id,worker_id).first();
+      if(env.SOP_GROUP_FINISH||!others.n){
+        const plan=jobRow.related_doc_id?await env.DB.prepare('SELECT * FROM v2_inbound_plans WHERE id=?').bind(jobRow.related_doc_id).first():null;
+        const originalBiz=mapInboundJobTypeToBiz(jobRow.job_type)||jobRow.biz_class||'';
+        const biz=putawayTaskBiz(env,plan,originalBiz)||(originalBiz==='bulk'&&plan&&extractPlanBizClasses(plan).includes('direct_ship')?'direct_ship':originalBiz);
+        return atomicNativeFinish(env,body,jobRow,{inbound:true,biz});
+      }
+    }
+    if(stagedInbound(jobRow.job_type)&&!leave_only)return {ok:false,error:'请由本任务派审员完成整组阶段任务'};
     await closeAllOpenSegs(env, job_id, worker_id, t, leave_only ? 'leave' : 'finished');
     const realCount = await recalcActiveCount(env, job_id, t);
 
@@ -5801,7 +5903,7 @@ route("v2_inbound_job_finish", async (body, env) => {
     ).bind(JSON.stringify(resultData), t, job_id).run();
 
     if (complete_job) {
-      if (realCount > 0) {
+      if (realCount > 0 && !env.SOP_GROUP_FINISH) {
         return { ok: false, error: "others_still_working",
           message: "您已退出此任务，还有 " + realCount + " 人继续作业",
           active_worker_count: realCount };
@@ -5831,15 +5933,17 @@ route("v2_inbound_job_finish", async (body, env) => {
         }
 
         // 标记该业务类型的 biz_task 完成
-        const biz_for_task = mapInboundJobTypeToBiz(jobRow.job_type) || jobRow.biz_class || '';
+        const currentPlan=await env.DB.prepare('SELECT * FROM v2_inbound_plans WHERE id=?').bind(pid).first();
+        const originalBiz=mapInboundJobTypeToBiz(jobRow.job_type) || jobRow.biz_class || '';
+        const biz_for_task=putawayTaskBiz(env,currentPlan,originalBiz)||(inboundFlowEnabled(env)&&originalBiz==='bulk'&&extractPlanBizClasses(currentPlan).includes('direct_ship')?'direct_ship':originalBiz);
         if (biz_for_task) {
           // 汇总参与人员 + 总分钟，写入 biz_task
           const wkRs = await env.DB.prepare(
-            "SELECT worker_name, minutes_worked, joined_at FROM v2_ops_job_workers WHERE job_id=? ORDER BY joined_at"
+            "SELECT worker_name, minutes_worked, joined_at,leave_reason FROM v2_ops_job_workers WHERE job_id=? ORDER BY joined_at"
           ).bind(job_id).all();
           const wkRows = wkRs.results || [];
           const names = [...new Set(wkRows.map(w => w.worker_name).filter(Boolean))].join('、');
-          const total_min = Math.round(wkRows.reduce((s, w) => s + (Number(w.minutes_worked) || 0), 0));
+          const total_min = Math.round(wkRows.reduce((s, w) => s + (forcedClock(w)?0:Number(w.minutes_worked)||0), 0));
           const startedAt = wkRows.reduce((m, w) => (!m || (w.joined_at && w.joined_at < m)) ? w.joined_at : m, '');
           await markInboundBizTaskCompleted(env, pid, biz_for_task, {
             job_id,
@@ -5883,7 +5987,7 @@ route("v2_import_delivery_job_start", async (body, env) => {
     const t = now();
     const job_type = "pickup_delivery_import";
 
-    const existing = await env.DB.prepare(
+    const existing = env.SOP_NATIVE_START ? null : await env.DB.prepare(
       "SELECT * FROM v2_ops_jobs WHERE job_type=? AND status IN ('pending','working') LIMIT 1"
     ).bind(job_type).first();
 
@@ -5926,6 +6030,8 @@ route("v2_import_delivery_job_finish", async (body, env) => {
   const leave_only = body.leave_only === true;
   if (!job_id) return err("missing job_id");
 
+  if(env.SOP_GROUP_FINISH&&complete_job){const job=await env.DB.prepare('SELECT * FROM v2_ops_jobs WHERE id=?').bind(job_id).first();if(!job)return err('job not found');if(job.status==='completed')return json({ok:true,already_completed:true});return json(await atomicNativeFinish(env,body,job,{delivery:true}));}
+
   return withIdem(env, body, "v2_import_delivery_job_finish", async () => {
     const t = now();
 
@@ -5955,7 +6061,7 @@ route("v2_import_delivery_job_finish", async (body, env) => {
     ).bind(JSON.stringify(resultData), t, job_id).run();
 
     if (complete_job) {
-      if (realCount > 0) {
+      if (realCount > 0 && !env.SOP_GROUP_FINISH) {
         return { ok: false, error: "others_still_working",
           message: "您已退出此任务，还有 " + realCount + " 人继续作业",
           active_worker_count: realCount };
@@ -5991,13 +6097,14 @@ route("v2_inbound_mark_completed", async (body, env) => {
 
     const plan = await env.DB.prepare("SELECT * FROM v2_inbound_plans WHERE id=?").bind(plan_id).first();
     if (!plan) return { ok: false, error: "plan not found" };
-    const markCompletedAllowed = ['arrived_pending_putaway', 'putting_away', 'partially_completed'];
+    const markCompletedAllowed = ['arrived_pending_putaway', 'putting_away', 'tallied_pending_putaway', 'direct_putting_away', 'partially_completed'];
+    if(!await courierReady(env,plan_id))return {ok:false,error:'courier_not_received',message:'快递尚未收齐，不能完结 / 택배 미수령'};
     if (markCompletedAllowed.indexOf(plan.status) === -1) {
       return { ok: false, error: "status_invalid", message: "only arrived_pending_putaway/putting_away/partially_completed can be marked completed, current: " + plan.status };
     }
 
     const activeJob = await env.DB.prepare(
-      "SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type LIKE 'inbound%' AND status IN ('pending','working','awaiting_close') LIMIT 1"
+      "SELECT id FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type LIKE 'inbound%' AND status IN ('pending','working','awaiting_close') LIMIT 1"
     ).bind(plan_id).first();
     if (activeJob) {
       return { ok: false, error: "inbound_job_still_active", message: "当前仍有进行中的入库任务，不能直接完结" };
@@ -6053,60 +6160,55 @@ route("v2_inbound_plan_force_complete", async (body, env) => {
     if (!plan) return { ok: false, error: "not_found" };
     if (plan.status === 'completed') return { ok: false, error: "already_completed" };
     if (plan.status === 'cancelled') return { ok: false, error: "cancelled_cannot_complete" };
+    if(!await courierReady(env,id))return {ok:false,error:'courier_not_received',message:'快递尚未收齐，不能完结 / 택배 미수령'};
+    const referenceProgress=await inboundCodeProgress(env,plan);
+    if(referenceProgress?.missing_departments?.length)return {ok:false,error:'external_references_missing',message:'外部入库单号待补充，不能直接完结整张计划'};
+    if(referenceProgress?.items?.some(x=>x.tally_job_id&&x.status!=='completed')||referenceProgress?.total>1&&referenceProgress.completed<referenceProgress.total)return {ok:false,error:'external_inbounds_pending',message:'多个外部入库单须逐单完成：当前 '+referenceProgress.completed+'/'+referenceProgress.total+'，不能直接完结整张计划'};
 
-    const ALLOWED = ['pending', 'arrived_pending_putaway', 'putting_away', 'partially_completed'];
+    const ALLOWED = ['pending', 'arrived_pending_putaway', 'putting_away', 'tallied_pending_putaway', 'direct_putting_away', 'partially_completed'];
     if (ALLOWED.indexOf(plan.status) === -1) {
       return { ok: false, error: "status_invalid", message: "current status: " + plan.status };
     }
 
     // active job 存在 → 不允许（避免和现场作业冲突）
     const activeJob = await env.DB.prepare(
-      "SELECT id, job_type FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND status IN ('pending','working','awaiting_close') LIMIT 1"
+      "SELECT id, job_type FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND status IN ('pending','working','awaiting_close') LIMIT 1"
     ).bind(id).first();
     if (activeJob) {
       return { ok: false, error: "active_job_cannot_force_complete", active_job_id: activeJob.id, active_job_type: activeJob.job_type };
     }
 
     const t = now();
-    // 确保 biz_tasks 行齐全
-    await ensureInboundPlanBizTasks(env, plan);
-    // 把所有未完成 biz_task 标 completed（manual_force 来源）
-    await env.DB.prepare(`
-      UPDATE v2_inbound_plan_biz_tasks
-        SET status='completed', completed_at=?, completed_by=?, worker_names=?,
-            total_minutes=COALESCE(total_minutes,0),
-            completion_source='manual_force', completion_note=?, updated_at=?
-        WHERE plan_id=? AND status!='completed'
-    `).bind(t, operator, operator, reason, t, id).run();
-
-    // 实际数量写入 v2_inbound_plan_lines（按 unit_type=carton/pallet 分别 upsert）
-    // v2_inbound_plans 主表无 actual_box_count / actual_pallet_count 字段
-    async function upsertPlanLineActual(unit_type, qty) {
-      if (qty == null || !Number.isFinite(qty)) return;
-      const existed = await env.DB.prepare(
-        "SELECT id FROM v2_inbound_plan_lines WHERE plan_id=? AND unit_type=? LIMIT 1"
-      ).bind(id, unit_type).first();
-      if (existed) {
-        await env.DB.prepare(
-          "UPDATE v2_inbound_plan_lines SET actual_qty=? WHERE id=?"
-        ).bind(qty, existed.id).run();
-      } else if (qty > 0) {
-        const maxRow = await env.DB.prepare(
-          "SELECT MAX(line_no) AS m FROM v2_inbound_plan_lines WHERE plan_id=?"
-        ).bind(id).first();
-        const nextLineNo = (maxRow && Number(maxRow.m) ? Number(maxRow.m) : 0) + 1;
-        await env.DB.prepare(
-          "INSERT INTO v2_inbound_plan_lines(id, plan_id, line_no, unit_type, planned_qty, actual_qty, remark) VALUES(?,?,?,?,?,?,?)"
-        ).bind(uid(), id, nextLineNo, unit_type, 0, qty, 'manual_force_complete').run();
-      }
+    // The completion marker, quantities and tasks either all commit or none do.
+    const statements=[env.DB.prepare(`UPDATE v2_inbound_plans SET status='completed', updated_at=?, force_completed=1, force_completed_by=?, force_completed_at=?, force_complete_reason=?, manual_completed_by=?, manual_completed_at=?
+      WHERE id=? AND updated_at=? AND status IN ('pending','arrived_pending_putaway','putting_away','tallied_pending_putaway','direct_putting_away','partially_completed') AND COALESCE(is_deleted,0)=0
+      AND NOT EXISTS(SELECT 1 FROM v2_inbound_plan_jobs j WHERE j.plan_id=v2_inbound_plans.id AND j.status NOT IN ('completed','cancelled'))
+      AND NOT EXISTS(SELECT 1 FROM ck_courier_plan_items ci WHERE ci.plan_id=v2_inbound_plans.id AND NOT EXISTS(SELECT 1 FROM ck_courier_receipts r WHERE r.tracking_no=ci.tracking_no))
+    `).bind(t,operator,t,reason,operator,t,id,plan.updated_at)];
+    const guardKey='FORCE-'+crypto.randomUUID();
+    statements.push(env.DB.prepare("INSERT INTO v2_idempotency_keys(idem_key,action,response_json,created_at) SELECT ?,'inbound_force_commit','{}',? WHERE changes()=1").bind(guardKey,t));
+    const applied="EXISTS(SELECT 1 FROM v2_idempotency_keys WHERE idem_key=? AND action='inbound_force_commit')";
+    for(const biz of extractPlanBizClasses(plan))statements.push(env.DB.prepare(`
+      INSERT OR IGNORE INTO v2_inbound_plan_biz_tasks(id,plan_id,biz_class,job_type,status,created_at,updated_at)
+      SELECT ?,?,?,?,'pending',?,? WHERE ${applied}
+    `).bind('IBT-'+uid(),id,biz,mapInboundBizToJobType(biz),t,t,guardKey));
+    statements.push(env.DB.prepare(`UPDATE v2_inbound_plan_biz_tasks
+      SET status='completed',completed_at=?,completed_by=?,worker_names=?,total_minutes=COALESCE(total_minutes,0),completion_source='manual_force',completion_note=?,updated_at=?
+      WHERE plan_id=? AND status!='completed' AND ${applied}
+    `).bind(t,operator,operator,reason,t,id,guardKey));
+    for(const [unit,qty]of [['carton',actual_box_count],['pallet',actual_pallet_count]]){
+      if(qty==null||!Number.isFinite(qty))continue;
+      statements.push(env.DB.prepare(`UPDATE v2_inbound_plan_lines SET actual_qty=?
+        WHERE id=(SELECT id FROM v2_inbound_plan_lines WHERE plan_id=? AND unit_type=? LIMIT 1) AND ${applied}
+      `).bind(qty,id,unit,guardKey));
+      if(qty>0)statements.push(env.DB.prepare(`INSERT INTO v2_inbound_plan_lines(id,plan_id,line_no,unit_type,planned_qty,actual_qty,remark)
+        SELECT ?,?,COALESCE((SELECT MAX(line_no) FROM v2_inbound_plan_lines WHERE plan_id=?),0)+1,?,0,?,'manual_force_complete'
+        WHERE NOT EXISTS(SELECT 1 FROM v2_inbound_plan_lines WHERE plan_id=? AND unit_type=?) AND ${applied}
+      `).bind(uid(),id,id,unit,qty,id,unit,guardKey));
     }
-    await upsertPlanLineActual('carton', actual_box_count);
-    await upsertPlanLineActual('pallet', actual_pallet_count);
-
-    // 更新入库计划：force_completed=1 + status=completed（仅写真实存在字段）
-    await env.DB.prepare(
-      "UPDATE v2_inbound_plans SET status='completed', updated_at=?, force_completed=1, force_completed_by=?, force_completed_at=?, force_complete_reason=?, manual_completed_by=?, manual_completed_at=? WHERE id=?"
-    ).bind(t, operator, t, reason, operator, t, id).run();
+    statements.push(env.DB.prepare('DELETE FROM v2_idempotency_keys WHERE idem_key=?').bind(guardKey));
+    const results=await env.DB.batch(statements);
+    if(!results[0].meta.changes)return {ok:false,error:'plan_state_changed',message:'计划、收货或现场任务已变化，请刷新后核对 / 계획 상태가 변경되었습니다'};
 
     return { ok: true, status: 'completed', force_completed: 1, completed_at: t, completed_by: operator };
   });
@@ -6146,9 +6248,14 @@ route("v2_admin_force_complete_partial_inbounds", async (body, env) => {
   for (const plan of rows) {
     checked_count++;
 
+    if(!await courierReady(env,plan.id)){
+      if(examples.length<50)examples.push({plan_id:plan.id,display_no:plan.display_no,skipped_reason:'courier_not_received'});
+      continue;
+    }
+
     // active job 探测
     const activeJob = await env.DB.prepare(
-      "SELECT id, job_type FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND status IN ('pending','working','awaiting_close') LIMIT 1"
+      "SELECT id, job_type FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND status IN ('pending','working','awaiting_close') LIMIT 1"
     ).bind(plan.id).first();
     if (activeJob) {
       skipped_active_job_count++;
@@ -6250,7 +6357,7 @@ route("v2_admin_force_complete_partial_inbounds", async (body, env) => {
 const _STATUS_LABEL_ZH = {
   // inbound
   pending: '未到货', unloading: '卸货中', unloading_putting_away: '卸货中+理货中',
-  arrived_pending_putaway: '已到库待理货', putting_away: '理货中',
+  arrived_pending_putaway: '已到库待理货', putting_away: '理货中', tallied_pending_putaway:'理货完成待上架', direct_putting_away:'上架中',
   partially_completed: '部分入库完成', processing: '处理中', completed: '已完成',
   unloaded_pending_info: '已卸货·待补充信息',
   // outbound
@@ -6280,13 +6387,15 @@ route("v2_inbound_plan_export", async (body, env) => {
   const customer_keyword = String(body.customer_keyword || "").trim();
   const unload_done_from = String(body.unload_done_date_from || "").trim();
   const unload_done_to = String(body.unload_done_date_to || "").trim();
-  const VALID_BIZ = ['direct_ship','bulk','return','change_order'];
+  const VALID_BIZ = ['direct_ship','bulk_putaway','bulk','return','change_order'];
   let limit = parseInt(body.limit, 10);
   if (!Number.isFinite(limit) || limit <= 0) limit = 5000;
   if (limit > 10000) limit = 10000;
 
-  let sql = "SELECT * FROM v2_inbound_plans WHERE source_type != 'return_session' AND COALESCE(is_deleted,0)=0";
+  let sql = "SELECT * FROM v2_inbound_plans WHERE source_type NOT IN ('return_session','direct_tally_session') AND COALESCE(is_deleted,0)=0";
   const binds = [];
+  let arrivalFilter;try{arrivalFilter=inboundArrivalFilter(body);}catch(e){return err(e.message,400);}
+  sql += arrivalFilter.sql;binds.push(...arrivalFilter.binds);
   if (start) { sql += " AND plan_date>=?"; binds.push(start); }
   if (end) { sql += " AND plan_date<=?"; binds.push(end); }
   if (status) { sql += " AND status=?"; binds.push(status); }
@@ -6313,7 +6422,7 @@ route("v2_inbound_plan_export", async (body, env) => {
     sql += " AND customer LIKE ?";
     binds.push('%' + customer_keyword + '%');
   }
-  sql += " ORDER BY plan_date DESC, created_at DESC LIMIT ?";
+  sql += " ORDER BY " + inboundArrivalOrder + " LIMIT ?";
   binds.push(limit);
   const rs = await env.DB.prepare(sql).bind(...binds).all();
   const rows = rs.results || [];
@@ -6355,7 +6464,7 @@ route("v2_inbound_plan_export", async (body, env) => {
     if (!materialFilesByPlan[r.plan_id]) materialFilesByPlan[r.plan_id] = [];
     materialFilesByPlan[r.plan_id].push(r.file_name || '');
   }
-  // 入库实际数量来源是 v2_inbound_plan_lines（按 unit_type='carton'/'pallet' 分行）
+  // 入库数量只取 v2_inbound_plan_lines；快递数量按箱计，不再从运单/作业结果重复汇总。
   // v2_inbound_plans 主表无 actual_box_count / actual_pallet_count 字段
   const planLineRows = await batchSelectInGlobal(env,
     `SELECT plan_id, unit_type, SUM(planned_qty) AS pq, SUM(actual_qty) AS aq, SUM(putaway_qty) AS pu
@@ -6371,6 +6480,9 @@ route("v2_inbound_plan_export", async (body, env) => {
     };
   }
 
+  // Aggregate task results before any worker join: one shared workload per job.
+  const putawayRows=await batchSelectInGlobal(env,`SELECT j.plan_id,j.inbound_external_no,j.id AS job_id,COALESCE((SELECT display_no FROM sop_document_numbers WHERE record_id=j.id),j.id) AS task_no,(SELECT COUNT(*) FROM ck_putaway_links l WHERE l.job_id=j.id) AS member_count,(SELECT group_concat(external_no,'、') FROM ck_putaway_links l WHERE l.job_id=j.id) AS all_numbers,r.result_json FROM v2_inbound_references j JOIN v2_ops_job_results r ON r.id='RES-FINAL-'||j.id WHERE j.plan_id IN (PLACEHOLDER) AND j.job_type='inbound_direct_putaway' AND j.status='completed'`,planIds);
+  const putawayByPlan=new Map();for(const r of putawayRows){const data=JSON.parse(r.result_json);if(!putawayByPlan.has(r.plan_id))putawayByPlan.set(r.plan_id,[]);putawayByPlan.get(r.plan_id).push({...data,external_no:r.inbound_external_no,job_id:r.job_id,task_no:r.task_no,member_count:r.member_count,all_numbers:r.all_numbers});}
   const out = rows.map(p => {
     const bizArr = extractPlanBizClasses(p);
     const tasks = tasksByPlan[p.id] || [];
@@ -6378,11 +6490,11 @@ route("v2_inbound_plan_export", async (body, env) => {
     const pendingBiz = tasks.filter(t => t.status !== 'completed').map(t => t.biz_class);
     // 入库类型执行状态明细：代发入库=已完成/EMP-xxx/2026-04-30 10:20；大货入库=未完成
     const taskDetail = tasks.map(t => {
-      const lbl = _INBOUND_BIZ_LABEL_ZH[t.biz_class] || t.biz_class;
+      const lbl = (inboundFlowEnabled(env)?inboundLabels:_INBOUND_BIZ_LABEL_ZH)[t.biz_class] || t.biz_class;
       if (t.status === 'completed') {
         const who = t.worker_names || t.completed_by || '';
         const at = t.completed_at ? fmtKst(t.completed_at) : '';
-        const src = t.completion_source === 'manual_force' ? '(手动)' : '';
+        const src = t.completion_source === 'manual_force' ? '(手动)' : t.completion_source==='unload'?'(卸货完成自动入库)':'';
         return `${lbl}=已完成${src}/${who}/${at}`;
       } else {
         return `${lbl}=未完成`;
@@ -6391,20 +6503,24 @@ route("v2_inbound_plan_export", async (body, env) => {
     const linkedNos = linkByPlan[p.id] || [];
     const lp = linesByPlan[p.id] || {};
     const cartonAgg = lp.carton || { pq: 0, aq: 0, pu: 0 };
+    const courierAgg = lp.courier || { pq: 0, aq: 0, pu: 0 };
     const palletAgg = lp.pallet || { pq: 0, aq: 0, pu: 0 };
-    // 实际数量优先取 putaway（实际入库），否则取卸货 actual
-    const actualBox = cartonAgg.pu || cartonAgg.aq;
+    // 箱/托沿用原 putaway 优先口径；快递取详情中的 actual_qty，零/缺失不以计划或上架数补齐。
+    const actualBox = (cartonAgg.pu || cartonAgg.aq) + courierAgg.aq;
     const actualPallet = palletAgg.pu || palletAgg.aq;
 
     return {
       入库单号: p.display_no || p.id,
       外部WMS单号: p.external_inbound_no || '',
+      上架货位数: putawayByPlan.has(p.id)?(putawayByPlan.get(p.id).some(r=>r.member_count<=1)?putawayByPlan.get(p.id).filter(r=>r.member_count<=1).reduce((n,r)=>n+Number(r.location_count||0),0):''):'',
+      '共同上架任务（整任务数量，未分摊）': [...new Map((putawayByPlan.get(p.id)||[]).filter(r=>r.member_count>1).map(r=>[r.job_id,r])).values()].map(r=>r.task_no+' · '+r.all_numbers+' · 货位数 '+r.location_count+' · 叉车 '+(r.used_forklift?'是':'否')).join('；'),
+      上架叉车使用明细: (putawayByPlan.get(p.id)||[]).map(r=>r.external_no+'：'+(r.used_forklift?'是':'否')).join('；'),
       计划日期: p.plan_date || '',
       客户: p.customer || '',
-      状态: _statusLabelZh(p.status),
-      业务分类: _bizListLabelZh(bizArr),
-      已完成入库类型: completedBiz.map(b => _BIZ_LABEL_ZH[b] || b).join('+'),
-      未完成入库类型: pendingBiz.map(b => _BIZ_LABEL_ZH[b] || b).join('+'),
+      状态: inboundFlowEnabled(env)&&p.status==='completed'?'已入库':_statusLabelZh(p.status),
+      业务分类: inboundFlowEnabled(env)?bizArr.map(b=>inboundLabels[b]||b).join('+'):_bizListLabelZh(bizArr),
+      已完成入库类型: completedBiz.map(b => (inboundFlowEnabled(env)?inboundLabels:_BIZ_LABEL_ZH)[b] || b).join('+'),
+      未完成入库类型: pendingBiz.map(b => (inboundFlowEnabled(env)?inboundLabels:_BIZ_LABEL_ZH)[b] || b).join('+'),
       入库类型执行状态明细: taskDetail,
       货物摘要: p.cargo_summary || '',
       用途: p.purpose || '',
@@ -6414,7 +6530,7 @@ route("v2_inbound_plan_export", async (body, env) => {
       备注: p.remark || '',
       创建人: p.created_by || '',
       创建时间: fmtKst(p.created_at),
-      计划箱数: cartonAgg.pq,
+      计划箱数: cartonAgg.pq + courierAgg.pq,
       计划托数: palletAgg.pq,
       实际箱数: actualBox,
       实际托数: actualPallet,
@@ -6571,7 +6687,9 @@ route("v2_outbound_order_export", async (body, env) => {
 // GENERIC OPS JOB — for flexible use
 // =====================================================
 route("v2_ops_job_start", async (body, env) => {
+  if(internalEnabled(env)&&isInternal(body.job_type))return err("请从本作业派工入口开始 / 담당자가 배정하여 시작하세요",409);
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  if(env.SOP_ENVIRONMENT==='staging'&&env.SOP_UPGRADE_ENABLED==='true'&&String(body.job_type||'').trim()==='pick_direct')return err('请从代发拣货入口开始 / 직배송 피킹 메뉴에서 시작하세요',409);
   const flow_stage = String(body.flow_stage || "").trim();
   const biz_class = String(body.biz_class || "").trim();
   const job_type = String(body.job_type || "").trim();
@@ -6663,12 +6781,17 @@ route("v2_ops_job_finish", async (body, env) => {
   return withIdem(env, body, "v2_ops_job_finish", async () => {
     const t = now();
 
-    const jobCheck = await env.DB.prepare("SELECT status FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
+    const jobCheck = await env.DB.prepare("SELECT status,job_type FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
     if (jobCheck && jobCheck.status === 'completed') {
-      const cleaned = await closeOpenWorkerSegmentsForJob(env, job_id, t, 'already_completed_cleanup');
+      const cleaned = internalEnabled(env)&&isInternal(jobCheck.job_type)?0:await closeOpenWorkerSegmentsForJob(env, job_id, t, 'already_completed_cleanup');
       return { ok: true, already_completed: true, error: "already_completed", cleaned_open_segments: cleaned, message: "任务已完成" };
     }
 
+    if(inboundFlowEnabled(env)){
+      const job=await env.DB.prepare('SELECT * FROM v2_ops_jobs WHERE id=?').bind(job_id).first();
+      if(!job)return {ok:false,error:'job not found'};
+      return atomicNativeFinish(env,body,job);
+    }
     await closeAllOpenSegs(env, job_id, worker_id, t, 'finished');
 
     const shared = body.shared_result || {};
@@ -6701,21 +6824,26 @@ route("v2_ops_job_detail", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
   const job_id = String(body.job_id || "").trim();
   if (!job_id) return err("missing job_id");
-  // 实时校正 active_worker_count
-  await recalcActiveCount(env, job_id, now());
-  const job = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
+  // A detail read must not change task timestamps or write on every UI poll.
+  const queries=[
+    env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(job_id),
+    env.DB.prepare("SELECT * FROM v2_ops_job_workers WHERE job_id=? ORDER BY joined_at DESC").bind(job_id),
+    env.DB.prepare("SELECT * FROM v2_ops_job_results WHERE job_id=? ORDER BY created_at DESC").bind(job_id),
+    env.DB.prepare("SELECT * FROM v2_attachments WHERE related_doc_type='ops_job' AND related_doc_id=? ORDER BY created_at DESC").bind(job_id)
+  ];
+  if(inboundFlowEnabled(env))queries.push(env.DB.prepare("SELECT revision,state FROM sop_records WHERE id=? AND kind='dispatch'").bind(job_id));
+  if(env.SOP_UPGRADE_ENABLED==='true')queries.push(env.DB.prepare(jobNumberSQL(env)+' WHERE j.id=?').bind(job_id));
+  const [detail,canManage]=await Promise.all([env.DB.batch(queries),nativeOwner(body,env)]);
+  const [jobRows,workers,results,atts,dispatchRows]=detail,job=jobRows.results[0];
   if (!job) return err("not found", 404);
-  const workers = await env.DB.prepare(
-    "SELECT * FROM v2_ops_job_workers WHERE job_id=? ORDER BY joined_at DESC"
-  ).bind(job_id).all();
-  const results = await env.DB.prepare(
-    "SELECT * FROM v2_ops_job_results WHERE job_id=? ORDER BY created_at DESC"
-  ).bind(job_id).all();
-  const atts = await env.DB.prepare(
-    "SELECT * FROM v2_attachments WHERE related_doc_type='ops_job' AND related_doc_id=? ORDER BY created_at DESC"
-  ).bind(job_id).all();
+  if(env.SOP_UPGRADE_ENABLED==='true'){const n=detail.at(-1).results[0];if(n)Object.assign(job,decorateJobNumber(job,n));}
+  job.active_worker_count=new Set(workers.results.filter(w=>!w.left_at).map(w=>badgeKey(env,w.worker_id))).size;
+  if(job.job_type==='pick_direct')job.planned_pick_workload=readPickWorkload(JSON.parse(dispatchRows?.results[0]?.state||'{}').planned_pick_workload);
   return json({
-    ok: true, job,
+    ok: true, dispatch: inboundFlowEnabled(env)?dispatchRows?.results[0]||null:null, job, can_manage_dispatch: canManage, can_view_resting: await restingDispatch(env,job_id), unload_plans: job.job_type==='unload'?await tripPlans(env,job_id):[],
+    putaway_refs: job.job_type===putawayType?await putawayReferences(env,job.id):[],
+    load_orders: await loadOrdersForJob(env,job),
+    load_trip: loadTripEnabled(env)&&job.job_type==='load_outbound'?await env.DB.prepare('SELECT vehicle_no,driver_name,finished_at FROM ck_load_trips WHERE job_id=?').bind(job.id).first():null,
     workers: workers.results || [],
     results: results.results || [],
     attachments: atts.results || []
@@ -6732,7 +6860,7 @@ route("v2_ops_my_active_job", async (body, env) => {
   const seg = await env.DB.prepare(
     `SELECT w.* FROM v2_ops_job_workers w
      JOIN v2_ops_jobs j ON j.id = w.job_id
-     WHERE w.worker_id=? AND w.left_at='' AND j.status IN ('pending','working','awaiting_close')
+     WHERE ${badgeSQL(env,'w.worker_id','?')} AND w.left_at='' AND j.status IN ('pending','working','awaiting_close')
      ORDER BY w.joined_at DESC LIMIT 1`
   ).bind(worker_id).first();
 
@@ -6745,7 +6873,7 @@ route("v2_ops_my_active_job", async (body, env) => {
             j.status AS job_status, j.job_type, j.flow_stage, j.related_doc_id, j.updated_at AS job_updated_at
        FROM v2_ops_job_workers w
        JOIN v2_ops_jobs j ON j.id = w.job_id
-      WHERE w.worker_id=? AND w.left_at=''
+      WHERE ${badgeSQL(env,'w.worker_id','?')} AND w.left_at=''
       ORDER BY w.joined_at ASC`
   ).bind(worker_id).all();
   const stale_segments = [];
@@ -6800,12 +6928,15 @@ route("v2_ops_my_active_job", async (body, env) => {
     }
   }
 
-  if (!seg) return json({ ok: true, active: false, stale_segments, auto_cleaned_segments });
+  const relatedDisplays=await jobNumbers(env,[...stale_segments,...auto_cleaned_segments],'job_id');
+  const jobDisplays=new Map(relatedDisplays.map(j=>[j.job_id,j]));
+  const labeledStale=stale_segments.map(j=>jobDisplays.get(j.job_id)||j),labeledCleaned=auto_cleaned_segments.map(j=>jobDisplays.get(j.job_id)||j);
+  if (!seg) return json({ ok: true, active: false, stale_segments:labeledStale, auto_cleaned_segments:labeledCleaned });
 
   const t = now();
   await recalcActiveCount(env, seg.job_id, t);
   const job = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(seg.job_id).first();
-  return json({ ok: true, active: true, segment: seg, job, stale_segments, auto_cleaned_segments });
+  return json({ ok: true, active: true, segment: seg, job:(await jobNumbers(env,[job]))[0], stale_segments:labeledStale, auto_cleaned_segments:labeledCleaned });
 });
 
 // Resume parent job after interrupt
@@ -6820,6 +6951,9 @@ route("v2_ops_job_resume", async (body, env) => {
     const t = now();
     const job = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(parent_job_id).first();
     if (!job) return { ok: false, error: "parent job not found" };
+    if (!['working','awaiting_close'].includes(job.status)) return { ok:false, error:'原任务已结束、取消或暂停，不能恢复计时' };
+    const occupied=await checkWorkerBusy(env,worker_id,parent_job_id);
+    if(occupied)return {ok:false,error:'人员仍在其他任务中，不能重复恢复计时'};
 
     const dup = await findOpenSeg(env, parent_job_id, worker_id);
     if (dup) {
@@ -6939,8 +7073,10 @@ route("v2_attachment_list", async (body, env) => {
   const doc_type = String(body.related_doc_type || "").trim();
   const doc_id = String(body.related_doc_id || "").trim();
   if (!doc_type || !doc_id) return err("missing related_doc_type or related_doc_id");
+  if(accessEnabled(env)&&["issue_ticket","issue","issue_handle","issue_handle_run"].includes(doc_type)&&!await issueAttachmentAllowed(env,env.SOP_REQUEST_USER,doc_type,doc_id))return err("无此附件权限",403);
+  if(workChainEnabled(env)&&doc_type==='outbound_order'){const base=(await env.DB.prepare('SELECT * FROM v2_attachments WHERE related_doc_type=? AND related_doc_id=?').bind(doc_type,doc_id).all()).results||[];const files=await workMaterials(env,await chainLinked(env,doc_id),doc_id);const items=new Map(base.map(f=>[f.id,f]));for(const f of files)items.set(f.id,{...f,attachment_category:'outbound_material',canonical_material:true});return json({ok:true,items:[...items.values()]});}
   const rs = await env.DB.prepare(
-    "SELECT * FROM v2_attachments WHERE related_doc_type=? AND related_doc_id=? ORDER BY created_at DESC"
+    "SELECT a.* FROM v2_attachments a WHERE a.related_doc_type=? AND a.related_doc_id=?"+batchVisibleSql(env)+" ORDER BY a.created_at DESC"
   ).bind(doc_type, doc_id).all();
   return json({ ok: true, items: rs.results || [] });
 });
@@ -6967,6 +7103,8 @@ route("v2_attachment_delete", async (body, env) => {
   return withIdem(env, body, "v2_attachment_delete", async () => {
     const att = await env.DB.prepare("SELECT * FROM v2_attachments WHERE id=?").bind(id).first();
     if (!att) return { ok: false, error: "not_found", message: "附件不存在或已被删除" };
+    if(workChainEnabled(env)&&(att.related_doc_type==='sop_need'||['inbound_material','outbound_material'].includes(att.attachment_category)))return {ok:false,error:'作业资料请在关联作业需求中管理；历史来源资料保留只读'};
+    if(batchStateEnabled(env)&&att.attachment_category==='batch_work_material')return {ok:false,error:'本批总作业明细请从作业组可恢复移除，不能永久删除'};
 
     // 已 frozen 的出库单不允许删除其资料
     if (att.related_doc_type === 'outbound_order' && att.attachment_category === 'outbound_material') {
@@ -7076,7 +7214,8 @@ route("v2_feedback_list", async (body, env) => {
     ? await env.DB.prepare("SELECT COUNT(*) AS c FROM v2_field_feedbacks" + where).bind(...binds).first()
     : await env.DB.prepare("SELECT COUNT(*) AS c FROM v2_field_feedbacks" + where).first();
   const total = Number((countRow && countRow.c) || 0);
-  const listSql = "SELECT * FROM v2_field_feedbacks" + where + " ORDER BY created_at DESC LIMIT ? OFFSET ?";
+  const linkedColumn=inboundFlowEnabled(env)?", (SELECT p.display_no FROM ck_feedback_plan_links l JOIN v2_inbound_plans p ON p.id=l.plan_id WHERE l.feedback_id=v2_field_feedbacks.id) AS linked_plan_no":"";
+  const listSql = "SELECT *" + linkedColumn + " FROM v2_field_feedbacks" + where + " ORDER BY created_at DESC LIMIT ? OFFSET ?";
   const rs = await env.DB.prepare(listSql).bind(...binds, limit, offset).all();
   return json({ ok: true, items: rs.results || [], ...pageMeta(total, limit, offset) });
 });
@@ -7098,13 +7237,50 @@ route("v2_feedback_detail", async (body, env) => {
   // Parse result_lines from feedback itself (unplanned_unload flow)
   let feedbackResultLines = [];
   try { feedbackResultLines = JSON.parse(row.result_lines_json || "[]"); } catch(e) {}
-  return json({ ok: true, feedback: row, job_results: jobResults, feedback_result_lines: feedbackResultLines });
+  return json({ ok: true, feedback: row, job_results: jobResults, feedback_result_lines: feedbackResultLines, arrival_photos:await unloadPhotos(env,'field_feedback',id), existing_plan_link: inboundFlowEnabled(env)?await feedbackLinkDetail(env,id):null });
 });
 
 // ===== [DEPRECATED] Generic feedback-to-inbound conversion =====
 // New flow for unplanned_unload feedbacks must use v2_feedback_finalize_to_inbound.
 // This route is kept only for backward compatibility with old open/unload_no_doc feedback data.
+async function convertLegacyFeedback(body,env){
+  feedbackLinkActor(env);
+  const feedback_id=String(body.feedback_id||'').trim(),key=String(body.client_req_id||'').trim();
+  if(!feedback_id||!key)return err('缺少反馈或创建请求编号');
+  if(!String(body.customer||'').trim())return err('请客服确认并填写客户 / 고객을 확인해 입력하세요');
+  const fb=await env.DB.prepare('SELECT * FROM v2_field_feedbacks WHERE id=?').bind(feedback_id).first();
+  if(!fb||fb.is_deleted||fb.feedback_type!=='unload_no_doc')return err('仅旧无单卸货反馈可使用此入口');
+  // A recorded unload must pass the completed-job and closed-crew checks.
+  if(fb.related_doc_id)return finalizeCompletedFeedback(body,env);
+  const action='v2_feedback_convert_to_inbound';
+  const cached=await env.DB.prepare('SELECT action,response_json FROM v2_idempotency_keys WHERE idem_key=?').bind(key).first();
+  if(cached&&(cached.action!==action||JSON.parse(cached.response_json).feedback_id!==feedback_id))return err('请求编号已用于其他操作，请重新打开表单');
+  return withIdem(env,{...body,client_req_id:key},action,async()=>{
+    if(fb.status!=='open'||fb.inbound_plan_id||await existingFeedbackPlan(env,feedback_id))throw Error('反馈已处理或已有卸货记录，请刷新核对');
+    const norm=normalizeInboundBizClasses(body);if(!norm.list.length)throw Error('请选择入库业务分类');
+    const {externalNo,bulkExternalNo}=await inboundReferenceData(env,norm.list,body);
+    const lines=await validateCourierLines(env,body.lines),id='IB-'+uid(),t=now(),plan_date=kstToday(),display_no=await nextDisplayNo(env,plan_date);
+    const result={ok:true,id,inbound_plan_id:id,display_no,feedback_id};
+    // Abort the whole batch if the old source changed, was converted, or acquired a job.
+    const statements=[env.DB.prepare(`SELECT CASE WHEN EXISTS(SELECT 1 FROM v2_field_feedbacks f WHERE f.id=? AND f.status='open' AND f.feedback_type='unload_no_doc' AND COALESCE(f.is_deleted,0)=0 AND COALESCE(f.updated_at,'')=? AND COALESCE(f.related_doc_id,'')='' AND COALESCE(f.inbound_plan_id,'')='' AND NOT EXISTS(SELECT 1 FROM v2_inbound_plans p WHERE p.source_feedback_id=f.id) AND NOT EXISTS(SELECT 1 FROM ck_feedback_plan_links l WHERE l.feedback_id=f.id)) THEN 1 ELSE json('feedback_source_changed') END`).bind(feedback_id,fb.updated_at||''),
+      env.DB.prepare('INSERT INTO v2_idempotency_keys(idem_key,action,response_json,created_at) VALUES(?,?,?,?)').bind(key,action,JSON.stringify(result),t),
+      env.DB.prepare(`INSERT INTO v2_inbound_plans(id,plan_date,customer,biz_class,biz_classes_json,cargo_summary,expected_arrival,purpose,remark,status,source_feedback_id,created_by,created_at,updated_at,display_no,external_inbound_no,bulk_external_inbound_no)
+        VALUES(?,?,?,?,?,?,?,?,?,'pending',?,?,?,?,?,?,?)`).bind(id,plan_date,String(body.customer).trim(),norm.primary,JSON.stringify(norm.list),String(body.cargo_summary||fb.title||''),normalizeDateOnly(body.expected_arrival),String(body.purpose||''),String(body.remark||fb.content||''),feedback_id,String(body.created_by||''),t,t,display_no,externalNo,bulkExternalNo)];
+    for(const biz of norm.list)statements.push(env.DB.prepare("INSERT INTO v2_inbound_plan_biz_tasks(id,plan_id,biz_class,job_type,status,created_at,updated_at) VALUES(?,?,?,?,'pending',?,?)").bind('IBT-'+uid(),id,biz,mapInboundBizToJobType(biz),t,t));
+    for(const [i,line] of lines.entries()){
+      const lineId='IPL-'+uid();statements.push(env.DB.prepare('INSERT INTO v2_inbound_plan_lines(id,plan_id,line_no,unit_type,planned_qty,remark) VALUES(?,?,?,?,?,?)').bind(lineId,id,i+1,String(line.unit_type||''),Number(line.planned_qty||0),String(line.remark||'')),...courierPlanStatements(env,id,lineId,line));
+    }
+    statements.push(env.DB.prepare("UPDATE v2_field_feedbacks SET status='converted',inbound_plan_id=?,updated_at=? WHERE id=?").bind(id,t,feedback_id),...planAuditStatements(env,'inbound',id,'create',t));
+    try{await env.DB.batch(statements);}catch(error){
+      const prior=await env.DB.prepare('SELECT response_json FROM v2_idempotency_keys WHERE idem_key=? AND action=?').bind(key,action).first();if(prior){const saved=JSON.parse(prior.response_json);if(saved.feedback_id!==feedback_id)throw Error('请求编号已用于其他操作，请重新打开表单');return saved;}
+      if(/malformed JSON/.test(error.message))throw Error('反馈已变化或已被处理，请刷新核对');throw error;
+    }
+    // This historical path has no physical unload; actual quantities stay zero.
+    return result;
+  });
+}
 route("v2_feedback_convert_to_inbound", async (body, env) => {
+  if(inboundFlowEnabled(env))return convertLegacyFeedback(body,env);
   if (!isAuth(body, env)) return err("unauthorized", 401);
   const feedback_id = String(body.feedback_id || "").trim();
   if (!feedback_id) return err("missing feedback_id");
@@ -7124,20 +7300,22 @@ route("v2_feedback_convert_to_inbound", async (body, env) => {
   const bizNorm = normalizeInboundBizClasses({ biz_classes: body.biz_classes, biz_class: body.biz_class });
   const biz_class = bizNorm.primary || String(body.biz_class || "");
   const biz_classes_json = bizNorm.list.length > 0 ? JSON.stringify(bizNorm.list) : '[]';
+  const {externalNo,bulkExternalNo}=await inboundReferenceData(env,bizNorm.list,body);
+  if(inboundFlowEnabled(env)&&!bizNorm.list.length)throw Error("请选择入库业务分类");
   const created_by = String(body.created_by || "");
   const display_no = await nextDisplayNo(env, plan_date);
 
   await env.DB.prepare(`
     INSERT INTO v2_inbound_plans(id, plan_date, customer, biz_class, biz_classes_json, cargo_summary,
-      expected_arrival, purpose, remark, status, source_feedback_id, created_by, created_at, updated_at, display_no)
-    VALUES(?,?,?,?,?,?,?,?,?,'pending',?,?,?,?,?)
+      expected_arrival, purpose, remark, status, source_feedback_id, created_by, created_at, updated_at, display_no, external_inbound_no, bulk_external_inbound_no)
+    VALUES(?,?,?,?,?,?,?,?,?,'pending',?,?,?,?,?,?,?)
   `).bind(
     id, plan_date, customer, biz_class, biz_classes_json,
     String(body.cargo_summary || fb.title || ""),
     normalizeDateOnly(body.expected_arrival),
     String(body.purpose || ""),
     String(body.remark || fb.content || ""),
-    feedback_id, created_by, t, t, display_no
+    feedback_id, created_by, t, t, display_no, externalNo, bulkExternalNo
   ).run();
 
   // 初始化 biz_tasks（pending）
@@ -7210,6 +7388,20 @@ route("v2_feedback_delete", async (body, env) => {
     const relatedJobIds = (relatedJobsRs.results || []).map(r => r.id);
 
     let deleted = { feedback: 0, attachments: 0, jobs: 0, job_workers: 0, job_results: 0 };
+
+    // Attribution and feedback cleanup must not interleave partial worker/result deletes.
+    if(inboundFlowEnabled(env)){
+      const statements=[],keys=[];
+      for(const jobId of relatedJobIds){
+        for(const [table,key] of [['v2_ops_job_workers','job_workers'],['v2_ops_job_results','job_results'],['v2_ops_jobs','jobs']]){
+          statements.push(env.DB.prepare('DELETE FROM '+table+' WHERE '+(key==='jobs'?'id':'job_id')+'=?').bind(jobId));keys.push(key);
+        }
+      }
+      statements.push(env.DB.prepare("DELETE FROM v2_attachments WHERE related_doc_type='field_feedback' AND related_doc_id=?").bind(id));keys.push('attachments');
+      statements.push(env.DB.prepare('DELETE FROM v2_field_feedbacks WHERE id=?').bind(id));keys.push('feedback');
+      const results=await env.DB.batch(statements);results.forEach((r,i)=>deleted[keys[i]]+=r.meta?.changes||0);
+      return {ok:true,id,deleted};
+    }
 
     // 反馈关联 job 通常 1 条；逐个清 workers/results 再删 job 主体（小循环不影响性能）
     for (const jobId of relatedJobIds) {
@@ -7289,6 +7481,8 @@ route("v2_pick_job_start", async (body, env) => {
     pick_doc_nos.map(s => String(s || '').trim()).filter(Boolean)
   ));
   if (pick_doc_nos.length === 0) return err("missing pick_doc_nos");
+  const scanError=pick_doc_nos.map(documentCodeError).find(Boolean);
+  if(scanError)return err(scanError);
 
   return withIdem(env, body, "v2_pick_job_start", async () => {
     const t = now();
@@ -7304,8 +7498,8 @@ route("v2_pick_job_start", async (body, env) => {
       ).bind(docNo).first();
       if (conflict) {
         return { ok: false, error: "doc_conflict",
-          message: "拣货单 " + docNo + " 已在活跃趟次 " + (conflict.display_no || conflict.id) + " 中",
-          conflict_doc_no: docNo, conflict_trip: conflict.display_no || conflict.id };
+          message: "拣货单 " + docNo + " 已在活跃趟次 " + (businessReference(conflict.display_no) || ('拣货单 '+docNo)) + " 中",
+          conflict_doc_no: docNo, conflict_trip: businessReference(conflict.display_no) || ('拣货单 '+docNo), conflict_job_id:conflict.id };
       }
     }
 
@@ -7361,6 +7555,8 @@ route("v2_pick_job_start_by_docs", async (body, env) => {
     pick_doc_nos.map(s => String(s || '').trim()).filter(Boolean)
   ));
   if (pick_doc_nos.length === 0) return err("missing pick_doc_nos");
+  const scanError=pick_doc_nos.map(documentCodeError).find(Boolean);
+  if(scanError)return err(scanError);
 
   return withIdem(env, body, "v2_pick_job_start_by_docs", async () => {
     const t = now();
@@ -7411,13 +7607,16 @@ route("v2_pick_job_start_by_docs", async (body, env) => {
     // 跨趟次拒绝：所有扫描单必须属于同一个趟次
     const jobIds = Array.from(new Set(docs.map(d => d.j_id)));
     if (jobIds.length > 1) {
-      const tripNos = Array.from(new Set(docs.map(d => d.j_display_no || d.j_id)));
+      const tripNos = Array.from(new Set(docs.map(d => businessReference(d.j_display_no) || ('拣货单 '+d.pick_doc_no))));
       return { ok: false, error: "cross_trip_not_allowed",
         message: "不能跨趟次同时拣货（涉及趟次：" + tripNos.join(", ") + "），请确认拣货单号",
         trips: tripNos };
     }
 
     const job_id = jobIds[0];
+    // Old in-flight trips may continue without inventing a start-time plan.
+    // A pending trip with no work history must use atomic staffed dispatch.
+    if(env.SOP_ENVIRONMENT==='staging'&&env.SOP_UPGRADE_ENABLED==='true'&&!env.SOP_NATIVE_START&&!(await pickWorkloadContext(env,job_id)).pick_workload_started)return {ok:false,error:'请从代发拣货入口确认人员及计划工作量 / 직배송 피킹 메뉴에서 작업자와 계획 수량을 확인하세요'};
 
     // 创建拣货人 segment（开始计时）
     const seg_id = "WS-" + uid();
@@ -7480,6 +7679,7 @@ route("v2_pick_doc_lookup", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
   const docNo = String(body.pick_doc_no || "").trim();
   if (!docNo) return err("missing pick_doc_no");
+  if(documentCodeError(docNo))return err(documentCodeError(docNo));
 
   const row = await env.DB.prepare(
     `SELECT pd.*, j.id as j_id, j.display_no as j_display_no, j.status as j_status,
@@ -7493,6 +7693,7 @@ route("v2_pick_doc_lookup", async (body, env) => {
   if (!row) {
     return json({ ok: true, found: false, pick_doc_no: docNo });
   }
+  const workload=env.SOP_UPGRADE_ENABLED==='true'?await pickWorkloadContext(env,row.j_id):{};
   const pickStatus = row.pick_status || 'pending';
   // 参与人员明细（多对多）
   const partsRs = await env.DB.prepare(
@@ -7509,11 +7710,13 @@ route("v2_pick_doc_lookup", async (body, env) => {
     ok: true,
     found: true,
     pick_doc_no: row.pick_doc_no,
+    ...workload,
     pick_status: pickStatus,
     pick_started_at: row.pick_started_at || '',
     pick_finished_at: row.pick_finished_at || '',
     job_id: row.j_id,
     job_display_no: row.j_display_no || '',
+    ...jobDisplayMetadata((await jobNumbers(env,[{id:row.j_id}]))[0]),
     job_status: row.j_status || '',
     job_interrupted: !!row.j_interrupt,
     job_created_by: row.j_created_by || '',
@@ -7617,6 +7820,7 @@ route("v2_pick_job_breakdown", async (body, env) => {
   return json({
     ok: true,
     job_id,
+    ...jobDisplayMetadata((await jobNumbers(env,[{id:job_id}]))[0]),
     docs_view: Object.values(byDoc),
     workers_view: Object.values(byWorker),
     segments: segs,
@@ -7647,7 +7851,7 @@ route("v2_pick_job_docs_list", async (body, env) => {
     return Object.assign({}, d, {
       participants: parts,
       active_picker_count: parts.filter(p => p.status === 'working').length,
-      total_picker_count: new Set(parts.map(p => p.worker_id)).size
+      total_picker_count: new Set(parts.map(p => badgeKey(env,p.worker_id))).size
     });
   });
   return json({ ok: true, docs });
@@ -7663,6 +7867,8 @@ route("v2_pick_job_add_docs", async (body, env) => {
     pick_doc_nos = pick_doc_nos.split(',').map(s => s.trim()).filter(Boolean);
   }
   if (pick_doc_nos.length === 0) return err("missing pick_doc_nos");
+  const scanError=pick_doc_nos.map(documentCodeError).find(Boolean);
+  if(scanError)return err(scanError);
 
   return withIdem(env, body, "v2_pick_job_add_docs", async () => {
     const t = now();
@@ -7678,8 +7884,8 @@ route("v2_pick_job_add_docs", async (body, env) => {
       ).bind(docNo, job_id).first();
       if (conflict) {
         return { ok: false, error: "doc_conflict",
-          message: "拣货单 " + docNo + " 已在趟次 " + (conflict.display_no || conflict.id) + " 中",
-          conflict_doc_no: docNo, conflict_trip: conflict.display_no || conflict.id };
+          message: "拣货单 " + docNo + " 已在趟次 " + (businessReference(conflict.display_no) || ('拣货单 '+docNo)) + " 中",
+          conflict_doc_no: docNo, conflict_trip: businessReference(conflict.display_no) || ('拣货单 '+docNo), conflict_job_id:conflict.id };
       }
     }
 
@@ -7715,6 +7921,7 @@ route("v2_pick_job_add_docs", async (body, env) => {
 // =====================================================
 route("v2_pick_job_finish", async (body, env) => {
   if (!isOpsAuth(body, env)) return err("unauthorized", 401);
+  if(env.SOP_GROUP_FINISH)return json(await finishNativePick(body,env));
   const job_id = String(body.job_id || "").trim();
   const worker_id = String(body.worker_id || "").trim();
   if (!job_id) return err("missing job_id");
@@ -7823,6 +8030,8 @@ route("v2_pick_job_finalize", async (body, env) => {
       return { ok: false, error: "already_cancelled", message: "趟次已取消" };
     }
 
+    if (env.SOP_GROUP_FINISH) return finishNativePick(body,env);
+
     // ---- 权限收口：仅 ADMINKEY 或 趟次创建人 可整趟完成 ----
     // OPSKEY 调用时必须 worker_id === job.created_by，否则拒绝
     const isAdminCall = isAdmin(body, env);
@@ -7831,7 +8040,7 @@ route("v2_pick_job_finalize", async (body, env) => {
         return { ok: false, error: "missing_worker_id",
           message: "请提供拣货人ID / worker_id 필요" };
       }
-      if (worker_id !== (job.created_by || '')) {
+      if (!(attendanceEnabled(env)?sameWorkerBadge(worker_id,job.created_by||''):worker_id===(job.created_by||''))) {
         return { ok: false, error: "forbidden_not_creator",
           message: "只有趟次创建人或主管/管理员可以整趟完成 / 차수 생성자 또는 관리자만 전체 완료 가능",
           required_creator: job.created_by || '' };
@@ -7844,13 +8053,14 @@ route("v2_pick_job_finalize", async (body, env) => {
       "SELECT COUNT(*) as c, GROUP_CONCAT(worker_name, '、') as names FROM v2_ops_job_workers WHERE job_id=? AND left_at=''"
     ).bind(job_id).first();
     const activeCount = (activeRs && activeRs.c) || 0;
-    if (activeCount > 0) {
+    if (activeCount > 0 && !env.SOP_GROUP_FINISH) {
       return { ok: false, error: "active_workers_still_working",
         message: "仍有人员正在拣货，请先让所有人完成本次拣货后再整趟完成 / 아직 작업 중인 인원이 있습니다. 모두 완료 후 다시 시도하세요",
         active_worker_count: activeCount,
         active_worker_names: (activeRs && activeRs.names) || '' };
     }
 
+    if(inboundFlowEnabled(env))return finishNativePick(body,env,{legacy:true});
     // 1) 关闭残留 open segments（每段计算 minutes）— 此时正常无残留，仅作兜底
     const stale = await env.DB.prepare(
       "SELECT id, worker_id, joined_at FROM v2_ops_job_workers WHERE job_id=? AND left_at=''"
@@ -7883,8 +8093,8 @@ route("v2_pick_job_finalize", async (body, env) => {
     const totalsRs = await env.DB.prepare(
       `SELECT COUNT(DISTINCT worker_id) as worker_count,
               COUNT(*) as pwd_count,
-              COALESCE(SUM(minutes_worked), 0) as total_minutes
-       FROM v2_pick_worker_docs WHERE job_id=?`
+              COALESCE(SUM(CASE WHEN leave_reason LIKE 'system_cutoff:%' THEN 0 ELSE minutes_worked END), 0) as total_minutes
+       FROM v2_ops_job_workers WHERE job_id=?`
     ).bind(job_id).first();
     const result_id = "RES-" + uid();
     await env.DB.prepare(`
@@ -7980,7 +8190,7 @@ route("v2_pick_job_active_list", async (body, env) => {
       workers: (workers.results || []).map(w => ({ id: w.worker_id, name: w.worker_name }))
     });
   }
-  return json({ ok: true, items });
+  return json({ ok: true, items:await jobNumbers(env,items) });
 });
 
 // =====================================================
@@ -8006,6 +8216,7 @@ route("v2_bulk_op_job_start", async (body, env) => {
   const work_order_no = String(body.work_order_no || "").trim();
   if (!worker_id) return err("missing worker_id");
   if (!work_order_no) return err("missing work_order_no");
+  if(documentCodeError(work_order_no))return err(documentCodeError(work_order_no));
 
   return withIdem(env, body, "v2_bulk_op_job_start", async () => {
     const t = now();
@@ -8013,6 +8224,10 @@ route("v2_bulk_op_job_start", async (body, env) => {
     // ---- Phase 1: 查询关联出库单（校验前置，不再先建后回滚） ----
     const linkedOb = await findOutboundByWorkOrder(env, work_order_no);
     const obId = linkedOb ? linkedOb.id : "";
+    if(env.SOP_UPGRADE_ENABLED==='true'){
+      if(/^(CKWORK\||NEED-|SOPJOB-|(?:ZY|RW)-\d{8}-\d+)/i.test(work_order_no))return {ok:false,error:'这是需求作业单，请从需求作业单入口打开'};
+      if(obId&&(await linkedNeeds(env,obId)).length)return {ok:false,error:'此出库计划已关联作业需求，请打开原需求，避免重复记录产出'};
+    }
     const obStatus = linkedOb ? (linkedOb.status || "") : "";
 
     // 出库单状态校验（前置于 job 创建）
@@ -8058,7 +8273,7 @@ route("v2_bulk_op_job_start", async (body, env) => {
     const otherActive = await env.DB.prepare(
       `SELECT j.id, j.related_doc_id FROM v2_ops_job_workers w
        JOIN v2_ops_jobs j ON j.id = w.job_id
-       WHERE w.worker_id=? AND w.left_at=''
+       WHERE ${badgeSQL(env,'w.worker_id','?')} AND w.left_at=''
        AND j.job_type='bulk_op'
        AND j.status IN ('pending','working','awaiting_close')
        LIMIT 5`
@@ -8202,11 +8417,11 @@ route("v2_bulk_op_job_finish", async (body, env) => {
 
     // Pre-check: if this user is the only active worker, they MUST record output
     const othersRow = await env.DB.prepare(
-      "SELECT COUNT(*) as c FROM v2_ops_job_workers WHERE job_id=? AND worker_id!=? AND left_at=''"
+      `SELECT COUNT(*) as c FROM v2_ops_job_workers WHERE job_id=? AND NOT ${badgeSQL(env,'worker_id','?')} AND left_at=''`
     ).bind(job_id, worker_id).first();
     const willBeLastPerson = (Number((othersRow && othersRow.c) || 0) === 0);
 
-    if (willBeLastPerson) {
+    if (willBeLastPerson || env.SOP_GROUP_FINISH) {
       const numFields = [
         Number(body.packed_sku_count || 0),
         Number(body.packed_box_count || 0),
@@ -8226,6 +8441,32 @@ route("v2_bulk_op_job_finish", async (body, env) => {
       }
     }
 
+    if(inboundFlowEnabled(env)&&(willBeLastPerson||env.SOP_GROUP_FINISH)){
+     const jobBefore=await env.DB.prepare('SELECT * FROM v2_ops_jobs WHERE id=?').bind(job_id).first();
+     if(!jobBefore)return {ok:false,error:'job_not_found'};
+     const finalCustomer=String(body.customer||jobBefore.customer||'').trim();
+     if(!jobBefore.linked_outbound_order_id&&!finalCustomer)return {ok:false,error:'missing_customer',message:'请填写客户名称 / 고객명을 입력하세요'};
+    const resultData = {
+      packed_sku_count: Number(body.packed_sku_count || 0),
+      packed_box_count: Number(body.packed_box_count || 0),
+      used_carton_large_count: Number(body.used_carton_large_count || 0),
+      used_carton_small_count: Number(body.used_carton_small_count || 0),
+      repaired_box_count: Number(body.repaired_box_count || 0),
+      reboxed_count: Number(body.reboxed_count || 0),
+      label_count: Number(body.label_count || 0),
+      total_operated_box_count: Number(body.total_operated_box_count || 0),
+      pallet_count: Number(body.pallet_count || 0),
+      used_forklift: body.used_forklift ? 1 : 0,
+      forklift_location_count: Number(body.forklift_location_count || 0),
+      result_note: String(body.result_note || ""),
+      description: String(body.description || body.remark || ""),
+      location_photos: Array.isArray(body.location_photos) ? body.location_photos : [],
+      customer: finalCustomer
+    };
+
+     return atomicBulkFinish(env,body,jobBefore,resultData);
+    }
+
     // 1. Close this worker's segments only
     await closeAllOpenSegs(env, job_id, worker_id, t, 'finished');
 
@@ -8233,7 +8474,7 @@ route("v2_bulk_op_job_finish", async (body, env) => {
     const realCount = await recalcActiveCount(env, job_id, t);
 
     // 3. If others still working, this worker has been kicked out
-    if (realCount > 0) {
+    if (realCount > 0 && !env.SOP_GROUP_FINISH) {
       return { ok: false, error: "others_still_working",
         message: "您已退出此工单，还有 " + realCount + " 人继续作业",
         active_worker_count: realCount };
@@ -8265,6 +8506,8 @@ route("v2_bulk_op_job_finish", async (body, env) => {
       used_forklift: body.used_forklift ? 1 : 0,
       forklift_location_count: Number(body.forklift_location_count || 0),
       result_note: String(body.result_note || ""),
+      description: String(body.description || body.remark || ""),
+      location_photos: Array.isArray(body.location_photos) ? body.location_photos : [],
       customer: finalCustomer
     };
 
@@ -8344,7 +8587,7 @@ route("v2_order_ops_job_list", async (body, env) => {
 
   const [workersRs, pickDocsRs, resultsRs] = await Promise.all([
     env.DB.prepare(
-      `SELECT job_id, worker_name, minutes_worked FROM v2_ops_job_workers WHERE job_id IN (${placeholders}) ORDER BY joined_at`
+      `SELECT job_id, worker_name, minutes_worked,leave_reason FROM v2_ops_job_workers WHERE job_id IN (${placeholders}) ORDER BY joined_at`
     ).bind(...jobIds).all(),
     env.DB.prepare(
       `SELECT job_id, pick_doc_no FROM v2_ops_job_pick_docs WHERE job_id IN (${placeholders}) ORDER BY created_at`
@@ -8372,7 +8615,7 @@ route("v2_order_ops_job_list", async (body, env) => {
   const items = jobs.map(job => {
     const workerRows = workersByJob[job.id] || [];
     const names = [...new Set(workerRows.map(w => w.worker_name).filter(Boolean))];
-    const totalMin = workerRows.reduce((s, w) => s + (Number(w.minutes_worked) || 0), 0);
+    const totalMin = workerRows.reduce((s, w) => s + (forcedClock(w)?0:Number(w.minutes_worked)||0), 0);
     const pickDocs = (job.job_type === 'pick_direct') ? (pickDocsByJob[job.id] || []) : [];
     const lr = latestResultByJob[job.id];
     let resultData = null, remark = "";
@@ -8391,7 +8634,7 @@ route("v2_order_ops_job_list", async (body, env) => {
     };
   });
 
-  return json({ ok: true, items, ...pageMeta(total, limit, offset) });
+  return json({ ok: true, items:await jobNumbers(env,items), ...pageMeta(total, limit, offset) });
 });
 
 // =====================================================
@@ -8511,7 +8754,7 @@ route("v2_dashboard_realtime_overview", async (body, env) => {
     today_login_workers: (todayLogins && todayLogins.c) || 0,
     current_active_jobs: (activeJobs && activeJobs.c) || 0,
     current_active_docs: (activeDocs && activeDocs.c) || 0,
-    worker_live_status: liveWorkerRows,
+    worker_live_status: await jobNumbers(env,liveWorkerRows,'job_id'),
     biz_breakdown: bizBreak.results || []
   });
 });
@@ -8543,12 +8786,15 @@ route("v2_dashboard_live_docs", async (body, env) => {
     LIMIT 100
   `).all();
 
+  const jobRows = jobs.results || [];
+  // Keep each original indexed query and its DISTINCT/name ordering, but send
+  // the bounded (at most 100) reads in one D1 batch instead of 100 remote waits.
+  const workerRows = jobRows.length ? await env.DB.batch(jobRows.map(job => env.DB.prepare(
+    "SELECT DISTINCT worker_name FROM v2_ops_job_workers WHERE job_id=? AND left_at=''"
+  ).bind(job.job_id))) : [];
   const docs = [];
-  for (const job of (jobs.results || [])) {
-    // Get current worker names
-    const ws = await env.DB.prepare(
-      "SELECT DISTINCT worker_name FROM v2_ops_job_workers WHERE job_id=? AND left_at=''"
-    ).bind(job.job_id).all();
+  for (const [index, job] of jobRows.entries()) {
+    const ws = workerRows[index];
     const names = (ws.results || []).map(function(r) { return r.worker_name; }).filter(Boolean);
 
     // Unified display_no: plan_display_no > job_display_no > related_doc_id > job_id
@@ -8569,7 +8815,7 @@ route("v2_dashboard_live_docs", async (body, env) => {
     });
   }
 
-  return json({ ok: true, docs });
+  return json({ ok: true, docs:await jobNumbers(env,docs,'job_id') });
 });
 
 // P2-10：执行系统简版实时看板
@@ -8625,12 +8871,13 @@ route("v2_ops_realtime_board", async (body, env) => {
       FROM v2_ops_job_workers w
       JOIN v2_ops_jobs j ON w.job_id = j.id
       LEFT JOIN v2_inbound_plans p ON j.related_doc_type='inbound_plan' AND j.related_doc_id = p.id
-      WHERE w.worker_id=? AND w.joined_at >= ? AND w.joined_at < ? AND w.left_at != ''
+      WHERE ${badgeSQL(env,'w.worker_id','?')} AND w.joined_at >= ? AND w.joined_at < ? AND w.left_at != ''
       ORDER BY w.left_at DESC LIMIT 1
     `).bind(tw.worker_id, range.startUtc, range.endUtc).first();
     offWorkers.push({
       worker_id: tw.worker_id,
       worker_name: tw.worker_name,
+      job_id:last?.job_id||'',
       last_job_type: (last && last.job_type) || '',
       last_flow_stage: (last && last.flow_stage) || '',
       last_display_no: (last && (last.plan_display_no || last.job_display_no || last.related_doc_id)) || '',
@@ -8643,8 +8890,8 @@ route("v2_ops_realtime_board", async (body, env) => {
     today_worker_count: todayWorkers.length,
     active_worker_count: active_workers.length,
     off_worker_count: offWorkers.length,
-    active_workers: active_workers,
-    off_workers: offWorkers
+    active_workers: await jobNumbers(env,active_workers,'job_id'),
+    off_workers: (await jobNumbers(env,offWorkers,'job_id')).map(w=>({...w,last_display_no:w.display_business_no||w.job_label||w.last_display_no}))
   });
 });
 
@@ -8672,7 +8919,7 @@ route("v2_admin_dirty_data_diagnose", async (body, env) => {
     FROM v2_ops_job_workers w
     JOIN v2_ops_jobs j ON w.job_id = j.id
     WHERE w.left_at='' AND j.status IN ('working','awaiting_close','pending')
-      AND j.job_type IN ('bulk_op','inbound_direct','inbound_bulk','inbound_change_order','inbound_return','unload')
+      AND j.job_type IN ('bulk_op','inbound_direct_tally','inbound_direct_putaway','inbound_direct','inbound_bulk','inbound_change_order','inbound_return','unload')
     GROUP BY w.worker_id, j.job_type
     HAVING job_count > 1
   `).all();
@@ -8750,7 +8997,7 @@ route("v2_admin_dirty_data_cleanup", async (body, env) => {
       const worker_id = String(body.worker_id || "").trim();
       if (!worker_id) return { ok: false, error: "missing worker_id" };
       const segs = await env.DB.prepare(
-        "SELECT id, job_id FROM v2_ops_job_workers WHERE worker_id=? AND left_at=''"
+        `SELECT id, job_id FROM v2_ops_job_workers WHERE ${badgeSQL(env,'worker_id','?')} AND left_at=''`
       ).bind(worker_id).all();
       const rows = segs.results || [];
       for (const s of rows) {
@@ -8905,7 +9152,7 @@ route("v2_admin_force_worker_leave", async (body, env) => {
       ).bind(segment_id).first();
     } else {
       seg = await env.DB.prepare(
-        "SELECT * FROM v2_ops_job_workers WHERE job_id=? AND worker_id=? AND left_at='' ORDER BY joined_at DESC LIMIT 1"
+        `SELECT * FROM v2_ops_job_workers WHERE job_id=? AND ${badgeSQL(env,'worker_id','?')} AND left_at='' ORDER BY joined_at DESC LIMIT 1`
       ).bind(job_id, worker_id).first();
     }
     if (!seg) return { ok: false, error: "already_closed", message: "未找到未关闭参与段（可能已退出）" };
@@ -9096,10 +9343,10 @@ route("v2_admin_cleanup_inbound_plan_states", async (body, env) => {
     // 简化：dryRun 时跳过 helper，直接探测应转目标
     if (dryRun) {
       const hasActiveUnload = await env.DB.prepare(
-        `SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type='unload' AND status IN ('pending','working','awaiting_close') LIMIT 1`
+        `SELECT id FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type='unload' AND status IN ('pending','working','awaiting_close') LIMIT 1`
       ).bind(p.id).first();
       const hasActivePutaway = await env.DB.prepare(
-        `SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type IN ('inbound_direct','inbound_bulk','inbound_change_order') AND status IN ('pending','working','awaiting_close') LIMIT 1`
+        `SELECT id FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type IN ('inbound_direct_tally','inbound_direct_putaway','inbound_direct','inbound_bulk','inbound_change_order') AND status IN ('pending','working','awaiting_close') LIMIT 1`
       ).bind(p.id).first();
       if (p.status === 'unloading' && !hasActiveUnload) {
         repaired++;
@@ -9146,7 +9393,7 @@ route("v2_admin_cleanup_inbound_unload_scope", async (body, env) => {
     SELECT id, display_no, status, biz_class, biz_classes_json, source_type, updated_at
       FROM v2_inbound_plans
      WHERE status NOT IN ('cancelled')
-       AND (source_type IS NULL OR source_type != 'return_session')
+       AND (source_type IS NULL OR source_type NOT IN ('return_session','direct_tally_session'))
      ORDER BY created_at ASC
      LIMIT 10000
   `).all();
@@ -9162,13 +9409,13 @@ route("v2_admin_cleanup_inbound_unload_scope", async (body, env) => {
 
     // 已完成的 unload job 数 + 各 biz_task 状态
     const unloadDone = await env.DB.prepare(
-      "SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type='unload' AND status='completed' LIMIT 1"
+      "SELECT id FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type='unload' AND status='completed' LIMIT 1"
     ).bind(p.id).first();
     const activeUnload = await env.DB.prepare(
-      "SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type='unload' AND status IN ('pending','working','awaiting_close') LIMIT 1"
+      "SELECT id FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type='unload' AND status IN ('pending','working','awaiting_close') LIMIT 1"
     ).bind(p.id).first();
     const activePutaway = await env.DB.prepare(
-      "SELECT id FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type IN ('inbound_direct','inbound_bulk','inbound_change_order') AND status IN ('pending','working','awaiting_close') LIMIT 1"
+      "SELECT id FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type IN ('inbound_direct_tally','inbound_direct_putaway','inbound_direct','inbound_bulk','inbound_change_order') AND status IN ('pending','working','awaiting_close') LIMIT 1"
     ).bind(p.id).first();
 
     // 确保 biz_task 行齐全
@@ -9183,7 +9430,7 @@ route("v2_admin_cleanup_inbound_unload_scope", async (body, env) => {
     let target = p.status;
     if (activeUnload) {
       target = activePutaway ? 'unloading_putting_away' : 'unloading';
-    } else if (unloadDone || ['arrived_pending_putaway','putting_away','partially_completed','completed'].indexOf(p.status) !== -1) {
+    } else if (unloadDone || ['arrived_pending_putaway','putting_away','tallied_pending_putaway','direct_putting_away','partially_completed','completed'].indexOf(p.status) !== -1) {
       // 物理卸货已完成
       if (allCompleted) target = 'completed';
       else if (someCompleted) target = 'partially_completed';
@@ -9247,7 +9494,7 @@ route("v2_admin_backfill_inbound_unload_completed_at", async (body, env) => {
   const rs = await env.DB.prepare(`
     SELECT id, display_no, status FROM v2_inbound_plans
      WHERE (unload_completed_at IS NULL OR unload_completed_at='')
-       AND (source_type IS NULL OR source_type != 'return_session')
+       AND (source_type IS NULL OR source_type NOT IN ('return_session','direct_tally_session'))
        AND COALESCE(is_deleted,0)=0
      ORDER BY created_at ASC
      LIMIT 10000
@@ -9259,7 +9506,7 @@ route("v2_admin_backfill_inbound_unload_completed_at", async (body, env) => {
     checked_count++;
     // 取最后一个 completed unload job（更精确的"卸货完成时间"= updated_at）
     const job = await env.DB.prepare(
-      "SELECT id, updated_at FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND job_type='unload' AND status='completed' ORDER BY updated_at DESC LIMIT 1"
+      "SELECT id, updated_at FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type='unload' AND status='completed' ORDER BY updated_at DESC LIMIT 1"
     ).bind(p.id).first();
     if (!job) continue;
     // 汇总工人名（卸货人员）
@@ -9293,7 +9540,7 @@ route("v2_admin_cleanup_job_statuses", async (body, env) => {
   const t = now();
   const tMs = Date.parse(t);
   const rs = await env.DB.prepare(`
-    SELECT id, job_type, status, finished_at, updated_at, created_at
+    SELECT id, job_type, status, shared_result_json, finished_at, updated_at, created_at
       FROM v2_ops_jobs
      WHERE status IN ('pending','working','awaiting_close')
      ORDER BY created_at ASC
@@ -9311,6 +9558,7 @@ route("v2_admin_cleanup_job_statuses", async (body, env) => {
   const examples = [];
   for (const j of rows) {
     checked_count++;
+    if(internalEnabled(env)&&(readOperation(j)||j.job_type==='office_order_processing')){kept_active_count++;continue;}
     const openCnt = await env.DB.prepare(
       "SELECT COUNT(*) AS c FROM v2_ops_job_workers WHERE job_id=? AND left_at=''"
     ).bind(j.id).first();
@@ -9550,7 +9798,7 @@ route("v2_ops_job_result_update", async (body, env) => {
     const t = now();
     // 取最新 result 作为 previous_result_id，便于审计
     const prev = await env.DB.prepare(
-      "SELECT id FROM v2_ops_job_results WHERE job_id=? ORDER BY created_at DESC LIMIT 1"
+      "SELECT id FROM v2_ops_job_results WHERE job_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1"
     ).bind(job_id).first();
     const previous_result_id = prev ? prev.id : '';
 
@@ -9560,17 +9808,18 @@ route("v2_ops_job_result_update", async (body, env) => {
     if (result_note) resultObj.result_note = result_note;
     const summary = String(body.result_summary || _summarizeResultObj(resultObj) || '管理员修正').slice(0, 200);
 
-    await env.DB.prepare(`
+    const correction = env.DB.prepare(`
       INSERT INTO v2_ops_job_results(id, job_id, box_count, pallet_count, remark, result_json, created_by, created_at, source, previous_result_id)
-      VALUES(?,?,?,?,?,?,?,?,'manual_correction',?)
+      SELECT ?,?,?,?,?,?,?,?,'manual_correction',?
+      WHERE COALESCE((SELECT id FROM v2_ops_job_results WHERE job_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1),'')=?
     `).bind(
       result_id, job_id,
       Number(resultObj.box_count || 0), Number(resultObj.pallet_count || 0),
       String(resultObj.remark || result_note || ''),
       JSON.stringify(resultObj),
       operator, t,
-      previous_result_id
-    ).run();
+      previous_result_id, job_id, previous_result_id
+    );
 
     const sets = [
       "result_summary=?", "result_corrected=1", "result_corrected_by=?",
@@ -9579,9 +9828,10 @@ route("v2_ops_job_result_update", async (body, env) => {
     const binds = [summary, operator, t, reason, t];
     if (customer) { sets.push("customer=?"); binds.push(customer); }
     binds.push(job_id);
-    await env.DB.prepare(
-      "UPDATE v2_ops_jobs SET " + sets.join(', ') + " WHERE id=?"
-    ).bind(...binds).run();
+    await env.DB.batch([correction, env.DB.prepare(
+      "UPDATE v2_ops_jobs SET " + sets.join(', ') + " WHERE id=? AND EXISTS(SELECT 1 FROM v2_ops_job_results WHERE id=?)"
+    ).bind(...binds, result_id)]);
+    if (!await env.DB.prepare('SELECT id FROM v2_ops_job_results WHERE id=?').bind(result_id).first()) throw Error('产出刚被其他人修正，请刷新后核对最新结果');
 
     return { ok: true, job_id, result_id, previous_result_id, summary };
   });
@@ -9760,6 +10010,7 @@ route("v2_verify_batch_list", async (body, env) => {
       abnormal_count: Number(s.abnormal_count || 0)
     };
   });
+  for(const item of items){const check=await linkedCheck(env,item.id);if(check){item.ship_date=check.ship_date;item.sop_check_id=check.id;item.scanned_ok_count=check.summary.scanned;item.abnormal_count=check.summary.pending+check.summary.unresolved;item.planned_qty=check.summary.planned;}}
   return json({ ok: true, items, ...pageMeta(total, limit, offset) });
 });
 
@@ -9794,6 +10045,8 @@ route("v2_verify_batch_detail", async (body, env) => {
   const logs = logsRs.results || [];
   const okByBc = {};
   (okByBcRs.results || []).forEach(r => { okByBc[r.barcode] = Number(r.c || 0); });
+  const currentCheck=await linkedCheck(env,id);
+  if(currentCheck){for(const key of Object.keys(okByBc))delete okByBc[key];for(const item of currentCheck.items.filter(x=>!x.removed))okByBc[item.barcode]=item.scanned;batch.ship_date=currentCheck.ship_date;batch.sop_check_id=currentCheck.id;}
 
   // 预聚合：每个 barcode 的托盘集合 / 最后扫描时间&人
   const barcodeMeta = {};
@@ -9910,6 +10163,7 @@ route("v2_verify_batch_detail", async (body, env) => {
   return json({
     ok: true,
     batch,
+    check:currentCheck,
     items,
     extra_items,
     scan_logs: enrichedLogs,
@@ -10218,6 +10472,8 @@ route("v2_verify_job_finish", async (body, env) => {
 // 1) 单子数据 — 列表（按筛选 + 聚合 worker count / total minutes / start / end）
 route("v2_dashboard_order_list", async (body, env) => {
   if (!isAuth(body, env)) return err("unauthorized", 401);
+  if(body.date_basis==='actual_work') return json(await actualWorkReport({...body, report_kind:body.report_kind||'tasks'},env));
+  if(body.department)throw Error('用工部门筛选请使用按实际作业日期口径');
   const start_date = String(body.start_date || "").trim();
   const end_date = String(body.end_date || "").trim();
   const flow_stage = String(body.flow_stage || "").trim();
@@ -10232,6 +10488,7 @@ route("v2_dashboard_order_list", async (body, env) => {
   let offset = parseInt(body.offset, 10);
   if (!Number.isFinite(offset) || offset < 0) offset = 0;
 
+  dashboardRange(start_date,end_date);
   let where = "WHERE 1=1";
   const binds = [];
   const startRange = kstDayRangeUtc(start_date);
@@ -10242,9 +10499,7 @@ route("v2_dashboard_order_list", async (body, env) => {
   if (job_type)   { where += " AND j.job_type=?"; binds.push(job_type); }
   if (status)     { where += " AND j.status=?"; binds.push(status); }
   if (doc_no) {
-    where += " AND (j.display_no LIKE ? OR j.related_doc_id LIKE ? OR j.linked_outbound_order_id LIKE ?)";
-    const pat = "%" + doc_no + "%";
-    binds.push(pat, pat, pat);
+    const filter=jobBusinessFilter(env,'%'+doc_no+'%');where+=' AND '+filter.sql;binds.push(...filter.args);
   }
   if (worker_name) {
     where += " AND EXISTS (SELECT 1 FROM v2_ops_job_workers w WHERE w.job_id=j.id AND w.worker_name LIKE ?)";
@@ -10259,13 +10514,13 @@ route("v2_dashboard_order_list", async (body, env) => {
   const sql = `
     SELECT
       j.id, j.display_no, j.related_doc_type, j.related_doc_id, j.linked_outbound_order_id,
-      j.flow_stage, j.biz_class, j.job_type, j.status, j.created_at, j.updated_at,
+      j.flow_stage, j.biz_class, j.job_type, j.status, j.shared_result_json, j.created_at, j.updated_at,
       (SELECT COUNT(DISTINCT w2.worker_id) FROM v2_ops_job_workers w2 WHERE w2.job_id=j.id) AS worker_count,
-      (SELECT COALESCE(SUM(w2.minutes_worked),0) FROM v2_ops_job_workers w2 WHERE w2.job_id=j.id) AS total_minutes,
+      (SELECT COALESCE(SUM(CASE WHEN w2.leave_reason LIKE 'system_cutoff:%' THEN 0 ELSE w2.minutes_worked END),0) FROM v2_ops_job_workers w2 WHERE w2.job_id=j.id) AS total_minutes,
       (SELECT MIN(w2.joined_at) FROM v2_ops_job_workers w2 WHERE w2.job_id=j.id) AS started_at,
       (SELECT MAX(w2.left_at) FROM v2_ops_job_workers w2 WHERE w2.job_id=j.id AND w2.left_at!='') AS ended_at
     FROM v2_ops_jobs j ${where}
-    ORDER BY j.created_at DESC LIMIT ? OFFSET ?`;
+    ORDER BY j.created_at DESC,j.id LIMIT ? OFFSET ?`;
   const rs = await env.DB.prepare(sql).bind(...binds, limit, offset).all();
   const baseItems = rs.results || [];
   if (baseItems.length === 0) return json({ ok: true, items: [], total, limit, offset });
@@ -10273,13 +10528,13 @@ route("v2_dashboard_order_list", async (body, env) => {
   // 批量取 results → 调 parseOpsResultForExport 生成业务摘要
   const jobIds = baseItems.map(j => j.id);
   const resultsAll = await batchSelectInGlobal(env,
-    `SELECT job_id, box_count, pallet_count, remark, diff_note, result_json, result_lines_json, created_by, created_at FROM v2_ops_job_results WHERE job_id IN (PLACEHOLDER)`,
+    `SELECT id, job_id, source, previous_result_id, box_count, pallet_count, remark, diff_note, result_json, result_lines_json, created_by, created_at FROM v2_ops_job_results WHERE job_id IN (PLACEHOLDER)`,
     jobIds);
   const resultsByJob = {};
   resultsAll.forEach(r => { (resultsByJob[r.job_id] = resultsByJob[r.job_id] || []).push(r); });
 
   const items = baseItems.map(j => {
-    const parsed = parseOpsResultForExport(j.job_type, resultsByJob[j.id] || []);
+    const parsed = parseOpsResultForExport(j.job_type, resultsByJob[j.id] || [],j);
     return Object.assign({}, j, {
       total_minutes: round1(j.total_minutes),
       box_count_sum: parsed.box_count_sum,
@@ -10287,11 +10542,17 @@ route("v2_dashboard_order_list", async (body, env) => {
       packed_box_count_sum: parsed.packed_box_count_sum,
       total_operated_box_count_sum: parsed.total_operated_box_count_sum,
       label_count_sum: parsed.label_count_sum,
+      ...operationExport(j),
       result_summary: parsed.result_summary,
+      quantity_state: parsed.quantity_state, quantity_metrics: parsed.quantity_metrics, quantity_warnings: parsed.quantity_warnings,
+      putaway_task_no: j.job_type===putawayType?(j.task_no||j.id):'',
+      putaway_location_count: j.job_type===putawayType&&parsed.putaway_forklift!==null?parsed.location_count_sum:null,
+      putaway_used_forklift: j.job_type===putawayType?parsed.putaway_forklift:null,
+      putaway_quantity_scope: j.job_type===putawayType?'task':'',
       result_remarks_short: (parsed.result_notes || '').slice(0, 100)
     });
   });
-  return json({ ok: true, items, total, limit, offset });
+  return json({ ok: true, items:await jobNumbers(env,items), total, limit, offset });
 });
 
 // 2) 单子数据 — 详情
@@ -10300,23 +10561,31 @@ route("v2_dashboard_order_detail", async (body, env) => {
   const job_id = String(body.job_id || "").trim();
   if (!job_id) return err("missing job_id");
 
+  let period_report=null;
+  if(body.date_basis==='actual_work'){period_report=await actualWorkReport({...body,snapshot:undefined,report_kind:'tasks',job_id},env);}
   const job = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
   if (!job) return err("not found", 404);
 
   const [workersRs, resultsRs, pickDocsRs] = await Promise.all([
     env.DB.prepare(
-      "SELECT id, worker_id, worker_name, joined_at, left_at, minutes_worked, leave_reason FROM v2_ops_job_workers WHERE job_id=? ORDER BY joined_at ASC LIMIT 200"
+      "SELECT id, worker_id, worker_name, joined_at, left_at, minutes_worked, leave_reason FROM v2_ops_job_workers WHERE job_id=? ORDER BY joined_at ASC LIMIT 20001"
     ).bind(job_id).all(),
     env.DB.prepare(
-      "SELECT * FROM v2_ops_job_results WHERE job_id=? ORDER BY created_at ASC LIMIT 200"
+      "SELECT * FROM v2_ops_job_results WHERE job_id=? ORDER BY created_at ASC LIMIT 20001"
     ).bind(job_id).all(),
     env.DB.prepare(
-      "SELECT id, segment_id, worker_id, worker_name, pick_doc_no, status, started_at AS joined_at, finished_at AS left_at, minutes_worked FROM v2_pick_worker_docs WHERE job_id=? ORDER BY started_at ASC LIMIT 500"
+      "SELECT id, segment_id, worker_id, worker_name, pick_doc_no, status, started_at AS joined_at, finished_at AS left_at, minutes_worked FROM v2_pick_worker_docs WHERE job_id=? ORDER BY started_at ASC LIMIT 20001"
     ).bind(job_id).all()
   ]);
 
+  if ([workersRs,resultsRs,pickDocsRs].some(r=>(r.results||[]).length>20000)) return err('任务明细超过安全上限 20000 行，请按实际作业日期缩小区间导出');
+  if(job.job_type==='pick_direct'&&env.SOP_UPGRADE_ENABLED==='true'){
+    const dispatch=await env.DB.prepare("SELECT state FROM sop_records WHERE id=? AND kind='dispatch'").bind(job_id).first();
+    job.planned_pick_workload=readPickWorkload(JSON.parse(dispatch?.state||'{}').planned_pick_workload);
+  }
+
   const results = resultsRs.results || [];
-  const parsed = parseOpsResultForExport(job.job_type, results);
+  const parsed = parseOpsResultForExport(job.job_type, results,job);
 
   // 关联单据的备注（让单子详情能直接看到客服备注 / 出库要求 等）
   let inbound_remark = '';
@@ -10351,7 +10620,8 @@ route("v2_dashboard_order_detail", async (body, env) => {
 
   return json({
     ok: true,
-    job,
+    period_report,
+    job:(await jobNumbers(env,[job]))[0],
     workers: workersRs.results || [],
     results,
     pick_worker_docs: pickDocsRs.results || [],
@@ -10371,6 +10641,8 @@ route("v2_dashboard_order_detail", async (body, env) => {
 // 2.5) 单子数据 — 导出（一次性聚合 worker / result / pick / 关联单据；不要 N+1）
 route("v2_dashboard_order_export", async (body, env) => {
   if (!isAuth(body, env)) return err("unauthorized", 401);
+  if(body.date_basis==='actual_work') return json(await actualWorkReport({...body, report_kind:body.report_kind||'tasks'},env));
+  if(body.department)throw Error('用工部门筛选请使用按实际作业日期口径');
   const start_date = String(body.start_date || "").trim();
   const end_date = String(body.end_date || "").trim();
   const flow_stage = String(body.flow_stage || "").trim();
@@ -10381,8 +10653,10 @@ route("v2_dashboard_order_export", async (body, env) => {
 
   let limit = parseInt(body.limit, 10);
   if (!Number.isFinite(limit) || limit <= 0) limit = 5000;
-  if (limit > 10000) limit = 10000;
+  if (limit > 200) limit = 200;
+  const offset=Math.max(0,Math.trunc(Number(body.offset)||0));
 
+  dashboardRange(start_date,end_date);
   let where = "WHERE 1=1";
   const binds = [];
   const startRange = kstDayRangeUtc(start_date);
@@ -10393,25 +10667,26 @@ route("v2_dashboard_order_export", async (body, env) => {
   if (job_type)   { where += " AND j.job_type=?"; binds.push(job_type); }
   if (status)     { where += " AND j.status=?"; binds.push(status); }
   if (doc_no) {
-    where += " AND (j.display_no LIKE ? OR j.related_doc_id LIKE ? OR j.linked_outbound_order_id LIKE ?)";
-    const pat = "%" + doc_no + "%";
-    binds.push(pat, pat, pat);
+    const filter=jobBusinessFilter(env,'%'+doc_no+'%');where+=' AND '+filter.sql;binds.push(...filter.args);
   }
   if (worker_name) {
     where += " AND EXISTS (SELECT 1 FROM v2_ops_job_workers w WHERE w.job_id=j.id AND w.worker_name LIKE ?)";
     binds.push("%" + worker_name + "%");
   }
 
+  const total=Number((await env.DB.prepare(`SELECT COUNT(*) c FROM v2_ops_jobs j ${where}`).bind(...binds).first())?.c||0);
   const jobsRs = await env.DB.prepare(
     `SELECT id, display_no, related_doc_type, related_doc_id, linked_outbound_order_id,
-            flow_stage, biz_class, job_type, status, created_at, updated_at
+            flow_stage, biz_class, job_type, status, shared_result_json, inbound_external_no, created_at, updated_at
      FROM v2_ops_jobs j ${where}
-     ORDER BY j.created_at DESC LIMIT ?`
-  ).bind(...binds, limit).all();
-  const jobs = jobsRs.results || [];
+     ORDER BY j.created_at DESC,j.id LIMIT ? OFFSET ?`
+  ).bind(...binds, limit,offset).all();
+  const jobs = await jobNumbers(env,jobsRs.results || []);
   if (jobs.length === 0) return json({ ok: true, rows: [], total: 0 });
 
   const jobIds = jobs.map(j => j.id);
+  const counts=await env.DB.batch(['v2_ops_job_workers','v2_ops_job_results','v2_pick_worker_docs'].map(table=>env.DB.prepare('SELECT COUNT(*) c FROM '+table+' WHERE job_id IN (SELECT value FROM json_each(?))').bind(JSON.stringify(jobIds))));
+  if(counts.some(r=>Number(r.results?.[0]?.c)>20000))throw Error('本页关联明细超过20000行安全上限，请缩小范围或每页数量；未截断导出');
   // 兼容历史 related_doc_type 写法：实际写入是 'inbound_plan'，旧导出按 'inbound' 过滤导致永远空
   const isInboundLink = (t) => (t === 'inbound_plan' || t === 'inbound');
   const inboundIds = [...new Set(jobs.filter(j => isInboundLink(j.related_doc_type) && j.related_doc_id).map(j => j.related_doc_id))];
@@ -10430,7 +10705,7 @@ route("v2_dashboard_order_export", async (body, env) => {
        FROM v2_ops_job_workers WHERE job_id IN (PLACEHOLDER) ORDER BY joined_at ASC`,
       jobIds),
     batchSelectInGlobal(env,
-      `SELECT id, job_id, box_count, pallet_count, remark, diff_note, result_json, result_lines_json, created_by, created_at
+      `SELECT id, job_id, source, previous_result_id, box_count, pallet_count, remark, diff_note, result_json, result_lines_json, created_by, created_at
        FROM v2_ops_job_results WHERE job_id IN (PLACEHOLDER) ORDER BY created_at ASC`,
       jobIds),
     batchSelectInGlobal(env,
@@ -10452,6 +10727,14 @@ route("v2_dashboard_order_export", async (body, env) => {
        FROM v2_outbound_orders WHERE id IN (PLACEHOLDER)`,
       outboundIds)
   ]);
+
+  const ownerLinks=await batchSelectInGlobal(env,'SELECT l.job_id,l.plan_id,l.external_no AS external_inbound_no,p.customer FROM ck_putaway_links l JOIN v2_inbound_plans p ON p.id=l.plan_id WHERE l.job_id IN (PLACEHOLDER) ORDER BY l.position',jobs.filter(j=>j.job_type===putawayType).map(j=>j.id));
+  const ownersByJob=new Map();for(const ref of ownerLinks){if(!ownersByJob.has(ref.job_id))ownersByJob.set(ref.job_id,[]);ownersByJob.get(ref.job_id).push(ref);}
+
+  // One plan per task, independent of document and participant counts.
+  const pickPlans=env.SOP_UPGRADE_ENABLED==='true'?await batchSelectInGlobal(env,
+    "SELECT id,state FROM sop_records WHERE kind='dispatch' AND id IN (PLACEHOLDER)",pickJobIds):[];
+  const pickPlanByJob=new Map(pickPlans.map(r=>[r.id,readPickWorkload(JSON.parse(r.state).planned_pick_workload)]));
 
   const workersByJob = {}, resultsByJob = {}, pickByJob = {};
   workersAll.forEach(w => { (workersByJob[w.job_id] = workersByJob[w.job_id] || []).push(w); });
@@ -10485,12 +10768,12 @@ route("v2_dashboard_order_export", async (body, env) => {
     const ps = pickByJob[j.id] || [];
 
     const workerNames = [...new Set(ws.map(w => w.worker_name).filter(Boolean))].join('、');
-    const total_minutes = round1(ws.reduce((s, w) => s + (Number(w.minutes_worked) || 0), 0));
+    const total_minutes = round1(ws.reduce((s, w) => s + (forcedClock(w)?0:Number(w.minutes_worked)||0), 0));
     const started_at_iso = ws.reduce((m, w) => (!m || (w.joined_at && w.joined_at < m)) ? w.joined_at : m, '');
     const ended_at_iso = ws.reduce((m, w) => (w.left_at && w.left_at > m) ? w.left_at : m, '');
 
     // 解析 result_json → 业务可读摘要 + 各项累加
-    const parsed = parseOpsResultForExport(j.job_type, rs);
+    const parsed = parseOpsResultForExport(j.job_type, rs,j);
 
     // 代发拣货：拣货单号 + 拣货人员明细 + 摘要补充
     let pick_doc_nos = '', pick_worker_summary = '';
@@ -10517,7 +10800,9 @@ route("v2_dashboard_order_export", async (body, env) => {
     if (isInboundLink(j.related_doc_type)) related = inboundById[j.related_doc_id] || null;
     else if (isOutboundRelType(j.related_doc_type)) related = outboundById[j.related_doc_id] || null;
     const linked_ob = j.linked_outbound_order_id ? outboundById[j.linked_outbound_order_id] : null;
-    const customer = (related && related.customer) || (linked_ob && linked_ob.customer) || '';
+    const inbound_owners=ownersByJob.get(j.id)||(isInboundLink(j.related_doc_type)&&related?[{plan_id:related.id,external_inbound_no:j.inbound_external_no||related.external_inbound_no,customer:related.customer||''}]:[]);
+    const customer = inbound_owners.length?[...new Set(inbound_owners.map(p=>p.customer||'未记录 / 미기록'))].join('、'):(related && related.customer) || (linked_ob && linked_ob.customer) || '';
+
     const accounted = (related && related.accounted) ?? (linked_ob && linked_ob.accounted) ?? '';
     const accounted_by = (related && related.accounted_by) || (linked_ob && linked_ob.accounted_by) || '';
     const accounted_at_iso = (related && related.accounted_at) || (linked_ob && linked_ob.accounted_at) || '';
@@ -10575,8 +10860,12 @@ route("v2_dashboard_order_export", async (body, env) => {
 
     return {
       job_id: j.id,
-      日期: (j.created_at || '').slice(0, 10),
-      单号: j.display_no || j.related_doc_id || j.linked_outbound_order_id || j.id,
+      日期: kstDateOf(j.created_at),
+      单号: j.display_business_no || j.job_label || '作业信息未记录',
+      作业: j.job_label || '',
+      派审员: j.dispatcher_name || '未记录',
+      ...jobDisplayMetadata(j),
+      work_plan_no:j.work_plan_no||'',
       display_no: j.display_no || '',
       related_doc_id: j.related_doc_id || '',
       linked_outbound_order_id: j.linked_outbound_order_id || '',
@@ -10593,7 +10882,13 @@ route("v2_dashboard_order_export", async (body, env) => {
       total_hours: round1(total_minutes / 60),
       // 作业结果（业务可读摘要 + 解析后的各项累加）
       result_count: rs.length,
+      ...operationExport(j),
       result_summary: parsed.result_summary,
+      quantity_state: parsed.quantity_state, quantity_metrics: parsed.quantity_metrics, quantity_warnings: parsed.quantity_warnings,
+      putaway_task_no: j.job_type===putawayType?(j.task_no||j.id):'',
+      putaway_location_count: j.job_type===putawayType&&parsed.putaway_forklift!==null?parsed.location_count_sum:null,
+      putaway_used_forklift: j.job_type===putawayType?parsed.putaway_forklift:null,
+      putaway_quantity_scope: j.job_type===putawayType?'task':'',
       result_notes: parsed.result_notes,
       diff_notes: parsed.diff_notes,
       box_count_sum: parsed.box_count_sum,
@@ -10616,11 +10911,13 @@ route("v2_dashboard_order_export", async (body, env) => {
       verify_ok_count_sum: parsed.verify_ok_count_sum,
       verify_ng_count_sum: parsed.verify_ng_count_sum,
       result_submitters: parsed.result_submitters,
-      result_submitted_at: parsed.result_submitted_at,
+      result_submitted_at: fmtKst(parsed.result_submitted_at),
       readable_result_lines: parsed.readable_result_lines,
       result_lines_count: parsed.result_lines_count,
       raw_result_json_compact: parsed.raw_result_json_compact,
       // 业务关联
+      inbound_owners,
+      inbound_owner_details:inbound_owners.map(p=>(p.external_inbound_no||p.plan_id)+'：'+(p.customer||'未记录 / 미기록')).join('；'),
       customer,
       accounted: accounted === '' ? '' : (accounted ? 1 : 0),
       accounted_by,
@@ -10650,16 +10947,18 @@ route("v2_dashboard_order_export", async (body, env) => {
       inbound_completed_biz,
       inbound_pending_biz,
       // 代发拣货
-      pick_doc_nos, pick_worker_summary
+      pick_doc_nos, pick_worker_summary,
+      planned_pick_workload: pickPlanByJob.get(j.id)||null
     };
   });
 
-  return json({ ok: true, rows: out, total: out.length, truncated: jobs.length >= limit });
+  return json({ ok: true, rows: out, total, limit, offset, has_more:offset+out.length<total, truncated:false, metadata:{basis:"created_at",basis_label:"按建单日期（任务累计工时，非期间工时）",timezone:"Asia/Seoul (UTC+09:00)",as_of:now()} });
 });
 
 // 3) 工时分析 — 汇总（summary + by_worker + by_job_type + segments）
 route("v2_dashboard_workhour_summary", async (body, env) => {
   if (!isAuth(body, env)) return err("unauthorized", 401);
+  if(body.date_basis==='actual_work') return json(await actualWorkReport({...body, report_kind:body.report_kind||'segments'},env));
   const start_date = String(body.start_date || "").trim();
   const end_date = String(body.end_date || "").trim();
   const worker_name = String(body.worker_name || "").trim();
@@ -10668,57 +10967,57 @@ route("v2_dashboard_workhour_summary", async (body, env) => {
 
   let where = "WHERE 1=1";
   const binds = [];
+  const range = dashboardRange(start_date,end_date);
   const startRange = kstDayRangeUtc(start_date);
   const endRange = kstDayRangeUtc(end_date);
-  if (startRange) { where += " AND w.joined_at >= ?"; binds.push(startRange.startUtc); }
-  if (endRange)   { where += " AND w.joined_at < ?"; binds.push(endRange.endUtc); }
+  if (startRange) { where += " AND (w.left_at='' OR julianday(w.left_at)>julianday(?))"; binds.push(startRange.startUtc); }
+  if (endRange)   { where += " AND julianday(w.joined_at)<julianday(?)"; binds.push(endRange.endUtc); }
   if (flow_stage) { where += " AND j.flow_stage=?"; binds.push(flow_stage); }
   if (job_type)   { where += " AND j.job_type=?"; binds.push(job_type); }
   if (worker_name) { where += " AND w.worker_name LIKE ?"; binds.push("%" + worker_name + "%"); }
 
   // segments: 限 1000 条，避免一次拉太大
   const segSql = `
-    SELECT w.worker_id, w.worker_name, w.joined_at, w.left_at, w.minutes_worked, w.leave_reason,
+    SELECT w.id, w.worker_id, w.worker_name, w.joined_at, w.left_at, w.minutes_worked, w.leave_reason,
            j.id AS job_id, j.display_no, j.flow_stage, j.biz_class, j.job_type, j.status
     FROM v2_ops_job_workers w
     JOIN v2_ops_jobs j ON j.id = w.job_id
     ${where}
-    ORDER BY w.joined_at DESC LIMIT 1000`;
+    ORDER BY w.joined_at DESC LIMIT 20001`;
   const rs = await env.DB.prepare(segSql).bind(...binds).all();
-  const rows = rs.results || [];
+  if((rs.results||[]).length>20000)throw Error('工时超过20000段安全上限，请缩小区间；未返回部分汇总');
+  const rows = await jobNumbers(env,rs.results || [],'job_id');
 
   const nowMs = Date.now();
   const todayKst = kstToday();
   const segments = rows.map(r => {
     const closed = !!r.left_at;
-    let minutes = Number(r.minutes_worked) || 0;
-    if (!closed && r.joined_at) {
-      const t = new Date(r.joined_at).getTime();
-      if (!isNaN(t)) minutes = Math.max(0, (nowMs - t) / 60000);
-    }
-    minutes = round1(minutes);
+    const counted=segmentMinutes(r,range,nowMs);
+    const minutes=counted.minutes,rawMinutes=counted.raw_minutes;
     const joinedKstDate = kstDateOf(r.joined_at);
     const crossDayActive = !closed && joinedKstDate && joinedKstDate < todayKst;
     let anomaly = 0, anomaly_reason = '';
-    if (closed && minutes <= 0) { anomaly = 1; anomaly_reason = '已结束但工时为 0/负'; }
-    else if (closed && minutes >= 720) { anomaly = 1; anomaly_reason = '已结束 ≥12 小时'; }
-    else if (!closed && minutes >= 720) { anomaly = 1; anomaly_reason = '进行中 ≥12 小时'; }
+    if (forcedClock(r)) { anomaly=1;anomaly_reason='系统04:00强制结束，工时待核实，排除有效工时与人效'; }
+    else if (counted.invalid) { anomaly=1; anomaly_reason='时间无效或倒序'; }
+    else if (closed && rawMinutes <= 0) { anomaly = 1; anomaly_reason = '已结束但工时为 0/负'; }
+    else if (closed && rawMinutes >= 720) { anomaly = 1; anomaly_reason = '已结束 ≥12 小时'; }
+    else if (!closed && rawMinutes >= 720) { anomaly = 1; anomaly_reason = '进行中 ≥12 小时'; }
     else if (crossDayActive) { anomaly = 1; anomaly_reason = '跨天未结束'; }
     const long_segment = (!anomaly && minutes >= 240) ? 1 : 0;
     return {
-      worker_id: r.worker_id, worker_name: r.worker_name,
+      worker_id: reportWorkerId(r), worker_name: r.worker_name,
       joined_at: r.joined_at, left_at: r.left_at,
-      minutes,
+      minutes, raw_minutes:rawMinutes,
       leave_reason: r.leave_reason || '',
       active: closed ? 0 : 1,
-      job_id: r.job_id, display_no: r.display_no,
+      job_id: r.job_id, display_no: r.display_no, ...jobDisplayMetadata(r),
       flow_stage: r.flow_stage, biz_class: r.biz_class,
       job_type: r.job_type, status: r.status,
       anomaly, anomaly_reason, long_segment
     };
   });
 
-  const byWorkerMap = {}, byJobTypeMap = {}, jobIdSet = {};
+  const byWorkerMap = Object.create(null), byJobTypeMap = Object.create(null), jobIdSet = Object.create(null);
   let total_minutes = 0, max_segment_minutes = 0, anomaly_count = 0, long_segment_count = 0;
   segments.forEach(s => {
     total_minutes += s.minutes;
@@ -10726,8 +11025,8 @@ route("v2_dashboard_workhour_summary", async (body, env) => {
     if (s.anomaly) anomaly_count++;
     if (s.long_segment) long_segment_count++;
     jobIdSet[s.job_id] = 1;
-    const wk = s.worker_name || s.worker_id || '--';
-    if (!byWorkerMap[wk]) byWorkerMap[wk] = { worker_name: wk, total_minutes: 0, job_ids: {}, max_segment_minutes: 0 };
+    const wk = s.worker_id;
+    if (!byWorkerMap[wk]) byWorkerMap[wk] = { worker_id:wk,worker_name:s.worker_name||wk, total_minutes: 0, job_ids: {}, max_segment_minutes: 0 };
     byWorkerMap[wk].total_minutes += s.minutes;
     byWorkerMap[wk].job_ids[s.job_id] = 1;
     if (s.minutes > byWorkerMap[wk].max_segment_minutes) byWorkerMap[wk].max_segment_minutes = s.minutes;
@@ -10741,7 +11040,7 @@ route("v2_dashboard_workhour_summary", async (body, env) => {
   const by_worker = Object.values(byWorkerMap).map(v => {
     const job_count = Object.keys(v.job_ids).length;
     return {
-      worker_name: v.worker_name,
+      worker_id:v.worker_id, worker_name: v.worker_name,
       total_minutes: round1(v.total_minutes),
       total_hours: round1(v.total_minutes / 60),
       job_count,
@@ -10780,7 +11079,7 @@ route("v2_dashboard_workhour_summary", async (body, env) => {
     by_worker,
     by_job_type,
     segments,
-    truncated: rows.length >= 1000
+    truncated: false, metadata:{basis:"actual_work",open_policy:"未结束时段排除",overlap_policy:"推荐使用实际作业口径参数 date_basis=actual_work 获取重叠检查及分页"}
   });
 });
 
@@ -10886,26 +11185,29 @@ route("v2_dashboard_management_summary", async (body, env) => {
     change_order: ['change_order'],
     pack_direct: ['pack_direct'],
     pick_direct: ['pick_direct'],
-    inbound: ['inbound_direct', 'inbound_bulk', 'inbound_return', 'inbound_change_order'],
+    inbound: ['inbound_direct_tally','inbound_direct_putaway','inbound_direct', 'inbound_bulk', 'inbound_return', 'inbound_change_order'],
     outbound: ['load_outbound', 'verify_scan', 'bulk_op'],
   };
 
+  const actual=body.date_basis==='actual_work'?await actualWorkReport({...body,report_kind:'segments'},env):null;
   // ---- 工时段（与 workhour_summary 同口径，但聚合到 by_job_type / by_worker）----
   let where = "WHERE 1=1";
   const binds = [];
+  const range = dashboardRange(start_date,end_date);
   const startRange = kstDayRangeUtc(start_date);
   const endRange = kstDayRangeUtc(end_date);
-  if (startRange) { where += " AND w.joined_at >= ?"; binds.push(startRange.startUtc); }
-  if (endRange)   { where += " AND w.joined_at < ?"; binds.push(endRange.endUtc); }
+  if (startRange) { where += " AND (w.left_at='' OR julianday(w.left_at)>julianday(?))"; binds.push(startRange.startUtc); }
+  if (endRange)   { where += " AND julianday(w.joined_at)<julianday(?)"; binds.push(endRange.endUtc); }
 
   const segRs = await env.DB.prepare(`
-    SELECT w.worker_id, w.worker_name, w.joined_at, w.left_at, w.minutes_worked,
+    SELECT w.id,w.job_id, w.worker_id, w.worker_name, w.joined_at, w.left_at, w.minutes_worked,w.leave_reason,
            j.flow_stage, j.biz_class, j.job_type
     FROM v2_ops_job_workers w
     JOIN v2_ops_jobs j ON j.id = w.job_id
     ${where}
-    ORDER BY w.joined_at DESC LIMIT 5000`).bind(...binds).all();
+    ORDER BY w.joined_at DESC LIMIT 20001`).bind(...binds).all();
   const segs = segRs.results || [];
+  if(segs.length>20000)throw Error('工时超过20000段安全上限，请缩小区间；未返回部分汇总');
 
   // ---- WMS 行（按 work_date 在范围内）----
   let wmsWhere = "WHERE 1=1";
@@ -10913,24 +11215,25 @@ route("v2_dashboard_management_summary", async (body, env) => {
   if (start_date) { wmsWhere += " AND work_date>=?"; wmsBinds.push(start_date); }
   if (end_date)   { wmsWhere += " AND work_date<=?"; wmsBinds.push(end_date); }
   const wmsRs = await env.DB.prepare(
-    `SELECT import_type, worker_name, qty, box_count FROM v2_wms_import_rows ${wmsWhere} LIMIT 20000`
+    `SELECT import_type, worker_id, worker_name, qty, box_count FROM v2_wms_import_rows ${wmsWhere} LIMIT 20001`
   ).bind(...wmsBinds).all();
   const wmsRows = wmsRs.results || [];
+  if(wmsRows.length>20000)throw Error('WMS超过20000行安全上限，请缩小区间；未返回部分汇总');
 
   // ---- 工时聚合 ----
   const nowMs = Date.now();
   let total_minutes = 0, anomaly_count = 0;
-  const workerMins = {}, jobTypeMins = {}, workerJobTypeMins = {};
-  segs.forEach(r => {
+  const workerMins = Object.create(null), jobTypeMins = Object.create(null), workerJobTypeMins = Object.create(null), workerNames=Object.create(null),nameIds=new Map();
+  const measured=measureSegments(segs,range,actual?Date.parse(actual.metadata.as_of):Date.now());
+  const cutoffWorkers=new Set(measured.filter(forcedClock).map(reportWorkerId)),cutoffTypes=new Set(measured.filter(forcedClock).map(r=>r.job_type||'--'));
+  measured.forEach(r => {
     const closed = !!r.left_at;
-    let m = Number(r.minutes_worked) || 0;
-    if (!closed && r.joined_at) {
-      const t = new Date(r.joined_at).getTime();
-      if (!isNaN(t)) m = Math.max(0, Math.round((nowMs - t) / 60000));
-    }
-    if (m > 240 || (closed && m <= 0)) anomaly_count++;
+    const counted={invalid:r.anomaly,raw_minutes:r.raw_minutes},m=r.minutes;
+    if(counted.invalid||counted.raw_minutes>240||(closed&&counted.raw_minutes<=0))anomaly_count++;
     total_minutes += m;
-    const wk = r.worker_name || r.worker_id || '--';
+    const wk=reportWorkerId(r);
+    if(!workerNames[wk])workerNames[wk]=r.worker_name||wk;
+    if(r.worker_name){const ids=nameIds.get(r.worker_name)||new Set();ids.add(wk);nameIds.set(r.worker_name,ids);}
     workerMins[wk] = (workerMins[wk] || 0) + m;
     const jt = r.job_type || '--';
     jobTypeMins[jt] = (jobTypeMins[jt] || 0) + m;
@@ -10940,8 +11243,8 @@ route("v2_dashboard_management_summary", async (body, env) => {
 
   // ---- WMS 聚合（按 import_type 反查 job_type 候选；按 worker_name）----
   let total_qty = 0, total_boxes = 0;
-  const jobTypeWms = {}; // job_type -> { qty, boxes }
-  const workerWms = {};  // worker_name -> { qty, boxes }
+  const jobTypeWms = Object.create(null); // job_type -> { qty, boxes }
+  const workerWms = Object.create(null), workerWmsDirect=Object.create(null), unmatchedRows=[];
   wmsRows.forEach(r => {
     const q = Number(r.qty) || 0, b = Number(r.box_count) || 0;
     total_qty += q;
@@ -10953,11 +11256,12 @@ route("v2_dashboard_management_summary", async (body, env) => {
       jobTypeWms[jt].qty += q / cands.length;
       jobTypeWms[jt].boxes += b / cands.length;
     });
-    if (r.worker_name) {
+    if(r.worker_id){const id=String(r.worker_id).trim();if(Object.hasOwn(workerMins,id)){const prior=workerWmsDirect[id]||{qty:0,boxes:0};workerWmsDirect[id]={qty:prior.qty+q,boxes:prior.boxes+b};}else unmatchedRows.push({worker_id:id,worker_name:r.worker_name||'（未填写姓名）',qty:q,boxes:b,reason:'工牌没有对应作业记录，待核实'});}
+    else if (r.worker_name) {
       if (!workerWms[r.worker_name]) workerWms[r.worker_name] = { qty: 0, boxes: 0 };
       workerWms[r.worker_name].qty += q;
       workerWms[r.worker_name].boxes += b;
-    }
+    }else unmatchedRows.push({worker_id:'',worker_name:'（未填写姓名）',qty:q,boxes:b,reason:'姓名与工牌缺失，待核实'});
   });
 
   // ---- by_job_type ----
@@ -10974,45 +11278,55 @@ route("v2_dashboard_management_summary", async (body, env) => {
       total_hours: hours,
       wms_qty: qty,
       wms_boxes: boxes,
-      qty_per_hour: hours > 0 ? Math.round((qty / hours) * 10) / 10 : 0,
-      boxes_per_hour: hours > 0 ? Math.round((boxes / hours) * 10) / 10 : 0
+      ...(cutoffTypes.has(jt)?{efficiency_needs_review:true}:{}),
+      qty_per_hour: cutoffTypes.has(jt)?null:hours > 0 ? Math.round((qty / hours) * 10) / 10 : 0,
+      boxes_per_hour: cutoffTypes.has(jt)?null:hours > 0 ? Math.round((boxes / hours) * 10) / 10 : 0
     };
   }).sort((a, b) => b.total_minutes - a.total_minutes);
 
   // ---- by_worker ----
-  const wkSet = new Set([...Object.keys(workerMins), ...Object.keys(workerWms)]);
+  const unmatched=[...unmatchedRows];const workerWmsById=workerWmsDirect;
+  for(const [name,value] of Object.entries(workerWms)){const ids=nameIds.get(name);if(ids?.size===1){const id=[...ids][0],prior=workerWmsById[id]||{qty:0,boxes:0};workerWmsById[id]={qty:prior.qty+value.qty,boxes:prior.boxes+value.boxes};}else unmatched.push({worker_name:name,...value,reason:ids?.size>1?'同名多个工牌，待核实':'无唯一工牌，待核实'});}
+  const wkSet = new Set(Object.keys(workerMins));
   const by_worker = [...wkSet].map(wk => {
     const mins = workerMins[wk] || 0;
     const hours = Math.round(mins / 6) / 10;
-    const w = workerWms[wk] || { qty: 0, boxes: 0 };
+    const w = workerWmsById[wk] || { qty: 0, boxes: 0 };
     const qty = Math.round(w.qty * 10) / 10;
     const boxes = Math.round(w.boxes * 10) / 10;
     return {
-      worker_name: wk,
+      worker_id:wk, worker_name:workerNames[wk],
       total_minutes: mins,
       total_hours: hours,
       wms_qty: qty,
       wms_boxes: boxes,
-      qty_per_hour: hours > 0 ? Math.round((qty / hours) * 10) / 10 : 0,
-      boxes_per_hour: hours > 0 ? Math.round((boxes / hours) * 10) / 10 : 0
+      ...(cutoffWorkers.has(wk)?{efficiency_needs_review:true}:{}),
+      qty_per_hour: cutoffWorkers.has(wk)?null:hours > 0 ? Math.round((qty / hours) * 10) / 10 : 0,
+      boxes_per_hour: cutoffWorkers.has(wk)?null:hours > 0 ? Math.round((boxes / hours) * 10) / 10 : 0
     };
   }).sort((a, b) => b.total_minutes - a.total_minutes);
 
   const total_hours = Math.round(total_minutes / 6) / 10;
   return json({
     ok: true,
+    metadata:actual?.metadata||{basis:"actual_work",open_policy:"未结束时段排除",overlap_policy:"同人重叠显式告警，记录时长含重复部分"},
+    by_department:actual?.by_department||[],
     summary: {
+      total_seconds:measured.reduce((n,r)=>n+r.seconds,0),
+      overlap_seconds:measured.reduce((n,r)=>n+r.overlap_seconds,0),
+      excluded_open_count:measured.filter(r=>r.active).length,
       total_minutes,
       total_hours,
       total_qty: Math.round(total_qty * 10) / 10,
       total_boxes: Math.round(total_boxes * 10) / 10,
-      qty_per_hour: total_hours > 0 ? Math.round((total_qty / total_hours) * 10) / 10 : 0,
-      boxes_per_hour: total_hours > 0 ? Math.round((total_boxes / total_hours) * 10) / 10 : 0,
+      ...(cutoffWorkers.size?{efficiency_needs_review:true,efficiency_reason:'系统强制结束工时待核实，不混合计算WMS人效'}:{}),
+      qty_per_hour: cutoffWorkers.size?null:total_hours > 0 ? Math.round((total_qty / total_hours) * 10) / 10 : 0,
+      boxes_per_hour: cutoffWorkers.size?null:total_hours > 0 ? Math.round((total_boxes / total_hours) * 10) / 10 : 0,
       worker_count: Object.keys(workerMins).length,
       anomaly_count
     },
     by_job_type,
-    by_worker
+    by_worker, unmatched_wms:unmatched, truncated:false
   });
 });
 
@@ -11604,10 +11918,7 @@ route('v2_003_material_txn', async (body, env) => {
       const supplier = v003Text(body.supplier || item.supplier, 160);
       const txId = v003Id('MTX');
       const results = await env.DB.batch([
-        env.DB.prepare(`UPDATE v2_003_materials SET current_qty=?, location_code=?,
-          unit_cost=?, supplier=?, stock_version=stock_version+1, updated_by=?, updated_at=?
-          WHERE id=? AND stock_version=?`)
-          .bind(after, location, cost, supplier, op.name, t, id, version),
+        // Insert only against the version actually read; the paired update is in this same transaction.
         env.DB.prepare(`INSERT INTO v2_003_material_txns
           (id, material_id, txn_type, qty_delta, qty_before, qty_after, warehouse_name, location_code,
            recipient_id, recipient_name, purpose, related_doc_no, unit_cost, supplier, note,
@@ -11617,7 +11928,11 @@ route('v2_003_material_txn', async (body, env) => {
           .bind(txId, id, txnType, delta, before, after, '', location,
             v003Text(body.recipient_id, 80), recipientName,
             v003Text(body.purpose, 240), v003Text(body.related_doc_no, 120), cost, supplier,
-            v003Text(body.note, 1000), op.id, op.name, department, t, id, version + 1)
+            v003Text(body.note, 1000), op.id, op.name, department, t, id, version),
+        env.DB.prepare(`UPDATE v2_003_materials SET current_qty=?, location_code=?,
+          unit_cost=?, supplier=?, stock_version=stock_version+1, updated_by=?, updated_at=?
+          WHERE id=? AND stock_version=?`)
+          .bind(after, location, cost, supplier, op.name, t, id, version)
       ]);
       if (v003Changes(results[0]) === 1 && v003Changes(results[1]) === 1) {
         return { ok: true, id: txId, qty_before: before, qty_delta: delta, qty_after: after };
@@ -11841,10 +12156,7 @@ route('v2_003_asset_action', async (body, env) => {
       const t = now();
       const txId = v003Id('ATX');
       const results = await env.DB.batch([
-        env.DB.prepare(`UPDATE v2_003_assets SET status=?, location_code=?,
-          keeper_id=?, keeper_name=?, keeper_department=?, asset_version=asset_version+1, updated_by=?, updated_at=?
-          WHERE id=? AND asset_version=?`)
-          .bind(status, location, keeperId, keeperName, keeperDepartment, op.name, t, id, version),
+        // Insert only against the version actually read; the paired update is in this same transaction.
         env.DB.prepare(`INSERT INTO v2_003_asset_txns
           (id, asset_id, action_type, status_before, status_after, from_warehouse, from_location,
            to_warehouse, to_location, from_keeper_id, from_keeper_name, to_keeper_id, to_keeper_name,
@@ -11854,7 +12166,11 @@ route('v2_003_asset_action', async (body, env) => {
           .bind(txId, id, action, item.status, status, item.warehouse_name, item.location_code,
             '', location, item.keeper_id, item.keeper_name, keeperId, keeperName,
             v003Text(body.related_doc_no, 120), v003Text(body.note, 1000), op.id, op.name,
-            v003Department(item.keeper_department), keeperDepartment, t, id, version + 1)
+            v003Department(item.keeper_department), keeperDepartment, t, id, version),
+        env.DB.prepare(`UPDATE v2_003_assets SET status=?, location_code=?,
+          keeper_id=?, keeper_name=?, keeper_department=?, asset_version=asset_version+1, updated_by=?, updated_at=?
+          WHERE id=? AND asset_version=?`)
+          .bind(status, location, keeperId, keeperName, keeperDepartment, op.name, t, id, version)
       ]);
       if (v003Changes(results[0]) === 1 && v003Changes(results[1]) === 1) {
         return { ok: true, id: txId, status, keeper_id: keeperId, keeper_name: keeperName,
@@ -12164,6 +12480,15 @@ route('v2_003_purchase_order_update', async (body, env) => {
 
 route('v2_003_purchase_shipment_create', async (body, env) => {
   if (!isAdmin(body, env)) return err('unauthorized_admin_only', 401);
+  const requestKey = String(body.client_req_id || '').trim();
+  const replay = async () => {
+    if (!requestKey) return null;
+    const cached = await env.DB.prepare("SELECT response_json FROM v2_idempotency_keys WHERE idem_key=? AND action='v2_003_purchase_shipment_create'").bind(requestKey).first();
+    if (!cached || !cached.response_json) return null;
+    try { return JSON.parse(cached.response_json); } catch { return null; }
+  };
+  const cached = await replay();
+  if (cached) return json(cached);
   const orderId = v003Text(body.order_id, 100);
   const method = ['express', 'supplier'].includes(String(body.delivery_method)) ? String(body.delivery_method) : '';
   const tracking = v003Text(body.tracking_no, 180);
@@ -12196,30 +12521,57 @@ route('v2_003_purchase_shipment_create', async (body, env) => {
     items.push({ line_id: lineId, material_id: line.material_id, qty });
   }
   if (!items.length) return err('shipment_lines_required');
-  return withIdem(env, body, 'v2_003_purchase_shipment_create', async () => {
     const shipmentId = v003Id('SHP');
     const shipmentNo = v003HumanNo(method === 'express' ? 'KD' : 'SC');
     const op = v003RequireOperator(body) || { id: 'ADMIN', name: '管理员' };
     const t = now();
+    const guards = [], guardArgs = [];
+    for (const item of items) {
+      guards.push(`EXISTS (SELECT 1 FROM v2_003_purchase_order_lines l WHERE l.id=? AND l.order_id=o.id
+        AND l.ordered_qty+0.0001>=?+COALESCE((SELECT SUM(si.expected_qty)
+          FROM v2_003_purchase_shipment_items si JOIN v2_003_purchase_shipments s ON s.id=si.shipment_id
+          WHERE si.order_line_id=l.id AND s.status!='cancelled'),0))`);
+      guardArgs.push(item.line_id, item.qty);
+    }
+    // The reservation, its items and the replay response commit together.
+    // Recheck live quantities inside the batch instead of trusting the earlier form snapshot.
+    const response = { ok: true, id: shipmentId, shipment_no: shipmentNo };
+    const responseJson = JSON.stringify(response);
     const statements = [env.DB.prepare(`INSERT INTO v2_003_purchase_shipments
       (id, shipment_no, order_id, delivery_method, tracking_no, supplier, expected_date, status,
        received_at, received_by, note, created_by, created_at, updated_at)
-      VALUES(?,?,?,?,?,?,?,'pending','','',?,?,?,?)`)
+      SELECT ?,?,?,?,?,?,?,'pending','','',?,?,?,? FROM v2_003_purchase_orders o
+      WHERE o.id=? AND o.status NOT IN ('completed','cancelled')
+        AND (?='' OR NOT EXISTS (SELECT 1 FROM v2_003_purchase_shipments WHERE tracking_no=?))
+        AND (?='' OR NOT EXISTS (SELECT 1 FROM v2_idempotency_keys WHERE idem_key=?))
+        AND ${guards.join(' AND ')}`)
       .bind(shipmentId, shipmentNo, orderId, method, tracking,
         v003Text(body.supplier || order.supplier, 160), normalizeDateOnly(body.expected_date),
-        v003Text(body.note, 1000), op.name, t, t)];
+        v003Text(body.note, 1000), op.name, t, t, orderId, tracking, tracking, requestKey, requestKey, ...guardArgs)];
     for (const item of items) {
       statements.push(env.DB.prepare(`INSERT INTO v2_003_purchase_shipment_items
         (id, shipment_id, order_line_id, material_id, expected_qty, received_qty, created_at, updated_at)
-        VALUES(?,?,?,?,?,0,?,?)`)
-        .bind(v003Id('PSI'), shipmentId, item.line_id, item.material_id, item.qty, t, t));
+        SELECT ?,?,?,?,?,0,?,? WHERE EXISTS (SELECT 1 FROM v2_003_purchase_shipments WHERE id=?)`)
+        .bind(v003Id('PSI'), shipmentId, item.line_id, item.material_id, item.qty, t, t, shipmentId));
     }
     statements.push(env.DB.prepare(`UPDATE v2_003_purchase_orders
-      SET status=CASE WHEN status='partial_received' THEN status ELSE 'shipped' END, updated_at=? WHERE id=?`)
-      .bind(t, orderId));
-    await env.DB.batch(statements);
-    return { ok: true, id: shipmentId, shipment_no: shipmentNo };
-  });
+      SET status=CASE WHEN status='partial_received' THEN status ELSE 'shipped' END, updated_at=? WHERE id=?
+        AND EXISTS (SELECT 1 FROM v2_003_purchase_shipments WHERE id=?)`)
+      .bind(t, orderId, shipmentId));
+    if (requestKey) statements.push(env.DB.prepare(`INSERT OR IGNORE INTO v2_idempotency_keys
+      (idem_key, action, response_json, created_at)
+      SELECT ?,'v2_003_purchase_shipment_create',?,? WHERE EXISTS (SELECT 1 FROM v2_003_purchase_shipments WHERE id=?)`)
+      .bind(requestKey, responseJson, t, shipmentId));
+    const results = await env.DB.batch(statements);
+    if (!v003Changes(results[0])) {
+      const committed = await replay();
+      if (committed) return json(committed);
+      const latestOrder = await env.DB.prepare('SELECT status FROM v2_003_purchase_orders WHERE id=?').bind(orderId).first();
+      if (!latestOrder || ['completed', 'cancelled'].includes(latestOrder.status)) return err('purchase_order_closed');
+      if (tracking && await env.DB.prepare('SELECT id FROM v2_003_purchase_shipments WHERE tracking_no=? LIMIT 1').bind(tracking).first()) return err('duplicate_tracking_no');
+      return err('shipment_qty_exceeds_ordered');
+    }
+    return json(response);
 });
 
 async function v003ReceivingDetail(env, shipment) {
@@ -12380,14 +12732,11 @@ route('v2_003_receipt_confirm', async (body, env) => {
   statements.push(env.DB.prepare(`UPDATE v2_003_purchase_orders SET
     has_discrepancy=CASE WHEN ?=1 THEN 1 ELSE has_discrepancy END,
     status=CASE
-      WHEN (SELECT COALESCE(SUM(received_qty),0) FROM v2_003_purchase_order_lines
-              WHERE order_id=v2_003_purchase_orders.id)
-        >= (SELECT COALESCE(SUM(ordered_qty),0) FROM v2_003_purchase_order_lines
-              WHERE order_id=v2_003_purchase_orders.id)
-       AND (SELECT COALESCE(SUM(ordered_qty),0) FROM v2_003_purchase_order_lines
-              WHERE order_id=v2_003_purchase_orders.id)>0
+      WHEN EXISTS (SELECT 1 FROM v2_003_purchase_order_lines
+              WHERE order_id=v2_003_purchase_orders.id AND ordered_qty>0)
        AND NOT EXISTS (SELECT 1 FROM v2_003_purchase_order_lines
-              WHERE order_id=v2_003_purchase_orders.id AND ordered_qty<=0)
+              WHERE order_id=v2_003_purchase_orders.id
+                AND (ordered_qty<=0 OR received_qty+0.0001<ordered_qty))
       THEN 'completed' ELSE 'partial_received' END,
     updated_at=? WHERE id=? AND EXISTS (SELECT 1 FROM v2_003_purchase_receipts WHERE id=?)`)
     .bind(hasDiscrepancy ? 1 : 0, t, shipment.order_id, receiptId));
@@ -12429,6 +12778,7 @@ route('v2_003_purchase_order_close', async (body, env) => {
 // Worker fetch entry
 // =====================================================
 export default {
+  async scheduled(controller,env){await ensureMigrated(env.DB);return runSystemCutoff(env,Math.max(Number(controller.scheduledTime)||0,Date.now()));},
   async fetch(request, env) {
     if (request.method === "OPTIONS") {
       return new Response(null, { headers: CORS });
@@ -12436,14 +12786,26 @@ export default {
 
     try {
       await ensureMigrated(env.DB);
+      await ensureInboundReferenceGuard(env);
+      await ensureCourierClaims(env);
+      await ensureInboundDocuments(env);
+      await ensureBatchMaterialState(env);
+      await ensureReferenceHistory(env);
+      await runSystemCutoff(env);
     } catch (e) {
       return json({ ok: false, error: "migration failed: " + e.message }, 500);
     }
 
     const url = new URL(request.url);
+    if(accessEnabled(env)&&request.method==='GET'&&(url.pathname.endsWith('/file')||url.searchParams.get('action')==='v2_attachment_get')){
+      const key=url.searchParams.get('key')||url.searchParams.get('file_key')||'';
+      if(!key||!await accessFileAllowed(request,env,key))return err('请登录有权限的系统 / 로그인 권한을 확인하세요',401);
+      const obj=await env.R2_BUCKET.get(key);if(!obj)return err('not found',404);
+      return materialFileResponse(request,env,key,obj);
+    }
 
     // Handle attachment file GET
-    if (url.pathname === "/file" && request.method === "GET") {
+    if (["/file", "/api/file"].includes(url.pathname) && request.method === "GET") {
       const fileKey = url.searchParams.get("key") || "";
       if (!fileKey) return err("missing key");
       const obj = await env.R2_BUCKET.get(fileKey);
@@ -12478,9 +12840,108 @@ export default {
 
     const action = String(body.action || "").trim();
 
+    // Staging reuses the original pages and routes under one personal session.
+    // The principal is supplied only by a verified HttpOnly cookie, never request JSON.
+    env = { ...env, SOP_REQUEST_USER: await sessionUser(request, env) };
+    if(attendanceEnabled(env)&&env.SOP_REQUEST_USER?.scope==='field'){try{await ensureAttendance(env);await resolveDailyBadge(env,env.SOP_REQUEST_USER.badge,{day:kstToday()});}catch(e){return json({ok:false,error:e.message},409);}}
+    if(accessEnabled(env)&&env.SOP_REQUEST_USER?.scope==='field'&&isMultipart){
+      const doc=formData.get('related_doc_type'),id=formData.get('related_doc_id');
+      if(!['inbound_plan','outbound_order','field_feedback','ops_job','issue_ticket','issue_handle_run','sop_task'].includes(doc))return err('现场无此附件上传权限',403);
+      if(doc==='ops_job'&&!await nativeOwner({job_id:id},env))return err('仅本任务派审员可上传附件',403);
+      if(doc==='issue_handle_run'){
+        const run=await env.DB.prepare("SELECT r.job_id,t.biz_class FROM v2_issue_handle_runs r JOIN v2_ops_jobs j ON j.id=r.job_id JOIN v2_issue_tickets t ON t.id=r.issue_id WHERE r.id=? AND r.run_status='working' AND j.status NOT IN ('completed','cancelled')").bind(id).first();
+        const file=formData.get('file');
+        if(!run||!(env.SOP_REQUEST_USER.departments||[]).includes(run.biz_class==='return'?'direct_ship':run.biz_class)||!await nativeOwner({job_id:run.job_id},env)||formData.get('attachment_category')!=='issue_handle_photo')return err('仅本任务派审员可上传当前处理轮次照片',403);
+        if(!file||!['image/jpeg','image/png','image/webp'].includes(file.type)||!file.size||file.size>10*1024*1024)return err('仅支持10MB以内的JPG、PNG、WebP照片');
+      }
+    }
+    const accessBlock=accessGuard(body,env,request);if(accessBlock)return accessBlock;
+    if(accessEnabled(env)&&action==='v2_attachment_get'&&!await accessFileAllowed(request,env,String(body.file_key||'')))return err('无此附件权限',403);
+    await officeOperationContext(request,env);
+    const operatorResponse=await confirmOfficeOperator(body,env,request);if(operatorResponse)return operatorResponse;
+    const operationBlock=officeOperationGuard(body,env,request);if(operationBlock)return operationBlock;
+    if(action==='sop_system_cutoff_correct'){try{return json(await correctSystemCutoff(body,env));}catch(e){return json({ok:false,error:e.message},409);}}
+    try{await guardSystemCutoffMutation(body,env);}catch(e){return json({ok:false,error:e.message},409);}
+    await ensureDocumentNumbers(env);
+    await ensureLoadSchema(env);
+    const authResponse = await sessionAction(body, env,request);
+    if (authResponse) return authResponse;
+    if(action.startsWith('sop_import_daily_scan_')){
+      if(request.method!=='POST'||request.headers.get('Origin')&&request.headers.get('Origin')!==url.origin||request.headers.get('Sec-Fetch-Site')==='cross-site')return err('Invalid request origin',403);
+      try{return json(await handleDailyScan(body,env));}catch(e){return json({ok:false,error:e.status?e.message:'保存或查询失败，请保留输入后重试 / 저장·조회 실패, 입력을 유지하고 다시 시도하세요'},e.status||500);}
+    }
+    if(accessEnabled(env)){const adminAction=await accessAdminAction(body,env);if(adminAction)return adminAction;}
+    // Resolve generated daily badge aliases before crew preparation and all admission guards.
+    if(attendanceEnabled(env)){try{await ensureAttendance(env);await normalizeDailyBadgeRequest(env,body);}catch(e){return json({ok:false,error:e.message},409);}}
+    if(action.startsWith('sop_office_duty_')){try{return json(await handleOfficeDuty(body,env));}catch(e){return json({ok:false,error:e.status?e.message:'保存或查询未确认，请保留原请求并重试 / 저장·조회 미확인, 같은 요청으로 재시도'},e.status||500);}}
+    try{await protectOfficeDuty(body,env);}catch(e){return json({ok:false,error:e.message},409);}
+    if(dailyDispatchEnabled(env)&&action.startsWith('sop_daily_dispatch_')){try{return json(await dailyDispatchAdmin(body,env));}catch(e){return json({ok:false,error:e.message},409);}}
+    try{await guardDailyDispatch(body,env);}catch(e){return json({ok:false,error:e.message},403);}
+    if(action.startsWith('sop_feedback_link_')){
+      if(action==='sop_feedback_link_save'&&(request.method!=='POST'||request.headers.get('Origin')&&request.headers.get('Origin')!==url.origin))return err('Invalid request origin',403);
+      try{return json(action==='sop_feedback_link_create_preview'?await feedbackCreatePreview(env,body):await handleFeedbackLink(body,env,{ensureTasks:ensureInboundPlanBizTasks,recalc:recalcInboundPlanCompletion,syncCourier:syncCourierArrival}));}catch(e){return json({ok:false,error:e.message},409);}
+    }
+    if(action.startsWith('sop_courier_')){
+      if(!['sop_courier_config','sop_courier_list','sop_courier_detail','sop_courier_lookup'].includes(action)&&(request.method!=='POST'||request.headers.get('Origin')&&request.headers.get('Origin')!==url.origin))return err('Invalid request origin',403);
+      try{return json(await handleCourier(body,env,recalcInboundPlanCompletion));}catch(e){return json({ok:false,error:e.message},400);}
+    }
+    if(action==='sop_native_rest_return'){
+      try{const user=env.SOP_REQUEST_USER;if(user?.scope!=='field'||!user.attendance_id)return err('请以本人现场身份操作',403);
+       const prior=await env.DB.prepare('SELECT * FROM ck_attendance_events WHERE request_id=?').bind(String(body.client_req_id||'')).first();
+       const replay=prior&&prior.actor===user.id&&prior.record_id===user.attendance_id&&prior.action==='sop_attendance_break_end'&&JSON.parse(prior.fingerprint).rest_job_id===body.job_id;
+       if(!replay&&!await restingDispatch(env,body.job_id))return json({ok:false,error:'本人休息或任务分配已变化，请刷新 / 휴식·배정 정보를 확인하세요'},403);
+       return json(await handleAttendance({action:'sop_attendance_break_end',id:user.attendance_id,rest_job_id:body.job_id,client_req_id:body.client_req_id},env));
+      }catch(e){return json({ok:false,error:e.message},409);}
+    }
+    if(action.startsWith('sop_attendance_')){
+      try{const result=await handleAttendance(body,env);if(result.ok&&crewBorrowEnabled(env)&&['sop_attendance_checkout','sop_attendance_break_start','sop_attendance_break_end'].includes(action)){try{result.crew_returns=await reconcilePersonReturns(env,result.record?.badgeId);}catch{result.crew_return_error='借调归还暂未完成，请在原装卸任务重试归还';}}return json(result);}catch(e){return json({ok:false,error:e.message},400);}
+    }
+    if(crewBorrowEnabled(env)&&['sop_crew_availability','sop_crew_status','sop_crew_return','sop_native_start','sop_native_people'].includes(action)){
+      try{
+        await ensureAttendance(env);await ensureCrewBorrow(env);
+        if(action==='sop_crew_availability')return json(await crewAvailability(env,body));
+        if(action==='sop_crew_status')return json(await crewStatus(env,body));
+        if(action==='sop_crew_return')return json(await crewRetry(env,body));
+        env.SOP_CREW_BORROW=await prepareCrewBorrow(env,body);
+      }catch(e){return json({ok:false,error:e.message},409);}
+    }
+    if(action==='v2_issue_handle_finish'&&body.run_id){const run=await env.DB.prepare('SELECT job_id FROM v2_issue_handle_runs WHERE id=?').bind(body.run_id).first();if(run?.job_id){if(body.job_id&&body.job_id!==run.job_id)return err('任务与处理轮次不一致',409);body.job_id=run.job_id;}}
+    if(action==='v2_ops_job_resume'&&body.parent_job_id)body.job_id=body.parent_job_id;
+    try{const attendanceBlock=await guardAttendance(body,env);if(attendanceBlock)return json({ok:false,error:attendanceBlock},409);}catch(e){return json({ok:false,error:e.message},400);}
+    if(action.startsWith('sop_bulk_batch_')){try{return json(await handleBulkBatch(body,env,{findOutbound:no=>findOutboundByWorkOrder(env,no),linkedNeeds:id=>linkedNeeds(env,id)}));}catch(e){return json({ok:false,error:e.message},409);}}
+    try{await guardBulkBatchMutation(body,env);}catch(e){return json({ok:false,error:e.message},409);}
+    if(action==='sop_native_adopt'){try{return json(await adoptLegacyLoad(body,env));}catch(e){return json({ok:false,error:e.message},409);}}
+    if(action==='sop_putaway_cancel'){try{return json(await cancelPutaway(env,body));}catch(e){return json({ok:false,error:e.message},409);}}
+    if(action==='sop_native_pause'){try{return json(await pauseNative(body,env));}catch(e){return json({ok:false,error:e.message},409);}}
+    if(action==='sop_native_resume'){try{return json(await nativePeople(body,env,{resume:true}));}catch(e){return json({ok:false,error:e.message},409);}}
+    if(action==='sop_native_people'){try{const allowed=await canCrewDestination(env,body),result=await nativePeople(body,env);if(allowed){try{result.crew_returns=await reconcileCrewReturns(env,body.job_id);}catch{result.crew_return_error='人员已调整，归还暂未完成，请重试归还';}}return json(result);}catch(e){return json({ok:false,error:e.message},409);}}
+    if(action==='sop_native_start'){
+      try{const result=await startNative(body,env,async input=>(await HANDLERS[input.action](input,env)).json(),guardLegacy,{feedbackNumber:()=>nextFeedbackDisplayNo(env,kstToday(),'XCXH'),inboundNumber:()=>nextDisplayNo(env,kstToday()),pickNumber:()=>nextPickTripNo(env),findOutbound:no=>findOutboundByWorkOrder(env,no),linkedNeeds:id=>linkedNeeds(env,id)});if(result.ok&&env.SOP_CREW_BORROW)result.has_crew_borrows=true;if(result.ok&&env.SOP_COMPLETED_CLOCK_REPAIRS?.length)result.completed_clock_repair_count=env.SOP_COMPLETED_CLOCK_REPAIRS.length;return json(result);}
+      catch(e){return json({ok:false,error:e.message},400);}
+    }
+    if(checkWorkbenchEnabled(env)&&['v2_verify_scan_submit','v2_verify_job_finish'].includes(action)){
+      try{return json(await (action==='v2_verify_scan_submit'?scanCheck:finishCheck)(body,env));}catch(e){return json({ok:false,error:e.message},409);}
+    }
+    env.SOP_GROUP_FINISH = /_(finish|finalize)$/.test(action) && !body.leave_only && await nativeOwner(body,env);
+    try{await protectInternalMutation(body,env);await validateNativeMutation(body,env);}catch(e){return json({ok:false,error:e.message},409);}
+    if(action==='sop_demo_prepare'){
+      try{return json(await prepareDemo(env,async input=>{const response=await HANDLERS[input.action](input,env);return response.json();},input=>handleSop(input,env)));}
+      catch(e){return json({ok:false,error:'虚拟数据准备失败：'+e.message},400);}
+    }
+
     // Special handling for multipart upload — formData already parsed above, pass it directly
     if (action === "v2_attachment_upload" || isMultipart) {
       return await handleMultipartUpload(formData, env);
+    }
+
+    // SOP rollout is opt-in; old clients and in-flight legacy jobs stay on original routes.
+    if (action.startsWith('sop_')) {
+      try { const result=await handleSop(body, env);if(result.ok&&action==='sop_get'&&result.record?.kind==='task')result.record.borrowed_out=await borrowedOut(env,result.record.id);if(result.ok&&action==='sop_field_resolve'&&result.task)result.task.borrowed_out=await borrowedOut(env,result.task.id);return json(result); }
+      catch (e) { return json({ok:false,error:'新版配置或迁移未就绪，请联系管理员'},503); }
+    }
+    if (env.SOP_UPGRADE_ENABLED === 'true') {
+      const blocked = await guardLegacy(body, env);
+      if (blocked) return json({ok:false,error:blocked},409);
     }
 
     const handler = HANDLERS[action];
@@ -12489,7 +12950,18 @@ export default {
     }
 
     try {
-      return await handler(body, env, request);
+      const destination=crewBorrowEnabled(env)&&body.job_id&&await canCrewDestination(env,body);
+      const response=await handler(body, env, request);
+      if(destination&&(/_(finish|finalize|leave)$/.test(action)||action==='v2_ops_job_detail')){
+        const result=await response.clone().json();
+        if(result.ok){try{result.crew_returns=await reconcileCrewReturns(env,body.job_id);}catch{result.crew_return_error='装卸操作已保存，借调归还暂未完成，请重试归还';}
+          if(action==='v2_ops_job_detail'){result.crew_borrows=(await crewStatus(env,body)).items;result.borrowed_out=await borrowedOut(env,body.job_id);}
+          return json(result,response.status);
+        }
+      }else if(crewBorrowEnabled(env)&&action==='v2_ops_job_detail'){
+        const result=await response.clone().json();if(result.ok&&result.can_manage_dispatch){result.borrowed_out=await borrowedOut(env,body.job_id);return json(result,response.status);}
+      }
+      return response;
     } catch (e) {
       return json({ ok: false, error: e.message || "internal error" }, 500);
     }
@@ -12508,7 +12980,7 @@ async function handleMultipartUpload(formData, env) {
     const related_doc_type = v003Text(formData.get("related_doc_type"), 80);
     const related_doc_id = v003Text(formData.get("related_doc_id"), 120);
     const attachment_category = v003Text(formData.get("attachment_category"), 80);
-    const uploaded_by = v003Text(formData.get("uploaded_by"), 120);
+    const uploaded_by = env.SOP_OPERATION_CONTEXT?.operator_name || (related_doc_type==='sop_task'||related_doc_type==='issue_handle_run'||attachment_category==='location_photo' ? env.SOP_REQUEST_USER?.name||'' : v003Text(formData.get("uploaded_by"), 120));
     const fieldBody = {
       k,
       operator_id: v003Text(formData.get("operator_id"), 80),
@@ -12518,6 +12990,35 @@ async function handleMultipartUpload(formData, env) {
       && v003IsPublicField(fieldBody);
     if (!isOpsAuth(fieldBody, env) && !publicArrival) return err("unauthorized", 401);
     if (!related_doc_type || !related_doc_id) return err("missing attachment target");
+    if(related_doc_type==='issue_draft')return json(await uploadIssueDraft(formData,env));
+    if(attachment_category==='issue_original')return err('原始附件须从新建问题的附件草稿提交 / 새 문제의 첨부 초안을 제출하세요',403);
+    if(accessEnabled(env)&&['issue_ticket','issue','issue_handle'].includes(related_doc_type)&&!await issueAttachmentAllowed(env,env.SOP_REQUEST_USER,related_doc_type,related_doc_id))return err('无此问题附件权限',403);
+    if(related_doc_type==='cargo_draft')return json(await uploadCargoDraft(formData,env));
+    if(attachment_category==='unload_photo')return json(await uploadUnloadPhoto(formData,env));
+    if(workChainEnabled(env)){
+      if(attachment_category==='batch_work_material')return json(await uploadBatchMaterial(formData,env));
+      if(['inbound_plan','outbound_order'].includes(related_doc_type)&&!['vehicle_photo','load_vehicle_photo','arrival_photo'].includes(attachment_category))return err('资料统一在作业需求中上传 / 작업 요청에서 자료를 업로드하세요');
+      if(related_doc_type==='sop_need'&&attachment_category!=='inbound_material'&&attachment_category!=='pallet_details')return json(await uploadWorkMaterial(formData,env));
+    }
+    if(related_doc_type==='sop_task'||related_doc_type==='ops_job'&&attachment_category==='location_photo'){
+      if(env.SOP_UPGRADE_ENABLED!=='true'||attachment_category!=='location_photo')return err('无效货位照片');
+      const task=await env.DB.prepare("SELECT state,department,kind FROM sop_records WHERE id=? AND kind=?").bind(related_doc_id,related_doc_type==='sop_task'?'task':'dispatch').first(),u=env.SOP_REQUEST_USER;
+      if(!task||!u)return err('任务不存在或未授权',403);
+      const data=JSON.parse(task.state),native=related_doc_type==='ops_job',job=native?await env.DB.prepare('SELECT job_type,status FROM v2_ops_jobs WHERE id=?').bind(related_doc_id).first():null;
+      const allowed=native?await nativeOwner({job_id:related_doc_id},env):u.role==='manager'||u.role==='dispatcher'&&(u.departments||[]).includes(executionDepartment(task))&&(data.owner_id===u.id||(data.delegates||[]).includes(u.id));
+      if(!allowed||(native?job?.job_type!=='bulk_op'||!['working','awaiting_close'].includes(job?.status):data.status!=='working'))return err('只有本任务派审员可在作业中上传货位照片',403);
+      if(!['image/jpeg','image/png','image/webp'].includes(file.type)||!file.size||file.size>10*1024*1024)return err('仅支持10MB以内的JPG、PNG、WebP照片');
+      const bytes=new Uint8Array(await file.slice(0,12).arrayBuffer());
+      const valid=file.type==='image/jpeg'?bytes[0]===255&&bytes[1]===216&&bytes[2]===255:file.type==='image/png'?[137,80,78,71,13,10,26,10].every((v,i)=>bytes[i]===v):String.fromCharCode(...bytes.slice(0,4))==='RIFF'&&String.fromCharCode(...bytes.slice(8,12))==='WEBP';
+      if(!valid)return err('照片格式无效');
+      const count=await env.DB.prepare("SELECT COUNT(*) n FROM v2_attachments WHERE related_doc_type=? AND related_doc_id=? AND attachment_category='location_photo'").bind(related_doc_type,related_doc_id).first();if(count.n>=8)return err('每个任务最多8张货位照片');
+    }
+    if(related_doc_type==='sop_need'){
+      if(env.SOP_UPGRADE_ENABLED!=='true')return err('作业需求功能未启用');
+      const need=await env.DB.prepare("SELECT state FROM sop_records WHERE id=? AND kind='need'").bind(related_doc_id).first();
+      if(!need||!JSON.parse(need.state).result)return err('须先完成作业审核');
+      if(!/\.xlsx?$/i.test(file.name)||Number(file.size)>20*1024*1024)return err('仅支持20MB以内的Excel明细');
+    }
     if (attachment_category === 'arrival_photo') {
       if (related_doc_type !== 'material_shipment') return err('invalid_arrival_photo_target');
       if (!String(file.type || '').startsWith('image/')) return err('image_required');
