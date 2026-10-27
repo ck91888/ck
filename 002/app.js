@@ -85,6 +85,7 @@ function _genReqId(action) {
 }
 var _createSubmissionIntents = {};
 var _issueListController = null, _issueDetailController = null;
+var _outboundListController = null;
 async function api(params, options) {
   var intentAction = params.action === 'v2_inbound_plan_create' || params.action === 'v2_outbound_order_create';
   if (intentAction && !params.client_req_id) {
@@ -122,11 +123,12 @@ async function api(params, options) {
 
 // Read-only deadline and progress: failed reads remain failures, never empty lists.
 async function readIssue(params, host, controller) {
-  var timedOut=false, started=Date.now();
+  var timedOut=false, started=Date.now(), onAbort;
   var progress=setInterval(function(){if(!controller.signal.aborted && Date.now()-started>=8000)host.innerHTML='<div class="card muted" role="status">连接较慢，正在等待完整响应 / 응답 대기 중 · '+Math.floor((Date.now()-started)/1000)+'秒 / 초</div>';},1000);
+  var cancelled=new Promise(function(resolve){onAbort=function(){resolve(timedOut?{ok:false,timed_out:true,message:'加载超时，请重试 / 로딩 시간 초과. 다시 시도하세요'}:{ok:false,aborted:true});};controller.signal.addEventListener('abort',onAbort,{once:true});if(controller.signal.aborted)onAbort();});
   var timeout=setTimeout(function(){timedOut=true;controller.abort();},60000);
-  try {var result=await api(params,{signal:controller.signal});return timedOut?{ok:false,timed_out:true,message:'加载超时，请重试 / 로딩 시간 초과. 다시 시도하세요'}:result;}
-  finally {clearInterval(progress);clearTimeout(timeout);}
+  try {return await Promise.race([api(params,{signal:controller.signal}),cancelled]);}
+  finally {clearInterval(progress);clearTimeout(timeout);controller.signal.removeEventListener('abort',onAbort);}
 }
 
 async function uploadFile(formData) {
@@ -701,6 +703,7 @@ function dateOnly(v) {
 // ===== Navigation =====
 function goTab(tab, btn) {
   if (_currentView === "issue_create" && _issueCreateDraft && _issueCreateDraft.busy) return;
+  if (tab !== 'outbound' && _outboundListController) _outboundListController.abort();
   _currentTab = tab;
   // Highlight tab
   var tabs = document.querySelectorAll("#mainTabs button");
@@ -1507,6 +1510,8 @@ async function cancelIssue(btnEl) {
 async function loadOutboundList() {
   var body = document.getElementById("outboundListBody");
   if (!body) return;
+  if (_outboundListController) _outboundListController.abort();
+  var controller = _outboundListController = new AbortController();
   var btn = document.getElementById("obQueryBtn");
   if (btn) btn.disabled = true;
   body.innerHTML = '<div class="card muted">' + L("loading") + '</div>';
@@ -1528,7 +1533,7 @@ async function loadOutboundList() {
   var res;
   var _obPager = getPager('outbound');
   try {
-    res = await api({
+    res = await readIssue({
       action: "v2_outbound_order_list",
       start_date: start, end_date: end,
       date_basis: "expected_ship_at",
@@ -1539,13 +1544,15 @@ async function loadOutboundList() {
       has_material: has_material,
       limit: _obPager.limit,
       offset: getOffset('outbound')
-    });
+    }, body, controller);
   } finally {
-    if (btn) btn.disabled = false;
+    if (controller === _outboundListController && btn) btn.disabled = false;
   }
+  if (controller !== _outboundListController || (controller.signal.aborted && !res?.timed_out)) return;
   if (!res || !res.ok) {
     var errMsg = (res && (res.message || res.error)) || '网络异常 / 네트워크 오류';
-    body.innerHTML = '<div class="card muted" style="color:#c62828;">加载失败 / 로딩 실패: ' + esc(String(errMsg)) + '</div>';
+    body.innerHTML = '<div class="card muted" role="alert" style="color:#c62828;">加载失败 / 로딩 실패: ' + esc(String(errMsg)) + '<p><button type="button" class="btn btn-outline" data-outbound-retry>重试加载 / 다시 시도</button></p></div>';
+    body.querySelector('[data-outbound-retry]').onclick = function(){loadOutboundList();};
     return;
   }
 

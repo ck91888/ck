@@ -26,15 +26,28 @@ export async function ensureCutoffSchema(e){
 }
 const quote=x=>'"'+x.replaceAll('"','""')+'"';
 async function jsonRow(e,table,alias){const columns=await rows(e,'PRAGMA table_info('+quote(table)+')');return 'json_object('+columns.flatMap(c=>["'"+c.name.replaceAll("'","''")+"'",alias+'.'+quote(c.name)]).join(',')+')';}
+const running=new WeakMap();
 export async function runSystemCutoff(e,asOf=Date.now()){
  if(!cutoffEnabled(e))return {enabled:false};
- await ensureCutoffSchema(e);const latest=latestCutoff(asOf);
+ const latest=latestCutoff(asOf);let work=running.get(e.DB);
+ if(work?.has(latest))return work.get(latest);
+ if(!work)running.set(e.DB,work=new Map());
+ const task=Promise.resolve().then(()=>performCutoff(e,asOf,latest)).finally(()=>{work.delete(latest);if(!work.size)running.delete(e.DB);});
+ work.set(latest,task);return task;
+}
+async function performCutoff(e,asOf,latest){
+ await ensureCutoffSchema(e);
  if(await q(e,'SELECT cutoff_at FROM ck_system_cutoff_runs WHERE cutoff_at=?',latest).first())return {ok:true,replayed:true,cutoff_at:latest};
- const token=crypto.randomUUID(),at=new Date(asOf).toISOString(),tables=new Set((await rows(e,"SELECT name FROM sqlite_master WHERE type='table'")).map(r=>r.name)),sql=[];
- const selected=(kind,id)=>`EXISTS(SELECT 1 FROM ck_system_cutoff_audit ca WHERE ca.run_token='${token}' AND ca.kind='${kind}' AND ca.row_id=${id})`;
+ const token=crypto.randomUUID(),at=new Date(asOf).toISOString(),tables=new Set((await rows(e,"SELECT name FROM sqlite_master WHERE type='table'")).map(r=>r.name));
+ // Claim this boundary inside the same transaction as every snapshot and update.
+ // A competing isolate sees its token lose and skips the scans; failure rolls
+ // back the claim too, so the next request can retry the complete transaction.
+ const claimed=`EXISTS(SELECT 1 FROM ck_system_cutoff_runs WHERE cutoff_at='${latest}' AND run_token='${token}')`;
+ const sql=[q(e,`INSERT OR IGNORE INTO ck_system_cutoff_runs VALUES(?,?,?,'kst-0400-v1; earliest boundary per execution; unverified clocks excluded from effective labor')`,latest,at,token)];
+ const selected=(kind,id)=>`(${claimed} AND EXISTS(SELECT 1 FROM ck_system_cutoff_audit ca WHERE ca.run_token='${token}' AND ca.kind='${kind}' AND ca.row_id=${id}))`;
  const savedCut=(kind,id)=>`(SELECT cutoff_at FROM ck_system_cutoff_audit ca WHERE ca.run_token='${token}' AND ca.kind='${kind}' AND ca.row_id=${id})`;
  const snapshot=async(kind,table,id,job,cut,where,minutes='NULL')=>{
-  sql.push(q(e,`INSERT OR IGNORE INTO ck_system_cutoff_audit SELECT ?,${id},${cut},${job},?,?,${await jsonRow(e,table,'x')},${minutes} FROM ${quote(table)} x WHERE ${where}`,kind,token,at));
+  sql.push(q(e,`INSERT OR IGNORE INTO ck_system_cutoff_audit SELECT ?,${id},${cut},${job},?,?,${await jsonRow(e,table,'x')},${minutes} FROM ${quote(table)} x WHERE ${claimed} AND (${where})`,kind,token,at));
  };
  const segmentCut=nextSQL('julianday(x.joined_at)',latest),jobCut=nextSQL(jobStart('x'),latest);
  await snapshot('segment','v2_ops_job_workers','x.id',"COALESCE(x.job_id,'')",segmentCut,`COALESCE(x.left_at,'')='' AND julianday(${segmentCut})<=julianday('${latest}')`,`CASE WHEN julianday(x.joined_at) IS NOT NULL THEN MAX(0,(julianday(${segmentCut})-julianday(x.joined_at))*1440) END`);
@@ -58,8 +71,8 @@ export async function runSystemCutoff(e,asOf=Date.now()){
  }
  sql.push(q(e,`UPDATE v2_ops_jobs SET status='system_closed',paused_at=${savedCut('job','v2_ops_jobs.id')},active_worker_count=0,updated_at=? WHERE ${selected('job','v2_ops_jobs.id')}`,at));
  for(const [table,kind,status]of [['v2_inbound_plan_jobs','inbound_execution','status'],['v2_issue_handle_runs','issue_execution','run_status']])if(tables.has(table))sql.push(q(e,`UPDATE ${table} SET ${status}='system_closed' WHERE ${selected(kind,table+'.id')}`));
- sql.push(q(e,`INSERT OR IGNORE INTO ck_system_cutoff_runs VALUES(?,?,?,'kst-0400-v1; earliest boundary per execution; unverified clocks excluded from effective labor')`,latest,at,token));
- await e.DB.batch(sql);
+ const result=await e.DB.batch(sql);
+ if(!result[0].meta.changes)return {ok:true,replayed:true,cutoff_at:latest};
  return {ok:true,cutoff_at:latest,changes:await rows(e,'SELECT kind,COUNT(*) AS count FROM ck_system_cutoff_audit WHERE run_token=? GROUP BY kind',token)};
 }
 export async function guardSystemCutoffMutation(b,e){
