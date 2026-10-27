@@ -5,6 +5,8 @@ const q=(env,sql,...args)=>env.DB.prepare(sql).bind(...args);
 export const COURIER_CLAIM_HISTORY_SQL=`CREATE TABLE IF NOT EXISTS ck_courier_plan_item_history(tracking_no TEXT NOT NULL,plan_id TEXT NOT NULL,line_id TEXT NOT NULL,released_at TEXT NOT NULL,replacement_plan_id TEXT NOT NULL,actor_id TEXT NOT NULL,actor_name TEXT NOT NULL,receipt_json TEXT NOT NULL,PRIMARY KEY(plan_id,tracking_no))`;
 
 // A cancelled plan can release an expected parcel only before any real work.
+// A never-dispatched bundled requirement is planning, not execution; archive it
+// with its original state before releasing the claim in the same transaction.
 // Keep this predicate identical in the helpful preflight and the write transaction.
 export const reusableCourierPlan=p=>`${p}.status='cancelled' AND COALESCE(${p}.is_deleted,0)=0
  AND COALESCE(${p}.accounted,0)=0 AND COALESCE(${p}.force_completed,0)=0
@@ -17,7 +19,14 @@ export const reusableCourierPlan=p=>`${p}.status='cancelled' AND COALESCE(${p}.i
    OR EXISTS(SELECT 1 FROM v2_ops_job_results r WHERE r.job_id=j.id)))
  AND NOT EXISTS(SELECT 1 FROM v2_inbound_plan_biz_tasks t WHERE t.plan_id=${p}.id AND t.status!='pending')
  AND NOT EXISTS(SELECT 1 FROM v2_outbound_orders o WHERE o.source_inbound_plan_id=${p}.id)
- AND NOT EXISTS(SELECT 1 FROM sop_records s WHERE s.kind='need' AND json_extract(s.state,'$.source_type')='inbound' AND json_extract(s.state,'$.source_id')=${p}.id AND COALESCE(json_extract(s.state,'$.status'),'')!='cancelled')`;
+ AND NOT EXISTS(SELECT 1 FROM sop_records s WHERE s.kind='need' AND json_extract(s.state,'$.source_type')='inbound' AND json_extract(s.state,'$.source_id')=${p}.id AND (
+  COALESCE(json_extract(s.state,'$.status'),'') NOT IN ('pending','cancelled')
+  OR COALESCE(json_extract(s.state,'$.task_id'),'')!='' OR COALESCE(json_array_length(s.state,'$.task_ids'),0)>0
+  OR json_extract(s.state,'$.result') IS NOT NULL OR json_extract(s.state,'$.shipping_output') IS NOT NULL
+  OR COALESCE(json_array_length(s.state,'$.links'),0)>0
+  OR EXISTS(SELECT 1 FROM json_each(s.state,'$.cargo_groups.groups') g WHERE COALESCE(json_array_length(g.value,'$.outputs'),0)>0 OR COALESCE(json_extract(g.value,'$.status'),'pending') NOT IN ('pending','cancelled')
+   OR EXISTS(SELECT 1 FROM json_each(g.value,'$.processes') pr WHERE COALESCE(json_extract(pr.value,'$.task_id'),'')!='' OR json_extract(pr.value,'$.result') IS NOT NULL OR COALESCE(json_extract(pr.value,'$.status'),'pending') NOT IN ('pending','cancelled')))
+ ))`;
 
 export async function ensureCourierClaims(env){
  if(!inboundFlowEnabled(env))return;
@@ -51,7 +60,15 @@ export async function ensureCourierClaims(env){
 
 export function claimCourierStatements(env,planId,lineId,code){
  const user=env.SOP_REQUEST_USER||{},safe=`EXISTS(SELECT 1 FROM v2_inbound_plans p WHERE p.id=ck_courier_plan_items.plan_id AND ${reusableCourierPlan('p')})`;
+ const t=new Date().toISOString(),request='COURIER-REPLACE-'+planId+'-',after="json_set(s.state,'$.status','cancelled','$.cancel_reason','来源入库已取消，重传时封存未派工作业','$.replacement_inbound_plan_id',?,'$.cancelled_at',?)";
  return [
+  // Archive only never-dispatched requirements, in the claim transaction. Their
+  // original state, attachments and creation events remain available for audit.
+  q(env,`INSERT INTO sop_events(request_id,record_id,expected_revision,action,actor_id,actor_name,before_json,after_json,result_json,created_at)
+   SELECT ?||s.id,s.id,s.revision,'sop_inbound_replaced',?,?,s.state,${after},'{}',? FROM sop_records s
+   WHERE s.kind='need' AND json_extract(s.state,'$.status')='pending' AND json_extract(s.state,'$.source_type')='inbound'
+    AND EXISTS(SELECT 1 FROM ck_courier_plan_items i JOIN v2_inbound_plans p ON p.id=i.plan_id WHERE i.tracking_no=? AND i.plan_id!=? AND p.id=json_extract(s.state,'$.source_id') AND ${reusableCourierPlan('p')})`,request,String(user.id||''),String(user.name||''),planId,t,t,code,planId),
+  q(env,`UPDATE sop_records AS s SET revision=revision+1,state=${after},updated_at=? WHERE EXISTS(SELECT 1 FROM sop_events e WHERE e.request_id=?||s.id AND e.record_id=s.id AND e.expected_revision=s.revision)`,planId,t,t,request),
   q(env,`INSERT INTO ck_courier_plan_item_history(tracking_no,plan_id,line_id,released_at,replacement_plan_id,actor_id,actor_name,receipt_json)
    SELECT tracking_no,plan_id,line_id,?,?,?,?,COALESCE((SELECT json_object('receipt_id',r.id,'owner',r.owner,'received_at',r.received_at,'scanner_id',r.scanner_id,'scanner_name',r.scanner_name,'status',r.status,'handed_to',r.handed_to,'handed_at',r.handed_at,'batch_id',bi.batch_id,'batch_no',b.batch_no) FROM ck_courier_receipts r LEFT JOIN ck_courier_batch_items bi ON bi.receipt_id=r.id LEFT JOIN ck_courier_batches b ON b.id=bi.batch_id WHERE r.tracking_no=ck_courier_plan_items.tracking_no),'{}') FROM ck_courier_plan_items WHERE tracking_no=? AND plan_id!=? AND ${safe}`,
    new Date().toISOString(),planId,String(user.id||''),String(user.name||''),code,planId),
