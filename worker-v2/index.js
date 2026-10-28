@@ -39,7 +39,7 @@ import {validateNativeMutation, nativePeople, finishNativePick, finishNativeOutb
 import {findUnloadPlan, startUnloadTrip, finishUnloadTrip, tripPlans} from './unload-trip.js';
 import {ensureLoadSchema,loadTripEnabled,loadCandidates,resolveLoadOrder,loadOrdersForJob,finishLoadTrip,validateLegacyLoadFinish} from './outbound-load-trip.js';
 import {handleCourier,validateCourierLines,courierPlanStatements,courierProgress,courierProgressRead,courierProgressRows,courierReady,protectCourierEdit,syncCourierArrival} from './courier.js';
-import {ensureCourierClaims} from './courier-claims.js';
+import {ensureCourierClaims,courierCancellationAudit} from './courier-claims.js';
 import { inboundFlowEnabled, inboundCode, inboundCodes, inboundReferenceValue, inboundCodeProgress, selectInboundReference, validateInboundCode, resolveInboundPlan, putawayTaskBiz, completeUnloadedDispositions, bindInboundCode, inboundLabels, inboundReferenceData, departmentCodes, putawayClasses } from './inbound-flow.js';
 import { handleAttendance, guardAttendance, ensureAttendance, attendanceEnabled } from './attendance.js';
 import {runSystemCutoff,guardSystemCutoffMutation,correctSystemCutoff,forcedClock} from './system-cutoff.js';
@@ -4689,6 +4689,7 @@ route("v2_inbound_plan_cancel", async (body, env) => {
     updateSql += " AND (status IN ('pending','arrived_pending_putaway') OR (source_type='direct_tally_session' AND status='tallied_pending_putaway')) AND NOT EXISTS(SELECT 1 FROM v2_inbound_plan_jobs j WHERE j.plan_id=v2_inbound_plans.id AND j.status NOT IN ('completed','cancelled'))";
     const statements=[env.DB.prepare(updateSql).bind(...binds)],context=env.SOP_OPERATION_CONTEXT;
     if(context?.operator_name)statements.push(env.DB.prepare('INSERT INTO ck_plan_operation_audit SELECT ?,?,?,?,?,?,? WHERE changes()=1').bind(crypto.randomUUID(),'inbound',id,'cancel',env.SOP_REQUEST_USER.id,context.operator_name,t));
+    statements.push(courierCancellationAudit(env,id));
     const results=await env.DB.batch(statements);
     if(!results[0].meta.changes){
       const current=await env.DB.prepare('SELECT status,updated_at FROM v2_inbound_plans WHERE id=?').bind(id).first();
