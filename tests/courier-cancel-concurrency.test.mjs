@@ -57,7 +57,7 @@ for(const mode of ['legacy unload','native generic','native multi-plan unload'])
   assert.equal(f.DB.raw.prepare("SELECT count(*) n FROM sop_records WHERE kind='dispatch'").get().n,0);
   assert.equal(f.DB.raw.prepare('SELECT count(*) n FROM ck_unload_trips').get().n,0);
   assert.equal(f.DB.raw.prepare('SELECT count(*) n FROM ck_unload_plan_links').get().n,0);
-  assert.equal(f.DB.raw.prepare('SELECT count(*) n FROM ck_courier_plan_item_history').get().n,0);
+  assert.equal(f.DB.raw.prepare('SELECT count(*) n FROM ck_courier_plan_item_history').get().n,1);
   if(x.second)assert.equal(f.plan(x.first.id).status,'pending','the other plan in the failed trip must remain untouched');
  });
 
@@ -95,13 +95,14 @@ for(const concurrent of [false,true])test((concurrent?'concurrent':'replayed')+'
  const retry=await f.cancel(p.id,{reason:'QA later retry must not replace original reason'});assert.equal(retry.ok,true,retry.error);assert.deepEqual(f.plan(p.id),after);
  assert.equal(f.DB.raw.prepare('SELECT count(*) n FROM v2_inbound_plan_lines WHERE plan_id=?').get(p.id).n,1);
  assert.equal(f.DB.raw.prepare('SELECT count(*) n FROM ck_courier_plan_items WHERE plan_id=?').get(p.id).n,1);
- assert.equal(f.DB.raw.prepare('SELECT count(*) n FROM ck_courier_plan_item_history').get().n,0);
+ assert.equal(f.DB.raw.prepare('SELECT count(*) n FROM ck_courier_plan_item_history').get().n,1);
 });
 
 test('a legacy cancelled courier row is reusable on the first create without an intervening detail or list read',async t=>{
  const f=await fixture(t),old=await f.create([C1,C2]);
  // Model a cancellation saved by the old release: no claim archive was written.
- f.DB.raw.prepare("UPDATE v2_inbound_plans SET status='cancelled',remark='QA legacy cancellation' WHERE id=?").run(old.id);
+ const trigger=f.DB.raw.prepare("SELECT sql FROM sqlite_master WHERE name='ck_courier_inactive_snapshot'").get().sql;f.DB.raw.exec('DROP TRIGGER ck_courier_inactive_snapshot');
+ f.DB.raw.prepare("UPDATE v2_inbound_plans SET status='cancelled',remark='QA legacy cancellation' WHERE id=?").run(old.id);f.DB.raw.exec(trigger);
  const oldRow=f.plan(old.id),oldLines=f.DB.raw.prepare('SELECT * FROM v2_inbound_plan_lines WHERE plan_id=?').all(old.id);
  const replacement=await f.create([C1,C2]);assert.notEqual(replacement.id,old.id);assert.deepEqual(f.plan(old.id),oldRow);
  assert.deepEqual(f.DB.raw.prepare('SELECT * FROM v2_inbound_plan_lines WHERE plan_id=?').all(old.id),oldLines);

@@ -9,7 +9,7 @@ async function fixture(t){
  const plan=await ok('v2_inbound_plan_create',payload),scan=code=>call('sop_courier_receive',{owner:'8-1',tracking_no:code,batch_id:batch.id,scanner_badge:person.badgeId});
  const rows=(table,where='',...args)=>DB.raw.prepare('SELECT * FROM '+table+(where?' WHERE '+where:'')+' ORDER BY rowid').all(...args);
  const freeze=async()=>{
-  const first=await scan(codes[0]);assert.equal(first.ok,true,first.error);await ok('v2_inbound_plan_cancel',{inbound_plan_id:plan.id,reason:'Synthetic cancellation'});assert.equal(rows('ck_courier_plan_item_history').length,0,'stage A must not begin writing cancellation snapshots');
+  const first=await scan(codes[0]);assert.equal(first.ok,true,first.error);const trigger=DB.raw.prepare("SELECT sql FROM sqlite_master WHERE name='ck_courier_inactive_snapshot'").get().sql;DB.raw.exec('DROP TRIGGER ck_courier_inactive_snapshot');await ok('v2_inbound_plan_cancel',{inbound_plan_id:plan.id,reason:'Synthetic cancellation'});DB.raw.exec(trigger);assert.equal(rows('ck_courier_plan_item_history').length,0,'synthetic legacy cancellation has no snapshot');
   const line=rows('v2_inbound_plan_lines','plan_id=?',plan.id)[0];
   for(const [i,code] of codes.entries())DB.raw.prepare('INSERT INTO ck_courier_plan_item_history VALUES(?,?,?,?,?,?,?,?)').run(code,plan.id,line.id,'2026-10-01T00:00:00.000Z','','SYNTHETIC-CANCEL','Synthetic cancellation',JSON.stringify(i?{}:{receipt_id:first.item.id,owner:first.item.owner,received_at:first.item.received_at,scanner_name:first.item.scanner_name,status:first.item.status,scanner_id:first.item.scanner_id,batch_id:first.item.batch_id,batch_no:first.item.batch_no}));
   const late={...rows('ck_courier_receipts')[0],id:'SYNTHETIC-LATE-RECEIPT',tracking_no:codes[1]},keys=Object.keys(late);DB.raw.prepare('INSERT INTO ck_courier_receipts('+keys.join(',')+') VALUES('+keys.map(()=>'?').join(',')+')').run(...Object.values(late));DB.raw.prepare('INSERT INTO ck_courier_batch_items VALUES(?,?)').run(late.id,batch.id);
@@ -17,9 +17,6 @@ async function fixture(t){
  };
  return {DB,env,call,ok,plan,payload,scan,rows,freeze};
 }
-test('compatibility stage preserves old cancellation behavior and creates no new snapshot schema',async t=>{
- const f=await fixture(t);await f.ok('v2_inbound_plan_cancel',{inbound_plan_id:f.plan.id});assert.equal(f.rows('ck_courier_plan_item_history').length,0);assert.equal((await f.scan(codes[0])).ok,false);assert.equal(f.DB.raw.prepare("SELECT count(*) n FROM sqlite_master WHERE name IN ('ck_courier_active_plan_items','ck_courier_inactive_snapshot')").get().n,0);
-});
 test('return reader freezes 1/2 while safe reconstruction reaches 2/2 and archives the original need once',async t=>{
  const f=await fixture(t);await f.freeze();const original=f.rows('v2_inbound_plans','id=?',f.plan.id),lines=f.rows('v2_inbound_plan_lines','plan_id=?',f.plan.id),history=f.rows('ck_courier_plan_item_history'),receipts=f.rows('ck_courier_receipts');
  const progress=(await f.ok('v2_inbound_plan_detail',{id:f.plan.id})).plan.courier_progress;assert.equal(progress.total,2);assert.equal(progress.received,1);

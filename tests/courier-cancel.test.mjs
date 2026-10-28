@@ -112,10 +112,10 @@ for(const [name,seed] of unsafe)test('legacy cancelled plan with '+name+' cannot
  // of these cancellations, but old cancelled rows still require release guards.
  f.DB.raw.prepare("UPDATE v2_inbound_plans SET status='cancelled' WHERE id=?").run(old.id);
  const before=f.allGraph(),failed=await f.call('v2_inbound_plan_create',f.createBody());assert.equal(failed.ok,false,name+': '+JSON.stringify(failed));assert.deepEqual(f.allGraph(),before);
- assert.equal(f.history(old.id).length,0);assert.equal(f.rows('SELECT count(*) n FROM ck_courier_plan_items WHERE plan_id=?',old.id)[0].n,2);
+ assert.equal(f.history(old.id).length,2);assert.ok(f.history(old.id).every(h=>h.replacement_plan_id===''));assert.equal(f.rows('SELECT count(*) n FROM ck_courier_plan_items WHERE plan_id=?',old.id)[0].n,2);
 });
 
-test('cancellation after scanner preflight rejects the receipt commit without receipt, event or batch item',async t=>{
+test('cancellation after scanner preflight permits receipt without updating the cancelled plan',async t=>{
  const f=await fixture(t),old=await f.create([C1]),batch=f.DB.batch.bind(f.DB);let injected=false,afterCancel;
  f.DB.batch=async statements=>{
   if(!injected&&statements.some(s=>s.sql.includes('INSERT OR IGNORE INTO ck_courier_receipts'))){
@@ -123,9 +123,9 @@ test('cancellation after scanner preflight rejects the receipt commit without re
   }
   return batch(statements);
  };
- const scan=await f.scan(C1,false);assert.equal(injected,true,'cancel must commit between the scanner preflight and receipt batch');assert.equal(scan.ok,false);
- for(const table of ['ck_courier_receipts','ck_courier_events','ck_courier_batch_items'])assert.equal(f.rows('SELECT count(*) n FROM '+table)[0].n,0,table);
- assert.deepEqual(f.graph(old.id),afterCancel);assertProgress(await f.detail(old.id),0,1);assert.equal(f.history(old.id).length,0);
+ const scan=await f.scan(C1,false);assert.equal(injected,true,'cancel must commit between the scanner preflight and receipt batch');assert.equal(scan.ok,true,scan.error);assert.equal(scan.item.plan_id,null);
+ for(const table of ['ck_courier_receipts','ck_courier_events','ck_courier_batch_items'])assert.equal(f.rows('SELECT count(*) n FROM '+table)[0].n,1,table);
+ assert.deepEqual(f.graph(old.id),afterCancel);assertProgress(await f.detail(old.id),0,1);assert.equal(f.history(old.id).length,1);
 });
 
 test('a scan already in flight follows the replacement claim after cancellation and recreation',async t=>{
@@ -139,7 +139,7 @@ test('a scan already in flight follows the replacement claim after cancellation 
  };
  const scan=await f.scan(C1);assert.equal(injected,true,'recreation must commit between the scanner preflight and receipt batch');assert.equal(scan.duplicate,false);assert.equal(scan.item.plan_id,replacement.id);assert.equal(scan.plan.plan_id,replacement.id);
  for(const table of ['ck_courier_receipts','ck_courier_events','ck_courier_batch_items'])assert.equal(f.rows('SELECT count(*) n FROM '+table)[0].n,1,table);
- assert.deepEqual(f.graph(old.id),afterCancel);assertProgress(await f.detail(old.id),0,1);assert.deepEqual(JSON.parse(f.history(old.id)[0].receipt_json),{});
+ assert.deepEqual(f.graph(old.id),afterCancel);assertProgress(await f.detail(old.id),0,1);assert.equal(JSON.parse(f.history(old.id)[0].receipt_json).receipt_id,undefined);
  const current=await f.detail(replacement.id);assertProgress(current,1,1);assert.equal(current.plan.status,'arrived_pending_putaway');assert.equal(current.lines[0].actual_qty,1);
  assert.equal(f.rows('SELECT receipt_id FROM ck_courier_batch_items')[0].receipt_id,scan.item.id);assert.equal(f.rows('SELECT receipt_id FROM ck_courier_events')[0].receipt_id,scan.item.id);
 });

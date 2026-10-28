@@ -37,19 +37,19 @@ test('same-file courier reupload archives only the unstarted requirement and pre
 
 for(const patch of [{task_id:'SYNTHETIC-TASK'},{task_ids:['SYNTHETIC-TASK']},{result:{quantity:1,unit:'箱'}},{links:[{outbound_id:'SYNTHETIC-ORDER'}]},{cargo_groups:{groups:[{outputs:[{quantity:1}]}]}},{cargo_groups:{groups:[{processes:[{status:'approved'}]}]}}])test('legacy pending requirement with execution evidence stays protected: '+Object.keys(patch)[0],async t=>{
  const f=await fixture(t),old=await f.create(),need=f.need();await f.cancel(old.id);f.DB.raw.prepare('UPDATE sop_records SET state=? WHERE id=?').run(JSON.stringify({...JSON.parse(need.state),...patch}),need.id);
- const before=f.DB.raw.prepare('SELECT * FROM sop_records ORDER BY id').all(),failed=await f.call('v2_inbound_plan_create',structuredClone(f.body));assert.equal(failed.ok,false);assert.deepEqual(f.DB.raw.prepare('SELECT * FROM sop_records ORDER BY id').all(),before);assert.equal(f.DB.raw.prepare('SELECT count(*) n FROM v2_inbound_plans').get().n,1);assert.equal(f.DB.raw.prepare('SELECT count(*) n FROM ck_courier_plan_item_history').get().n,0);
+ const before=f.DB.raw.prepare('SELECT * FROM sop_records ORDER BY id').all(),failed=await f.call('v2_inbound_plan_create',structuredClone(f.body));assert.equal(failed.ok,false);assert.deepEqual(f.DB.raw.prepare('SELECT * FROM sop_records ORDER BY id').all(),before);assert.equal(f.DB.raw.prepare('SELECT count(*) n FROM v2_inbound_plans').get().n,1);assert.equal(f.DB.raw.prepare("SELECT count(*) n FROM ck_courier_plan_item_history WHERE replacement_plan_id!=''").get().n,0);
 });
 
 test('execution evidence committed after preflight rejects the entire replacement without archiving the old requirement',async t=>{
  const f=await fixture(t),old=await f.create(),need=f.need();await f.cancel(old.id);const batch=f.DB.batch.bind(f.DB);let changed;
  f.DB.batch=async statements=>{if(!changed&&statements.some(s=>s.sql.includes('sop_inbound_replaced'))){changed={...JSON.parse(need.state),result:{quantity:1,unit:'箱'}};f.DB.raw.prepare('UPDATE sop_records SET state=? WHERE id=?').run(JSON.stringify(changed),need.id);}return batch(statements);};
- assert.equal((await f.call('v2_inbound_plan_create',structuredClone(f.body))).ok,false);assert.ok(changed);assert.deepEqual(JSON.parse(f.need().state),changed);assert.equal(f.DB.raw.prepare('SELECT count(*) n FROM ck_courier_plan_item_history').get().n,0);assert.equal(f.DB.raw.prepare('SELECT count(*) n FROM v2_inbound_plans').get().n,1);assert.equal(f.DB.raw.prepare("SELECT count(*) n FROM sop_events WHERE action='sop_inbound_replaced'").get().n,0);
+ assert.equal((await f.call('v2_inbound_plan_create',structuredClone(f.body))).ok,false);assert.ok(changed);assert.deepEqual(JSON.parse(f.need().state),changed);assert.equal(f.DB.raw.prepare("SELECT count(*) n FROM ck_courier_plan_item_history WHERE replacement_plan_id!=''").get().n,0);assert.equal(f.DB.raw.prepare('SELECT count(*) n FROM v2_inbound_plans').get().n,1);assert.equal(f.DB.raw.prepare("SELECT count(*) n FROM sop_events WHERE action='sop_inbound_replaced'").get().n,0);
 });
 
 test('a claim failure rolls back requirement archival and a corrected retry archives once',async t=>{
  const f=await fixture(t),old=await f.create(),need=f.need();await f.cancel(old.id);const batch=f.DB.batch.bind(f.DB);let failed=false;
  f.DB.batch=async statements=>{if(!failed&&statements.some(s=>s.sql.includes('sop_inbound_replaced'))){failed=true;return batch([...statements,f.DB.prepare('INSERT INTO table_that_does_not_exist VALUES(1)')]);}return batch(statements);};
- const first=await f.call('v2_inbound_plan_create',structuredClone(f.body));assert.equal(first.ok,false);assert.equal(failed,true);assert.deepEqual(f.need(),need);assert.equal(f.DB.raw.prepare('SELECT count(*) n FROM ck_courier_plan_item_history').get().n,0);
+ const first=await f.call('v2_inbound_plan_create',structuredClone(f.body));assert.equal(first.ok,false);assert.equal(failed,true);assert.deepEqual(f.need(),need);assert.equal(f.DB.raw.prepare("SELECT count(*) n FROM ck_courier_plan_item_history WHERE replacement_plan_id!=''").get().n,0);
  await f.create();assert.equal(f.DB.raw.prepare("SELECT count(*) n FROM sop_events WHERE action='sop_inbound_replaced'").get().n,1);
 });
 

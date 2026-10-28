@@ -3,6 +3,12 @@ import {inboundFlowEnabled} from './inbound-flow.js';
 import {ensureCourierBatches} from './courier-batches.js';
 const q=(env,sql,...args)=>env.DB.prepare(sql).bind(...args);
 export const COURIER_CLAIM_HISTORY_SQL=`CREATE TABLE IF NOT EXISTS ck_courier_plan_item_history(tracking_no TEXT NOT NULL,plan_id TEXT NOT NULL,line_id TEXT NOT NULL,released_at TEXT NOT NULL,replacement_plan_id TEXT NOT NULL,actor_id TEXT NOT NULL,actor_name TEXT NOT NULL,receipt_json TEXT NOT NULL,PRIMARY KEY(plan_id,tracking_no))`;
+const receiptSnapshot=i=>`COALESCE((SELECT json_object('receipt_id',r.id,'owner',r.owner,'received_at',r.received_at,'scanner_id',r.scanner_id,'scanner_name',r.scanner_name,'status',r.status,'handed_to',r.handed_to,'handed_at',r.handed_at,'batch_id',bi.batch_id,'batch_no',b.batch_no) FROM ck_courier_receipts r LEFT JOIN ck_courier_batch_items bi ON bi.receipt_id=r.id LEFT JOIN ck_courier_batches b ON b.id=bi.batch_id WHERE r.tracking_no=${i}.tracking_no),'{}')`;
+// Historical references still protect reconstruction when work/accounting exists.
+// Receipt operations use this live projection instead of treating that history
+// as an active plan. Cancellation/deletion changes the projection immediately.
+const livePlan=p=>`${p}.status NOT IN ('cancelled','deleted') AND COALESCE(${p}.is_deleted,0)=0`;
+
 // A cancelled plan can release an expected parcel only before any real work.
 // A never-dispatched bundled requirement is planning, not execution; archive it
 // with its original state before releasing the claim in the same transaction.
@@ -55,12 +61,29 @@ export async function ensureCourierClaims(env){
      AND (EXISTS(SELECT 1 FROM ck_courier_plan_items ci WHERE ci.plan_id=p.id) OR EXISTS(SELECT 1 FROM ck_courier_plan_item_history h WHERE h.plan_id=p.id)))
    BEGIN SELECT RAISE(ABORT,'关联快递入库计划已取消或删除，请刷新 / 취소된 계획입니다'); END`))
  ]));
+ await ensureSchema(env.DB,'courier-live-links-v1',()=>env.DB.batch([
+  q(env,`CREATE VIEW IF NOT EXISTS ck_courier_active_plan_items AS SELECT i.* FROM ck_courier_plan_items i JOIN v2_inbound_plans p ON p.id=i.plan_id WHERE ${livePlan('p')}`),
+  q(env,`CREATE TRIGGER IF NOT EXISTS ck_courier_inactive_snapshot AFTER UPDATE OF status,is_deleted ON v2_inbound_plans
+   WHEN NEW.status IN ('cancelled','deleted') OR COALESCE(NEW.is_deleted,0)!=0
+   BEGIN INSERT OR IGNORE INTO ck_courier_plan_item_history(tracking_no,plan_id,line_id,released_at,replacement_plan_id,actor_id,actor_name,receipt_json)
+    SELECT i.tracking_no,i.plan_id,i.line_id,strftime('%Y-%m-%dT%H:%M:%fZ','now'),'','','',json_set(${receiptSnapshot('i')},'$.claim_release',json_object('reason','plan_inactive','status',NEW.status,'is_deleted',COALESCE(NEW.is_deleted,0))) FROM ck_courier_plan_items i WHERE i.plan_id=NEW.id;
+   END`)
+ ]));
 }
 
 export function courierCancellationAudit(env,planId){
  const u=env.SOP_REQUEST_USER||{};
  return q(env,`UPDATE ck_courier_plan_item_history SET actor_id=?,actor_name=? WHERE plan_id=? AND replacement_plan_id='' AND actor_id=''`,String(u.id||''),String(u.name||''),planId);
 }
+// Lazily freeze pre-existing invalid/orphan references in the receipt transaction,
+// before a new receipt could appear in their historical arrival progress.
+export function inactiveCourierSnapshot(env,code,time){
+ const u=env.SOP_REQUEST_USER||{};
+ return q(env,`INSERT OR IGNORE INTO ck_courier_plan_item_history(tracking_no,plan_id,line_id,released_at,replacement_plan_id,actor_id,actor_name,receipt_json)
+  SELECT i.tracking_no,i.plan_id,i.line_id,?,'',?,?,json_set(${receiptSnapshot('i')},'$.claim_release',json_object('reason','legacy_inactive_on_receive','status',p.status,'is_deleted',p.is_deleted))
+  FROM ck_courier_plan_items i LEFT JOIN v2_inbound_plans p ON p.id=i.plan_id WHERE i.tracking_no=? AND (p.id IS NULL OR NOT (${livePlan('p')}))`,time,String(u.id||''),String(u.name||''),code);
+}
+
 export function claimCourierStatements(env,planId,lineId,code){
  const user=env.SOP_REQUEST_USER||{},safe=`EXISTS(SELECT 1 FROM v2_inbound_plans p WHERE p.id=ck_courier_plan_items.plan_id AND ${reusableCourierPlan('p')})`;
  const t=new Date().toISOString(),request='COURIER-REPLACE-'+planId+'-',after="json_set(s.state,'$.status','cancelled','$.cancel_reason','来源入库已取消，重传时封存未派工作业','$.replacement_inbound_plan_id',?,'$.cancelled_at',?)";
