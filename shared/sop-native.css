@@ -57,3 +57,5 @@ body.ck-stage-home{display:block;min-height:100vh}body.ck-stage-home .nav{max-wi
 #ck-putaway-workload fieldset { margin:12px 0; border:1px solid #ccd9d5; border-radius:8px; padding:10px; }
 #ck-putaway-workload fieldset label { display:flex; align-items:center; gap:10px; min-height:44px; margin:0; cursor:pointer; }
 #ck-putaway-workload input[type=radio] { width:20px; min-width:20px; height:20px; min-height:20px; margin:0; }
+
+.ck-order-selection [data-bulk-candidates]{max-height:18rem;overflow:auto;overscroll-behavior:contain}

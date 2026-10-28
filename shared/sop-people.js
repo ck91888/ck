@@ -25,6 +25,30 @@
  window.CKPeopleSelection=selection;
  window.CKPeopleSelection.parseBadge=parse;
  window.CKPeopleFields=function(){return '<label>扫描工牌 / 명찰<input data-staff-badge placeholder="工号|姓名 / 사번|이름" autocomplete="off"></label><div class="toolbar"><button type="button" data-staff-add>添加工牌 / 명찰 추가</button><button type="button" data-staff-camera>相机扫码 / 카메라</button></div><div data-staff-scanner></div><p data-staff-count></p><p data-staff-status role="status" aria-live="polite"></p><div data-staff-people></div><label>主操作员 / 주 작업자<select name="lead_id" data-staff-lead required></select></label>';};
+ // A missing optional script must never silently turn multi-order dispatch into
+ // single-order submission. Retry only the exact same-origin built script URL.
+ window.CKRequireBulkSelection=function(form,onReady){
+  if(window.CKBulkOrderSelection)return true;
+  form.onsubmit=event=>event.preventDefault();
+  form.querySelectorAll('input,select,button').forEach(control=>control.disabled=true);
+  const box=document.createElement('section');box.className='ck-warning';box.dataset.bulkUnavailable='';
+  const message=document.createElement('p');message.setAttribute('role','alert');
+  message.textContent='多单派工组件未加载，尚未派工；请重试加载 / 복수 주문 구성요소 미완료·아직 배정되지 않았습니다';
+  const button=document.createElement('button');button.type='button';button.textContent='重试加载多单派工 / 복수 주문 다시 불러오기';box.append(message,button);form.prepend(box);
+  button.onclick=async()=>{if(button.disabled)return;button.disabled=true;
+   try{
+    if(!window.CKBulkOrderSelection){
+     const original=[...document.scripts].find(script=>{try{const url=new URL(script.src);return url.origin===location.origin&&url.pathname==='/shared/bulk-work-batch.js';}catch{return false;}});
+     if(!original)throw Error('缺少组件地址，请保留其他未提交内容后重新打开页面 / 구성요소 주소 없음·미저장 내용을 보존하고 페이지를 다시 여세요');
+     message.textContent='正在重新加载多单派工 / 복수 주문 다시 불러오는 중';
+     await new Promise((resolve,reject)=>{const script=document.createElement('script');let timer;const finish=error=>{clearTimeout(timer);script.onload=null;script.onerror=null;script.remove();error?reject(error):resolve();};script.src=original.src;script.onload=()=>finish(window.CKBulkOrderSelection?null:Error('组件未就绪 / 구성요소 준비 실패'));script.onerror=()=>finish(Error('组件连接失败，可再次重试 / 연결 실패·다시 시도하세요'));timer=setTimeout(()=>finish(Error('组件加载超时，可再次重试 / 불러오기 시간 초과·다시 시도하세요')),8000);document.head.append(script);});
+    }
+    if(form.isConnected)await onReady();
+   }catch(error){if(form.isConnected)message.textContent=error.message;}
+   finally{if(form.isConnected)button.disabled=false;}
+  };
+  return false;
+ };
  let scannerSequence=0;
  window.CKPeoplePicker=function(root,{workers=[],leadId='',error,allowEmpty=false,borrowContext=null,maxPeople=50}={}){
   const find=s=>root.querySelector('[data-staff-'+s+']'),input=find('badge'),lead=find('lead'),status=find('status'),camera=find('camera'),model=selection(workers,leadId);

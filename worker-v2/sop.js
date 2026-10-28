@@ -221,6 +221,10 @@ export async function handleSop(b,env) {
    const need=row.kind==='need'?row:row.data.need_id?await read(env,row.data.need_id):null;
    if(need?.data.needs_clarification)fail('要求未补充完整，请联系订单处理组');
    const taskIds=need?[...new Set([...(need.data.task_ids||[]),need.data.task_id].filter(Boolean))]:[];const relatedTasks=[];for(const id of taskIds){const item=await read(env,id);if(item)relatedTasks.push(item);}if(row.kind==='need'&&relatedTasks.length)task=relatedTasks.find(x=>!['completed','cancelled'].includes(x.data.status)&&x.data.owner_id===u.id)||relatedTasks.find(x=>!['completed','cancelled'].includes(x.data.status))||relatedTasks.at(-1);
+   // A cancelled grouped assignment remains in history, but is not the current
+   // execution when its batch has released this plan. Opening its task ID still
+   // reads that history; opening the plan offers its unassigned processes again.
+   if(row.kind==='need'&&need?.data.cargo_groups&&!need.data.bulk_batch_id&&task?.data.status==='cancelled'&&relatedTasks.every(x=>['completed','cancelled'].includes(x.data.status)))task=null;
    const segments=task?await all(env,'SELECT worker_id,worker_name,joined_at,left_at,leave_reason FROM v2_ops_job_workers WHERE job_id=? ORDER BY joined_at',task.id):[];
    let source=null;if(need?.data.source_id&&['inbound','outbound'].includes(need.data.source_type))source=await verifySource(env,need.data.source_type,need.data.source_id);
    const shipping=need&&workChainEnabled(env)?await chainAllocation(env,need.data):null;
