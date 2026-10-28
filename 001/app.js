@@ -1802,7 +1802,7 @@ async function initInbound() {
       goPage("home");
       return;
     }
-    if (res && res.ok && res.job && res.job.job_type && (res.job.job_type === 'inbound_direct_tally' || res.job.job_type === 'inbound_direct_putaway' || res.job.job_type === 'inbound_direct' || res.job.job_type === 'inbound_bulk' || res.job.job_type === 'inbound_change_order') && (res.job.status === "working" || res.can_manage_dispatch && ['pending','awaiting_close','paused'].includes(res.job.status))) {
+    if (res && res.ok && res.job && res.job.job_type && (res.job.job_type === 'inbound_direct_tally' || res.job.job_type === 'inbound_direct_putaway' || res.job.job_type === 'inbound_direct' || res.job.job_type === 'inbound_bulk' || res.job.job_type === 'inbound_change_order') && (res.job.status === "working" || res.can_manage_dispatch && ['pending','awaiting_close','paused','system_closed'].includes(res.job.status))) {
       document.getElementById("inboundEntryCard").style.display = "none";
       document.getElementById("inboundWorkingCard").style.display = "";
       loadInboundPlanInfo(res.job.related_doc_id);

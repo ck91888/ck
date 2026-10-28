@@ -94,7 +94,12 @@ export async function startAtomicInbound(e,p,staff,number){
  if(returned)sql.push(q(e,`INSERT OR IGNORE INTO v2_inbound_plan_biz_tasks(id,plan_id,biz_class,job_type,status,created_at,updated_at) VALUES(?,?,'return','inbound_return','pending',?,?)`,'IBT-'+crypto.randomUUID(),planId,t,t));
  sql.push(q(e,`INSERT INTO v2_ops_jobs(id,flow_stage,biz_class,job_type,related_doc_type,related_doc_id,status,created_by,created_at,updated_at,active_worker_count,inbound_external_no) VALUES(?,'inbound',?,?,'inbound_plan',?,'working',?,?,?,?,?)`,id,biz,type,planId,lead.id,t,t,staff.workers.length,code));
  if(returned){const data=validateOperationStart(type,p);sql.push(q(e,'UPDATE v2_ops_jobs SET shared_result_json=? WHERE id=?',JSON.stringify({internal_operation:{...data,start:{...data.start,recorded_at:t,recorded_by:e.SOP_REQUEST_USER.id}}}),id));}
- return commitPrepared(e,p,staff,{id,t,sql,jobType:type,sourceType:'inbound_plan',sourceId:planId,after:[stagedPlanStatement(e,planId,t)],extra:{plan_id:planId,external_inbound_no:code}});
+ try{return await commitPrepared(e,p,staff,{id,t,sql,jobType:type,sourceType:'inbound_plan',sourceId:planId,after:[stagedPlanStatement(e,planId,t)],extra:{plan_id:planId,external_inbound_no:code}});}
+ catch(error){
+  // The unique stage claim remains authoritative if another start wins after preflight.
+  if(String(error.message).includes('UNIQUE constraint failed: v2_ops_jobs.related_doc_id, v2_ops_jobs.inbound_external_no, v2_ops_jobs.job_type'))await validateInboundStage(e,{id:planId},code,type);
+  throw error;
+ }
 }
 export async function startAtomicBulk(e,p,staff,findOutbound,needs){
  const no=String(p.work_order_no||'').trim();if(!no||documentCodeError(no))return {ok:false,error:documentCodeError(no)||'缺少作业单号'};

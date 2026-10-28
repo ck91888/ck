@@ -36,12 +36,12 @@ export async function inboundCodeProgress(env,plan,knownJobs,biz){
  const items=codes.map(code=>{
   const matches=jobs.filter(j=>j.inbound_external_no===code||(!j.inbound_external_no&&allCodes.length===1));
   const final=matches.find(j=>j.job_type!==tallyType&&j.status==='completed');
-  const putaway=matches.find(j=>j.job_type===putawayType&&['pending','working','awaiting_close','paused'].includes(j.status));
+  const putaway=matches.find(j=>j.job_type===putawayType&&['pending','working','awaiting_close','paused','system_closed'].includes(j.status));
   const tally=matches.find(j=>j.job_type===tallyType&&j.status==='completed');
-  const job=final||putaway||matches.find(j=>['pending','working','awaiting_close','paused'].includes(j.status))||tally;
+  const job=final||putaway||matches.find(j=>['pending','working','awaiting_close','paused','system_closed'].includes(j.status))||tally;
   const historicalComplete=codes.length===1&&plan.status==='completed';
-  const status=final||historicalComplete?'completed':putaway?'putting_away':tally?'tallied_pending_putaway':job?'working':'pending';
-  return {external_no:code,biz_class:inboundCodes(plan.bulk_external_inbound_no).includes(code)?'bulk_putaway':'direct_ship',status,job_id:job?.id||'',tally_job_id:tally?.id||'',completed_at:final?.updated_at||(historicalComplete?(plan.manual_completed_at||plan.updated_at||''):'')};
+  const status=final||historicalComplete?'completed':job?.status==='system_closed'?'system_closed':putaway?'putting_away':tally?'tallied_pending_putaway':job?'working':'pending';
+  return {external_no:code,biz_class:inboundCodes(plan.bulk_external_inbound_no).includes(code)?'bulk_putaway':'direct_ship',status,job_id:job?.id||'',job_type:job?.job_type||'',tally_job_id:tally?.id||'',completed_at:final?.updated_at||(historicalComplete?(plan.manual_completed_at||plan.updated_at||''):'')};
  });
  const missing_departments=planClasses(plan).filter(x=>putawayClasses.includes(x)&&(!biz||x===biz)&&!departmentCodes(plan,x).length);
  return {total:items.length,completed:items.filter(x=>x.status==='completed').length,items,missing_departments};

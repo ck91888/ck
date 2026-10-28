@@ -22,7 +22,10 @@ export async function validateInboundStage(env,plan,code,type){
  if(!stagedInbound(type))return;
  const jobs=(await env.DB.prepare("SELECT id,job_type,status FROM v2_inbound_references WHERE related_doc_type='inbound_plan' AND plan_id=? AND (inbound_external_no=? OR COALESCE(inbound_external_no,'')='') AND status!='cancelled'").bind(plan.id,code).all()).results||[];
  if(jobs.some(j=>j.job_type==='inbound_direct'))throw Error('此单已有旧版理货上架任务，请继续原任务 / 기존 검수·적치 작업을 계속하세요');
+ const closed=jobs.find(j=>j.status==='system_closed');
+ if(closed)throw Error('已有系统04:00结束的原任务，请从现场首页打开原任务，核对人员后恢复 / 04:00 종료된 기존 작업을 열어 인원 확인 후 재개하세요');
  const tally=jobs.find(j=>j.job_type===tallyType&&j.status==='completed');
  if(type===tallyType&&tally)throw Error('本单理货已完成，请从上架入口派工 / 검수 완료, 적치를 시작하세요');
  if(type===putawayType&&!tally)throw Error('本单理货尚未完成，不能开始上架 / 검수 완료 후 적치를 시작하세요');
+ if(jobs.some(j=>j.job_type===type))throw Error('此单已有原任务，请打开原任务核对状态与人员 / 기존 작업의 상태와 인원을 확인하세요');
 }
