@@ -1,0 +1,107 @@
+import {ensureSchema} from './schema-ready.js';
+import {inboundFlowEnabled} from './inbound-flow.js';
+import {ensureCourierBatches} from './courier-batches.js';
+const q=(env,sql,...args)=>env.DB.prepare(sql).bind(...args);
+export const COURIER_CLAIM_HISTORY_SQL=`CREATE TABLE IF NOT EXISTS ck_courier_plan_item_history(tracking_no TEXT NOT NULL,plan_id TEXT NOT NULL,line_id TEXT NOT NULL,released_at TEXT NOT NULL,replacement_plan_id TEXT NOT NULL,actor_id TEXT NOT NULL,actor_name TEXT NOT NULL,receipt_json TEXT NOT NULL,PRIMARY KEY(plan_id,tracking_no))`;
+const receiptSnapshot=i=>`COALESCE((SELECT json_object('receipt_id',r.id,'owner',r.owner,'received_at',r.received_at,'scanner_id',r.scanner_id,'scanner_name',r.scanner_name,'status',r.status,'handed_to',r.handed_to,'handed_at',r.handed_at,'batch_id',bi.batch_id,'batch_no',b.batch_no) FROM ck_courier_receipts r LEFT JOIN ck_courier_batch_items bi ON bi.receipt_id=r.id LEFT JOIN ck_courier_batches b ON b.id=bi.batch_id WHERE r.tracking_no=${i}.tracking_no),'{}')`;
+// Historical references still protect reconstruction when work/accounting exists.
+// Receipt operations use this live projection instead of treating that history
+// as an active plan. Cancellation/deletion changes the projection immediately.
+const livePlan=p=>`${p}.status NOT IN ('cancelled','deleted') AND COALESCE(${p}.is_deleted,0)=0`;
+
+// A cancelled plan can release an expected parcel only before any real work.
+// A never-dispatched bundled requirement is planning, not execution; archive it
+// with its original state before releasing the claim in the same transaction.
+// Keep this predicate identical in the helpful preflight and the write transaction.
+export const reusableCourierPlan=p=>`${p}.status='cancelled' AND COALESCE(${p}.is_deleted,0)=0
+ AND COALESCE(${p}.accounted,0)=0 AND COALESCE(${p}.force_completed,0)=0
+ AND COALESCE(${p}.manual_completed_at,'')=''
+ AND (COALESCE(${p}.unload_completed_at,'')='' OR NOT EXISTS(SELECT 1 FROM v2_inbound_plan_lines l WHERE l.plan_id=${p}.id AND l.unit_type!='courier' AND l.planned_qty>0))
+ AND NOT EXISTS(SELECT 1 FROM v2_inbound_plan_lines l WHERE l.plan_id=${p}.id AND (COALESCE(l.putaway_qty,0)!=0
+  OR (COALESCE(l.actual_qty,0)!=0 AND (l.unit_type!='courier' OR l.actual_qty!=((SELECT COUNT(*) FROM ck_courier_plan_items ci JOIN ck_courier_receipts cr ON cr.tracking_no=ci.tracking_no WHERE ci.line_id=l.id AND NOT EXISTS(SELECT 1 FROM ck_courier_plan_item_history h WHERE h.plan_id=ci.plan_id AND h.tracking_no=ci.tracking_no))+(SELECT COUNT(*) FROM ck_courier_plan_item_history h WHERE h.line_id=l.id AND json_extract(h.receipt_json,'$.receipt_id') IS NOT NULL))))))
+ AND NOT EXISTS(SELECT 1 FROM v2_inbound_plan_jobs j WHERE j.plan_id=${p}.id AND (j.status!='cancelled'
+   OR EXISTS(SELECT 1 FROM v2_ops_job_workers w WHERE w.job_id=j.id)
+   OR EXISTS(SELECT 1 FROM v2_ops_job_results r WHERE r.job_id=j.id)))
+ AND NOT EXISTS(SELECT 1 FROM v2_inbound_plan_biz_tasks t WHERE t.plan_id=${p}.id AND t.status!='pending')
+ AND NOT EXISTS(SELECT 1 FROM v2_outbound_orders o WHERE o.source_inbound_plan_id=${p}.id)
+ AND NOT EXISTS(SELECT 1 FROM sop_records s WHERE s.kind='need' AND json_extract(s.state,'$.source_type')='inbound' AND json_extract(s.state,'$.source_id')=${p}.id AND (
+  COALESCE(json_extract(s.state,'$.status'),'') NOT IN ('pending','cancelled')
+  OR COALESCE(json_extract(s.state,'$.task_id'),'')!='' OR COALESCE(json_array_length(s.state,'$.task_ids'),0)>0
+  OR json_extract(s.state,'$.result') IS NOT NULL OR json_extract(s.state,'$.shipping_output') IS NOT NULL
+  OR COALESCE(json_array_length(s.state,'$.links'),0)>0
+  OR EXISTS(SELECT 1 FROM json_each(s.state,'$.cargo_groups.groups') g WHERE COALESCE(json_array_length(g.value,'$.outputs'),0)>0 OR COALESCE(json_extract(g.value,'$.status'),'pending') NOT IN ('pending','cancelled')
+   OR EXISTS(SELECT 1 FROM json_each(g.value,'$.processes') pr WHERE COALESCE(json_extract(pr.value,'$.task_id'),'')!='' OR json_extract(pr.value,'$.result') IS NOT NULL OR COALESCE(json_extract(pr.value,'$.status'),'pending') NOT IN ('pending','cancelled')))
+ ))`;
+
+export async function ensureCourierClaims(env){
+ if(!inboundFlowEnabled(env))return;
+ await ensureCourierBatches(env);
+ await ensureSchema(env.DB,'courier-claims-v1',()=>env.DB.batch([
+  q(env,COURIER_CLAIM_HISTORY_SQL),
+  q(env,`CREATE TRIGGER IF NOT EXISTS ck_courier_released_plan_guard BEFORE UPDATE OF status ON v2_inbound_plans
+   WHEN NEW.status!='cancelled' AND EXISTS(SELECT 1 FROM ck_courier_plan_item_history h WHERE h.plan_id=NEW.id)
+   BEGIN SELECT RAISE(ABORT,'已释放快递占用的取消计划不能恢复，请使用新的入库计划 / 취소된 계획은 복원할 수 없습니다'); END`),
+  q(env,`CREATE TRIGGER IF NOT EXISTS ck_courier_history_delete_guard BEFORE DELETE ON v2_inbound_plans
+   WHEN EXISTS(SELECT 1 FROM ck_courier_plan_item_history h WHERE h.plan_id=OLD.id)
+   BEGIN SELECT RAISE(ABORT,'此计划保留快递重建历史，不能删除 / 택배 이력이 있어 삭제할 수 없습니다'); END`),
+  q(env,`CREATE TRIGGER IF NOT EXISTS ck_courier_history_edit_guard BEFORE UPDATE OF plan_date,customer,biz_class,biz_classes_json,cargo_summary,expected_arrival,purpose,remark,external_inbound_no,bulk_external_inbound_no ON v2_inbound_plans
+   WHEN OLD.status='cancelled' AND EXISTS(SELECT 1 FROM ck_courier_plan_item_history h WHERE h.plan_id=OLD.id)
+   BEGIN SELECT RAISE(ABORT,'此计划已取消并保留快递历史，不能修改 / 취소된 계획은 수정할 수 없습니다'); END`),
+  q(env,`CREATE TRIGGER IF NOT EXISTS ck_courier_claim_insert_guard BEFORE INSERT ON ck_courier_plan_items
+   WHEN NOT EXISTS(SELECT 1 FROM v2_inbound_plans p WHERE p.id=NEW.plan_id AND p.status='pending' AND COALESCE(p.is_deleted,0)=0)
+   BEGIN SELECT RAISE(ABORT,'入库计划状态已变化，请刷新 / 계획 상태가 변경되었습니다'); END`),
+  q(env,`CREATE TRIGGER IF NOT EXISTS ck_courier_claim_edit_guard BEFORE UPDATE ON ck_courier_plan_items
+   WHEN NOT EXISTS(SELECT 1 FROM v2_inbound_plans p WHERE p.id=OLD.plan_id AND p.status='pending' AND COALESCE(p.is_deleted,0)=0)
+    OR EXISTS(SELECT 1 FROM ck_courier_plan_items ci JOIN ck_courier_receipts r ON r.tracking_no=ci.tracking_no WHERE ci.plan_id=OLD.plan_id)
+    OR EXISTS(SELECT 1 FROM v2_inbound_plan_jobs j WHERE j.plan_id=OLD.plan_id AND j.status!='cancelled')
+   BEGIN SELECT RAISE(ABORT,'计划状态或收货作业已变化，不能修改 / 계획 또는 수령 상태가 변경되었습니다'); END`),
+  ...['INSERT','UPDATE OF status,related_doc_type,related_doc_id'].map((operation,i)=>q(env,`CREATE TRIGGER IF NOT EXISTS ck_courier_cancelled_job_${i} BEFORE ${operation} ON v2_ops_jobs
+   WHEN NEW.related_doc_type='inbound_plan' AND NEW.status NOT IN ('cancelled','completed')
+    AND EXISTS(SELECT 1 FROM v2_inbound_plans p WHERE p.id=NEW.related_doc_id AND (p.status='cancelled' OR COALESCE(p.is_deleted,0)!=0)
+     AND (EXISTS(SELECT 1 FROM ck_courier_plan_items ci WHERE ci.plan_id=p.id) OR EXISTS(SELECT 1 FROM ck_courier_plan_item_history h WHERE h.plan_id=p.id)))
+   BEGIN SELECT RAISE(ABORT,'关联快递入库计划已取消或删除，请刷新 / 취소된 계획입니다'); END`))
+ ]));
+ await ensureSchema(env.DB,'courier-live-links-v1',()=>env.DB.batch([
+  q(env,`CREATE VIEW IF NOT EXISTS ck_courier_active_plan_items AS SELECT i.* FROM ck_courier_plan_items i JOIN v2_inbound_plans p ON p.id=i.plan_id WHERE ${livePlan('p')}`),
+  q(env,`CREATE TRIGGER IF NOT EXISTS ck_courier_inactive_snapshot AFTER UPDATE OF status,is_deleted ON v2_inbound_plans
+   WHEN NEW.status IN ('cancelled','deleted') OR COALESCE(NEW.is_deleted,0)!=0
+   BEGIN INSERT OR IGNORE INTO ck_courier_plan_item_history(tracking_no,plan_id,line_id,released_at,replacement_plan_id,actor_id,actor_name,receipt_json)
+    SELECT i.tracking_no,i.plan_id,i.line_id,strftime('%Y-%m-%dT%H:%M:%fZ','now'),'','','',json_set(${receiptSnapshot('i')},'$.claim_release',json_object('reason','plan_inactive','status',NEW.status,'is_deleted',COALESCE(NEW.is_deleted,0))) FROM ck_courier_plan_items i WHERE i.plan_id=NEW.id;
+   END`)
+ ]));
+}
+
+export function courierCancellationAudit(env,planId){
+ const u=env.SOP_REQUEST_USER||{};
+ return q(env,`UPDATE ck_courier_plan_item_history SET actor_id=?,actor_name=? WHERE plan_id=? AND replacement_plan_id='' AND actor_id=''`,String(u.id||''),String(u.name||''),planId);
+}
+// Lazily freeze pre-existing invalid/orphan references in the receipt transaction,
+// before a new receipt could appear in their historical arrival progress.
+export function inactiveCourierSnapshot(env,code,time){
+ const u=env.SOP_REQUEST_USER||{};
+ return q(env,`INSERT OR IGNORE INTO ck_courier_plan_item_history(tracking_no,plan_id,line_id,released_at,replacement_plan_id,actor_id,actor_name,receipt_json)
+  SELECT i.tracking_no,i.plan_id,i.line_id,?,'',?,?,json_set(${receiptSnapshot('i')},'$.claim_release',json_object('reason','legacy_inactive_on_receive','status',p.status,'is_deleted',p.is_deleted))
+  FROM ck_courier_plan_items i LEFT JOIN v2_inbound_plans p ON p.id=i.plan_id WHERE i.tracking_no=? AND (p.id IS NULL OR NOT (${livePlan('p')}))`,time,String(u.id||''),String(u.name||''),code);
+}
+
+export function claimCourierStatements(env,planId,lineId,code){
+ const user=env.SOP_REQUEST_USER||{},safe=`EXISTS(SELECT 1 FROM v2_inbound_plans p WHERE p.id=ck_courier_plan_items.plan_id AND ${reusableCourierPlan('p')})`;
+ const t=new Date().toISOString(),request='COURIER-REPLACE-'+planId+'-',after="json_set(s.state,'$.status','cancelled','$.cancel_reason','来源入库已取消，重传时封存未派工作业','$.replacement_inbound_plan_id',?,'$.cancelled_at',?)";
+ return [
+  // Archive only never-dispatched requirements, in the claim transaction. Their
+  // original state, attachments and creation events remain available for audit.
+  q(env,`INSERT INTO sop_events(request_id,record_id,expected_revision,action,actor_id,actor_name,before_json,after_json,result_json,created_at)
+   SELECT ?||s.id,s.id,s.revision,'sop_inbound_replaced',?,?,s.state,${after},'{}',? FROM sop_records s
+   WHERE s.kind='need' AND json_extract(s.state,'$.status')='pending' AND json_extract(s.state,'$.source_type')='inbound'
+    AND EXISTS(SELECT 1 FROM ck_courier_plan_items i JOIN v2_inbound_plans p ON p.id=i.plan_id WHERE i.tracking_no=? AND i.plan_id!=? AND p.id=json_extract(s.state,'$.source_id') AND ${reusableCourierPlan('p')})`,request,String(user.id||''),String(user.name||''),planId,t,t,code,planId),
+  q(env,`UPDATE sop_records AS s SET revision=revision+1,state=${after},updated_at=? WHERE EXISTS(SELECT 1 FROM sop_events e WHERE e.request_id=?||s.id AND e.record_id=s.id AND e.expected_revision=s.revision)`,planId,t,t,request),
+  q(env,`INSERT OR IGNORE INTO ck_courier_plan_item_history(tracking_no,plan_id,line_id,released_at,replacement_plan_id,actor_id,actor_name,receipt_json)
+   SELECT tracking_no,plan_id,line_id,?,?,?,?,COALESCE((SELECT json_object('receipt_id',r.id,'owner',r.owner,'received_at',r.received_at,'scanner_id',r.scanner_id,'scanner_name',r.scanner_name,'status',r.status,'handed_to',r.handed_to,'handed_at',r.handed_at,'batch_id',bi.batch_id,'batch_no',b.batch_no) FROM ck_courier_receipts r LEFT JOIN ck_courier_batch_items bi ON bi.receipt_id=r.id LEFT JOIN ck_courier_batches b ON b.id=bi.batch_id WHERE r.tracking_no=ck_courier_plan_items.tracking_no),'{}') FROM ck_courier_plan_items WHERE tracking_no=? AND plan_id!=? AND ${safe}`,
+   new Date().toISOString(),planId,String(user.id||''),String(user.name||''),code,planId),
+  q(env,`UPDATE ck_courier_plan_item_history SET replacement_plan_id=? WHERE tracking_no=? AND replacement_plan_id='' AND plan_id!=?
+   AND EXISTS(SELECT 1 FROM ck_courier_plan_items i JOIN v2_inbound_plans p ON p.id=i.plan_id WHERE i.plan_id=ck_courier_plan_item_history.plan_id AND i.tracking_no=ck_courier_plan_item_history.tracking_no AND ${reusableCourierPlan('p')})`,planId,code,planId),
+  q(env,`DELETE FROM ck_courier_plan_items WHERE tracking_no=? AND plan_id!=? AND ${safe}
+   AND EXISTS(SELECT 1 FROM ck_courier_plan_item_history h WHERE h.plan_id=ck_courier_plan_items.plan_id AND h.tracking_no=ck_courier_plan_items.tracking_no AND h.replacement_plan_id=?)`,code,planId,planId),
+  q(env,'INSERT INTO ck_courier_plan_items(tracking_no,plan_id,line_id) VALUES(?,?,?)',code,planId,lineId)
+ ];
+}
