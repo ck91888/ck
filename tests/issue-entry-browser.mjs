@@ -20,7 +20,7 @@ async function create(label){await office.locator('#mainTabs [data-tab=issue]').
 const row=id=>DB.raw.prepare('SELECT * FROM v2_issue_tickets WHERE id=?').get(id),events=(id,action)=>DB.raw.prepare('SELECT count(*) n FROM sop_events WHERE record_id=? AND action=?').get('ISSUE-'+id,action).n;
 async function fieldList(filter='pending'){await field.locator('#page-issue_detail .back-btn').click();if(filter==='my')await field.locator('#page-issue_list button[onclick*="filterIssues(\'my\'"]').click();}
 async function fieldOpen(label){await field.locator('#issueListBody .list-item').filter({hasText:label}).click();await actions(field).waitFor();}
-const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jxZkAAAAASUVORK5CYII=','base64');
+import {png} from './issue-attachment-fixtures.mjs';
 try{
  await office.goto(origin+'/002/');const a=await create('Synthetic A'),b=await create('Synthetic B');
  await field.goto(origin+'/001/');await field.locator('#ck-login-code').fill(staff.badgeId);await field.locator('#ck-auth-gate button[type=submit]').click();await field.locator('#ck-auth-gate').waitFor({state:'hidden'});await field.locator('#page-home [onclick="goPage(\'issue_list\')"]').click();await fieldOpen('Synthetic A');
@@ -39,7 +39,7 @@ try{
  await actions(field).getByRole('button',{name:'仓库反馈',exact:true}).click();await modal(field).locator('[name=message]').fill('Synthetic A draft');
  let entered,release;const uploading=new Promise(r=>entered=r);await field.route('**/001/api',async route=>{if(route.request().headers()['content-type']?.startsWith('multipart/form-data')){entered();await new Promise(r=>release=r);}await route.continue();});
  const album=field.waitForEvent('filechooser');await modal(field).getByRole('button',{name:/从相册选择/}).click();await(await album).setFiles({name:'synthetic-album.png',mimeType:'image/png',buffer:png});await uploading;
- await modal(field).locator('#save').click();await field.waitForFunction(()=>document.querySelector('dialog[open] #formError')?.textContent.includes('仍在上传'));assert.equal(events(a,'sop_issue_feedback'),0);
+ await field.screenshot({path:path.join(artifacts,'photo-progress-dialog-mobile.png'),fullPage:true});await modal(field).locator('#save').click();await field.waitForFunction(()=>document.querySelector('dialog[open] #formError')?.textContent.includes('仍在上传'));assert.equal(events(a,'sop_issue_feedback'),0);
  await modal(field).locator('#cancel').click();await fieldList();await fieldOpen('Synthetic B');await actions(field).getByRole('button',{name:'仓库反馈',exact:true}).click();assert.equal(await modal(field).locator('[name=message]').inputValue(),'');await modal(field).locator('[name=message]').fill('Synthetic B separate draft');release();await field.waitForFunction(id=>!window._issueDrafts.get(id)?.uploading,a);await field.unroute('**/001/api');
  await modal(field).locator('#cancel').click();await fieldList('my');await fieldOpen('Synthetic A');await actions(field).getByRole('button',{name:'仓库反馈',exact:true}).click();assert.equal(await modal(field).locator('[name=message]').inputValue(),'Synthetic A draft');
  await field.waitForFunction(()=>window._issueHandleDraft.uploading===0);assert.equal(DB.raw.prepare('SELECT count(*) n FROM v2_attachments').get().n,1);let att=DB.raw.prepare('SELECT * FROM v2_attachments').get();assert.equal(att.related_doc_type,'issue_handle_run');assert.equal(att.related_doc_id,run.id);assert.equal(await field.locator('#issueDetailBody [data-issue-evidence] .photo-thumb').count(),1);

@@ -1,5 +1,7 @@
 # CK 仓库项目跨电脑接续
 
+- 2026-10-30 新现场照片上传前自动压缩已本地验收，发布标识 `20261030-photo-upload-compression`；**尚未推送或部署**。范围、1350项回归、3.46MB→404KB合成照片与条码验证、实机/实网边界见 [20261030-photo-compression.md](20261030-photo-compression.md)。不另存拍摄原图；旧照片、资料附件、业务数据库保持原样。
+
 - 2026-10-21 报表加载故障热修复：e580eb3 的客户关联6路UNION ALL超过D1的5项上限；改为最多6条固定独立SQL的一次批处理，保留全部来源和数量/工时口径。新增本地workerd D1复现与1003任务规模验收，必须运行 `tests/actual-work-d1.mjs`，不可仅靠普通SQLite回归。详见 [20261021-actual-work-report.md](20261021-actual-work-report.md) 热修复章节；发布标记 `20261021-report-d1-query-fix`，仅测试站。
 
 - 2026-10-21 数据中心实际作业日期统计/导出见 [20261021-actual-work-report.md](20261021-actual-work-report.md)：KST区间秒级工时、同人重叠/缺口提示、任务累计数量与同类样本分离、完整分页导出及零/缺失修正。基于caafccc；只用于测试分支/staging，部署结果以精确SHA检查为准；真实上周报告尚待新授权导出。

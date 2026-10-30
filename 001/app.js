@@ -4702,6 +4702,7 @@ function uploadIssueHandlePhoto(source) {
 }
 
 function _triggerPhotoInput(source) {
+  if(window.CKPhotoUpload?.busy())return;
   // source: 'camera'(拍照) / 'album'(相册多选) — 默认 album（不强制摄像头）
   var inputId = (source === 'camera') ? 'photoInputCamera' : 'photoInputAlbum';
   var el = document.getElementById(inputId);
@@ -4720,10 +4721,12 @@ function renderPhotoSourceBar(triggerCamera, triggerAlbum) {
   return '<div class="photo-source-bar">' +
     '<button type="button" class="btn btn-outline btn-sm" onclick="' + triggerCamera + '">📷 拍照 / 촬영</button>' +
     '<button type="button" class="btn btn-outline btn-sm" onclick="' + triggerAlbum + '">🖼 从相册选择 / 앨범에서 선택</button>' +
-    '</div>';
+    '</div>'+(window.CKPhotoUpload?'<p class="muted">'+CKPhotoUpload.hint+'</p>':'');
 }
 
 async function handlePhotoUpload(input) {
+  if(!window.CKPhotoUpload){alert('照片处理组件尚未加载，请刷新后重试 / 새로고침 후 사진을 다시 선택하세요');return;}
+  if(window.CKPhotoUpload?.busy())return;
   if (!input.files || input.files.length === 0) return;
   var files = Array.prototype.slice.call(input.files);
   var ctx = {
@@ -4732,6 +4735,19 @@ async function handlePhotoUpload(input) {
     attachment_category: _photoUploadCtx.attachment_category || '',
     issue_id: _photoUploadCtx.issue_id || ''
   };
+  if(window.CKPhotoUpload){
+    input.value='';_saveIssueFeedbackDraft();
+    var draft=ctx.issue_id?(_issueDrafts.get(ctx.issue_id)||_issueHandleDraft):null;
+    return CKPhotoUpload.upload(files,{
+      onBusy:function(busy){if(draft)draft.uploading=(draft.uploading||0)+(busy?1:-1);},
+      send:function(file){var fd=new FormData();fd.append('file',file);fd.append('related_doc_type',ctx.related_doc_type);fd.append('related_doc_id',ctx.related_doc_id);fd.append('attachment_category',ctx.attachment_category);fd.append('uploaded_by',getWorkerName());return uploadFile(fd);},
+      onUploaded:function(res,file){
+        var att=res.attachment||{id:res.id,file_key:res.file_key,file_name:file.name,content_type:file.type,file_size:file.size,related_doc_type:ctx.related_doc_type,related_doc_id:ctx.related_doc_id,attachment_category:ctx.attachment_category};
+        if(draft){if(!draft.session_photos.some(function(p){return p.id===att.id;}))draft.session_photos.push(att);if(_currentIssueId===ctx.issue_id)renderIssueSessionPhotos();}
+      },
+      onDone:function(){if(_currentPage==='issue_detail'&&_currentIssueId===ctx.issue_id&&!draft)loadIssueDetail();}
+    });
+  }
   var issueDraft=ctx.issue_id?(_issueDrafts.get(ctx.issue_id)||_issueHandleDraft):null;
   if(issueDraft)issueDraft.uploading=(issueDraft.uploading||0)+1;
   // 上传前先把"反馈内容"草稿保存好——任何后续渲染都能恢复

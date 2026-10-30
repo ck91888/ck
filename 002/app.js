@@ -1017,6 +1017,7 @@ function clearIssueCreateDraft(cancel) {
   var draft=_issueCreateDraft;_issueCreateDraft=null;
   resetIssueFileDrag();
   if(draft){
+    draft.controller?.abort();
     draft.files.forEach(function(f){if(f.preview)URL.revokeObjectURL(f.preview);});
     if(cancel)api({action:'v2_issue_draft_cancel',draft_id:draft.id});
   }
@@ -1024,9 +1025,16 @@ function clearIssueCreateDraft(cancel) {
   document.getElementById('ic-biz').disabled=false;
   document.getElementById('ic-file-list').innerHTML='';
 }
-function pickIssueFiles(input) {
-  addIssueFiles(Array.from(input.files||[]));
-  input.value='';
+async function pickIssueFiles(input) {
+  var files=Array.from(input.files||[]);input.value='';
+  if(!['ic-camera','ic-photos'].includes(input.id)){addIssueFiles(files);return;}
+  if(!window.CKPhotoUpload){if(_issueCreateDraft){_issueCreateDraft.error='照片处理组件尚未加载，请刷新后重试 / 새로고침 후 사진을 다시 선택하세요';renderIssueCreateAttachments();}return;}
+  var draft=_issueCreateDraft;if(!draft||draft.busy||draft.uncertain||!files.length)return;
+  draft.busy=true;draft.preparing=true;draft.controller=new AbortController();renderIssueCreateAttachments();
+  var prepared=[],errors=[];
+  try{for(var file of files){if(draft.files.length+prepared.length>=20){errors.push(L('ic_count'));break;}try{prepared.push(await CKPhotoUpload.prepare(file,{signal:draft.controller.signal}));}catch(e){errors.push(file.name+' — '+e.message);if(draft.controller.signal.aborted)break;}}}
+  finally{draft.busy=false;draft.preparing=false;draft.controller=null;}
+  if(_issueCreateDraft===draft)addIssueFiles(prepared,errors);
 }
 // Both picker and drop only stage local File objects. Upload stays in submitIssue.
 function addIssueFiles(files, rejected) {
@@ -1124,7 +1132,7 @@ function renderIssueCreateAttachments() {
   document.getElementById('ic-file-notice').textContent=d.notice;
   document.getElementById('ic-dropzone').setAttribute('aria-disabled',String(d.busy||d.uncertain));
   if(d.busy||d.uncertain)resetIssueFileDrag();
-  document.getElementById('ic-submit-status').textContent=d.uncertain?L('ic_uncertain'):d.busy?(d.payload?L('ic_saving'):L('ic_uploading')):'';
+  document.getElementById('ic-submit-status').textContent=d.preparing?'正在压缩照片… / 사진 압축 중…':d.uncertain?L('ic_uncertain'):d.busy?(d.payload?L('ic_saving'):L('ic_uploading')):'';
   document.querySelectorAll('#ic-attachments .ic-file-actions button,#ic-attachments input,#ic-biz,#ic-customer,#ic-docno,#ic-desc').forEach(function(el){el.disabled=d.busy||d.uncertain;});
   var btn=document.getElementById('ic-submit');btn.disabled=d.busy;btn.textContent=L(d.busy?'ic_saving':d.uncertain||d.files.some(function(f){return f.status==='failed';})?'ic_retry':'ic_submit');
 }
@@ -4669,6 +4677,7 @@ async function convertFeedbackToInbound(btnEl) {
 // ===== File Upload =====
 // source: 'camera'(拍照，capture=environment) / 'album'(相册多选) — 老调用缺省走 album
 function doUpload(docType, docId, category, source) {
+  if(window.CKPhotoUpload?.busy())return;
   _uploadCtx = { related_doc_type: docType, related_doc_id: docId, attachment_category: category };
   var inputId = (source === 'camera') ? 'fileInputCamera' : 'fileInputAlbum';
   var el = document.getElementById(inputId);
@@ -4687,10 +4696,11 @@ function renderPhotoSourceBar(triggerCamera, triggerAlbum) {
   return '<div class="photo-source-bar">' +
     '<button type="button" class="btn btn-outline btn-sm" onclick="' + triggerCamera + '">📷 拍照 / 촬영</button>' +
     '<button type="button" class="btn btn-outline btn-sm" onclick="' + triggerAlbum + '">🖼 从相册选择 / 앨범에서 선택</button>' +
-    '</div>';
+    '</div>'+(window.CKPhotoUpload?'<p class="muted">'+CKPhotoUpload.hint+'</p>':'');
 }
 
 async function handleFileUpload(input) {
+  if(window.CKPhotoUpload?.busy())return;
   if (!input.files || input.files.length === 0) return;
   var files = Array.prototype.slice.call(input.files);
   var ctx = {
@@ -4698,6 +4708,14 @@ async function handleFileUpload(input) {
     related_doc_id: _uploadCtx.related_doc_id || "",
     attachment_category: _uploadCtx.attachment_category || ""
   };
+  if(ctx.attachment_category==='issue_photo'&&!window.CKPhotoUpload){alert('照片处理组件尚未加载，请刷新后重试 / 새로고침 후 사진을 다시 선택하세요');return;}
+  if(window.CKPhotoUpload&&ctx.attachment_category==='issue_photo'){
+    input.value='';
+    return CKPhotoUpload.upload(files,{
+      send:function(file){var fd=new FormData();fd.append('file',file);fd.append('related_doc_type',ctx.related_doc_type);fd.append('related_doc_id',ctx.related_doc_id);fd.append('attachment_category',ctx.attachment_category);fd.append('uploaded_by',getUser());return uploadFile(fd);},
+      onDone:function(){if(_currentView==='issue_detail'&&_currentIssueId===ctx.related_doc_id)loadIssueDetail();}
+    });
+  }
   // 文件名+大小去重（同一批次内）
   var seen = {};
   var deduped = files.filter(function(f) {
