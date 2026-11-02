@@ -31,7 +31,7 @@ export const CREW_BORROW_SCHEMA=[
 export function crewAttendanceSchema(returns=false){const table=returns?'ck_attendance_current_days':'ck_attendance_days';
  const at=(time)=>returns?`((COALESCE((SELECT enabled FROM ck_attendance_return_config WHERE id=1),0)=0 AND d.day=date(${time},'+9 hours')) OR ((SELECT enabled FROM ck_attendance_return_config WHERE id=1)=1 AND d.span_status='open' AND julianday(${attendanceCutoffSQL('d.signed_in')})>julianday(${time})))`:`d.day=date(${time},'+9 hours')`;return [
  `CREATE TRIGGER IF NOT EXISTS ck_crew_source_attendance BEFORE INSERT ON ck_crew_borrows WHEN lower(NEW.worker_id) GLOB 'da-*' OR lower(NEW.worker_id) GLOB 'daf-*' OR lower(NEW.worker_id) GLOB 'emp-*' BEGIN
- SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM ${table} d JOIN ck_attendance_people p ON p.id=d.person_id JOIN v2_ops_job_workers w ON w.id=NEW.source_segment_id WHERE ${workerBadgeMatch('d.worker_id','NEW.worker_id')} AND ${at('NEW.borrowed_at')} AND p.enabled=1 AND d.signed_out='' AND ${activeAttendanceSQL('d')} AND d.signed_in<=w.joined_at AND date(w.joined_at,'+9 hours')=NEW.source_day AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks r WHERE r.attendance_id=d.id AND r.ended_at='')) THEN RAISE(ABORT,'borrow_source_attendance_changed') END; END`,
+ SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM ${table} d JOIN ck_attendance_people p ON p.id=d.person_id JOIN v2_ops_job_workers w ON w.id=NEW.source_segment_id WHERE ${workerBadgeMatch('d.worker_id','NEW.worker_id')} AND ${at('NEW.borrowed_at')} AND p.enabled=1 AND d.signed_out='' AND ${activeAttendanceSQL('d')} AND d.signed_in<=w.joined_at AND (date(w.joined_at,'+9 hours')=NEW.source_day${returns?" OR (SELECT enabled FROM ck_attendance_return_config WHERE id=1)=1":''}) AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks r WHERE r.attendance_id=d.id AND r.ended_at='')) THEN RAISE(ABORT,'borrow_source_attendance_changed') END; END`,
  `CREATE TRIGGER IF NOT EXISTS ck_crew_return_attendance BEFORE INSERT ON v2_ops_job_workers WHEN NEW.id LIKE 'WS-RETURN-%' AND (lower(NEW.worker_id) GLOB 'da-*' OR lower(NEW.worker_id) GLOB 'daf-*' OR lower(NEW.worker_id) GLOB 'emp-*') BEGIN
  SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM ${table} d JOIN ck_attendance_people p ON p.id=d.person_id WHERE ${workerBadgeMatch('d.worker_id','NEW.worker_id')} AND ${at('NEW.joined_at')} AND p.enabled=1 AND d.signed_out='' AND ${activeAttendanceSQL('d')} AND d.signed_in<=NEW.joined_at ${returns?"AND (COALESCE((SELECT enabled FROM ck_attendance_return_config WHERE id=1),0)=0 OR EXISTS(SELECT 1 FROM ck_crew_borrows loan WHERE 'WS-RETURN-'||loan.id=NEW.id AND julianday(loan.borrowed_at)>=julianday(d.signed_in)))":''} AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks r WHERE r.attendance_id=d.id AND r.ended_at='')) THEN RAISE(ABORT,'borrow_return_attendance_changed') END; END`
 ];}
@@ -136,11 +136,12 @@ export async function reconcileCrewReturns(e,id){
   let terminal='',wait='';
   if(!job||['completed','cancelled'].includes(job.status))terminal='原任务已结束或取消';
   else if(record?.kind==='task'&&!['working','paused'].includes(data.status))terminal='原作业段已完成或状态已变更';
-  else if(b.source_day!==kstDay(t))terminal='已跨韩国工作日，请重新确认派工';
+  else if(b.source_day!==kstDay(t)&&attendanceSource(e)==='ck_attendance_days')terminal='已跨韩国工作日，请重新确认派工';
   else if(record&&(data.owner_id!==b.source_owner_id||!(data.workers||[]).some(w=>sameWorkerBadge(w.id,b.worker_id))))terminal='原任务已正式改派该人';
   else if(!active.includes(job.status)||record?.kind==='task'&&data.status!=='working')wait='原任务已暂停，需负责人恢复';
   const own=await rows(e,`SELECT * FROM v2_ops_job_workers WHERE ${workerBadgeMatch('worker_id','?')} AND left_at=''`,b.worker_id);
   if(!terminal&&own.some(s=>s.job_id!==b.source_job_id))terminal='人员已另派任务，停止自动归还';
+  if(!terminal&&attendanceSource(e)!=='ck_attendance_days'){const current=await q(e,`SELECT d.signed_in FROM ${attendanceSource(e)} d WHERE ${workerBadgeMatch('d.worker_id','?')} AND ${attendanceCurrentSQL(e,'d')}`,b.worker_id).first();if(current&&b.borrowed_at<current.signed_in)terminal='借调属于先前出勤段，返岗须重新派工';}
   const why=await eligibility(e,b.worker_id,t);if(why.includes('休息'))wait=why;else if(why)terminal=why;
   if(terminal||wait){await mark(e,b,terminal?'closed':'return_pending',terminal||wait,t);out.push({id:b.id,worker_id:b.worker_id,worker_name:b.worker_name,status:terminal?'closed':'return_pending',reason:terminal||wait});continue;}
   const existing=own.find(s=>s.job_id===b.source_job_id),seg=existing?.id||'WS-RETURN-'+b.id,sql=[];

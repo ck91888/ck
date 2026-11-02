@@ -38,7 +38,7 @@ export async function ensureAttendanceReturnAdmission(e){
  if(!attendanceReturnEnabled(e))return;await ensureCrewBorrow(e);
  const enabled="(SELECT enabled FROM ck_attendance_return_config WHERE id=1)=1";
  const owner=(badge,time)=>`SELECT s.id FROM ck_attendance_spans s WHERE ${workerBadgeMatch('s.badge_id',badge)} AND s.status='open' AND s.ended_at='' AND julianday(s.started_at)<=julianday(${time}) AND julianday(${cutoffSQL('s.started_at')})>julianday(${time})`;
- await ensureSchema(e.DB,'attendance-return-admission-v3',()=>e.DB.batch([
+ await ensureSchema(e.DB,'attendance-return-admission-v4',()=>e.DB.batch([
  q(e,'DROP TRIGGER IF EXISTS ck_employee_guard_join'),...attendanceIdentitySchema(true).map(sql=>q(e,sql)),q(e,'DROP TRIGGER IF EXISTS ck_crew_source_attendance'),q(e,'DROP TRIGGER IF EXISTS ck_crew_return_attendance'),...crewAttendanceSchema(true).map(sql=>q(e,sql)),
  q(e,`CREATE TRIGGER IF NOT EXISTS ck_attendance_span_work_owner AFTER INSERT ON v2_ops_job_workers WHEN ${enabled} AND NEW.left_at='' BEGIN INSERT INTO ck_attendance_span_workers SELECT NEW.id,id FROM (${owner('NEW.worker_id','NEW.joined_at')}); END`),
  q(e,`CREATE TRIGGER IF NOT EXISTS ck_attendance_span_work_resume BEFORE UPDATE OF left_at,joined_at ON v2_ops_job_workers WHEN ${enabled} AND OLD.left_at<>'' AND NEW.left_at='' AND EXISTS(SELECT 1 FROM ck_attendance_span_workers old WHERE old.segment_id=OLD.id AND old.span_id NOT IN (${owner('NEW.worker_id','NEW.joined_at')})) BEGIN SELECT RAISE(ABORT,'attendance_resume_new_segment_required'); END`),
