@@ -356,7 +356,7 @@ test('home opens both work-plan and external jobs in the shared workspace; finis
  const task=await call('sop_task_dispatch',{department:'bulk',need_id:need.id,title:'打托',job_type:'bulk_op',estimated_minutes:30,workers:[{id:'PLAN-W',name:'计划员工'}],lead_id:'PLAN-W'}),number=(await call('sop_get',{id:need.id})).record.display_no;
  const p=await f.page('/001/');
  const cards=()=>[...p.d.querySelectorAll('#page-home .ck-native-task')],card=no=>cards().find(b=>b.querySelector('strong').textContent===no),action=prefix=>[...p.d.querySelectorAll('#page-bulk_op [data-actions] button')].find(b=>b.textContent.startsWith(prefix)),status=id=>f.env.DB.raw.prepare('SELECT status FROM v2_ops_jobs WHERE id=?').get(id).status;
- const openFinish=async()=>{action('填写产出').click();await until(()=>p.d.querySelector('#page-bulk_op [data-finish]'),p.errors);return p.d.querySelector('#page-bulk_op [data-finish]');};
+ const openFinish=async()=>{action('填写产出').click();await until(()=>p.d.querySelector('#page-bulk_op [data-finish]')&&!p.d.querySelector('#page-bulk_op [data-finish] button.ck-primary').disabled,p.errors);return p.d.querySelector('#page-bulk_op [data-finish]');};
  try{
   await until(()=>card(number)&&card('EXT-0')&&card('EXT-1'),p.errors);assert.match(card(number).textContent,/计划客户/);assert.match(card('EXT-0').textContent,/外部客户 0/);
   card(number).click();await until(()=>p.d.querySelector('#page-bulk_op .ck-work-number b')?.textContent===number,p.errors);

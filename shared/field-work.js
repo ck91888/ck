@@ -9,6 +9,7 @@
   root.className='ck-bulk';
   const external=!!options.external,api=(action,data={})=>CKSession.request(action,data),$=name=>root.querySelector('[data-'+name+']');
   let picker=null,scan=null,cargoDispatch=null,orderSelection=null,current=null,closed=false,loadSequence=0,requestId='',requestSignature='';
+  const draftState=ev=>{const r=ev.detail;if(r.id===current?.need?.id){current.need.revision=r.revision;orderSelection?.updateRevision?.(r.id,r.revision);cargoDispatch?.updateDraftRevision?.(r.id,r.revision);}if(r.id===current?.task?.id)current.task.revision=r.revision;};root.addEventListener('ck-output-draft-state',draftState);
   async function cleanup(){orderSelection?.destroy();orderSelection=null;if(cargoDispatch){await cargoDispatch.destroy();cargoDispatch=null;}if(picker){await picker.destroy();picker=null;}if(scan){const old=scan;scan=null;await old.stop().catch(()=>{});}}
   function error(x){if(!closed&&$('error')){$('error').textContent=x.message;$('error').hidden=false;}}
   function complete(){if(closed)return;current=null;options.onChange?.(null);if(options.onComplete)options.onComplete();else window.goPage('home');}
@@ -94,6 +95,7 @@
    if(!external&&t.owner_id!==CKSession.user?.id&&['assigned','working','paused','awaiting_review','rework'].includes(t.status)){
     const taskId=t.id;api('sop_owner_transfer_options',{id:taskId}).then(option=>{if(current?.task?.id===taskId&&option.can_claim)action('原负责人离岗 · 本人接班 / 담당자 부재 · 인계',async()=>{const fresh=await api('sop_owner_transfer_options',{id:taskId});if(!fresh.can_claim)throw Error('接班条件已变化，请刷新');await CKClaimOwner(fresh,()=>resolve(taskId));});}).catch(()=>{});
    }
+   if(['assigned','pending','working','paused','system_closed','awaiting_close','rework'].includes(t.status)&&!n?.cargo_groups)action('预填写／修改产出 / 산출 초안',()=>finish(t));
    if(external&&['pending','working','awaiting_close','paused','system_closed'].includes(t.status)){
     action(['paused','system_closed'].includes(t.status)?'恢复整个任务 / 전체 작업 재개':'暂停整个任务 / 전체 작업 중지',async()=>CKToggleNativePause(current.native,()=>resolve(t.id)));
     if(['paused','system_closed'].includes(t.status)){action('个人休息／恢复 / 개인 휴식·복귀',()=>window.CKOpenFieldLabor?.());return;}
@@ -112,6 +114,9 @@
    });
    else if(t.status==='completed')$('editor').innerHTML=`<h3>已审核完成 / 검수 완료</h3>${CKResultSummary(t.result)}${CKResultPhotos(t.result)}`;
   }
+  function dispatchDraft(){
+   if(!window.CKBulkOutputDraft)return;const host=$('people').parentElement,b=document.createElement('button'),panel=document.createElement('div');b.type='button';b.className='ck-small';b.textContent='预填写产出 / 산출 미리 입력';b.dataset.prefillOutput='';host.append(b,panel);b.onclick=()=>finish({id:current.need.id||'',revision:current.need.revision||0},true,panel);
+  }
   function people(label,workers,save,adjust=false,fields=''){
    workers=workers.map(w=>({...w}));for(const b of current.task?.borrowed_out||[])if(!workers.some(w=>w.id===b.worker_id))workers.push({id:b.worker_id,name:b.worker_name,borrowed:true});
    if(picker)picker.destroy();const host=$('editor')||$('content');
@@ -119,6 +124,7 @@
    if(!adjust&&!current.task&&options.onBatch&&!window.CKBulkOrderSelection&&!CKRequireBulkSelection($('people'),()=>resolve(current.need.id||current.need.display_no)))return;
    picker=CKPeoplePicker($('people'),{workers,leadId:current.task?.lead_id,error:$('error'),allowEmpty:external&&adjust});
    if(!adjust&&!current.task&&options.onBatch&&window.CKBulkOrderSelection){const selectionHost=document.createElement('div');$('people').prepend(selectionHost);orderSelection=CKBulkOrderSelection(selectionHost,{need:current.need,external,picker,customer:()=>$('people').elements.customer?.value.trim()||current.need.customer||''});}
+   if(!adjust&&!current.task)dispatchDraft();
    $('people').onsubmit=async ev=>{ev.preventDefault();const submit=ev.submitter||ev.target.querySelector('button[type=submit],button:not([type])');if(submit.disabled)return;submit.disabled=true;try{const staff=picker.read(),items=orderSelection?.read();if(items){const r=await write('sop_bulk_batch_create',{items,...staff});await options.onBatch(r.batch_id);}else await save(staff);}catch(x){error(x);submit.disabled=false;}};
   }
   function pause(t){
@@ -126,30 +132,36 @@
    $('editor').innerHTML='<form data-pause><label>暂停原因 / 중지 사유<textarea name="reason" required></textarea></label><button class="ck-primary">确认暂停 / 중지</button></form>';
    $('pause').onsubmit=async ev=>{ev.preventDefault();const submit=ev.submitter||ev.target.querySelector('button[type=submit],button:not([type])');if(submit.disabled)return;submit.disabled=true;try{const reason=new FormData(ev.target).get('reason');await write(external?'sop_native_people':'sop_task_pause',external?{job_id:t.id,revision:t.revision,workers:[],lead_id:'',reason}:{id:t.id,revision:t.revision,reason});await resolve(t.id);}catch(x){error(x);submit.disabled=false;}};
   }
-  function finish(t){
-   if(picker){picker.destroy();picker=null;}
-   const n=current.need,shipping=current.shipping,unit=shipping?.unit||n?.shipping_basis?.unit||n?.planned_unit||n?.unit||'箱',booked=shipping?.links?.filter(l=>l.phase==='planned')||[],linked=external&&!!current.native.job.linked_outbound_order_id,leadId=t.lead_id||current.last_lead?.id;
+  function finish(t,draftOnly=false,panel=null){
+   if(!draftOnly&&picker){picker.destroy();picker=null;}
+   const n=current.need,shipping=current.shipping,unit=shipping?.unit||n?.shipping_basis?.unit||n?.planned_unit||n?.unit||'箱',booked=shipping?.links?.filter(l=>l.phase==='planned')||[],linked=external&&!!current.native?.job.linked_outbound_order_id,leadId=t.lead_id||current.last_lead?.id;
    const planned=external?'':`<div class="ck-instructions"><p>待操作货量 / 작업 대상: ${esc(n?.planned_quantity||'—')} ${esc(n?.planned_unit||'')}</p><p>预计可出库成果 / 예상 출고 산출: ${esc(shipping?.by_unit?.map(c=>c.quantity+' '+c.unit).join(' + ')||((shipping?.quantity||n?.planned_quantity||'—')+' '+unit))}</p>${booked.map(l=>`<p>已预约出库 / 출고 예약: ${esc(shipping.orders.find(o=>o.id===l.outbound_id)?.display_no||l.outbound_id)} · <b>${esc(l.quantity)} ${esc(l.unit)}</b></p>`).join('')}<p>按实际完成的成果填写。打托后按托记录成果，操作总箱数填写实际处理的箱数。 / 실제 산출을 입력하세요.</p></div><div class="ck-counter-grid"><label>实际成果数量 / 실제 완료 수량<input type="number" name="quantity" min="1" step="1" required></label><label>成果单位 / 단위<select name="unit">${['箱','件','托','单','批'].map(u=>`<option ${u===unit?'selected':''}>${u}</option>`).join('')}</select></label></div>`;
-   $('editor').innerHTML=`<form data-finish><h3>审核并记录本次产出 / 검수·산출</h3><p class="ck-muted">核对现场实际完成内容后填写。本次产出整单记录一次，个人工时按参与时段计算。</p>${external?`<label>客户 / 고객<input name="customer" value="${esc(n.customer)}" required ${linked?'readonly':''}></label>`:''}${planned}${external?'':'<fieldset><legend>实际独立出货包装（混合箱托时填写全部）/ 실제 출고 포장</legend><p>不含托内箱或纸箱耗材；留空按上方单一成果单位。 / 팔레트 내부 상자·소모품 제외</p><div class="ck-counter-grid"><label>独立散箱 / 낱상자<input name="shipping_box_count" type="number" min="0" step="1"></label><label>独立托数 / 팔레트<input name="shipping_pallet_count" type="number" min="0" step="1"></label></div></fieldset>'}<details open><summary>操作产出与耗材 / 작업 산출·자재</summary><div class="ck-counter-grid">${counts.map(([key,label])=>`<label>${label}<input name="${key}" type="number" min="0" step="1" value="0"></label>`).join('')}</div></details><label style="display:flex;align-items:center;gap:10px"><input name="used_forklift" type="checkbox" style="width:auto;margin:0">使用叉车 / 지게차 사용</label><label>附加操作（选填）/ 추가 작업 (선택)<textarea name="description" placeholder="产出之外的补充操作 / 추가 작업 내용"></textarea></label><div data-location-photos></div><label>审核说明 / 검수 내용<input name="reason" placeholder="核对数量、包装及货位后的结论" required></label><button class="ck-primary">审核通过并结束任务 / 검수 통과·종료</button></form>`;
-   const photos=CKLocationPhotoPicker($('location-photos'),t,{type:external?'ops_job':'sop_task'});
-   if(options.drafts){const form=$('finish'),saved=options.drafts.get(t.id);for(const input of form.querySelectorAll('[name]'))if(saved&&Object.hasOwn(saved,input.name)&&input.type!=='file'){if(input.type==='checkbox')input.checked=!!saved[input.name];else input.value=saved[input.name];}const remember=()=>options.drafts.set(t.id,Object.fromEntries([...form.querySelectorAll('[name]')].filter(x=>x.type!=='file').map(x=>[x.name,x.type==='checkbox'?x.checked:x.value])));form.oninput=remember;form.onchange=remember;}
+   const host=panel||$('editor');
+   host.innerHTML=`<form data-finish><h3>审核并记录本次产出 / 검수·산출</h3><p class="ck-muted">核对现场实际完成内容后填写。本次产出整单记录一次，个人工时按参与时段计算。</p>${external?`<label>客户 / 고객<input name="customer" value="${esc(n.customer)}" required ${linked?'readonly':''}></label>`:''}${planned}${external?'':'<fieldset><legend>实际独立出货包装（混合箱托时填写全部）/ 실제 출고 포장</legend><p>不含托内箱或纸箱耗材；留空按上方单一成果单位。 / 팔레트 내부 상자·소모품 제외</p><div class="ck-counter-grid"><label>独立散箱 / 낱상자<input name="shipping_box_count" type="number" min="0" step="1"></label><label>独立托数 / 팔레트<input name="shipping_pallet_count" type="number" min="0" step="1"></label></div></fieldset>'}<details open><summary>操作产出与耗材 / 작업 산출·자재</summary><div class="ck-counter-grid">${counts.map(([key,label])=>`<label>${label}<input name="${key}" type="number" min="0" step="1" value="0"></label>`).join('')}</div></details><label style="display:flex;align-items:center;gap:10px"><input name="used_forklift" type="checkbox" style="width:auto;margin:0">使用叉车 / 지게차 사용</label><label>附加操作（选填）/ 추가 작업 (선택)<textarea name="description" placeholder="产出之外的补充操作 / 추가 작업 내용"></textarea></label><div data-location-photos></div><label>审核说明 / 검수 내용<input name="reason" placeholder="核对数量、包装及货位后的结论" required></label><button class="ck-primary">审核通过并结束任务 / 검수 통과·종료</button></form>`;
+   const form=host.querySelector('[data-finish]'),final=form.querySelector('button.ck-primary');
+   if(draftOnly||!(external?['pending','working','awaiting_close']:['working']).includes(t.status)){form.querySelector('h3').textContent='预填写产出 / 산출 초안';final.hidden=true;final.style.display='none';final.type='button';}
+   const photos=draftOnly?{read:async()=>[]}:CKLocationPhotoPicker(form.querySelector('[data-location-photos]'),t,{type:external?'ops_job':'sop_task'});
+   const target=draftOnly&&external?{external_code:n.display_no}:{id:t.id};
+   const draft=window.CKBulkOutputDraft?.(form,target,{onLoaded:r=>{if(!draftOnly)t.revision=r.revision;const saved=options.drafts?.get(t.id);for(const x of form.querySelectorAll('[name]'))if(saved&&Object.hasOwn(saved,x.name)){if(x.type==='checkbox')x.checked=!!saved[x.name];else x.value=saved[x.name];}},onSaved:r=>{if(!draftOnly)t.revision=r.revision;options.drafts?.delete(t.id);}});
+   if(options.drafts&&!draftOnly){const saved=options.drafts.get(t.id);for(const input of form.querySelectorAll('[name]'))if(saved&&Object.hasOwn(saved,input.name)&&input.type!=='file'){if(input.type==='checkbox')input.checked=!!saved[input.name];else input.value=saved[input.name];}const remember=()=>options.drafts.set(t.id,Object.fromEntries([...form.querySelectorAll('[name]')].filter(x=>x.type!=='file').map(x=>[x.name,x.type==='checkbox'?x.checked:x.value])));form.oninput=remember;form.onchange=remember;}
 
-   $('finish').onsubmit=async ev=>{
+   form.onsubmit=async ev=>{
     ev.preventDefault();const submit=ev.submitter||ev.target.querySelector('button[type=submit],button:not([type])');if(submit.disabled)return;submit.disabled=true;
     try{
+     if(draftOnly)return;const completion=draft?.completion()||{};
      const result=Object.fromEntries(new FormData(ev.target)),reason=result.reason;delete result.reason;
      for(const [key] of counts){result[key]=Number(result[key]);if(!Number.isSafeInteger(result[key])||result[key]<0)throw Error('工耗数量必须为非负整数 / 산출은 0 이상의 정수로 입력하세요');}
      const explicitShipping=['shipping_box_count','shipping_pallet_count'].some(k=>result[k]!==undefined&&result[k]!=='');
      if(!explicitShipping&&booked.some(l=>l.unit!==result.unit))throw Error('本次成果单位与出库预约不一致，请联系办公室调整出库数量与单位。 / 출고 예약 단위를 확인하세요.');
      const reserved=booked.reduce((sum,l)=>sum+Number(l.quantity),0);if(!explicitShipping&&reserved>Number(result.quantity))throw Error('已预约 '+reserved+' '+result.unit+'，本次填写 '+result.quantity+' '+result.unit+'，请核实实际成果或调整预约。 / 예약 수량을 확인하세요.');
      result.used_forklift=!!result.used_forklift;result.location_photos=await photos.read();
-     if(external)await write('v2_bulk_op_job_finish',{...result,job_id:t.id,worker_id:leadId,complete_job:true,packed_box_count:result.packed_count,total_operated_box_count:result.operated_box_count,remark:result.description,result_note:reason});
-     else await write('sop_task_complete_review',{id:t.id,revision:t.revision,result,decision:'pass',reason});
+     if(external)await write('v2_bulk_op_job_finish',{...result,...completion,job_id:t.id,worker_id:leadId,complete_job:true,packed_box_count:result.packed_count,total_operated_box_count:result.operated_box_count,remark:result.description,result_note:reason});
+     else await write('sop_task_complete_review',{id:t.id,revision:t.revision,...completion,result,decision:'pass',reason});
      options.drafts?.delete(t.id);complete();
     }catch(x){error(x);submit.disabled=false;}
    };
   }
   (initial?resolve(initial,options.detail):home()).catch(error);
-  return {destroy(){closed=true;loadSequence++;cleanup();},open:resolve};
+  return {destroy(){closed=true;loadSequence++;root.removeEventListener('ck-output-draft-state',draftState);cleanup();},open:resolve};
  };
 })();

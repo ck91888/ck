@@ -17,7 +17,7 @@ async function target(e,b,u){
  }else row=await read(e,text(b.id));
  if(!row||!['task','dispatch','need','bulk_output_draft'].includes(row.kind))throw Error('大货作业单不存在');
  permit(u,row);
- if(row.kind==='bulk_output_draft'){if(row.data.owner_id!==u.id)throw Error('无此操作权限');}
+ if(row.kind==='bulk_output_draft'){if(row.data.owner_id!==u.id)throw Error('无此操作权限');if(await q(e,"SELECT id FROM v2_ops_jobs WHERE job_type='bulk_op' AND related_doc_id=? LIMIT 1",row.data.external_code).first())throw Error('此单已有任务，请打开任务操作；已结束任务不能修改草稿');}
  else if(row.kind==='need'){if(row.data.status!=='pending'||row.data.task_id||row.data.bulk_batch_id)throw Error('此单已派工或结束，请打开当前任务');if(row.data.operation_kind==='direct_forward')throw Error('直接转发不登记操作产出');}
  else{
   const d=row.data,job=await q(e,'SELECT * FROM v2_ops_jobs WHERE id=?',row.id).first();
@@ -26,7 +26,7 @@ async function target(e,b,u){
   else{const delegate=(d.delegates||[]).includes(u.id)&&!(d.owner_transfers||[]).some(x=>x.from_id===u.id);shared=u.role==='dispatcher'&&d.owner_id!==u.id&&!delegate&&isBulkShareRecord(row)&&await isActivePartner(e,u.id,d.owner_id);if(u.role!=='manager'&&d.owner_id!==u.id&&!delegate&&!shared)throw Error('仅本任务派审员或获授权人员可操作');}
   if(row.kind==='dispatch')shared=u.role!=='manager'&&d.owner_id!==u.id&&isBulkShareRecord(row)&&await isActivePartner(e,u.id,d.owner_id);
   if(d.need_id)source=await read(e,d.need_id);
-  else if(row.kind==='dispatch'&&job.related_doc_type==='work_order')source=await read(e,await externalId({id:d.owner_id},job.related_doc_id));
+  else if(row.kind==='dispatch'&&job.related_doc_type==='work_order')source=await read(e,await externalId({id:d.owner_transfers?.[0]?.from_id||d.owner_id},job.related_doc_id));
   if(source&&['cancelled','closed'].includes(source.data.status))throw Error('作业计划已关闭');
  }
  const need=row.kind==='need'?row:source,cargo=need?.data.cargo_groups;
@@ -60,6 +60,7 @@ export async function bulkOutputDraft(b,e,u){
  // Revision guards serialize crew/owner changes; the status guard also covers native completion which does not update the dispatch record.
  await q(e,`CREATE TRIGGER IF NOT EXISTS ck_bulk_output_draft_open BEFORE INSERT ON sop_events WHEN NEW.action='sop_bulk_output_draft_save' BEGIN
  SELECT CASE WHEN EXISTS(SELECT 1 FROM v2_ops_jobs j WHERE j.id=NEW.record_id AND j.status NOT IN ('pending','working','paused','system_closed','awaiting_close')) THEN RAISE(ABORT,'output_draft_closed') END;
+ SELECT CASE WHEN json_extract(NEW.after_json,'$.external_code') IS NOT NULL AND EXISTS(SELECT 1 FROM v2_ops_jobs j WHERE j.job_type='bulk_op' AND j.related_doc_id=json_extract(NEW.after_json,'$.external_code')) THEN RAISE(ABORT,'output_draft_closed') END;
  END`).run();
  const statements=[...await partnerShareGuard(e,row,u,shared),q(e,'INSERT INTO sop_events VALUES(?,?,?,?,?,?,?,?,?,?)',request,row.id,row.revision,b.action,u.id,u.name,row.state||'{}',JSON.stringify(next),JSON.stringify(reply),t),q(e,'INSERT INTO sop_records VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET state=excluded.state,revision=excluded.revision,updated_at=excluded.updated_at',row.id,row.kind,row.revision+1,row.department,JSON.stringify(next),t)];
  // The inherited plan must still have the version the operator actually saw.
