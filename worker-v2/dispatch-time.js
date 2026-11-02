@@ -2,8 +2,9 @@
 // Internal server API only. Business-route integration is a separate rollout stage.
 import {ensureSchema} from './schema-ready.js';
 import {kstDay} from './attendance-time.js';
+import {latestCutoff} from './system-cutoff.js';
 const q=(e,s,...a)=>e.DB.prepare(s).bind(...a);
-const actions=new Set(['dispatch','transfer_in','assignment_end','transfer_out','operation_start','operation_end','rest_start','rest_end','checkout','qualification_change','refresh','cutoff']);
+const actions=new Set(['dispatch','transfer_in','assignment_end','transfer_out','operation_start','operation_end','rest_start','rest_end','checkout','qualification_change','cutoff']);
 const resumptions=new Set(['dispatch','transfer_in','operation_end','rest_end','qualification_change']);
 export const dispatchTimeEnabled=e=>e.SOP_ENVIRONMENT==='staging'&&e.SOP_AUTO_DISPATCH_TIME_ENABLED==='true';
 export const DISPATCH_TIME_SCHEMA=[
@@ -20,7 +21,8 @@ export async function ensureDispatchTime(e){
 function stamp(value){const t=Date.parse(value);if(!Number.isFinite(t))throw Error('派审事件时间无效');return t;}
 function boundary(at,day){
  const midnight=Date.parse(day+'T00:00:00+09:00')+86400000;
- let cutoff=Date.parse(day+'T04:00:00+09:00');if(cutoff<=at)cutoff+=86400000;
+ // Use the existing 04:00 KST operational boundary, never client connectivity.
+ const cutoff=stamp(latestCutoff(at))+86400000;
  return Math.min(midnight,cutoff);
 }
 const iso=t=>new Date(t).toISOString();
@@ -28,27 +30,26 @@ function close(state,at,reason){
  const segment=state.segments.find(s=>!s.end);if(!segment)return;
  segment.end=iso(Math.max(stamp(segment.start),at));segment.endReason=reason;
 }
-function expire(state,at){
+function markBoundary(state,at){
  const segment=state.segments.find(s=>!s.end);if(!segment)return;
- const last=stamp(state.lastConfirmedAt),limit=Math.min(last+state.leaseMs,boundary(stamp(segment.start),state.day));
- if(at<=limit&&kstDay(iso(at))===state.day)return;
- const end=Math.min(last,boundary(stamp(segment.start),state.day));
- close(state,end,'unconfirmed');state.suspendedForVerification=true;
- state.gaps.push({from:iso(end),observedAt:iso(at),reason:kstDay(iso(at))!==state.day?'cross_day':'confirmation_expired'});
+ const limit=boundary(stamp(segment.start),state.day);
+ if(at<limit)return;
+ const reason=kstDay(iso(at))!==state.day?'attendance_cross_day:unverified':'system_cutoff:unverified';
+ close(state,limit,reason);segment.needsVerification=true;state.suspendedForVerification=true;
+ state.gaps.push({from:segment.start,provisionalEnd:iso(limit),observedAt:iso(at),reason});
 }
 /** Context comes from authoritative post-transition attendance/ownership facts, never request JSON.
- * leaseMs is an explicit rollout policy; no timeout is silently enabled by this module.
+ * Screen locks, closed tabs, heartbeat gaps and short outages are not labor events.
  */
 export function transitionDispatchTime(previous,event,context){
  if(!actions.has(event.action))throw Error('无效派审计时事件');
- const at=stamp(event.at),leaseMs=Number(context.leaseMs);
- if(!Number.isSafeInteger(leaseMs)||leaseMs<=0||leaseMs>3600000)throw Error('请明确派审确认有效期');
+ const at=stamp(event.at);
  for(const key of ['personId','attendanceId','day'])if(!context[key])throw Error('派审身份或签到归属缺失');
  if(!/^\d{4}-\d{2}-\d{2}$/.test(context.day)||kstDay(context.day+'T12:00:00+09:00')!==context.day)throw Error('派审日期无效');
- const state=previous?structuredClone(previous):{personId:context.personId,attendanceId:context.attendanceId,day:context.day,version:0,status:'waiting_dispatch',activatedAt:'',lastConfirmedAt:'',lastEventAt:'',leaseMs,responsibilities:[],segments:[],gaps:[],suspendedForVerification:false};
+ const state=previous?structuredClone(previous):{personId:context.personId,attendanceId:context.attendanceId,day:context.day,version:0,status:'waiting_dispatch',activatedAt:'',lastEventAt:'',responsibilities:[],segments:[],gaps:[],suspendedForVerification:false};
  if(state.personId!==context.personId||state.attendanceId!==context.attendanceId||state.day!==context.day)throw Error('不得把派审时间并入另一身份或签到');
  if(state.lastEventAt&&at<stamp(state.lastEventAt))throw Error('派审事件早于已确认状态');
- expire(state,at);state.leaseMs=leaseMs;
+ markBoundary(state,at);
  // Only actual successful dispatch or an explicit owner handoff can create responsibility.
  if(['dispatch','transfer_in'].includes(event.action)){
   if(!event.jobId)throw Error('缺少真实大货作业单');
@@ -57,7 +58,7 @@ export function transitionDispatchTime(previous,event,context){
   state.activatedAt ||= event.at;
  }
  if(['assignment_end','transfer_out'].includes(event.action))state.responsibilities=state.responsibilities.filter(id=>id!==event.jobId);
- // A heartbeat may confirm an existing responsibility; it cannot invent an assignment.
+ // Only authoritative unfinished-task facts can retire an existing responsibility.
  if(context.unfinishedJobIds)state.responsibilities=state.responsibilities.filter(id=>context.unfinishedJobIds.includes(id));
  const currentDay=kstDay(event.at)===context.day;
  const present=context.attendanceValid===true&&currentDay&&(!context.inAt||at>=stamp(context.inAt));
@@ -74,16 +75,15 @@ export function transitionDispatchTime(previous,event,context){
  else{
   state.status='dispatching';state.suspendedForVerification=false;
   if(!state.segments.some(s=>!s.end))state.segments.push({start:event.at,end:'',startReason:event.action,endReason:'',actorId:event.actorId||'',requestId:event.requestId});
-  state.lastConfirmedAt=event.at;
  }
  state.lastEventAt=event.at;state.version++;
  return state;
 }
 export function dispatchTimeReport(state,asOf){
  if(!state)return {seconds:0,status:'waiting_dispatch',segments:[],gaps:[]};
- const copy=structuredClone(state),at=stamp(asOf);expire(copy,at);
+ const copy=structuredClone(state),at=stamp(asOf);markBoundary(copy,at);
  const segments=copy.segments.map(s=>({...s,seconds:Math.max(0,(Math.min(stamp(s.end||asOf),at)-stamp(s.start))/1000)})).filter(s=>s.seconds>0);
- return {seconds:segments.reduce((n,s)=>n+s.seconds,0),status:copy.suspendedForVerification&&copy.status==='dispatching'?'pending_review':copy.status,segments,gaps:copy.gaps,personId:copy.personId,attendanceId:copy.attendanceId,day:copy.day};
+ return {seconds:segments.filter(s=>!s.needsVerification).reduce((n,s)=>n+s.seconds,0),pendingSeconds:segments.filter(s=>s.needsVerification).reduce((n,s)=>n+s.seconds,0),status:copy.suspendedForVerification&&copy.status==='dispatching'?'pending_review':copy.status,segments,gaps:copy.gaps,personId:copy.personId,attendanceId:copy.attendanceId,day:copy.day};
 }
 /** Append the ledger change to the SAME batch as the real business transition.
  * Failed dispatches and CAS conflicts roll both writes back; retries replay no business SQL.
