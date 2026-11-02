@@ -40,3 +40,6 @@ test('pre-dispatch grouped output belongs to one process; a later process cannot
  await assert.rejects(()=>bulkOutputDraft({action:'sop_bulk_output_draft_read',id:'N',phase:'metrics'},f.env,f.user),/派工后/);const saved=f.state();saved.status='assigned';saved.task_id='T';saved.cargo_groups.groups[0].processes=[{name:'合成贴标',task_id:'FIRST',status:'approved'},{name:'合成打托',task_id:'T',status:'working'}];f.DB.raw.prepare('UPDATE sop_records SET state=? WHERE id=?').run(JSON.stringify(saved),'N');f.DB.raw.exec("UPDATE sop_records SET state=json_set(state,'$.cargo_process_index',1,'$.cargo_group_ids',json('[\"G0\"]')) WHERE id='T'");
  assert.equal((await bulkOutputDraft({action:'sop_bulk_output_draft_read',id:'T',phase:'group',group_id:'G0'},f.env,f.user)).draft,null);
 });
+test('pre-dispatch drafts require the existing dispatch role, even when the reviewer can read the same department',async t=>{
+ const f=fixture(t),n=await f.need();const reviewer={id:'SYNTH-REVIEWER',name:'合成审核员',role:'reviewer',departments:['bulk']};await assert.rejects(()=>bulkOutputDraft({action:'sop_bulk_output_draft_read',id:n.id},f.env,reviewer),/权限/);await assert.rejects(()=>bulkOutputDraft({action:'sop_bulk_output_draft_read',external_code:'SYNTH-REVIEWER-EXT'},f.env,reviewer),/权限/);
+});

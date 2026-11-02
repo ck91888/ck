@@ -17,8 +17,8 @@ async function target(e,b,u){
  }else row=await read(e,text(b.id));
  if(!row||!['task','dispatch','need','bulk_output_draft'].includes(row.kind))throw Error('大货作业单不存在');
  permit(u,row);
- if(row.kind==='bulk_output_draft'){if(row.data.owner_id!==u.id)throw Error('无此操作权限');if(await q(e,"SELECT id FROM v2_ops_jobs WHERE job_type='bulk_op' AND related_doc_id=? LIMIT 1",row.data.external_code).first())throw Error('此单已有任务，请打开任务操作；已结束任务不能修改草稿');}
- else if(row.kind==='need'){const grouped=b.phase==='group'&&row.data.cargo_groups;if(grouped?!['pending','assigned'].includes(row.data.status):row.data.status!=='pending'||row.data.task_id||row.data.bulk_batch_id)throw Error('此单已派工或结束，请打开当前任务');if(row.data.operation_kind==='direct_forward')throw Error('直接转发不登记操作产出');}
+ if(row.kind==='bulk_output_draft'){if(!['manager','dispatcher'].includes(u.role))throw Error('无派工预填写权限');if(row.data.owner_id!==u.id)throw Error('无此操作权限');if(await q(e,"SELECT id FROM v2_ops_jobs WHERE job_type='bulk_op' AND related_doc_id=? LIMIT 1",row.data.external_code).first())throw Error('此单已有任务，请打开任务操作；已结束任务不能修改草稿');}
+ else if(row.kind==='need'){if(!['manager','dispatcher'].includes(u.role))throw Error('无派工预填写权限');if(row.data.needs_clarification)throw Error('要求未补充完整，请联系订单处理组');if(row.data.status!=='pending'||row.data.task_id||row.data.bulk_batch_id)throw Error('此单已派工或结束，请打开当前任务');if(row.data.operation_kind==='direct_forward')throw Error('直接转发不登记操作产出');}
  else{
   const d=row.data,job=await q(e,'SELECT * FROM v2_ops_jobs WHERE id=?',row.id).first();
   if(d.job_type!=='bulk_op'||!job||job.job_type!=='bulk_op'||!open.includes(job.status)||!open.includes(d.status))throw Error('任务已结束、取消或已提交审核，不能修改草稿');
