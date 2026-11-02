@@ -9,6 +9,7 @@
   if(job.status==='system_closed')crew.textContent+=' · 系统04:00强制结束 · 待核实 / 시스템 종료·확인 필요';
   if(job.bulk_batch_id&&!(job.workers||[]).length)crew.textContent+=' · 指派 '+((job.assigned_workers||[]).map(w=>w.name).join('、'))+' · 待切单计时';
   const dispatcher=document.createElement('small');dispatcher.className='ck-task-dispatcher';dispatcher.textContent='派审员 / 배정·검수 담당자：'+window.CKDocumentLabels.jobDispatcher(job);b.append(title,info,dispatcher,crew);
+  if(job.shared){const hint=document.createElement('small');hint.textContent='协作未完成单 / 협업 미완료 · 原派审员不变';b.append(hint);}
   if(job.can_claim){const hint=document.createElement('small');hint.textContent='原派审员离岗 · 点击明确接班 / 기존 담당자 부재 · 인계 확인';b.append(hint);}
   b.onclick=async()=>{b.disabled=true;try{if(job.can_claim){const option=await CKSession.request('sop_owner_transfer_options',{id:job.id});if(!option.can_claim)throw Error('接班条件已变化，请刷新任务 / 인계 상태가 변경되었습니다');await CKClaimOwner(option,()=>CKOpenNativeJob({...job,can_claim:false}));}else await CKOpenNativeJob(job);}catch(e){alert(e.message);}finally{b.disabled=false;}};return b;
  };

@@ -9,6 +9,7 @@ import {workerBadgeMatch} from './daily-badge-identity.js';
 import {assignCargoProcess,processNames,taskGroups} from './cargo-processes.js';
 import {recordNumbers,resolveRecordId} from './document-numbers.js';
 import {documentCodeError} from '../shared/document-code.js';
+import {isActivePartner,partnerShareGuard,shareConflict} from './dispatch-share.js';
 const q=(e,s,...a)=>e.DB.prepare(s).bind(...a),rows=async(e,s,...a)=>(await q(e,s,...a).all()).results;
 const text=v=>String(v??'').trim(),terminal=d=>['completed','cancelled'].includes(d.status);
 const read=async(e,id)=>{if(!id)return null;const r=await q(e,'SELECT * FROM sop_records WHERE id=?',id).first();return r?{...r,data:JSON.parse(r.state)}:null;};
@@ -36,7 +37,9 @@ async function permit(e,u,owner='',admission=false){
   if(u.role!=='dispatcher'||u.daily_dispatch&&!u.can_dispatch||!(u.daily_dispatch?u.dispatch_departments||[]:u.departments||[]).includes('bulk'))throw Error('无大货派工权限');
   if(!await q(e,"SELECT 1 FROM ck_attendance_days d WHERE d.id=? AND d.day=date('now','+9 hours') AND d.signed_out='' AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at='')",u.attendance_id||'').first())throw Error('派审员须已签到且不在休息中');
  }
- if(owner&&owner!==u.id&&!(u.role==='manager'&&u.scope==='office'))throw Error('请由本批派审员操作；原负责人离岗时请先办理接班');
+ if(!owner||owner===u.id||u.role==='manager'&&u.scope==='office')return false;
+ if(!await isActivePartner(e,u.id,owner))throw Error('请由本批派审员操作；原负责人离岗时请先办理接班');
+ return true;
 }
 async function person(e,workers,lead){
  if(!Array.isArray(workers)||workers.length!==1||!workers[0]?.id||!sameWorkerBadge(workers[0].id,lead))throw Error('一人多单必须且只能选择1名实际操作员');
@@ -62,9 +65,10 @@ async function candidate(e,item,helpers){
  const customer=text(order?.customer||item.customer);return {source_type:'external',work_order_no:no,order,customer,title:no,token:order?JSON.stringify([order.id,order.status,order.updated_at,order.revision_no||0]):'',key:order?'outbound:'+order.id:'external:'+no};
 }
 async function batchItems(e,id){return (await rows(e,'SELECT s.*,i.position,i.source_type AS batch_source_type,i.source_id AS batch_source_id,j.status AS job_status,j.active_worker_count FROM ck_bulk_work_batch_items i JOIN sop_records s ON s.id=i.job_id JOIN v2_ops_jobs j ON j.id=s.id WHERE i.batch_id=? ORDER BY i.position',id)).map(r=>({...r,data:{...JSON.parse(r.state),...(r.kind==='dispatch'?{status:r.job_status}:{})}}));}
-async function commit(e,b,u,row,data,sql,result){
+async function commit(e,b,u,row,data,sql,result,viaShare=false){
  const t=new Date().toISOString(),signature=JSON.stringify(b),answer={ok:true,id:row.id,revision:row.revision+1,...result,_bulk_signature:signature};
- try{await e.DB.batch([...event(e,row,data,u,b.client_req_id,b.action,t,answer),...sql]);}catch(error){const prior=await replay(e,b,u);if(prior)return prior;throw error;}return answer;
+ const guard=await partnerShareGuard(e,row,u,viaShare);
+ try{await e.DB.batch([...guard,...event(e,row,data,u,b.client_req_id,b.action,t,answer),...sql]);}catch(error){const prior=await replay(e,b,u);if(prior)return prior;if(shareConflict.test(error.message||''))throw Error('记录已更新或协作已结束，请刷新后再操作');throw error;}return answer;
 }
 async function replay(e,b,u){if(!b.client_req_id)return null;const r=await q(e,'SELECT * FROM sop_events WHERE request_id=?',b.client_req_id).first();if(!r)return null;const a=JSON.parse(r.result_json);if(r.actor_id!==u.id||r.action!==b.action||a._bulk_signature!==JSON.stringify(b))throw Error('请求编号已使用，内容已变化');return a;}
 export async function handleBulkBatch(b,e,helpers){
@@ -96,8 +100,8 @@ export async function handleBulkBatch(b,e,helpers){
   state.active_job_id=jobs[0];sql.push(q(e,"INSERT INTO v2_ops_jobs(id,flow_stage,biz_class,job_type,related_doc_type,related_doc_id,status,created_by,created_at,updated_at,active_worker_count,display_no) VALUES(?,'order_op','bulk','bulk_batch','bulk_batch',?,'working',?,?,?,1,?)",id,id,u.id,t,t,state.batch_no),openLabor(e,id,worker,t));
   return commit(e,b,u,{id,kind:'bulk_batch',revision:0},state,sql,{batch_id:id,job_id:jobs[0],jobs});
  }
- const row=await read(e,b.id);if(!row||row.kind!=='bulk_batch')throw Error('多单派工批次不存在');await permit(e,u,row.data.owner_id);const items=await batchItems(e,row.id);
- if(b.action==='sop_bulk_batch_get')return {ok:true,...(simultaneous(row.data)?{facts:await batchFacts(e,row,items)}:{}),batch:pub(row),items:await recordNumbers(e,items.map(r=>({...pub(r),job_status:r.job_status,active_worker_count:r.active_worker_count}))),completed:items.every(r=>terminal(r.data))};
+ const row=await read(e,b.id);if(!row||row.kind!=='bulk_batch')throw Error('多单派工批次不存在');const viaShare=await permit(e,u,row.data.owner_id);const items=await batchItems(e,row.id);
+ if(b.action==='sop_bulk_batch_get')return {ok:true,shared:await isActivePartner(e,u.id,row.data.owner_id),...(simultaneous(row.data)?{facts:await batchFacts(e,row,items)}:{}),batch:pub(row),items:await recordNumbers(e,items.map(r=>({...pub(r),job_status:r.job_status,active_worker_count:r.active_worker_count}))),completed:items.every(r=>terminal(r.data))};
  if(!text(b.client_req_id))throw Error('缺少请求编号');const old=await replay(e,b,u);if(old)return old;if(Number(b.revision)!==row.revision)throw Error('多单派工已更新，请刷新后重试');
  const data=structuredClone(row.data),t=new Date().toISOString(),sql=[];
  if(simultaneous(data)){
@@ -106,7 +110,7 @@ export async function handleBulkBatch(b,e,helpers){
   else if(b.action==='sop_bulk_batch_resume'){if(!['paused','system_closed'].includes(data.status))throw Error('本批未暂停');const worker=await person(e,[data.worker],data.worker.id);if(data.status==='system_closed')for(const child of items.filter(x=>x.job_status==='system_closed')){const d={...child.data,status:child.data.system_cutoff?.previous_status==='awaiting_review'?'awaiting_review':'working'};sql.push(...event(e,child,d,u,b.client_req_id+'-resume-'+child.id,b.action,t),q(e,"UPDATE v2_ops_jobs SET status='working',resumed_at=?,updated_at=? WHERE id=? AND status='system_closed'",t,t,child.id));}data.status='working';sql.push(q(e,"UPDATE v2_ops_jobs SET status='working',resumed_at=?,active_worker_count=1,updated_at=? WHERE id=?",t,t,row.id),openLabor(e,row.id,worker,t));}
   else if(b.action==='sop_bulk_batch_people'){if(!['working','paused'].includes(data.status))throw Error('本批劳动已结束');const worker=await person(e,b.workers,b.lead_id);if(!text(b.reason))throw Error('请填写换人原因');data.worker=worker;data.workers=[worker];data.lead_id=worker.id;sql.push(closeLabor(e,row.id,t,'bulk_batch_people'));for(const r of items)if(!terminal(r.data))sql.push(...event(e,r,{...r.data,workers:[worker],lead_id:worker.id,last_lead:worker},u,b.client_req_id+'-'+r.id,b.action,t));if(data.status==='working')sql.push(openLabor(e,row.id,worker,t),q(e,'UPDATE v2_ops_jobs SET active_worker_count=1 WHERE id=?',row.id));}
   else if(b.action!=='sop_bulk_batch_cancel')throw Error('未知批次操作');
-  if(b.action!=='sop_bulk_batch_cancel')return commit(e,b,u,row,data,sql,{batch_id:row.id});
+  if(b.action!=='sop_bulk_batch_cancel')return commit(e,b,u,row,data,sql,{batch_id:row.id},viaShare);
  }
 
  if(b.action==='sop_bulk_batch_switch'||b.action==='sop_bulk_batch_resume'){
@@ -128,7 +132,7 @@ export async function handleBulkBatch(b,e,helpers){
   if(r.data.need_id){const need=await read(e,r.data.need_id),nd=structuredClone(need.data);if(nd.cargo_groups){for(const g of taskGroups(nd.cargo_groups,{id:r.id,data:r.data})){const p=g.processes?.find(x=>x.task_id===r.id);if(p?.result||p?.status==='approved'||p?.status==='awaiting_review')throw Error('本单已有成果，请按原流程完成审核');if(p){p.task_id='';p.status='pending';}}}else{nd.task_id='';nd.status='pending';}if(simultaneous(data)&&!items.some(x=>x.id!==r.id&&x.data.need_id===need.id&&!terminal(x.data)))delete nd.bulk_batch_id;sql.push(...event(e,need,nd,u,b.client_req_id+'-need',b.action,t));}
   sql.push(close(e,r.id,t,'bulk_batch_cancel'),...event(e,r,{...r.data,status:'cancelled',cancel_reason:text(b.reason)},u,b.client_req_id+'-'+r.id,b.action,t),q(e,"UPDATE v2_ops_jobs SET status='cancelled',active_worker_count=0,updated_at=? WHERE id=?",t,r.id));if(data.active_job_id===r.id)data.active_job_id='';
  }else throw Error('未知多单派工操作');
- return commit(e,b,u,row,data,sql,{batch_id:row.id,job_id:data.active_job_id});
+ return commit(e,b,u,row,data,sql,{batch_id:row.id,job_id:data.active_job_id},viaShare);
 }
 
 export async function guardBulkBatchMutation(b,e){
