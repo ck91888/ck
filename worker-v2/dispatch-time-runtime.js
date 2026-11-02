@@ -33,9 +33,9 @@ function status(s,t){return `(SELECT CASE
  ELSE 'dispatching' END FROM (SELECT 1) singleton LEFT JOIN ck_dispatch_time_identity attendance ON attendance.id=${s}.attendance_id AND attendance.person_id=${s}.person_id)`;}
 function tick(person,t,reason,key){return `INSERT INTO ck_dispatch_time_ticks(person_id,at,reason,event_key) SELECT ${person},${t},'${reason}',${key} WHERE ${person} IS NOT NULL;`;}
 const businessActions=['sop_task_dispatch','sop_native_start','sop_task_start','sop_task_people','sop_task_pause','sop_task_finish','sop_task_complete_review','sop_task_review','sop_native_people','sop_native_resume','sop_native_pause','sop_owner_transfer','sop_cargo_group_complete','sop_cargo_group_review','sop_cargo_job_finish','sop_cargo_groups_ack','sop_bulk_output_draft_save','sop_bulk_batch_resume','sop_bulk_batch_pause','sop_bulk_batch_people','sop_bulk_batch_cancel','sop_bulk_batch_switch'];
-function capture(eventKey,actor,job,t,state,action){
+function capture(eventKey,actor,job,t,state,action,admitted='1'){
  const owner=`json_extract(${state},'$.owner_id')`;
- return `INSERT OR IGNORE INTO ck_dispatch_time_actions(event_key,person_id,actor_id,job_id,at,source,action) SELECT ${eventKey},${actor},${actor},${job},${t},CASE WHEN ${owner}=${actor} THEN 'owner' WHEN ${delegate(actor,state)} THEN 'delegate' ELSE 'shared' END,${action} WHERE ${owner}=${actor} OR (${delegate(actor,state)}) OR ${pair(actor,owner,`date(${t},'+9 hours')`)};`;
+ return `INSERT OR IGNORE INTO ck_dispatch_time_actions(event_key,person_id,actor_id,job_id,at,source,action) SELECT ${eventKey},${actor},${actor},${job},${t},CASE WHEN ${owner}=${actor} THEN 'owner' WHEN ${delegate(actor,state)} THEN 'delegate' ELSE 'shared' END,${action} WHERE (${admitted}) AND (${owner}=${actor} OR (${delegate(actor,state)}) OR ${pair(actor,owner,`date(${t},'+9 hours')`)});`;
 }
 function schema(){
  const enabled="(SELECT enabled FROM ck_dispatch_time_config WHERE id=1)=1",t="MAX(NEW.at,COALESCE((SELECT MAX(updated_at) FROM ck_dispatch_time_days WHERE person_id=NEW.person_id),NEW.at))";
@@ -66,7 +66,7 @@ function schema(){
  ${tick('NEW.person_id','NEW.at','business_action','NEW.event_key')}
  END`,
  `CREATE TRIGGER IF NOT EXISTS ck_dispatch_time_sop_action AFTER INSERT ON sop_events WHEN ${enabled} AND json_extract(NEW.after_json,'$.job_type')='bulk_op' AND NEW.action IN (${businessActions.map(x=>"'"+x+"'").join(',')}) BEGIN
- ${capture('NEW.request_id','NEW.actor_id','NEW.record_id','NEW.created_at','NEW.after_json','NEW.action')}
+ ${capture('NEW.request_id','NEW.actor_id','NEW.record_id','NEW.created_at','NEW.after_json','NEW.action',"NEW.action<>'sop_owner_transfer'")}
  INSERT OR IGNORE INTO ck_dispatch_time_actions SELECT NEW.request_id||':transfer-target',json_extract(NEW.after_json,'$.owner_id'),NEW.actor_id,NEW.record_id,NEW.created_at,'owner',NEW.action FROM (SELECT 1) WHERE NEW.action='sop_owner_transfer' AND json_extract(NEW.after_json,'$.owner_id')<>json_extract(NEW.before_json,'$.owner_id');
  END`,
  `CREATE TRIGGER IF NOT EXISTS ck_dispatch_time_native_result AFTER INSERT ON v2_ops_job_results WHEN ${enabled} AND COALESCE(json_extract(NEW.result_json,'$.dispatch_actor_id'),'')<>'' AND EXISTS(SELECT 1 FROM v2_ops_jobs WHERE id=NEW.job_id AND job_type='bulk_op') BEGIN

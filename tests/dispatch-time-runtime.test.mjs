@@ -109,3 +109,6 @@ test('last cancellation stops duty and a later successful dispatch starts a new 
 test('concurrent first dispatches of distinct orders open only one personal interval',async t=>{
  const f=await setup(t);const jobs=await Promise.all([f.task('A','合成并发甲'),f.task('A','合成并发乙')]);assert.notEqual(jobs[0].id,jobs[1].id);assert.equal(f.spans('A').length,1);assert.equal(f.DB.raw.prepare('SELECT count(*) n FROM ck_dispatch_time_links WHERE person_id=?').get(f.people.A.id).n,2);f.advance(10);await f.finish('A',jobs[0].id);assert.equal(f.state('A').status,'dispatching');await f.finish('A',jobs[1].id);assert.equal(f.seconds('A'),600);assert.equal(f.state('A').status,'waiting_dispatch');
 });
+test('formal transfer to an active sharing partner never reclassifies the former owner as a newly engaged shared handler',async t=>{
+ const f=await setup(t),job=await f.task('A','合成协作仍有效时转单');await f.share();f.advance(10);await f.ok('A','sop_owner_transfer',{id:job.id,revision:f.record(job.id).revision,target_badge:f.people.B.badgeId,reason:'合成正式交接而非继续协助'});assert.equal(f.state('A').status,'waiting_dispatch');assert.equal(f.state('B').status,'dispatching');assert.equal(f.seconds('A'),600);f.advance(10);await f.finish('B',job.id);assert.equal(f.seconds('A'),600);assert.equal(f.seconds('B'),600);
+});
