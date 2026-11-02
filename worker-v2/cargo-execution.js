@@ -1,3 +1,4 @@
+import {bulkOutputFinalGuard} from './bulk-output-draft.js';
 import {executionDepartment} from './work-execution.js';
 import {syncGroupReservations} from './cargo-reservations.js';
 import {advanceBatchProcesses} from './bulk-batch-labor.js';
@@ -68,6 +69,6 @@ export async function cargoExecution(b,env,u){
  task.data.cargo_last_action={action:b.action,group_id:group?.id||'',by:u.name,at:t};
  const result={ok:true,id:row.id,revision:row.revision+1,fingerprint};
  const shareGuard=task?await partnerShareGuard(env,task,u,shared):[];
- try{await env.DB.batch([...shareGuard,...chainEvent(env,row,data,u,request,b.action,t,result),...chainEvent(env,task,task.data,u,request+'-task',b.action,t),...extra]);}catch(error){const committed=await previous();if(committed)return committed;if(shareConflict.test(error.message||''))throw Error('记录已更新或协作已结束，请刷新后再操作');throw error;}
+ try{await env.DB.batch([...shareGuard,...bulkOutputFinalGuard(env,b,task,u),...chainEvent(env,row,data,u,request,b.action,t,result),...chainEvent(env,task,task.data,u,request+'-task',b.action,t),...extra]);}catch(error){const committed=await previous();if(committed)return committed;if(shareConflict.test(error.message||''))throw Error('记录已更新或协作已结束，请刷新后再操作');throw error;}
  return result;
 }

@@ -1,3 +1,4 @@
+import {bulkOutputDraft} from './bulk-output-draft.js';
 import {shippingExpectation} from './shipping-expectation.js';
 import {shippingOutput} from './shipping-output.js';
 import {reserveShipping,shippingFullyAllocated,shippingCapacity,resultShippingComponents,expectedShippingSources} from './shipping-quantities.js';
@@ -207,6 +208,7 @@ export async function handleSop(b,env) {
   const expectedShipping=await shippingExpectation(b,env,u);if(expectedShipping)return expectedShipping;
   const correctedShipping=await shippingOutput(b,env,u);if(correctedShipping)return correctedShipping;
   const shipping=await cargoShipping(b,env,u);if(shipping)return shipping;
+  const outputDraft=await bulkOutputDraft(b,env,u);if(outputDraft)return outputDraft;
   const execution=await cargoExecution(b,env,u);if(execution)return execution;
   const cargo=await cargoGroups(b,env,u);if(cargo)return cargo;
   const batchMaterials=await readBatchMaterials(b,env,u);if(batchMaterials)return batchMaterials;
@@ -717,6 +719,7 @@ export async function handleSop(b,env) {
   } else fail('未知操作');
   return await save(env,b,u,row,d,extra,await partnerShareGuard(env,row,u,viaShare));
  }catch(e){
+  if(b.action.startsWith('sop_bulk_output_draft_'))return {ok:false,error:e.message};
   // Shipping corrections validate their own payload and authorization on replay.
   if((b.action.startsWith('sop_shipping_output_')||b.action==='sop_shipping_expectation_save'))return {ok:false,error:/revision_conflict/.test(e.message)?'记录已更新，请刷新后再操作':e.message};
   // A lost response retried with the same request id never applies the mutation twice.
