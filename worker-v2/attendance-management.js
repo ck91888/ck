@@ -28,6 +28,8 @@ export async function attendanceVoidBlockers(env,date){
  const rest=(await q(env,'SELECT DISTINCT d.id FROM ck_attendance_days d JOIN ck_attendance_breaks b ON b.attendance_id=d.id WHERE d.day=?',date).all()).results;
  const hasLoans=await q(env,"SELECT name FROM sqlite_master WHERE type='table' AND name='ck_crew_borrows'").first();
  const loans=hasLoans?(await q(env,`SELECT DISTINCT d.id FROM ck_attendance_days d JOIN ck_crew_borrows b ON ${workerBadgeMatch('b.worker_id','d.worker_id')} WHERE d.day=? AND b.status IN ('borrowed','return_pending')`,date).all()).results:[];
- const result=new Map();for(const row of work)result.set(row.id,'已有作业计时，不能删除；请核实原作业 / 작업 기록이 있어 삭제할 수 없습니다');for(const row of rest)result.set(row.id,'已有休息记录，不能删除；请先核实 / 휴식 기록이 있어 삭제할 수 없습니다');for(const row of loans)result.set(row.id,'仍有借调或待归还记录，不能删除 / 차출·복귀 대기 기록이 있습니다');return result;
+ const hasDuty=await q(env,"SELECT name FROM sqlite_master WHERE type='table' AND name='ck_dispatch_time_days'").first();
+ const duties=hasDuty?(await q(env,'SELECT attendance_id AS id FROM ck_dispatch_time_days WHERE day=?',date).all()).results:[];
+ const result=new Map();for(const row of duties)result.set(row.id,'已有派审劳动记录，不能删除签到');for(const row of work)result.set(row.id,'已有作业计时，不能删除；请核实原作业 / 작업 기록이 있어 삭제할 수 없습니다');for(const row of rest)result.set(row.id,'已有休息记录，不能删除；请先核实 / 휴식 기록이 있어 삭제할 수 없습니다');for(const row of loans)result.set(row.id,'仍有借调或待归还记录，不能删除 / 차출·복귀 대기 기록이 있습니다');return result;
 }
 export function attendanceManagementStatement(env,after){return q(env,`INSERT INTO ck_attendance_management(attendance_id,department,voided_at,void_reason,voided_by) VALUES(?,?,?,?,?) ON CONFLICT(attendance_id) DO UPDATE SET department=excluded.department,voided_at=excluded.voided_at,void_reason=excluded.void_reason,voided_by=excluded.voided_by`,after.id,after.management_department||'',after.voided_at||'',after.void_reason||'',after.voided_by||'');}

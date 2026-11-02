@@ -1,3 +1,5 @@
+import {dispatchTimeEnabled} from './dispatch-time.js';
+import {dispatchTimeAttendance} from './dispatch-time-runtime.js';
 import {ensureSchema} from './schema-ready.js';
 import {retireCompletedWorkClocks} from './completed-work-clocks.js';
 import {jobNumbers,jobDisplayMetadata} from './document-numbers.js';
@@ -100,6 +102,7 @@ async function overview(env,date,t,scope='daily',detailPersonId=''){
  const reportSegmentIds=new Set(segments.filter(s=>s.in_report_window).map(s=>s.id));
  const breaks=await rows(env,'SELECT b.* FROM ck_attendance_breaks b JOIN ck_attendance_days d ON d.id=b.attendance_id WHERE d.day=?',date);
  const history=await rows(env,'SELECT e.* FROM ck_attendance_events e JOIN ck_attendance_days d ON d.id=e.record_id WHERE d.day=? ORDER BY e.version',date);
+ const dutyByAttendance=await dispatchTimeAttendance(env,date,t);
  const validSegments=new Map(),output=[],deletedItems=[],blockers=await attendanceVoidBlockers(env,date),identities=await dailyIdentityMap(env,days);
  for(const d of days){
   const record=publicDay(d),br=breaks.filter(x=>x.attendance_id===d.id);record.breaks=br.map(x=>({id:x.id,start:x.started_at,end:x.ended_at}));
@@ -108,8 +111,9 @@ async function overview(env,date,t,scope='daily',detailPersonId=''){
   const events=history.filter(e=>e.record_id===d.id),decisions=new Map(own.filter(s=>!s.end).map(s=>[s.id,attendanceOpenSegment(record,s,events,t)]));
   const verifiedWindow=own.filter(s=>reportSegmentIds.has(s.id)&&(s.end||decisions.get(s.id)?.eligible));
   validSegments.set(d.person_id,identityConflict?[]:verifiedWindow);
-  const shiftEnabled=shiftPolicyEnabled(env,date),totals=shiftEnabled?shiftAttendanceReport(record,verifiedWindow,t,date,{needsWorkVerification:identityConflict||[...decisions.values()].some(s=>!s.eligible)}):attendanceReport(record,verifiedWindow,t,date);
-  if(identityConflict){totals.bulk=totals.direct_ship=totals.import=totals.other=totals.unassigned=0;totals.conflict=Math.max(0,totals.presence-totals.rest);totals.flags.push('工牌大小写身份或活动记录冲突，工时待核实 / 명찰·작업 기록 충돌');}
+  const dispatchDuty=dutyByAttendance.get(d.id),dispatchSegments=dispatchTimeEnabled(env)?(dispatchDuty?.segments||[]).map(s=>({...s,badgeId:record.badgeId})):undefined;
+  const shiftEnabled=shiftPolicyEnabled(env,date),totals=shiftEnabled?shiftAttendanceReport(record,verifiedWindow,t,date,{needsWorkVerification:identityConflict||[...decisions.values()].some(s=>!s.eligible),dispatchSegments}):attendanceReport(record,verifiedWindow,t,date,dispatchSegments);
+  if(identityConflict){totals.bulk=totals.direct_ship=totals.import=totals.other=totals.unassigned=0;if(dispatchSegments)totals.dispatch=0;totals.conflict=Math.max(0,totals.presence-totals.rest);totals.flags.push('工牌大小写身份或活动记录冲突，工时待核实 / 명찰·작업 기록 충돌');}
   if(own.some(s=>s.department==='other'))totals.flags.push('有作业尚未确认用工部门');
   if([...decisions.values()].some(s=>s.reason==='previous_shift'))totals.flags.push('上个班次任务未退出，本日不计入');
   if([...decisions.values()].some(s=>['unverified_before_checkin','closed_shift'].includes(s.reason)))totals.flags.push('作业与有效签到不一致，待负责人核实，本日暂不计入');
@@ -118,13 +122,13 @@ async function overview(env,date,t,scope='daily',detailPersonId=''){
   // Raw open clocks still block dispatch even when excluded from today's labor.
   // Surface that discrepancy without counting it as work or changing any clock.
   const occupancyWarnings=date===kstDay(t)?own.filter(s=>s.end===''&&!live.some(l=>l.id===s.id)).map(s=>({...s,jobState:clockStatus(s.jobStatus),startedAtLabel:clockStart(s.start),reason:clockReason(s,decisions.get(s.id))})):[];
-  const resting=br.some(x=>!x.ended_at),status=identityConflict?'identity_conflict':record.outAt?'out':resting?'rest':occupancyWarnings.length?'occupancy_conflict':live.length?'working':'unassigned';
-  (record.voided?deletedItems:output).push({record,totals,segments:own,breaks:record.breaks,status:record.voided?'voided':status,identityConflict,occupancyWarnings,canVoid:!identityConflict&&!record.voided&&!isEmployee(d.worker_id)&&!blockers.has(d.id),voidBlockedReason:identityConflict?'工牌身份记录冲突，请负责人核对':blockers.get(d.id)||'',currentJobs:live.map(s=>({id:s.jobId,no:s.display_business_no||s.job_label,...jobDisplayMetadata({...s,job_type:s.jobType,job_department:s.department}),department:s.department})),events:events.map(e=>({action:e.action,actor:e.actor,actorName:JSON.parse(e.after_json).audit_actor_name||e.actor,at:e.at,before:JSON.parse(e.before_json),after:JSON.parse(e.after_json)}))});
+  const resting=br.some(x=>!x.ended_at),status=identityConflict?'identity_conflict':record.outAt?'out':resting?'rest':occupancyWarnings.length?'occupancy_conflict':live.length?'working':dispatchDuty?.status==='dispatching'?'dispatching':dispatchDuty?.status==='pending_review'?'dispatch_pending':dispatchDuty?'waiting_dispatch':'unassigned';
+  (record.voided?deletedItems:output).push({record,totals,...(dispatchDuty?{dispatchDuty}:{}),segments:own,breaks:record.breaks,status:record.voided?'voided':status,identityConflict,occupancyWarnings,canVoid:!identityConflict&&!record.voided&&!dispatchDuty&&!isEmployee(d.worker_id)&&!blockers.has(d.id),voidBlockedReason:identityConflict?'工牌身份记录冲突，请负责人核对':dispatchDuty?'已有派审劳动记录，不能删除签到':blockers.get(d.id)||'',currentJobs:live.map(s=>({id:s.jobId,no:s.display_business_no||s.job_label,...jobDisplayMetadata({...s,job_type:s.jobType,job_department:s.department}),department:s.department})),events:events.map(e=>({action:e.action,actor:e.actor,actorName:JSON.parse(e.after_json).audit_actor_name||e.actor,at:e.at,before:JSON.parse(e.before_json),after:JSON.parse(e.after_json)}))});
  }
  const stale=await rows(env,"SELECT d.id,d.worker_id,d.name,d.agency,d.day,d.signed_in FROM ck_attendance_days d WHERE d.day<? AND d.signed_out='' AND "+activeAttendanceSQL('d')+filter+" ORDER BY d.day DESC LIMIT 100",date);
  const identityWarnings=segments.filter(w=>isAttendanceBadge(w.worker_id)&&(scope!=='employee'||/^EMP-/i.test(w.worker_id))&&(scope==='employee'||scope==='all'||!/^EMP-/i.test(w.worker_id))).flatMap(w=>{const candidates=days.filter(d=>sameWorkerBadge(d.worker_id,w.worker_id));const d=candidates[0],reason=candidates.length!==1||!d?'作业工牌没有唯一的当天签到，待负责人核实':identities.get(d.id)?.conflict?'工牌身份记录冲突，待负责人核实':d.voided_at?'作业关联已删除签到，待负责人核实':'';return reason?[{worker_id:w.worker_id,worker_name:w.worker_name,job_id:w.job_id,job_label:w.display_business_no||w.job_label||w.display_no||w.job_id,reason}]:[];});
  if(scope==='employee'){const details=await employeeWorkdays(env,{date,asOf:t,items:detailPersonId?output.filter(item=>item.record.personId===detailPersonId):output,validSegments,detailPersonId});if(detailPersonId){const detail=details.get(detailPersonId);if(!detail)fail('没有该职员当天的签到记录 / 해당 직원의 당일 출근 기록이 없습니다');return detail;}}
- return {ok:true,date,asOf:t,agencies,identityWarnings,items:output,deletedItems:env.SOP_REQUEST_USER?.role==='manager'?deletedItems:[],stale,publicTest:!!env.SOP_REQUEST_USER?.public_test,...(shiftPolicyEnabled(env,date)?{attendancePolicy:{version:'shift-accounting-v1',dateScope:'all',timeZone:'Asia/Seoul',restCutoff:'12:00',restTargets:{morning:90,afternoon:40},outsideWindowStart:'actual_checkin'}}:{})};
+ return {ok:true,date,asOf:t,...(dispatchTimeEnabled(env)?{dispatchTimeEnabled:true}:{}),agencies,identityWarnings,items:output,deletedItems:env.SOP_REQUEST_USER?.role==='manager'?deletedItems:[],stale,publicTest:!!env.SOP_REQUEST_USER?.public_test,...(shiftPolicyEnabled(env,date)?{attendancePolicy:{version:'shift-accounting-v1',dateScope:'all',timeZone:'Asia/Seoul',restCutoff:'12:00',restTargets:{morning:90,afternoon:40},outsideWindowStart:'actual_checkin'}}:{})};
 }
 export async function handleAttendance(b,env){
  if(!attendanceEnabled(env))return {ok:false,error:'签到尚未启用'};
