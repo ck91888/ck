@@ -1,5 +1,6 @@
 import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';
 import worker from '../worker-v2/index.js';import {database} from './d1-adapter.mjs';import {digest} from '../worker-v2/access-control.js';
+import {handleSop} from '../worker-v2/sop.js';
 import {cargoFixture} from './cargo-fixture.mjs';import {cargoExecution} from '../worker-v2/cargo-execution.js';import {ensureDispatchShare} from '../worker-v2/dispatch-share.js';
 import {operationHeaders,rememberOperation,confirmOperation} from './office-operator-fixture.mjs';
 async function setup(enabled=true){
@@ -112,6 +113,95 @@ test('grouped review records the collaborator and rejects an outsider',async()=>
  assert.equal(reviewed.ok,true);assert.equal(s.state().cargo_groups.groups[0].outputs[0].review.actor_id,'PARTNER');
  assert.equal(JSON.parse(s.DB.raw.prepare("SELECT state FROM sop_records WHERE id='T'").get().state).owner_id,'OWNER');
  await assert.rejects(()=>cargoExecution(s.body('sop_cargo_group_complete',{group_id:'G1',quantity:3,unit:'箱'}),s.env,{...partner,id:'OUTSIDER'}),/派审员|协作/);
+});
+test('reviewer review and off-duty claim stay available while the share flag is on',async()=>{
+ const s=await setup(),owner=await s.permanent('合成原派审'),next=await s.permanent('合成接班人'),worker=await s.permanent('合成审核操作员');
+ const ownerDay=await s.checkin(owner);await s.checkin(next);await s.checkin(worker);await s.grant(owner);await s.grant(next);await s.grant(worker);
+ const need=await s.ok('office','sop_need_create',{department:'bulk',source_type:'inventory',supply_chain_no:'SHARE-REVIEWER',title:'审核不受协作开关影响',customer:'合成客户',instructions:'待审核',owner:'合成'});
+ await s.login(owner);const task=await s.ok('field','sop_task_dispatch',{need_id:need.id,department:'bulk',title:'审核不受协作开关影响',job_type:'bulk_op',workers:[{id:worker.badgeId,name:worker.name}],lead_id:worker.badgeId,estimated_minutes:10});
+ await s.ok('field','sop_task_finish',{id:task.id,revision:task.revision,result:{quantity:2,unit:'托',pallet_count:2,operated_box_count:4,description:'待审核'}});
+ const reviewer={id:'REV',name:'审核员',role:'reviewer',scope:'office',departments:['bulk']};
+ const reviewed=await handleSop({action:'sop_task_review',id:task.id,revision:task.revision+1,decision:'pass',reason:'原审核权限',client_req_id:'SHARE-REVIEWER'},{...s.env,SOP_REQUEST_USER:reviewer});
+ assert.equal(reviewed.ok,true,reviewed.error);assert.equal(JSON.parse(s.DB.raw.prepare('SELECT state FROM sop_records WHERE id=?').get(task.id).state).review.by,'审核员');
+ const claimNeed=await s.ok('office','sop_need_create',{department:'bulk',source_type:'inventory',supply_chain_no:'SHARE-CLAIM',title:'离岗接班',customer:'合成客户',instructions:'接班',owner:'合成'});
+ await s.login(owner);const claimTask=await s.ok('field','sop_task_dispatch',{need_id:claimNeed.id,department:'bulk',title:'离岗接班',job_type:'bulk_op',workers:[{id:worker.badgeId,name:worker.name}],lead_id:worker.badgeId,estimated_minutes:10});
+ await s.ok('office','sop_attendance_checkout',{id:ownerDay.id});await s.login(next);
+ const option=await s.ok('field','sop_owner_transfer_options',{id:claimTask.id});assert.equal(option.can_claim,true);
+ const claimed=await s.ok('field','sop_owner_transfer',{id:claimTask.id,revision:option.revision,target_badge:next.badgeId,reason:'原负责人离岗，本人接班'});
+ assert.equal(JSON.parse(s.DB.raw.prepare('SELECT state FROM sop_records WHERE id=?').get(claimTask.id).state).owner_id,next.id);assert.equal(claimed.ok,true);
+});
+test('completed partner work stays out of my list, and a break does not trap leave',async()=>{
+ const s=await setup(),a=await s.permanent('合成列表甲'),b=await s.permanent('合成列表乙'),worker=await s.permanent('合成列表操作'),other=await s.permanent('合成列表操作乙');
+ const day=await s.checkin(a);await s.checkin(b);await s.checkin(worker);await s.checkin(other);await s.grant(a);await s.grant(b);await s.grant(worker);await s.grant(other);
+ const openNeed=await s.ok('office','sop_need_create',{department:'bulk',source_type:'inventory',supply_chain_no:'SHARE-OPEN',title:'未完成共享',customer:'合成客户',instructions:'仍在作业',owner:'合成'});
+ const doneNeed=await s.ok('office','sop_need_create',{department:'bulk',source_type:'inventory',supply_chain_no:'SHARE-DONE',title:'已完成不共享',customer:'合成客户',instructions:'已审',owner:'合成'});
+ await s.login(a);
+ const open=await s.ok('field','sop_task_dispatch',{need_id:openNeed.id,department:'bulk',title:'未完成共享',job_type:'bulk_op',workers:[{id:worker.badgeId,name:worker.name}],lead_id:worker.badgeId,estimated_minutes:10});
+ const done=await s.ok('field','sop_task_dispatch',{need_id:doneNeed.id,department:'bulk',title:'已完成不共享',job_type:'bulk_op',workers:[{id:other.badgeId,name:other.name}],lead_id:other.badgeId,estimated_minutes:10});
+ const pair=await collaborate(s,a,b);
+ await s.login(b);await s.ok('field','sop_task_complete_review',resultOf(done));
+ const mine=await s.ok('field','sop_list',{kind:'task',view:'mine'});
+ assert.equal(mine.items.some(x=>x.id===open.id),true);assert.equal(mine.items.some(x=>x.id===done.id),false);
+ await s.login(a);await s.ok('field','sop_attendance_break_start',{id:day.id});
+ const left=await s.ok('field','sop_dispatch_share_leave',{pair_id:pair});assert.equal(left.pair.status,'ended');
+ assert.equal(s.DB.raw.prepare('SELECT COUNT(*) n FROM ck_dispatch_share_checks').get().n,0);
+});
+test('a second confirmation of the same invite gets a readable result',async()=>{
+ const s=await setup(),a=await s.permanent('合成同时甲'),b=await s.permanent('合成同时乙');
+ await s.checkin(a);await s.checkin(b);await s.grant(a);await s.grant(b);await s.login(a);
+ const invited=await s.ok('field','sop_dispatch_share_invite',{target_badge:b.badgeId});await s.login(b);const cookie=s.cookies.field;
+ const replies=await Promise.all([1,2].map(n=>s.call('field','sop_dispatch_share_accept',{pair_id:invited.pair.id,client_req_id:'SHARE-RACE-'+n},cookie)));
+ assert.equal(replies.filter(r=>r.ok).length,1);const lost=replies.find(r=>!r.ok);assert.match(lost.error,/请刷新/);assert.doesNotMatch(lost.error,/SQLITE|CHECK constraint/i);
+ assert.equal(s.DB.raw.prepare("SELECT status FROM ck_dispatch_share_pairs WHERE id=?").get(invited.pair.id).status,'active');
+});
+test('leaving during a native bulk change blocks that change and keeps the operator on the result',async()=>{
+ const s=await setup(),a=await s.permanent('合成外部甲'),b=await s.permanent('合成外部乙'),worker=await s.permanent('合成外部操作');
+ for(const p of [a,b,worker]){await s.checkin(p);await s.grant(p);}await collaborate(s,a,b);await s.login(a);
+ const started=await s.ok('field','sop_native_start',{payload:{action:'v2_bulk_op_job_start',work_order_no:'EXT-SHARE-1',customer:'合成客户',client_req_id:'EXT-SHARE-START'},workers:[{id:worker.badgeId,name:worker.name}],lead_id:worker.badgeId,estimated_minutes:10,labor_department:'bulk'});
+ const original=s.DB.batch.bind(s.DB);let ended=false;
+ s.DB.batch=async statements=>{if(!ended&&statements.some(st=>String(st.sql).startsWith('INSERT INTO ck_dispatch_share_checks'))){ended=true;s.DB.raw.prepare("UPDATE ck_dispatch_share_pairs SET status='ended',ended_at='2026-11-02T01:00:00Z',ended_by='race' WHERE status='active'").run();}return original(statements);};
+ await s.login(b);const paused=await s.call('field','sop_native_pause',{job_id:started.job_id,revision:1,reason:'退出后暂停'});
+ assert.equal(ended,true);assert.equal(paused.ok,false);assert.match(paused.error,/协作已结束/);assert.equal(s.DB.raw.prepare('SELECT status FROM v2_ops_jobs WHERE id=?').get(started.job_id).status,'working');
+ s.DB.batch=original;s.DB.raw.prepare("UPDATE ck_dispatch_share_pairs SET status='active',ended_at='',ended_by='' WHERE status='ended'").run();
+ const finished=await s.ok('field','v2_bulk_op_job_finish',{job_id:started.job_id,revision:1,worker_id:worker.badgeId,customer:'合成客户',label_count:5});
+ const saved=s.DB.raw.prepare('SELECT created_by,result_json FROM v2_ops_job_results WHERE job_id=?').get(started.job_id),body=JSON.parse(saved.result_json);
+ assert.equal(finished.ok,true);assert.equal(saved.created_by,worker.badgeId);assert.equal(body.dispatch_actor_id,b.id);assert.equal(body.dispatch_actor_name,b.name);
+ assert.equal(s.DB.raw.prepare('SELECT COUNT(*) n FROM ck_dispatch_share_checks').get().n,0);
+ await s.login(a);const again=await s.ok('field','sop_native_start',{payload:{action:'v2_bulk_op_job_start',work_order_no:'EXT-SHARE-2',customer:'合成客户',client_req_id:'EXT-SHARE-START-2'},workers:[{id:worker.badgeId,name:worker.name}],lead_id:worker.badgeId,estimated_minutes:10,labor_department:'bulk'});
+ s.DB.batch=async statements=>{if(statements.some(st=>String(st.sql).startsWith('INSERT INTO ck_dispatch_share_checks')))s.DB.raw.prepare("UPDATE ck_dispatch_share_pairs SET status='ended' WHERE status='active'").run();return original(statements);};
+ await s.login(b);const people=await s.call('field','sop_native_people',{job_id:again.job_id,revision:1,workers:[{id:worker.badgeId,name:worker.name}],lead_id:worker.badgeId,reason:'退出后换人'});
+ assert.equal(people.ok,false);assert.match(people.error,/协作已结束/);assert.equal(s.DB.raw.prepare('SELECT revision FROM sop_records WHERE id=?').get(again.job_id).revision,1);
+});
+test('a generic check failure is not described as collaboration ending',async()=>{
+ const s=await setup(false);const need=await s.ok('office','sop_need_create',{department:'bulk',source_type:'inventory',supply_chain_no:'SHARE-CHECK',title:'无关约束',customer:'合成客户',instructions:'原要求',owner:'合成'});
+ s.DB.batch=async()=>{throw Error('CHECK constraint failed: allowed');};
+ const failed=await s.call('office','sop_need_update',{id:need.id,revision:need.revision,instructions:'改要求',owner:'合成'});
+ assert.equal(failed.ok,false);assert.match(failed.error,/CHECK constraint failed/);assert.doesNotMatch(failed.error,/协作已结束/);
+});
+test('batch transfer and the external batch entry recognize a collaborator',async t=>{
+ const s=await setup(),a=await s.permanent('合成批次甲'),b=await s.permanent('合成批次乙'),c=await s.permanent('合成批次丙'),worker=await s.permanent('合成批次操作');
+ for(const p of [a,b,c,worker]){await s.checkin(p);await s.grant(p);}await collaborate(s,a,b);
+ const needs=[];for(const n of [1,2])needs.push(await s.ok('office','sop_need_create',{department:'bulk',source_type:'inventory',supply_chain_no:'SHARE-MOVE-'+n,title:'批次'+n,customer:'合成客户',instructions:'转交',owner:'合成'}));
+ await s.login(a);const batch=await s.ok('field','sop_bulk_batch_create',{items:needs.map(n=>({source_type:'need',id:n.id,revision:1})),workers:[{id:worker.badgeId,name:worker.name}],lead_id:worker.badgeId});
+ await s.login(b);const detail=await s.ok('field','sop_bulk_batch_get',{id:batch.batch_id});assert.equal(detail.shared,true);
+ await s.ok('field','sop_owner_transfer',{id:detail.items[0].id,revision:detail.items[0].revision,target_badge:c.badgeId,reason:'协作人转出本批'});
+ assert.equal(JSON.parse(s.DB.raw.prepare('SELECT state FROM sop_records WHERE id=?').get(batch.batch_id).state).owner_id,c.id);
+ if(!process.env.CK_JSDOM_MODULE)return;
+ const {JSDOM}=(await import(process.env.CK_JSDOM_MODULE)).default;
+ const dom=new JSDOM('<!doctype html><body><main id="root"></main></body>',{url:'https://fixture.local/001/',runScripts:'outside-only'});const w=dom.window;
+ const transferred=[];w.CKTransferOwner=(record,done)=>{transferred.push(record);done?.();};w.CKSession={user:{id:b.id,scope:'field',role:'dispatcher'},request:async action=>{if(action==='sop_bulk_batch_get')return detail;throw Error(action);}};
+ w.eval(fs.readFileSync(new URL('../shared/bulk-work-batch.js',import.meta.url),'utf8'));
+ const root=w.document.getElementById('root');w.CKBulkWorkBatch(root,{id:batch.batch_id,onComplete(){}});
+ for(let i=0;i<40&&!root.querySelector('button')?.textContent.includes('转移本批');i++)await new Promise(r=>setTimeout(r,15));
+ [...root.querySelectorAll('button')].find(x=>x.textContent.includes('转移本批')).click();
+ assert.equal(transferred[0].share_managed,true);assert.equal(transferred[0].owner_id,a.id);
+ const field=new JSDOM('<!doctype html><body><main id="work"></main></body>',{url:'https://fixture.local/001/',runScripts:'outside-only'}).window;
+ const opened=[];field.CKSession={user:{id:b.id,scope:'field'},request:async action=>{if(action==='sop_dispatch_list')return{items:[{id:'JOB-EXT',can_claim:false}]};if(action==='v2_ops_job_detail')return{ok:true,can_manage_dispatch:true,share_managed:true,dispatch:{revision:1,state:JSON.stringify({owner_id:a.id,owner:a.name,bulk_batch_id:batch.batch_id,lead_id:worker.badgeId,workers:[{id:worker.badgeId,name:worker.name}]})},job:{id:'JOB-EXT',job_type:'bulk_op',status:'working',customer:'合成客户',related_doc_type:'work_order',related_doc_id:'EXT-SHARE'},workers:[],results:[]};throw Error(action);}};
+ field.CKDocumentLabels={jobLabel:x=>x.related_doc_id||x.id,jobDispatcher:()=>a.name,jobDepartment:()=>'大货',jobHistoryText:v=>String(v??''),source:()=>'',number:x=>x.display_no||''};
+ field.eval(fs.readFileSync(new URL('../shared/field-work.js',import.meta.url),'utf8'));
+ field.CKFieldWork(field.document.getElementById('work'),'EXT-SHARE',{external:true,onBatch:id=>opened.push(id)});
+ for(let i=0;i<40&&!opened.length;i++)await new Promise(r=>setTimeout(r,15));
+ assert.deepEqual(opened,[batch.batch_id]);w.close();field.close();
 });
 test('photo compression and staging config stay unchanged while the flag is absent',()=>{
  const photo=fs.readFileSync(new URL('../shared/photo-upload.js',import.meta.url),'utf8');

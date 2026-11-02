@@ -27,5 +27,5 @@ CREATE TABLE IF NOT EXISTS ck_dispatch_share_events(
 );
 CREATE TABLE IF NOT EXISTS ck_dispatch_share_checks(
   id TEXT PRIMARY KEY,
-  allowed INTEGER NOT NULL CHECK(allowed=1)
+  allowed INTEGER NOT NULL CONSTRAINT ck_dispatch_share_checks CHECK(allowed=1)
 );

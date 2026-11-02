@@ -26,7 +26,7 @@
    if(result)result={...result,packed_count:result.packed_box_count,operated_box_count:result.total_operated_box_count,description:result.description||saved.remark||''};
    return {external:true,native:r,need:{display_no:jobLabel(j),title:'外部作业 / 외부 작업',customer:j.customer||'',instructions:'按纸质作业单核对本次操作要求。 / 인쇄된 작업서를 확인하세요.'},
     source:j.outbound_plan_no?{number:j.outbound_plan_no}:null,segments:r.workers,
-    task:{...j,bulk_batch_id:d.bulk_batch_id||'',id:j.id,kind:'dispatch',dispatcher_name:Object.hasOwn(j,'dispatcher_name')?j.dispatcher_name:d.dispatcher_name||d.owner||'',revision:r.dispatch.revision,status:j.status,lead_id:d.lead_id,workers:d.bulk_batch_id?d.workers||[]:live.map(w=>({id:w.worker_id,name:w.worker_name})),borrowed_out:r.borrowed_out||[],owner_id:d.owner_id,owner:d.owner,started_at:j.started_at||j.created_at,result,location:''},last_lead:d.last_lead||(d.workers||[]).find(w=>w.id===d.lead_id)};
+    task:{...j,bulk_batch_id:d.bulk_batch_id||'',id:j.id,kind:'dispatch',dispatcher_name:Object.hasOwn(j,'dispatcher_name')?j.dispatcher_name:d.dispatcher_name||d.owner||'',revision:r.dispatch.revision,status:j.status,lead_id:d.lead_id,workers:d.bulk_batch_id?d.workers||[]:live.map(w=>({id:w.worker_id,name:w.worker_name})),borrowed_out:r.borrowed_out||[],owner_id:d.owner_id,owner:d.owner,shared:!!r.share_managed,started_at:j.started_at||j.created_at,result,location:''},last_lead:d.last_lead||(d.workers||[]).find(w=>w.id===d.lead_id)};
   }
   async function resolve(code,detail){
    if(closed)return;

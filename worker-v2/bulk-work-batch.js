@@ -9,7 +9,7 @@ import {workerBadgeMatch} from './daily-badge-identity.js';
 import {assignCargoProcess,processNames,taskGroups} from './cargo-processes.js';
 import {recordNumbers,resolveRecordId} from './document-numbers.js';
 import {documentCodeError} from '../shared/document-code.js';
-import {isActivePartner,shareEnabled,shareMutationGuard,ensureDispatchShare} from './dispatch-share.js';
+import {isActivePartner,partnerShareGuard,shareConflict} from './dispatch-share.js';
 const q=(e,s,...a)=>e.DB.prepare(s).bind(...a),rows=async(e,s,...a)=>(await q(e,s,...a).all()).results;
 const text=v=>String(v??'').trim(),terminal=d=>['completed','cancelled'].includes(d.status);
 const read=async(e,id)=>{if(!id)return null;const r=await q(e,'SELECT * FROM sop_records WHERE id=?',id).first();return r?{...r,data:JSON.parse(r.state)}:null;};
@@ -65,8 +65,8 @@ async function candidate(e,item,helpers){
 async function batchItems(e,id){return (await rows(e,'SELECT s.*,i.position,i.source_type AS batch_source_type,i.source_id AS batch_source_id,j.status AS job_status,j.active_worker_count FROM ck_bulk_work_batch_items i JOIN sop_records s ON s.id=i.job_id JOIN v2_ops_jobs j ON j.id=s.id WHERE i.batch_id=? ORDER BY i.position',id)).map(r=>({...r,data:{...JSON.parse(r.state),...(r.kind==='dispatch'?{status:r.job_status}:{})}}));}
 async function commit(e,b,u,row,data,sql,result){
  const t=new Date().toISOString(),signature=JSON.stringify(b),answer={ok:true,id:row.id,revision:row.revision+1,...result,_bulk_signature:signature};
- const guard=shareEnabled(e)&&row.revision?(await ensureDispatchShare(e),shareMutationGuard(e,u,row.id,row.revision)):null;
- try{await e.DB.batch([...(guard?[guard]:[]),...event(e,row,data,u,b.client_req_id,b.action,t,answer),...sql]);}catch(error){const prior=await replay(e,b,u);if(prior)return prior;if(/ck_dispatch_share_checks|CHECK constraint failed/.test(error.message||''))throw Error('记录已更新或协作已结束，请刷新后再操作');throw error;}return answer;
+ const guard=await partnerShareGuard(e,row,u);
+ try{await e.DB.batch([...guard,...event(e,row,data,u,b.client_req_id,b.action,t,answer),...sql]);}catch(error){const prior=await replay(e,b,u);if(prior)return prior;if(shareConflict.test(error.message||''))throw Error('记录已更新或协作已结束，请刷新后再操作');throw error;}return answer;
 }
 async function replay(e,b,u){if(!b.client_req_id)return null;const r=await q(e,'SELECT * FROM sop_events WHERE request_id=?',b.client_req_id).first();if(!r)return null;const a=JSON.parse(r.result_json);if(r.actor_id!==u.id||r.action!==b.action||a._bulk_signature!==JSON.stringify(b))throw Error('请求编号已使用，内容已变化');return a;}
 export async function handleBulkBatch(b,e,helpers){
@@ -99,7 +99,7 @@ export async function handleBulkBatch(b,e,helpers){
   return commit(e,b,u,{id,kind:'bulk_batch',revision:0},state,sql,{batch_id:id,job_id:jobs[0],jobs});
  }
  const row=await read(e,b.id);if(!row||row.kind!=='bulk_batch')throw Error('多单派工批次不存在');await permit(e,u,row.data.owner_id);const items=await batchItems(e,row.id);
- if(b.action==='sop_bulk_batch_get')return {ok:true,...(simultaneous(row.data)?{facts:await batchFacts(e,row,items)}:{}),batch:pub(row),items:await recordNumbers(e,items.map(r=>({...pub(r),job_status:r.job_status,active_worker_count:r.active_worker_count}))),completed:items.every(r=>terminal(r.data))};
+ if(b.action==='sop_bulk_batch_get')return {ok:true,shared:await isActivePartner(e,u.id,row.data.owner_id),...(simultaneous(row.data)?{facts:await batchFacts(e,row,items)}:{}),batch:pub(row),items:await recordNumbers(e,items.map(r=>({...pub(r),job_status:r.job_status,active_worker_count:r.active_worker_count}))),completed:items.every(r=>terminal(r.data))};
  if(!text(b.client_req_id))throw Error('缺少请求编号');const old=await replay(e,b,u);if(old)return old;if(Number(b.revision)!==row.revision)throw Error('多单派工已更新，请刷新后重试');
  const data=structuredClone(row.data),t=new Date().toISOString(),sql=[];
  if(simultaneous(data)){

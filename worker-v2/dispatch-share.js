@@ -37,7 +37,7 @@ export async function ensureDispatchShare(e){
     response_json TEXT NOT NULL,
     created_at TEXT NOT NULL
   )`),
-  q(e,`CREATE TABLE IF NOT EXISTS ck_dispatch_share_checks(id TEXT PRIMARY KEY, allowed INTEGER NOT NULL CHECK(allowed=1))`)
+  q(e,`CREATE TABLE IF NOT EXISTS ck_dispatch_share_checks(id TEXT PRIMARY KEY, allowed INTEGER NOT NULL CONSTRAINT ck_dispatch_share_checks CHECK(allowed=1))`)
  ]));
 }
 async function expire(e){
@@ -96,28 +96,41 @@ export function isBulkShareRecord(row,data=row?.data){
  if(row.kind==='bulk_batch')return true;
  return data.job_type==='bulk_op'&&['task','dispatch'].includes(row.kind)&&(row.department==='bulk'||data.labor_department==='bulk');
 }
-// Runs before the record update in the same transaction. Owner, manager and
-// recorded delegates keep their existing paths; a collaborator is rechecked here.
-export function shareMutationGuard(e,actor,recordId,revision){
- if(!shareEnabled(e))return null;
+// Only a write that is allowed because of an active pair is rechecked here.
+// The original owner, manager, reviewer, delegate and off-duty claim keep their
+// own rules and do not depend on this table. The check row is removed in the
+// same transaction, so a successful write does not leave a trail.
+export const shareConflict=/ck_dispatch_share_checks/;
+export function shareGuardStatements(e,actor,recordId,revision){
  const id=crypto.randomUUID();
- return q(e,`INSERT INTO ck_dispatch_share_checks(id,allowed)
+ return [q(e,`INSERT INTO ck_dispatch_share_checks(id,allowed)
   SELECT ?, CASE WHEN (SELECT revision FROM sop_records WHERE id=?)=?
-   AND (
-    json_extract((SELECT state FROM sop_records WHERE id=?),'$.owner_id')=?
-    OR ?='manager'
-    OR EXISTS(SELECT 1 FROM json_each(COALESCE(json_extract((SELECT state FROM sop_records WHERE id=?),'$.delegates'),'[]')) WHERE value=?)
-    OR EXISTS(SELECT 1 FROM ck_dispatch_share_pairs WHERE status='active' AND (
-      (person_lo=? AND person_hi=json_extract((SELECT state FROM sop_records WHERE id=?),'$.owner_id'))
-      OR (person_hi=? AND person_lo=json_extract((SELECT state FROM sop_records WHERE id=?),'$.owner_id'))
-    ))
-   ) THEN 1 ELSE 0 END`,id,recordId,revision,recordId,actor.id,actor.role||'',recordId,actor.id,actor.id,recordId,actor.id,recordId);
+   AND EXISTS(SELECT 1 FROM ck_dispatch_share_pairs WHERE status='active' AND (
+     (person_lo=? AND person_hi=json_extract((SELECT state FROM sop_records WHERE id=?),'$.owner_id'))
+     OR (person_hi=? AND person_lo=json_extract((SELECT state FROM sop_records WHERE id=?),'$.owner_id'))
+   )) THEN 1 ELSE 0 END`,id,recordId,revision,actor.id,recordId,actor.id,recordId),
+  q(e,'DELETE FROM ck_dispatch_share_checks WHERE id=?',id)];
+}
+export async function partnerShareGuard(e,record,actor=e.SOP_REQUEST_USER){
+ if(!shareEnabled(e)||!record)return [];
+ const u=actor;if(!u?.id)return [];
+ let data=record.data;if(!data){try{data=JSON.parse(record.state||'{}');}catch{return [];}}
+ const row={id:record.id,kind:record.kind,department:record.department,data};
+ if(!isBulkShareRecord(row,data))return [];
+ if(u.role==='manager'||u.role==='reviewer'||data.owner_id===u.id)return [];
+ if((data.delegates||[]).includes(u.id)&&!(data.owner_transfers||[]).some(x=>x.from_id===u.id))return [];
+ if(!(await isActivePartner(e,u.id,data.owner_id)))return [];
+ await ensureDispatchShare(e);
+ return shareGuardStatements(e,u,record.id,record.revision);
 }
 export async function handleDispatchShare(b,e){
  if(!shareEnabled(e))return b.action==='sop_dispatch_share_status'?empty:{ok:false,enabled:false,error:'派审协作未开启'};
  await ensureDispatchShare(e);await expire(e);
  if(b.action==='sop_dispatch_share_status')return shareStatus(e);
- const u=caller(e);await onDuty(e,u);
+ const leaving=b.action==='sop_dispatch_share_leave';
+ const u=leaving?e.SOP_REQUEST_USER:caller(e);
+ if(!u?.id)fail('请先登录');
+ if(!leaving)await onDuty(e,u);
  const request=String(b.client_req_id||'').trim();if(!request||request.length>120)fail('缺少请求编号');
  if(b.action==='sop_dispatch_share_invite'){
   const target=await dispatchTransferTarget(e,b.target_badge,'bulk');
@@ -153,10 +166,12 @@ export async function handleDispatchShare(b,e){
   next='ended';endedBy=u.id;
  }else fail('未知协作操作');
  const response={ok:true,enabled:true,pair:{...pub(pair),status:next,accepted_at:next==='active'?t:pair.accepted_at,ended_at:next==='active'?'':t,ended_by:endedBy}};
- await e.DB.batch([
+ const checkId=crypto.randomUUID();
+ try{await e.DB.batch([
   q(e,"UPDATE ck_dispatch_share_pairs SET status=?,accepted_at=CASE WHEN ?='active' THEN ? ELSE accepted_at END,ended_at=CASE WHEN ?='active' THEN '' ELSE ? END,ended_by=? WHERE id=? AND status=?",next,next,t,next,t,endedBy,pair.id,pair.status),
-  q(e,`INSERT INTO ck_dispatch_share_checks(id,allowed) SELECT ?, CASE WHEN (SELECT status FROM ck_dispatch_share_pairs WHERE id=?)=? THEN 1 ELSE 0 END`,crypto.randomUUID(),pair.id,next),
+  q(e,`INSERT INTO ck_dispatch_share_checks(id,allowed) SELECT ?, CASE WHEN changes()=1 AND (SELECT status FROM ck_dispatch_share_pairs WHERE id=?)=? THEN 1 ELSE 0 END`,checkId,pair.id,next),
+  q(e,'DELETE FROM ck_dispatch_share_checks WHERE id=?',checkId),
   q(e,'INSERT INTO ck_dispatch_share_events(request_id,pair_id,action,actor_id,actor_name,signature,response_json,created_at) VALUES(?,?,?,?,?,?,?,?)',request,pair.id,b.action,u.id,u.name,signature,JSON.stringify(response),t)
- ]);
+ ]);}catch(error){const saved=await replay(e,u,b.action,request,signature);if(saved)return saved;if(shareConflict.test(error.message||''))fail('邀请已确认或已结束，请刷新');throw error;}
  return response;
 }

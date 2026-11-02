@@ -4,6 +4,7 @@ import {sameBadgeSignature} from './badge-request-signature.js';
 import {ensureSchema} from './schema-ready.js';
 // Staging dispatch ownership and validation shared by the original operation routes.
 import {nativeOwner} from './sop-dispatch.js';
+import {partnerShareGuard,shareConflict} from './dispatch-share.js';
 import {borrowedOut,crewBorrowStatements} from './crew-borrow.js';
 const q=(e,s,...a)=>e.DB.prepare(s).bind(...a);
 const rows=async(e,s,...a)=>(await q(e,s,...a).all()).results||[];
@@ -82,7 +83,9 @@ export async function nativePeople(body,env,{resume=false}={}){
  // Install after the SOP schema exists (legacy migrations run before SOP tables).
  await env.DB.prepare("CREATE TRIGGER IF NOT EXISTS ck_native_people_active BEFORE INSERT ON sop_events WHEN NEW.action='sop_native_people' AND NOT EXISTS(SELECT 1 FROM v2_ops_jobs WHERE id=NEW.record_id AND status IN ('pending','working','awaiting_close')) BEGIN SELECT RAISE(ABORT,'job_already_finished'); END").run();
  await ensureNativePauseGuards(env);
- await env.DB.batch(sql);return result;
+ sql.unshift(...await partnerShareGuard(env,row));
+ try{await env.DB.batch(sql);}catch(error){if(shareConflict.test(error.message||''))fail('记录已更新或协作已结束，请刷新后再操作');throw error;}
+ return result;
 }
 
 // One transaction closes the complete crew and writes exactly one trip result.
@@ -154,11 +157,14 @@ export async function pauseNative(body,env){
  const after={...before,status:'paused',pause_reason:reason,paused_at:t,pause_actor_id:env.SOP_REQUEST_USER.id,paused_workers:active,last_lead:before.last_lead||(before.workers||[]).find(w=>w.id===before.lead_id)};
  const result={ok:true,job_id:job.id,revision:row.revision+1,status:'paused'};
  await ensureNativePauseGuards(env);
- await env.DB.batch([
+ const shareGuard=await partnerShareGuard(env,row);
+ try{await env.DB.batch([
+ ...shareGuard,
  q(env,'INSERT INTO sop_events VALUES(?,?,?,?,?,?,?,?,?,?)',request,job.id,row.revision,'sop_native_pause',env.SOP_REQUEST_USER.id,env.SOP_REQUEST_USER.name,row.state,JSON.stringify(after),JSON.stringify(result),t),
  q(env,'UPDATE sop_records SET state=?,revision=revision+1,updated_at=? WHERE id=?',JSON.stringify(after),t,job.id),
  q(env,"UPDATE v2_ops_job_workers SET left_at=?,minutes_worked=MAX(0,ROUND((julianday(?)-julianday(joined_at))*14400)/10.0),leave_reason='task_pause' WHERE job_id=? AND left_at=''",t,t,job.id),
  q(env,"UPDATE v2_pick_worker_docs SET status='completed',finished_at=?,minutes_worked=COALESCE((SELECT minutes_worked FROM v2_ops_job_workers WHERE id=segment_id),minutes_worked) WHERE job_id=? AND status='working'",t,job.id),
  q(env,"UPDATE v2_ops_jobs SET status='paused',paused_at=?,active_worker_count=0,updated_at=? WHERE id=?",t,t,job.id)
- ]);return result;
+ ]);}catch(error){if(shareConflict.test(error.message||''))fail('记录已更新或协作已结束，请刷新后再操作');throw error;}
+ return result;
 }

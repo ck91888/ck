@@ -28,7 +28,7 @@ import { workChainEnabled, chainOutboundStatements, chainAllocation, guardWorkCh
 import { workPlanStatements } from './sop-planning.js';
 import { dispatchAccess } from './dispatch-access.js';
 import {ensureDailyDispatch,dispatchTransferTarget} from './daily-dispatch-permissions.js';
-import {shareEnabled,activePartnerIds,isActivePartner,isBulkShareRecord,shareMutationGuard,ensureDispatchShare} from './dispatch-share.js';
+import {shareEnabled,activePartnerIds,isActivePartner,isBulkShareRecord,partnerShareGuard,shareConflict} from './dispatch-share.js';
 import {sourceActiveWorkers} from './crew-borrow.js';
 import {effectiveResults} from './effective-results.js';
 /* SOP pilot: explicit opt-in, revision checked atomic mutations, immutable history.
@@ -240,7 +240,7 @@ export async function handleSop(b,env) {
    const dep=u.role==='manager'?'':` AND ${executionDepartmentSQL()} IN (${(u.departments||[]).map(()=>'?').join(',')||"''"})`;
    const args=u.role==='manager'?[]:u.departments||[];
    const mine=b.view==='mine'&&b.kind==='task',listPartners=shareEnabled(env)&&mine?await activePartnerIds(env,u.id):[];
-   const owned=mine?listPartners.length?` AND (json_extract(state,'$.owner_id')=? OR (json_extract(state,'$.job_type')='bulk_op' AND json_extract(state,'$.owner_id') IN (${listPartners.map(()=>'?').join(',')})))`:" AND json_extract(state,'$.owner_id')=?":'';
+   const owned=mine?listPartners.length?` AND (json_extract(state,'$.owner_id')=? OR (json_extract(state,'$.job_type')='bulk_op' AND json_extract(state,'$.status') NOT IN ('completed','cancelled') AND json_extract(state,'$.owner_id') IN (${listPartners.map(()=>'?').join(',')})))`:" AND json_extract(state,'$.owner_id')=?":'';
    const rows=await all(env,`SELECT * FROM sop_records WHERE kind=?${dep}${owned} ORDER BY updated_at DESC LIMIT ? OFFSET ?`,b.kind,...args,...(mine?[u.id,...listPartners]:[]),limit+1,offset);
    return {ok:true,items:await recordNumbers(env,rows.slice(0,limit).map(r=>publicState({...r,data:JSON.parse(r.state)}))),more:rows.length>limit,offset};
   }
@@ -446,8 +446,7 @@ export async function handleSop(b,env) {
         AND (absent.person_id=json_extract(NEW.before_json,'$.owner_id') OR EXISTS(SELECT 1 FROM ck_daily_dispatch_links l WHERE l.permanent_person_id=json_extract(NEW.before_json,'$.owner_id') AND l.daily_person_id=absent.person_id AND l.day=absent.day))
         AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=absent.id AND b.ended_at=''))))
    ) THEN RAISE(ABORT,'owner_transfer_changed') END; END`).run();
-   const transferGuard=shareEnabled(env)&&isBulkShareRecord(row)?(await ensureDispatchShare(env),shareMutationGuard(env,u,row.id,row.revision)):null;
-   return await save(env,b,u,row,next,await bulkOwnerTransferStatements(env,row,next,u,b,t),transferGuard?[transferGuard]:[]);
+   return await save(env,b,u,row,next,await bulkOwnerTransferStatements(env,row,next,u,b,t),await partnerShareGuard(env,row,u));
   }
   if(b.action.startsWith('sop_task_')) {
    if(row.kind!=='task')fail('记录类型错误');
@@ -698,14 +697,13 @@ export async function handleSop(b,env) {
     if(b.action==='sop_issue_cancel')extra.push(stmt(env,"UPDATE v2_issue_tickets SET status='cancelled',updated_at=? WHERE id=?",t,d.legacy_id));
    }
   } else fail('未知操作');
-  const shareGuard=shareEnabled(env)&&row&&isBulkShareRecord(row,d)?(await ensureDispatchShare(env),shareMutationGuard(env,u,row.id,row.revision)):null;
-  return await save(env,b,u,row,d,extra,shareGuard?[shareGuard]:[]);
+  return await save(env,b,u,row,d,extra,await partnerShareGuard(env,row,u));
  }catch(e){
   // Shipping corrections validate their own payload and authorization on replay.
   if((b.action.startsWith('sop_shipping_output_')||b.action==='sop_shipping_expectation_save'))return {ok:false,error:/revision_conflict/.test(e.message)?'记录已更新，请刷新后再操作':e.message};
   // A lost response retried with the same request id never applies the mutation twice.
   if(b.client_req_id){const cached=await stmt(env,'SELECT actor_id,action,result_json FROM sop_events WHERE request_id=?',b.client_req_id).first();if(cached&&cached.actor_id===u.id&&cached.action===b.action){const saved=JSON.parse(cached.result_json);if(b.action==='sop_need_create'&&saved._create_signature){try{return await needCreateReplay(b,env,u);}catch(error){return {ok:false,error:error.message};}}return saved;}}
-  return {ok:false,error:/ck_dispatch_share_checks|CHECK constraint failed/.test(e.message)?'记录已更新或协作已结束，请刷新后再操作':/revision_conflict/.test(e.message)?'记录已更新，请刷新后再操作':e.message};
+  return {ok:false,error:shareConflict.test(e.message)?'记录已更新或协作已结束，请刷新后再操作':/revision_conflict/.test(e.message)?'记录已更新，请刷新后再操作':e.message};
  }
 }
 function appendRelated(env,extra,key,u,row,data,action,t){
