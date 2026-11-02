@@ -77,6 +77,9 @@ export const attendanceEventCurrentSQL=(d,at)=>`${d}.signed_out='' AND julianday
 const attendanceStateGuards=new WeakMap();
 const attendanceStateSQL=`SELECT json_group_array(json_array(people.value,
  (SELECT json_array(s.id,s.version,s.attendance_id,d.version,s.source_person_id,s.status,s.started_at,s.ended_at,s.provisional_end_at,source.enabled,source.name,person.enabled,person.name,
+   (SELECT version FROM ck_employee_profiles WHERE person_id=source.id),(SELECT version FROM ck_permanent_badge_profiles WHERE person_id=source.id),
+   (SELECT version FROM ck_employee_profiles WHERE person_id=person.id),(SELECT version FROM ck_permanent_badge_profiles WHERE person_id=person.id),
+   (SELECT version FROM ck_daily_dispatch_grants WHERE person_id=person.id),
    (SELECT json_array(l.permanent_person_id,l.version) FROM ck_daily_dispatch_links l WHERE l.daily_person_id=s.source_person_id),
    (SELECT json_array(b.id,b.started_at,b.ended_at) FROM ck_attendance_breaks b WHERE b.attendance_id=d.id ORDER BY b.started_at DESC,b.id DESC LIMIT 1))
   FROM ck_attendance_spans s JOIN ck_attendance_days d ON d.id=s.attendance_id LEFT JOIN ck_attendance_people source ON source.id=s.source_person_id LEFT JOIN ck_attendance_people person ON person.id=s.person_id

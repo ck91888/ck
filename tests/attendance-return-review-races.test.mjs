@@ -61,3 +61,10 @@ test('a prepared verification takeover is rejected when its original owner retur
  try{f.advance(5);await f.ok('office','sop_attendance_return_confirm',{...f.cursor(await f.preview(a.badgeId)),confirmed:true});}finally{hold.release();}
  assert.equal((await pending).ok,false);hold.restore();assert.equal(JSON.parse((await f.first('SELECT state FROM sop_records WHERE id=?',job.job_id)).state).owner_id,a.id);assert.equal((await f.first("SELECT COUNT(*) n FROM sop_events WHERE record_id=? AND action='sop_verify_takeover'",job.job_id)).n,0);
 });
+
+test('revoking and restoring a transfer target grant while the transaction waits still invalidates the prepared admission',async t=>{
+ const f=await fixture(t),p=(await f.ok('office','sop_attendance_register',{name:'合成目标派审资格',agency:'가온'})).person;
+ await f.ok('office','sop_daily_dispatch_update',{person_id:p.id,badge:p.badgeId,enabled:true,departments:['bulk'],version:0,reason:'合成初次资格'});await f.ok('office','sop_attendance_checkin',{badge:p.badgeId,agency:'가온'});const job=await f.task('A','合成目标资格往返'),row=await f.first('SELECT revision FROM sop_records WHERE id=?',job.id),hold=await holdBatch(f,'sop_owner_transfer');const pending=f.call('A','sop_owner_transfer',{id:job.id,revision:row.revision,target_badge:p.badgeId,reason:'合成目标授权版本已变化'});await hold.ready;
+ try{f.advance(1);await f.ok('office','sop_daily_dispatch_update',{person_id:p.id,badge:p.badgeId,enabled:false,departments:['bulk'],version:1,reason:'合成临时撤销'});f.advance(1);await f.ok('office','sop_daily_dispatch_update',{person_id:p.id,badge:p.badgeId,enabled:true,departments:['bulk'],version:2,reason:'合成核实恢复'});}finally{hold.release();}
+ assert.equal((await pending).ok,false);hold.restore();assert.equal(JSON.parse((await f.first('SELECT state FROM sop_records WHERE id=?',job.id)).state).owner_id,f.people.A.id);
+});
