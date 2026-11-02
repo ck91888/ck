@@ -43,10 +43,10 @@ test('warm requests avoid DDL; detail query count is fixed as history grows and 
  }
  await api('sop_login',{sop_key:'fixture-only'});await confirmOperation(api,'Fixture');await api('sop_attendance_config');
  const p=await api('v2_inbound_plan_create',{customer:'Fixture',biz_classes:['direct_ship'],external_inbound_nos:['FIXTURE-A','FIXTURE-B'],lines:[{unit_type:'carton',planned_qty:20}]});
- // One authoritative feature-state read is needed per request across isolates;
+ // Authoritative dispatch state plus attendance-schema discovery are read per request across isolates;
  // it is fixed-cost, does not write, and is not a cached permission decision.
- calls=[];await api('sop_identity');assert.equal(calls.length,4);assert.ok(calls.every(s=>!s.includes('CREATE')));assert.ok(calls.every(s=>!/^\s*(INSERT|UPDATE|DELETE)/m.test(s)));
- calls=[];await api('v2_inbound_plan_detail',{id:p.id});const emptyCount=calls.length;assert.ok(emptyCount<=10,JSON.stringify({emptyCount,calls:calls.map(s=>s.slice(0,100))}));
+ calls=[];await api('sop_identity');assert.equal(calls.length,5);assert.equal(calls.filter(s=>s.includes("name IN ('ck_attendance_spans'")).length,1);assert.ok(calls.every(s=>!s.includes('CREATE')));assert.ok(calls.every(s=>!/^\s*(INSERT|UPDATE|DELETE)/m.test(s)));
+ calls=[];await api('v2_inbound_plan_detail',{id:p.id});const emptyCount=calls.length,returnSchemaReads=calls.filter(s=>s.includes("name IN ('ck_attendance_spans'")).length;assert.equal(returnSchemaReads,1);assert.ok(emptyCount-returnSchemaReads<=10,JSON.stringify({emptyCount,calls:calls.map(s=>s.slice(0,100))}));
  for(let i=0;i<12;i++){
   const job='FIXTURE-JOB-'+i;
   DB.raw.prepare("INSERT INTO v2_ops_jobs(id,related_doc_type,related_doc_id,job_type,status,inbound_external_no,created_at,updated_at) VALUES(?,'inbound_plan',?,'inbound_direct','completed',?,'2026-01-01T01:00:00Z','2026-01-01T02:00:00Z')").run(job,p.id,i===0?'FIXTURE-A':'');

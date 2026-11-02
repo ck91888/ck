@@ -50,14 +50,18 @@ export async function dailyIdentityMap(env,records){
 
 const managed=x=>`(lower(${x}) GLOB 'da-*' OR lower(${x}) GLOB 'daf-*' OR lower(${x}) GLOB 'emp-*')`;
 export function attendanceIdentitySchema(returns=false){
-const table=returns?'ck_attendance_current_days':'ck_attendance_days';
-const dayMatch=returns?`((COALESCE((SELECT enabled FROM ck_attendance_return_config WHERE id=1),0)=0 AND d.day=date(NEW.joined_at,'+9 hours')) OR ((SELECT enabled FROM ck_attendance_return_config WHERE id=1)=1 AND d.span_status='open' AND julianday(${attendanceCutoffSQL('d.signed_in')})>julianday(NEW.joined_at)))`:"d.day=date(NEW.joined_at,'+9 hours')";
+const table='ck_attendance_days';
+const dayMatch="d.day=date(NEW.joined_at,'+9 hours')";
 const validAttendance=`SELECT d.id FROM ${table} d JOIN ck_attendance_people p ON p.id=d.person_id
  WHERE ${workerBadgeMatch('d.worker_id','NEW.worker_id')} AND ${workerBadgeMatch('p.badge_id','d.worker_id')}
  AND ${dayMatch} AND d.signed_out='' AND julianday(d.signed_in)<=julianday(NEW.joined_at)
  AND p.enabled=1 AND (NOT (${dailySQL('NEW.worker_id')}) OR p.kind='daily') AND (lower(NEW.worker_id) NOT GLOB 'emp-*' OR EXISTS(SELECT 1 FROM ck_employee_profiles e WHERE e.person_id=p.id))
  AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at='')
  AND NOT EXISTS(SELECT 1 FROM ck_attendance_management m WHERE m.attendance_id=d.id AND m.voided_at!='')`;
+const childWhere=`s.badge_id=NEW.worker_id COLLATE NOCASE AND ${workerBadgeMatch('s.badge_id','NEW.worker_id')} AND s.status='open' AND s.ended_at='' AND julianday(s.started_at)<=julianday(NEW.joined_at) AND julianday(${attendanceCutoffSQL('s.started_at')})>julianday(NEW.joined_at) AND s.ordinal=(SELECT MAX(latest.ordinal) FROM ck_attendance_spans latest WHERE latest.attendance_id=s.attendance_id)`;
+const childValid=`SELECT d.id FROM ck_attendance_spans s JOIN ck_attendance_days d ON d.id=s.attendance_id JOIN ck_attendance_people p ON p.id=s.source_person_id WHERE ${childWhere} AND ${workerBadgeMatch('p.badge_id','s.badge_id')} AND p.enabled=1 AND (NOT (${dailySQL('NEW.worker_id')}) OR p.kind='daily') AND (lower(NEW.worker_id) NOT GLOB 'emp-*' OR EXISTS(SELECT 1 FROM ck_employee_profiles e WHERE e.person_id=p.id)) AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at='') AND NOT EXISTS(SELECT 1 FROM ck_attendance_management m WHERE m.attendance_id=d.id AND m.voided_at<>'')`;
+const switched=(yes,no)=>returns?`CASE WHEN (SELECT enabled FROM ck_attendance_return_config WHERE id=1)=1 THEN (${yes}) ELSE (${no}) END`:`(${no})`;
+const valid=switched(`EXISTS(${childValid})`,`EXISTS(${validAttendance})`),dayCount=switched(`SELECT COUNT(*) FROM ck_attendance_spans s WHERE ${childWhere}`,`SELECT COUNT(*) FROM ck_attendance_days d WHERE ${dayMatch} AND ${workerBadgeMatch('d.worker_id','NEW.worker_id')}`);
 return [
  'DROP TRIGGER IF EXISTS ck_attendance_guard_join',
  'DROP TRIGGER IF EXISTS ck_daily_badge_join_insert','DROP TRIGGER IF EXISTS ck_daily_badge_join_update',
@@ -66,9 +70,9 @@ return [
  BEGIN
  SELECT CASE WHEN lower(NEW.worker_id) GLOB 'emp-*' AND NOT EXISTS(SELECT 1 FROM ck_attendance_people p JOIN ck_employee_profiles e ON e.person_id=p.id WHERE p.badge_id=NEW.worker_id AND p.enabled=1) THEN RAISE(ABORT,'Employee disabled or unregistered') END;
  SELECT CASE WHEN lower(NEW.worker_id) GLOB 'daf-*' AND NOT EXISTS(SELECT 1 FROM ck_attendance_people p WHERE p.badge_id=NEW.worker_id AND p.kind='permanent' AND p.enabled=1) THEN RAISE(ABORT,'Permanent badge disabled or unregistered') END;
- SELECT CASE WHEN lower(NEW.worker_id) GLOB 'emp-*' AND NOT EXISTS(${validAttendance}) THEN RAISE(ABORT,'Employee attendance required: signed out, resting, voided, or not signed in') END;
- SELECT CASE WHEN (SELECT COUNT(*) FROM ck_attendance_people p WHERE ${workerBadgeMatch('p.badge_id','NEW.worker_id')})!=1 OR (SELECT COUNT(*) FROM ${table} d WHERE ${dayMatch} AND ${workerBadgeMatch('d.worker_id','NEW.worker_id')})!=1 THEN RAISE(ABORT,'Attendance badge identity missing or ambiguous') END;
- SELECT CASE WHEN NOT EXISTS(${validAttendance}) THEN RAISE(ABORT,'Attendance required: signed out, resting, voided, or not signed in') END;
+ SELECT CASE WHEN lower(NEW.worker_id) GLOB 'emp-*' AND NOT (${valid}) THEN RAISE(ABORT,'Employee attendance required: signed out, resting, voided, or not signed in') END;
+ SELECT CASE WHEN (SELECT COUNT(*) FROM ck_attendance_people p WHERE p.badge_id=NEW.worker_id COLLATE NOCASE AND ${workerBadgeMatch('p.badge_id','NEW.worker_id')})!=1 OR (${dayCount})!=1 THEN RAISE(ABORT,'Attendance badge identity missing or ambiguous') END;
+ SELECT CASE WHEN NOT (${valid}) THEN RAISE(ABORT,'Attendance required: signed out, resting, voided, or not signed in') END;
  SELECT CASE WHEN EXISTS(SELECT 1 FROM v2_ops_job_workers w WHERE w.left_at='' AND w.id!=NEW.id AND ${workerBadgeMatch('w.worker_id','NEW.worker_id')}) THEN RAISE(ABORT,'Attendance worker already assigned') END;
  END`)
 ];

@@ -11,32 +11,35 @@ export async function ensureAttendanceCurrentView(e){
  // Dispatch initialization may create an empty child schema with the switch off;
  // that is metadata only and never generates historical attendance or labor.
  await ensureAttendanceReturnSchema({...e,SOP_ATTENDANCE_RETURNS_ENABLED:'true'});
- await ensureSchema(e.DB,'attendance-current-view-v2',()=>e.DB.batch([
- e.DB.prepare(configDDL),e.DB.prepare('DROP VIEW IF EXISTS ck_attendance_current_days'),
+ await ensureSchema(e.DB,'attendance-current-view-v3',()=>e.DB.batch([
+ e.DB.prepare(configDDL),e.DB.prepare('INSERT OR IGNORE INTO ck_attendance_return_config VALUES(1,0)'),e.DB.prepare('DROP VIEW IF EXISTS ck_attendance_current_days'),
  e.DB.prepare(`CREATE VIEW IF NOT EXISTS ck_attendance_current_days AS
- SELECT d.*,d.day AS origin_day,d.person_id AS origin_person_id,'' AS attendance_span_id,CASE WHEN d.signed_out='' THEN 'open' ELSE 'closed' END AS span_status FROM ck_attendance_days d WHERE COALESCE((SELECT enabled FROM ck_attendance_return_config WHERE id=1),0)=0
+ SELECT d.*,d.day AS origin_day,d.person_id AS origin_person_id,'' AS attendance_span_id,CASE WHEN d.signed_out='' THEN 'open' ELSE 'closed' END AS span_status FROM ck_attendance_return_config cfg CROSS JOIN ck_attendance_days d WHERE cfg.id=1 AND cfg.enabled=0
  UNION ALL
  SELECT d.id,s.source_person_id AS person_id,s.badge_id AS worker_id,d.name,d.agency,date(s.started_at,'+9 hours') AS day,d.identity_key,s.started_at AS signed_in,CASE WHEN s.status='pending_review' AND s.ended_at='' THEN 'pending_review' ELSE s.ended_at END AS signed_out,d.version,d.day AS origin_day,d.person_id AS origin_person_id,s.id AS attendance_span_id,s.status AS span_status
- FROM ck_attendance_spans s JOIN ck_attendance_days d ON d.id=s.attendance_id
- WHERE (SELECT enabled FROM ck_attendance_return_config WHERE id=1)=1 AND s.ordinal=(SELECT MAX(latest.ordinal) FROM ck_attendance_spans latest WHERE latest.attendance_id=d.id)`)
+ FROM ck_attendance_return_config cfg CROSS JOIN ck_attendance_spans s JOIN ck_attendance_days d ON d.id=s.attendance_id
+ WHERE cfg.id=1 AND cfg.enabled=1 AND s.ordinal=(SELECT MAX(latest.ordinal) FROM ck_attendance_spans latest WHERE latest.attendance_id=d.id)`)
 
  ]));
 }
 export async function attendanceReturnEnvironment(e){
  const next={...e,SOP_ATTENDANCE_RETURNS_COMPAT:'false'};
- if(!attendanceReturnsRequested(next)&&next.SOP_ENVIRONMENT==='staging'&&next.SOP_ATTENDANCE_ENABLED==='true'&&next.SOP_ACCESS_CONTROL==='true'&&await e.DB.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ck_attendance_spans'").first()){
-  const facts=await e.DB.prepare("SELECT id FROM ck_attendance_spans WHERE kind<>'normal' LIMIT 1").first();
-  const eventTable=!facts&&await e.DB.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ck_attendance_span_events'").first();
-  const correction=eventTable&&await e.DB.prepare("SELECT request_id FROM ck_attendance_span_events WHERE action='mistaken_checkout' LIMIT 1").first();
-  if(facts||correction)next.SOP_ATTENDANCE_RETURNS_COMPAT='true';
+ if(next.SOP_ENVIRONMENT!=='staging'||next.SOP_ATTENDANCE_ENABLED!=='true'||next.SOP_ACCESS_CONTROL!=='true')return next;
+ let configExists,currentConfig;
+ if(!attendanceReturnsRequested(next)){
+  const tables=new Set((await e.DB.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('ck_attendance_spans','ck_attendance_return_config','ck_attendance_span_events')").all()).results.map(r=>r.name));configExists=tables.has('ck_attendance_return_config');
+  if(!configExists&&!tables.has('ck_attendance_spans'))return next;
+  const evidence=await e.DB.prepare(`SELECT ${configExists?'(SELECT enabled FROM ck_attendance_return_config WHERE id=1)':'NULL'} AS enabled,${tables.has('ck_attendance_spans')?"EXISTS(SELECT 1 FROM ck_attendance_spans WHERE kind<>'normal')":'0'} AS facts,${tables.has('ck_attendance_span_events')?"EXISTS(SELECT 1 FROM ck_attendance_span_events WHERE action='mistaken_checkout')":'0'} AS correction`).first();
+  currentConfig=evidence.enabled==null?null:{enabled:evidence.enabled};if(evidence.facts||evidence.correction)next.SOP_ATTENDANCE_RETURNS_COMPAT='true';
+  if(!configExists&&!tables.has('ck_attendance_spans'))return next;
  }
- return {...next,DB:await attendanceReturnDatabase(next)};
+ return {...next,DB:await attendanceReturnDatabase(next,{configExists,currentConfig})};
 }
-export async function attendanceReturnDatabase(e){
+export async function attendanceReturnDatabase(e,{configExists,currentConfig}={}){
  if(e.SOP_ENVIRONMENT!=='staging')return e.DB;const db=e.DB,on=attendanceReturnEnabled(e);
- const exists=on||!!await db.prepare("SELECT name FROM sqlite_master WHERE name='ck_attendance_return_config' AND type='table'").first();
+ const exists=on||(configExists===undefined?!!await db.prepare("SELECT name FROM sqlite_master WHERE name='ck_attendance_return_config' AND type='table'").first():configExists);
  if(!exists)return db;await ensureSchema(db,'attendance-return-config-v1',()=>db.prepare(configDDL).run());
- const sync=()=>db.prepare(configSQL).bind(on?1:0),current=await db.prepare('SELECT enabled FROM ck_attendance_return_config WHERE id=1').first();if(!current||current.enabled!==(on?1:0))await sync().run();
+ const sync=()=>db.prepare(configSQL).bind(on?1:0),current=currentConfig===undefined?await db.prepare('SELECT enabled FROM ck_attendance_return_config WHERE id=1').first():currentConfig;if(!current||current.enabled!==(on?1:0))await sync().run();
  const originals=new WeakMap(),sqls=new WeakMap(),writes=s=>!s||!/^\s*(SELECT|EXPLAIN|PRAGMA)\b/i.test(s);
  const batch=async statements=>{const source=statements.map(s=>originals.get(s)||s);return statements.some(s=>writes(sqls.get(s)))?(await db.batch([sync(),...source])).slice(1):db.batch(source);};
  const prepare=sql=>{const wrap=s=>{sqls.set(s,sql);const proxy=new Proxy(s,{get(target,key){if(key==='bind')return(...a)=>wrap(target.bind(...a));if(key==='run'&&writes(sql))return async()=>(await batch([target]))[0];if(['all','first'].includes(key)&&writes(sql))return async column=>{const r=(await batch([target]))[0],row=r.results?.[0]||null;return key==='first'?(column&&row?row[column]:row):r;};const value=target[key];return typeof value==='function'?value.bind(target):value;}});originals.set(proxy,s);sqls.set(proxy,sql);return proxy;};return wrap(db.prepare(sql));};
