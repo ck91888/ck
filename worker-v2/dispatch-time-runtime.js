@@ -1,3 +1,4 @@
+import {attendanceReturnEnabled} from './attendance-return-schema.js';
 import {ensureAttendanceCurrentView,attendanceCutoffSQL} from './attendance-context.js';
 // Event-driven dispatch labor. SQL triggers share the transaction of the real business write.
 // No browser presence, synthetic jobs, historical backfill, or client-supplied person names.
@@ -169,12 +170,12 @@ export async function ensureAutoDispatchTime(e){
 }
 export async function dispatchTimeAttendance(e,date,asOf){
  if(!dispatchTimeEnabled(e))return new Map();
- const result=await e.DB.batch([q(e,'SELECT * FROM ck_dispatch_time_days WHERE day=?',date),q(e,'SELECT * FROM ck_dispatch_time_spans WHERE day=? ORDER BY started_at,id',date)]);
+ const result=await e.DB.batch([attendanceReturnEnabled(e)?q(e,'SELECT * FROM ck_dispatch_time_days d WHERE day=? OR EXISTS(SELECT 1 FROM ck_dispatch_time_spans s WHERE s.attendance_id=d.attendance_id AND s.day=?)',date,date):q(e,'SELECT * FROM ck_dispatch_time_days WHERE day=?',date),q(e,'SELECT * FROM ck_dispatch_time_spans WHERE day=? ORDER BY started_at,id',date)]);
  const items=new Map(result[0].results.map(row=>[row.attendance_id,{...row,segments:[],seconds:0,pendingSeconds:0}]));
- for(const span of result[1].results){const item=items.get(span.attendance_id);if(!item)continue;const start=Date.parse(span.started_at);
+ for(const span of result[1].results){let item=items.get(span.attendance_id);if(!item&&attendanceReturnEnabled(e)){item={attendance_id:span.attendance_id,person_id:span.person_id,day:date,status:'out',segments:[],seconds:0,pendingSeconds:0};items.set(span.attendance_id,item);}if(!item)continue;const start=Date.parse(span.started_at);
   // Calculate the first 04:00 KST strictly after start without extending an unclosed historical span.
   const four=Math.floor((start+5*3600000)/86400000)*86400000-5*3600000+86400000,bound=Math.min(Date.parse(date+'T00:00:00+09:00')+86400000,four),until=Date.parse(asOf),pending=!!span.needs_review||!span.ended_at&&until>=bound,end=span.ended_at?Math.min(Date.parse(span.ended_at),until):Math.min(until,bound),seconds=Math.max(0,(end-start)/1000);
-  if(!seconds)continue;item.segments.push({id:span.id,start:span.started_at,end:span.ended_at||(!pending?'':new Date(end).toISOString()),endReason:pending?'system_cutoff:unverified':span.end_reason,startReason:span.start_reason,needsVerification:pending,seconds});item[pending?'pendingSeconds':'seconds']+=seconds;if(pending&&item.status==='dispatching')item.status='pending_review';
+  if(!seconds)continue;item.segments.push({id:span.id,attendanceSpanId:span.attendance_span_id||'',start:span.started_at,end:span.ended_at||(!pending?'':new Date(end).toISOString()),endReason:pending?'system_cutoff:unverified':span.end_reason,startReason:span.start_reason,needsVerification:pending,seconds});item[pending?'pendingSeconds':'seconds']+=seconds;if(pending&&item.status==='dispatching')item.status='pending_review';
  }
  return items;
 }

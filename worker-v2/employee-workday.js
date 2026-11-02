@@ -1,3 +1,4 @@
+import {attendanceSpanWindows} from './attendance-return-time.js';
 import {readPickWorkload} from './pick-workload.js';
 // Read-only employee workday facts. Account/person IDs identify dispatchers;
 // exact EMP badges identify participants. Names never establish identity.
@@ -26,6 +27,8 @@ export function employeeWorkdayAccess(env){
 }
 
 function personalSegments(record,segments,asOf,date){
+ if(record.attendanceSpans){const windows=attendanceSpanWindows(record,record.attendanceSpans,asOf).windows,dayStart=Date.parse(date+'T00:00:00+09:00'),dayEnd=dayStart+86400000;return segments.filter(s=>!String(s.reason||'').startsWith('system_cutoff:')).flatMap(s=>{const start=Date.parse(s.start),owner=s.attendanceSpanId?windows.find(w=>w.id===s.attendanceSpanId):windows.find(w=>start>=w.start&&start<w.end)||windows.find(w=>w.kind==='normal'&&start<w.start);if(!owner)return [];const a=Math.max(start,owner.start,dayStart),z=Math.min(s.end?Date.parse(s.end):Date.parse(asOf),owner.end,dayEnd);return z>a?[{...s,badgeId:record.badgeId,worker_id:s.sourceWorkerId||s.badgeId,start:iso(a),end:iso(z),clipped_start:iso(a),clipped_end:iso(z),minutes:(z-a)/60000}]:[];});}
+
  const from=Math.max(Date.parse(date+'T00:00:00+09:00'),Date.parse(record.inAt));
  const to=Math.min(Date.parse(date+'T00:00:00+09:00')+86400000,Date.parse(asOf),record.outAt?Date.parse(record.outAt):Infinity);
  return segments.filter(s=>s.badgeId===record.badgeId&&!String(s.reason||'').startsWith('system_cutoff:')).map(s=>{

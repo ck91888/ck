@@ -1,4 +1,4 @@
-import {attendanceReturnDatabase,guardAttendanceSession} from './attendance-context.js';
+import {attendanceReturnEnvironment,guardAttendanceSession} from './attendance-context.js';
 import {ensureAutoDispatchTime} from './dispatch-time-runtime.js';
 import {handleOfficeDuty,protectOfficeDuty} from './office-duty.js';
 import {materialFileResponse} from './material-file-response.js';
@@ -12837,7 +12837,7 @@ export default {
       await ensureInboundDocuments(env);
       await ensureBatchMaterialState(env);
       await ensureReferenceHistory(env);
-      env={...env,DB:await attendanceReturnDatabase(env)};
+      env=await attendanceReturnEnvironment(env);
       if(attendanceReturnEnabled(env)){await ensureAttendance(env);await ensureAttendanceReturns(env);}
       env={...env,DB:await ensureAutoDispatchTime(env)};
       if(attendanceReturnEnabled(env)){await ensureAttendanceReturns(env);await ensureAttendanceReturnAdmission(env);}

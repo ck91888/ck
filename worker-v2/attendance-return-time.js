@@ -51,7 +51,7 @@ export function attendanceReturnReport(record,operations,asOf,day=record.day,{at
   const base=attendanceReport({...record,day:kstDay(a),inAt:iso(a),outAt:iso(b),breaks:clipped(owned(breaks,active),a,b,record.badgeId)},clipped(owned(ops,active),a,b,record.badgeId),iso(b),kstDay(a),clipped(owned(duties,active),a,b,record.badgeId));
   const values={...empty(),...base},cellFlags=[...base.flags];
   if(active.length>1)cellFlags.push('出勤子段重叠，按个人合并并标待核实');
-  if(pending){values.attendancePendingMinutes=values.unassigned;values.conflict+=values.unassigned;values.unassigned=0;cellFlags.push('出勤截止或身份待核实，不补入劳动或休息');}
+  if(pending){values.attendancePendingMinutes=values.unassigned+values.conflict;values.conflict+=values.unassigned;values.unassigned=0;cellFlags.push('出勤截止或身份待核实，不补入劳动或休息');}
   cells.push({ownerSpanId:active[0].id,start:a,end:b,day:kstDay(a),groupId,returnOnly:normal.length===0,pending,values,registeredRestMinutes:values.rest,automaticRestMinutes:0,flags:cellFlags,virtual:false});
  }
  const rawPresence=cells.filter(c=>c.day===day).reduce((n,c)=>n+c.values.presence,0);

@@ -1,6 +1,6 @@
 // Explicit read model of the current attendance child; original punch evidence stays in the parent.
 import {ensureSchema,shareSchemaBinding} from './schema-ready.js';
-import {attendanceReturnEnabled,ensureAttendanceReturnSchema} from './attendance-return-schema.js';
+import {attendanceReturnEnabled,attendanceReturnsRequested,ensureAttendanceReturnSchema} from './attendance-return-schema.js';
 export const attendanceCutoffSQL=t=>`strftime('%Y-%m-%dT%H:%M:%fZ',julianday(${t}),'+5 hours','start of day','+1 day','-5 hours')`;
 export const attendanceSource=e=>attendanceReturnEnabled(e)?'ck_attendance_current_days':'ck_attendance_days';
 export const attendanceDaySQL=(e,d,day)=>attendanceReturnEnabled(e)?`date(${day}) BETWEEN date(${d}.signed_in,'+9 hours') AND date(${attendanceCutoffSQL(d+'.signed_in')},'+9 hours','-0.001 seconds')`:`${d}.day=${day}`;
@@ -21,6 +21,16 @@ export async function ensureAttendanceCurrentView(e){
  WHERE (SELECT enabled FROM ck_attendance_return_config WHERE id=1)=1 AND s.ordinal=(SELECT MAX(latest.ordinal) FROM ck_attendance_spans latest WHERE latest.attendance_id=d.id)`)
 
  ]));
+}
+export async function attendanceReturnEnvironment(e){
+ const next={...e,SOP_ATTENDANCE_RETURNS_COMPAT:'false'};
+ if(!attendanceReturnsRequested(next)&&next.SOP_ENVIRONMENT==='staging'&&next.SOP_ATTENDANCE_ENABLED==='true'&&next.SOP_ACCESS_CONTROL==='true'&&await e.DB.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ck_attendance_spans'").first()){
+  const facts=await e.DB.prepare("SELECT id FROM ck_attendance_spans WHERE kind<>'normal' LIMIT 1").first();
+  const eventTable=!facts&&await e.DB.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ck_attendance_span_events'").first();
+  const correction=eventTable&&await e.DB.prepare("SELECT request_id FROM ck_attendance_span_events WHERE action='mistaken_checkout' LIMIT 1").first();
+  if(facts||correction)next.SOP_ATTENDANCE_RETURNS_COMPAT='true';
+ }
+ return {...next,DB:await attendanceReturnDatabase(next)};
 }
 export async function attendanceReturnDatabase(e){
  if(e.SOP_ENVIRONMENT!=='staging')return e.DB;const db=e.DB,on=attendanceReturnEnabled(e);

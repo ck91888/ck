@@ -1,4 +1,5 @@
-import {attendanceReturnEnabled} from './attendance-return-schema.js';
+import {attendanceReturnOverview} from './attendance-return-overview.js';
+import {attendanceReturnEnabled,attendanceReturnsRequested} from './attendance-return-schema.js';
 import {attendanceSource,attendanceDaySQL,attendanceCurrentSQL} from './attendance-context.js';
 import {nextAttendanceCutoff} from './attendance-return-time.js';
 import {dispatchTimeEnabled} from './dispatch-time.js';
@@ -89,12 +90,13 @@ async function closePerson(env,r,t,reason){
  // remains disputed; a newly joined segment makes the transaction retry instead
  // of silently closing a clock that was absent from this read.
  const sql=[q(env,`UPDATE v2_ops_job_workers SET left_at=CASE WHEN id IN (SELECT value FROM json_each(?)) THEN ? WHEN id IN (SELECT value FROM json_each(?)) THEN joined_at ELSE json('attendance_work_changed') END,
- minutes_worked=CASE WHEN id IN (SELECT value FROM json_each(?)) THEN MAX(0,ROUND((julianday(?)-julianday(joined_at))*1440,1)) ELSE 0 END,
- leave_reason=CASE WHEN id IN (SELECT value FROM json_each(?)) THEN ? ELSE ? END WHERE ${workerBadgeMatch('worker_id','?')} AND left_at=''`,validIds,t,staleIds,validIds,t,validIds,'attendance:'+reason,'attendance_stale:'+reason,r.worker_id),q(env,`UPDATE v2_ops_jobs SET active_worker_count=(SELECT COUNT(*) FROM v2_ops_job_workers w WHERE w.job_id=v2_ops_jobs.id AND w.left_at=''),updated_at=? WHERE id IN (SELECT job_id FROM v2_ops_job_workers WHERE ${workerBadgeMatch('worker_id','?')})`,t,r.worker_id)];
+ minutes_worked=CASE WHEN id IN (SELECT value FROM json_each(?)) THEN ${reason==='checkout_pending'?'0*COALESCE(julianday(?),0)':'MAX(0,ROUND((julianday(?)-julianday(joined_at))*1440,1))'} ELSE 0 END,
+ leave_reason=CASE WHEN id IN (SELECT value FROM json_each(?)) THEN ? ELSE ? END WHERE ${workerBadgeMatch('worker_id','?')} AND left_at=''`,validIds,t,staleIds,validIds,t,validIds,reason==='checkout_pending'?'system_cutoff:attendance_pending':'attendance:'+reason,'attendance_stale:'+reason,r.worker_id),q(env,`UPDATE v2_ops_jobs SET active_worker_count=(SELECT COUNT(*) FROM v2_ops_job_workers w WHERE w.job_id=v2_ops_jobs.id AND w.left_at=''),updated_at=? WHERE id IN (SELECT job_id FROM v2_ops_job_workers WHERE ${workerBadgeMatch('worker_id','?')})`,t,r.worker_id)];
  sql.push(q(env,"UPDATE v2_pick_worker_docs SET status='completed',finished_at=?,minutes_worked=COALESCE((SELECT minutes_worked FROM v2_ops_job_workers WHERE id=segment_id),minutes_worked) WHERE segment_id IN (SELECT value FROM json_each(?)) AND status='working'",t,JSON.stringify(open.map(s=>s.id))));
  const ids=[...new Set(open.map(s=>s.job_id))];return {sql,open,valid,ids};
 }
 async function overview(env,date,t,scope='daily',detailPersonId=''){
+ if(attendanceReturnEnabled(env))return attendanceReturnOverview(env,date,t,scope,detailPersonId,{publicDay,agencies});
  if(scope==='employee')employeeWorkdayAccess(env);
  const filter=scope==='employee'?" AND d.worker_id LIKE 'EMP-%'":scope==='all'?'':" AND d.worker_id NOT LIKE 'EMP-%'";
  const start=new Date(date+'T00:00:00+09:00').toISOString(),end=new Date(Date.parse(start)+86400000).toISOString();
@@ -139,7 +141,7 @@ export async function handleAttendance(b,env){
  if(!attendanceEnabled(env))return {ok:false,error:'签到尚未启用'};
  await ensureAttendance(env);const u=access(env),t=new Date().toISOString(),day=kstDay(t),action=b.action;
  const returned=await handleAttendanceReturn(b,env,{publicDay,closePerson});if(returned)return returned;
- if(action==='sop_attendance_config')return {ok:true,day,asOf:t,agencies,employeeDepartments,user:{id:u.id,name:u.name,role:u.role},publicTest:!!u.public_test};
+ if(action==='sop_attendance_config')return {ok:true,...(attendanceReturnEnabled(env)?{attendanceReturnsEnabled:true,attendanceReturnCreationEnabled:attendanceReturnsRequested(env)}:{}),day,asOf:t,agencies,employeeDepartments,user:{id:u.id,name:u.name,role:u.role},publicTest:!!u.public_test};
  if(action==='sop_attendance_employee_work_detail'){employeeWorkdayAccess(env);const personId=typeof b.person_id==='string'?b.person_id:'';if(!personId||!await q(env,"SELECT p.id FROM ck_attendance_people p JOIN ck_employee_profiles e ON e.person_id=p.id WHERE p.id=? AND p.badge_id='EMP-'||e.employee_no AND p.kind='permanent'",personId).first())fail('职员身份不存在 / 직원 정보가 없습니다');return overview(env,dateOf(b.date||day),t,'employee',personId);}
  if(action==='sop_attendance_summary'){access(env,['manager','dispatcher','reviewer','viewer']);return overview(env,dateOf(b.date||day),t,b.scope);}
  if(['sop_attendance_employee_people','sop_attendance_employee_search','sop_attendance_employee_import_preview'].includes(action))return employeeAction(b,env,{access,fail,nameOf,text,commit,u,t});
