@@ -43,7 +43,9 @@ test('historical plan still rejects missing/busy/unsigned workers, unsupported j
  const started=await dispatch(f,n,w),other=await f.historical('import');let before=snapshot(f);assert.equal((await f.call('A','sop_task_dispatch',{...body,need_id:other.id})).ok,false);assert.deepEqual(snapshot(f),before);before=snapshot(f);assert.equal((await f.call('A','sop_task_dispatch',body)).ok,false);assert.deepEqual(snapshot(f),before);assert.equal(f.record(started.id).owner_id,f.people.A.id);
 });
 test('mixed historical plans form one single-operator batch, count review waiting once and preserve later unrelated work',async t=>{
- const f=await executionFixture(t);await f.daily('A');await f.daily('B');const ns=await Promise.all(['direct_ship','import'].map(d=>f.historical(d))),w=await f.person(),base=Date.now();t.mock.timers.enable({apis:['Date'],now:base});const items=ns.map(n=>({source_type:'need',id:n.id,revision:1})),crew={workers:[{id:w.badgeId,name:w.name}],lead_id:w.badgeId};
+ // This is a same-shift workflow; avoid accidentally crossing KST midnight in a wall-clock run.
+ const base=Date.parse(new Date(Date.now()+32400000).toISOString().slice(0,10)+'T09:00:00+09:00');t.mock.timers.enable({apis:['Date'],now:base});
+ const f=await executionFixture(t);await f.daily('A');await f.daily('B');const ns=await Promise.all(['direct_ship','import'].map(d=>f.historical(d))),w=await f.person();const items=ns.map(n=>({source_type:'need',id:n.id,revision:1})),crew={workers:[{id:w.badgeId,name:w.name}],lead_id:w.badgeId};
  const before=snapshot(f);assert.equal((await f.call('A','sop_bulk_batch_create',{items,workers:[...crew.workers,{id:f.people.A.badgeId,name:f.people.A.name}],lead_id:w.badgeId})).ok,false);assert.deepEqual(snapshot(f),before);
  const batch=await f.ok('A','sop_bulk_batch_create',{items,...crew});let detail=await f.ok('A','sop_bulk_batch_get',{id:batch.id});assert.equal(clocks(f).filter(x=>!x.left_at).length,1);assert.equal(clocks(f).find(x=>!x.left_at).job_id,batch.id);
  for(const [i,x]of detail.items.entries())f.DB.raw.prepare('UPDATE sop_records SET department=? WHERE id=?').run(['direct_ship','import'][i],x.id);

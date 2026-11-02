@@ -81,3 +81,14 @@ PC/手机页面、导出、最终全量与完整容量回归仍在进行，未�
 原生D1再次覆盖五项P2与双冷启动：六组均通过，含异常临时截止仍可见。最大SQL19482字节、单语句参数22、单参数1710字节，日志 `/tmp/ck-attendance-return-d1-six.log`。新增索引只影响读取，不改历史劳动。
 
 代码即将固定后重跑全量、产出草稿与照片浏览器。此阶段仍未独立放行，不合测试、不部署。返岗部署开关仍未启用，需最终审核后由总管安排测试发布。
+
+## 同日时钟测试与返岗模式业务回归
+
+固定0460fb2后的全量1498项，1497通过、1失败：`department-dispatch.test.mjs`同日一人多单测试从机器当前时间再推进15分钟，韩国23:45以后会跨午夜导致日当当天资格失效。已将该用例在创建人员/签到之前固定到当天09:00，保留所有权限/单量/工时断言；生产代码未放宽日期。该文件13项复测通过，日志 `/tmp/ck-attendance-return-midnight-fixture.log`。跨午夜/04场景由明确的返岗API用例覆盖，不依赖运行时刻。
+
+新增可独立运行的 `tests/dispatch-time-return-mode.mjs`：真实Worker每个请求从首次签到即启用出勤子段，复用普通/外部/分组/多单、共享退出/转移/借调/权限/并发的原业务断言。按name pattern选取22项通过，0失败；旧“直接清空签退”等不同语义不选入，已有20项返岗API专门覆盖新规则。另加“真实共享协作者签退返岗后需首次审计业务动作才起计，列表/详情/共享关系不启动、不重复部门成果”独立用例通过，日志 `/tmp/ck-attendance-return-shared.log`。
+
+复现命令：
+`node --test --test-name-pattern='successful first|joining oneself|rest and signout|shared|explicit transfer|external|daily permanent|direct permanent|multiple devices|group|one-person|actual loading|office and field|last cancellation|concurrent first|formal transfer|saving pre' tests/dispatch-time-return-mode.mjs`
+
+此后应用源码仍为0460fb2，仅增合成回归及其说明；重新固定后跑最终全量。产出草稿真实浏览器六组及照片压缩全矩阵已通过，开关均为真实启用的本地合成环境，未触及远端业务数据。

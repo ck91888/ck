@@ -1,0 +1,14 @@
+// Reuse actual business assertions with the new attendance mode enabled from the first request.
+// Run selected unchanged single-shift tests with --test-name-pattern; old cross-day/reopen semantics
+// are instead covered by attendance-return-api.test.mjs's explicit rescan/04 cases.
+import worker from '../worker-v2/index.js';
+const fetch=worker.fetch;
+worker.fetch=(request,env,context)=>fetch.call(worker,request,{...env,SOP_ATTENDANCE_RETURNS_ENABLED:'true'},context);
+await import('./dispatch-time-runtime.test.mjs');
+
+// An actual returned collaborator must act again; membership alone does not resume duty.
+const {default:test}=await import('node:test'),{default:assert}=await import('node:assert/strict'),{ownedHomeFixture}=await import('./field-owned-home-fixture.mjs');
+test('returned shared dispatcher requires a fresh audited action and never duplicates department output',async t=>{
+ t.mock.timers.enable({apis:['Date'],now:Date.parse('2026-11-02T00:00:00Z')});const f=await ownedHomeFixture();t.after(()=>f.DB.raw.close());f.env.SOP_AUTO_DISPATCH_TIME_ENABLED='true';f.env.SOP_DISPATCH_SHARE_ENABLED='true';const job=await f.task('A','合成返岗共享单'),pair=(await f.ok('A','sop_dispatch_share_invite',{target_badge:f.people.B.badgeId})).pair;await f.ok('B','sop_dispatch_share_accept',{pair_id:pair.id});const act=()=>{const r=f.record(job.id);return f.ok('B','sop_task_people',{id:r.id,revision:r.revision,workers:r.workers,lead_id:r.lead_id,reason:'合成共享实际处理'});};await act();t.mock.timers.tick(600000);
+ const preview=()=>f.ok('office','sop_attendance_return_preview',{badge:f.people.B.badgeId}),cursor=p=>({badge:f.people.B.badgeId,id:p.record.id,version:p.version,span_id:p.span_id,span_version:p.span_version});await f.ok('office','sop_attendance_checkout',cursor(await preview()));t.mock.timers.tick(600000);await f.ok('office','sop_attendance_return_confirm',{...cursor(await preview()),confirmed:true});await f.ok('B','sop_login',{badge:f.people.B.badgeId});const state=()=>f.DB.raw.prepare('SELECT * FROM ck_dispatch_time_days WHERE person_id=?').get(f.people.B.id);assert.equal(state().status,'waiting_dispatch');t.mock.timers.tick(300000);await f.ok('B','sop_field_resolve',{code:job.id});assert.equal(state().status,'waiting_dispatch');await act();assert.equal(state().status,'dispatching');t.mock.timers.tick(300000);await f.ok('B','sop_dispatch_share_leave',{pair_id:pair.id});assert.equal(state().status,'waiting_dispatch');const item=(await f.ok('office','sop_attendance_summary',{scope:'employee',date:'2026-11-02'})).items.find(x=>x.record.personId===f.people.B.id);assert.equal(item.totals.dispatch,15);assert.equal(item.totals.presence,20);assert.equal(item.workday.dispatched.total,0);assert.equal(item.workday.own.participated,0);assert.equal(f.DB.raw.prepare('SELECT COUNT(*) n FROM v2_ops_job_results').get().n,0);
+});
