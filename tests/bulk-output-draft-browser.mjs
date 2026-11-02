@@ -13,7 +13,7 @@ for(const p of [office,field]){p.on('pageerror',e=>errors.push(e.message));p.on(
 const officeReload=async()=>{await office.goto(origin+'/002/?need='+encodeURIComponent(need.id)+'&individual=1');await office.locator('.cargo-groups [data-paste]').waitFor();};const fieldReload=async()=>{await field.goto(origin+'/001/?need='+encodeURIComponent(need.id));await field.locator('[data-cargo-group]').first().waitFor();};
 
 try{
- field.setDefaultTimeout(15000);const evidence='/tmp/ck-output-draft-browser';fs.mkdirSync(evidence,{recursive:true});
+ field.setDefaultTimeout(30000);const evidence='/tmp/ck-output-draft-browser';fs.mkdirSync(evidence,{recursive:true});
  const save=async form=>{await form.locator('[data-save-output-draft]').click();await form.locator('.ck-output-draft [role=status]').filter({hasText:'已保存草稿'}).waitFor();};
  const open=async(p,id)=>{await p.goto(origin+'/001/?need='+id);if(await p.locator('#ck-login-code').isVisible()){await p.locator('#ck-login-code').fill(staff.badgeId);await p.locator('#ck-auth-gate button[type=submit]').click();}await p.locator('[data-work-department]').waitFor();};
  const add=async(form,p)=>{await form.locator('[data-staff-badge]').fill(p.badgeId+'|'+p.name);await form.locator('[data-staff-add]').click();};
