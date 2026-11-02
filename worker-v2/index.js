@@ -1,3 +1,4 @@
+import {ensureAutoDispatchTime} from './dispatch-time-runtime.js';
 import {handleOfficeDuty,protectOfficeDuty} from './office-duty.js';
 import {materialFileResponse} from './material-file-response.js';
 import {actualWorkReport,measureSegments} from './actual-work-report.js';
@@ -12833,6 +12834,7 @@ export default {
       await ensureInboundDocuments(env);
       await ensureBatchMaterialState(env);
       await ensureReferenceHistory(env);
+      await ensureAutoDispatchTime(env);
       await runSystemCutoff(env);
     } catch (e) {
       return json({ ok: false, error: "migration failed: " + e.message }, 500);

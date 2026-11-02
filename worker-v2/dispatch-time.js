@@ -1,12 +1,12 @@
 // Automatic dispatch labor has its own ledger: it is never an operation job or output.
-// Internal server API only. Business-route integration is a separate rollout stage.
+// Internal reference model; live business routes use the normalized transaction-trigger ledger.
 import {ensureSchema} from './schema-ready.js';
 import {kstDay} from './attendance-time.js';
 import {latestCutoff} from './system-cutoff.js';
 const q=(e,s,...a)=>e.DB.prepare(s).bind(...a);
-const actions=new Set(['dispatch','transfer_in','assignment_end','transfer_out','operation_start','operation_end','rest_start','rest_end','checkout','qualification_change','cutoff']);
-// Cross-boundary continuation policy remains unconfirmed; only a new real assignment is allowed here.
-const resumptions=new Set(['dispatch','transfer_in']);
+const actions=new Set(['dispatch','transfer_in','shared_handle','continue','assignment_end','transfer_out','operation_start','operation_end','rest_start','rest_end','checkout','qualification_change','cutoff']);
+// New-day activity must have an actual successful business event; reads and sign-in never activate it.
+const resumptions=new Set(['dispatch','transfer_in','shared_handle','continue']);
 export const dispatchTimeEnabled=e=>e.SOP_ENVIRONMENT==='staging'&&e.SOP_AUTO_DISPATCH_TIME_ENABLED==='true';
 export const DISPATCH_TIME_SCHEMA=[
  `CREATE TABLE IF NOT EXISTS ck_dispatch_time_sessions(id TEXT PRIMARY KEY,person_id TEXT NOT NULL,attendance_id TEXT NOT NULL,day TEXT NOT NULL,version INTEGER NOT NULL,state TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(person_id,attendance_id))`,
@@ -52,7 +52,7 @@ export function transitionDispatchTime(previous,event,context){
  if(state.lastEventAt&&at<stamp(state.lastEventAt))throw Error('派审事件早于已确认状态');
  markBoundary(state,at);
  // Only actual successful dispatch or an explicit owner handoff can create responsibility.
- if(['dispatch','transfer_in'].includes(event.action)){
+ if(resumptions.has(event.action)){
   if(!event.jobId)throw Error('缺少真实大货作业单');
   if(kstDay(event.at)!==context.day)throw Error('不能以旧班次记录当天派审');
   if(!state.responsibilities.includes(event.jobId))state.responsibilities.push(event.jobId);
@@ -88,7 +88,7 @@ export function dispatchTimeReport(state,asOf){
 }
 /** Append the ledger change to the SAME batch as the real business transition.
  * Failed dispatches and CAS conflicts roll both writes back; retries replay no business SQL.
- * No route currently invokes this foundation until lifecycle hooks are verified.
+ * Live business routes use the normalized SQL-trigger ledger in dispatch-time-runtime.js.
  */
 export async function commitDispatchTime(e,event,context,businessStatements=[]){
  if(!dispatchTimeEnabled(e))throw Error('自动派审工时尚未启用');
