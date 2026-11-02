@@ -91,15 +91,24 @@ export async function isActivePartner(e,actorId,ownerId){
  if(!shareEnabled(e)||!actorId||!ownerId||actorId===ownerId)return false;
  return (await activePartnerIds(e,actorId)).includes(ownerId);
 }
+// The first authorization records why it passed. A later lookup must not drop
+// the in-transaction check just because the pair ended in between.
+const shareGrants=new WeakMap();
+export function noteShareGrant(subject,viaShare){
+ if(!subject||typeof subject!=='object')return;
+ if(shareGrants.get(subject)===true)return;
+ shareGrants.set(subject,!!viaShare);
+}
+export function notedShareGrant(subject){return !!(subject&&typeof subject==='object'&&shareGrants.get(subject));}
 export function isBulkShareRecord(row,data=row?.data){
  if(!row||!data)return false;
  if(row.kind==='bulk_batch')return true;
  return data.job_type==='bulk_op'&&['task','dispatch'].includes(row.kind)&&(row.department==='bulk'||data.labor_department==='bulk');
 }
-// Only a write that is allowed because of an active pair is rechecked here.
-// The original owner, manager, reviewer, delegate and off-duty claim keep their
-// own rules and do not depend on this table. The check row is removed in the
-// same transaction, so a successful write does not leave a trail.
+// viaShare is the authorization recorded at the first check. When it is true,
+// the pair is rechecked inside the write transaction even if it has already
+// ended. Owner, manager, reviewer, delegate and off-duty claim pass false and
+// keep their own rules. The check row is deleted in the same transaction.
 export const shareConflict=/ck_dispatch_share_checks/;
 export function shareGuardStatements(e,actor,recordId,revision){
  const id=crypto.randomUUID();
@@ -111,15 +120,14 @@ export function shareGuardStatements(e,actor,recordId,revision){
    )) THEN 1 ELSE 0 END`,id,recordId,revision,actor.id,recordId,actor.id,recordId),
   q(e,'DELETE FROM ck_dispatch_share_checks WHERE id=?',id)];
 }
-export async function partnerShareGuard(e,record,actor=e.SOP_REQUEST_USER){
- if(!shareEnabled(e)||!record)return [];
+export async function partnerShareGuard(e,record,actor=e.SOP_REQUEST_USER,viaShare=false){
+ if(!viaShare||!shareEnabled(e)||!record)return [];
  const u=actor;if(!u?.id)return [];
  let data=record.data;if(!data){try{data=JSON.parse(record.state||'{}');}catch{return [];}}
  const row={id:record.id,kind:record.kind,department:record.department,data};
  if(!isBulkShareRecord(row,data))return [];
  if(u.role==='manager'||u.role==='reviewer'||data.owner_id===u.id)return [];
  if((data.delegates||[]).includes(u.id)&&!(data.owner_transfers||[]).some(x=>x.from_id===u.id))return [];
- if(!(await isActivePartner(e,u.id,data.owner_id)))return [];
  await ensureDispatchShare(e);
  return shareGuardStatements(e,u,record.id,record.revision);
 }

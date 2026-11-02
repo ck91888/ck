@@ -13,14 +13,14 @@ export async function cargoTask(env,row,u,requested=''){
  if(task){task.data=JSON.parse(task.state);if(task.data.need_id!==row.id)throw Error('任务不属于此计划');}
  const owner=!!task&&(u.role==='manager'||(u.departments||[]).includes(executionDepartment(task))&&(task.data.owner_id===u.id||(task.data.delegates||[]).includes(u.id)&&!(task.data.owner_transfers||[]).some(x=>x.from_id===u.id)));
  const shared=!!task&&isBulkShareRecord(task)&&await isActivePartner(env,u.id,task.data.owner_id);
- return {task,can_complete:(owner||shared)&&['manager','dispatcher','reviewer'].includes(u.role),can_review:!!task&&(['manager','reviewer'].includes(u.role)||u.role==='dispatcher'&&(owner||shared))};
+ return {task,shared:shared&&!owner,can_complete:(owner||shared)&&['manager','dispatcher','reviewer'].includes(u.role),can_review:!!task&&(['manager','reviewer'].includes(u.role)||u.role==='dispatcher'&&(owner||shared))};
 }
 export async function cargoExecution(b,env,u){
  if(!actions.has(b.action))return null;
  if(!workChainEnabled(env))throw Error('资料分组未启用');
  const row=await chainNeed(env,b.id,u),data=structuredClone(row.data),cargo=data.cargo_groups;
  if(!cargo)throw Error('此计划未设置资料分组，请沿用整单操作');
- const {task,can_complete,can_review}=await cargoTask(env,row,u,b.task_id),request=text(b.client_req_id);
+ const {task,can_complete,can_review,shared}=await cargoTask(env,row,u,b.task_id),request=text(b.client_req_id);
  if(!request)throw Error('缺少请求编号');
  const fingerprint=JSON.stringify({id:row.id,task_id:b.task_id||'',revision:b.revision,group_id:b.group_id||'',group_ids:b.group_ids||[],quantity:b.quantity,unit:b.unit,description:b.description||'',location:b.location||'',decision:b.decision||'',reason:b.reason||'',counts:b.counts||{}});
  const previous=async()=>{const p=await q(env,'SELECT * FROM sop_events WHERE request_id=?',request).first();if(!p)return null;const result=JSON.parse(p.result_json);if(p.actor_id!==u.id||p.record_id!==row.id||p.action!==b.action||result.fingerprint!==fingerprint)throw Error('请求编号冲突');return result;};
@@ -67,7 +67,7 @@ export async function cargoExecution(b,env,u){
  // Both plan and task revisions are claimed in the same batch, including pause races.
  task.data.cargo_last_action={action:b.action,group_id:group?.id||'',by:u.name,at:t};
  const result={ok:true,id:row.id,revision:row.revision+1,fingerprint};
- const shareGuard=task?await partnerShareGuard(env,task,u):[];
+ const shareGuard=task?await partnerShareGuard(env,task,u,shared):[];
  try{await env.DB.batch([...shareGuard,...chainEvent(env,row,data,u,request,b.action,t,result),...chainEvent(env,task,task.data,u,request+'-task',b.action,t),...extra]);}catch(error){const committed=await previous();if(committed)return committed;if(shareConflict.test(error.message||''))throw Error('记录已更新或协作已结束，请刷新后再操作');throw error;}
  return result;
 }

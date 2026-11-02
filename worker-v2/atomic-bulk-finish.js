@@ -1,11 +1,11 @@
-import {partnerShareGuard,shareConflict} from './dispatch-share.js';
+import {partnerShareGuard,shareConflict,notedShareGrant} from './dispatch-share.js';
 const q=(e,s,...a)=>e.DB.prepare(s).bind(...a);
 export async function atomicBulkFinish(e,b,job,data){
  const id=job.id,t=new Date().toISOString(),token=crypto.randomUUID(),resultId='RES-FINAL-'+id,by=String(b.worker_id||e.SOP_REQUEST_USER?.id||''),actor=e.SOP_REQUEST_USER||{},gate="EXISTS(SELECT 1 FROM v2_ops_job_results WHERE id=? AND json_extract(result_json,'$._completion_request')=?)",g=[resultId,token],result={ok:true};
  const reviewed={...data,_completion_request:token,dispatch_actor_id:String(actor.id||''),dispatch_actor_name:String(actor.name||'')};
  const finalGuard=e.SOP_GROUP_FINISH?'':" AND NOT EXISTS(SELECT 1 FROM v2_ops_job_workers WHERE job_id=? AND worker_id!=? AND left_at='')",args=e.SOP_GROUP_FINISH?[]:[id,by];
  const record=await q(e,"SELECT * FROM sop_records WHERE id=? AND kind='dispatch'",id).first();
- const sql=[...await partnerShareGuard(e,record),q(e,`INSERT INTO v2_ops_job_results(id,job_id,remark,result_json,result_lines_json,created_by,created_at) SELECT ?,?,?,?,?,?,? FROM v2_ops_jobs WHERE id=? AND status IN ('pending','working','awaiting_close')${finalGuard}`,resultId,id,String(b.remark||''),JSON.stringify(reviewed),'[]',by,t,id,...args),
+ const sql=[...await partnerShareGuard(e,record,actor,notedShareGrant(b)),q(e,`INSERT INTO v2_ops_job_results(id,job_id,remark,result_json,result_lines_json,created_by,created_at) SELECT ?,?,?,?,?,?,? FROM v2_ops_jobs WHERE id=? AND status IN ('pending','working','awaiting_close')${finalGuard}`,resultId,id,String(b.remark||''),JSON.stringify(reviewed),'[]',by,t,id,...args),
  q(e,`UPDATE v2_ops_job_workers SET left_at=?,minutes_worked=MAX(0,ROUND((julianday(?)-julianday(joined_at))*14400)/10.0),leave_reason='job_completed' WHERE job_id=? AND left_at='' AND ${gate}`,t,t,id,...g),
  q(e,`UPDATE v2_ops_jobs SET status='completed',finished_at=?,active_worker_count=0,customer=?,updated_at=? WHERE id=? AND ${gate}`,t,data.customer,t,id,...g)];
  if(job.linked_outbound_order_id){let meta={};try{meta=JSON.parse(job.shared_result_json||'{}');}catch{}const reopen=meta.started_from_reopen_pending?1:0;

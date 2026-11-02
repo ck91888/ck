@@ -203,6 +203,43 @@ test('batch transfer and the external batch entry recognize a collaborator',asyn
  for(let i=0;i<40&&!opened.length;i++)await new Promise(r=>setTimeout(r,15));
  assert.deepEqual(opened,[batch.batch_id]);w.close();field.close();
 });
+function armLeaveAfterShareRead(db){
+ let armed=true;const original=db.prepare.bind(db);
+ db.prepare=sql=>{const statement=original(sql);if(!armed||!String(sql).includes("FROM ck_dispatch_share_pairs WHERE status='active'"))return statement;const all=statement.all.bind(statement),first=statement.first.bind(statement);const after=async run=>{const value=await run();if(armed){armed=false;db.raw.prepare("UPDATE ck_dispatch_share_pairs SET status='ended',ended_at='2026-11-02T03:00:00Z',ended_by='race' WHERE status='active'").run();}return value;};statement.all=(...a)=>after(()=>all(...a));statement.first=(...a)=>after(()=>first(...a));return statement;};
+ return ()=>{db.prepare=original;};
+}
+test('a leave after the first share check still rejects every in-flight partner write',async()=>{
+ const s=await setup(),a=await s.permanent('合成窗口甲'),b=await s.permanent('合成窗口乙'),c=await s.permanent('合成窗口丙'),worker=await s.permanent('合成窗口操作'),helper=await s.permanent('合成窗口操作乙'),hand=await s.permanent('合成窗口操作丙'),mover=await s.permanent('合成窗口操作丁');
+ for(const p of [a,b,c,worker,helper,hand,mover]){await s.checkin(p);await s.grant(p);}await collaborate(s,a,b);
+ const need=await s.ok('office','sop_need_create',{department:'bulk',source_type:'inventory',supply_chain_no:'SHARE-WINDOW',title:'窗口普通单',customer:'合成客户',instructions:'暂停',owner:'合成'});
+ const moveNeed=await s.ok('office','sop_need_create',{department:'bulk',source_type:'inventory',supply_chain_no:'SHARE-WINDOW-MOVE',title:'窗口转单',customer:'合成客户',instructions:'转交',owner:'合成'});
+ const batchNeeds=[];for(const n of [1,2])batchNeeds.push(await s.ok('office','sop_need_create',{department:'bulk',source_type:'inventory',supply_chain_no:'SHARE-WINDOW-BATCH-'+n,title:'窗口批次'+n,customer:'合成客户',instructions:'批次',owner:'合成'}));
+ await s.login(a);
+ const batch=await s.ok('field','sop_bulk_batch_create',{items:batchNeeds.map(n=>({source_type:'need',id:n.id,revision:1})),workers:[{id:helper.badgeId,name:helper.name}],lead_id:helper.badgeId});
+ const task=await s.ok('field','sop_task_dispatch',{need_id:need.id,department:'bulk',title:'窗口普通单',job_type:'bulk_op',workers:[{id:worker.badgeId,name:worker.name}],lead_id:worker.badgeId,estimated_minutes:10});
+ const movable=await s.ok('field','sop_task_dispatch',{need_id:moveNeed.id,department:'bulk',title:'窗口转单',job_type:'bulk_op',workers:[{id:mover.badgeId,name:mover.name}],lead_id:mover.badgeId,estimated_minutes:10});
+ const external=await s.ok('field','sop_native_start',{payload:{action:'v2_bulk_op_job_start',work_order_no:'EXT-WINDOW',customer:'合成客户',client_req_id:'EXT-WINDOW'},workers:[{id:hand.badgeId,name:hand.name}],lead_id:hand.badgeId,estimated_minutes:10,labor_department:'bulk'});
+ const restore=()=>s.DB.raw.prepare("UPDATE ck_dispatch_share_pairs SET status='active',ended_at='',ended_by='' WHERE ended_by='race'").run();
+ await s.login(b);
+ let stop=armLeaveAfterShareRead(s.DB);let paused=await s.call('field','sop_task_pause',{id:task.id,revision:task.revision,reason:'退出后暂停'});stop();
+ assert.equal(paused.ok,false);assert.match(paused.error,/协作已结束/);assert.equal(JSON.parse(s.DB.raw.prepare('SELECT state FROM sop_records WHERE id=?').get(task.id).state).status,'working');
+ restore();stop=armLeaveAfterShareRead(s.DB);const moved=await s.call('field','sop_owner_transfer',{id:movable.id,revision:movable.revision,target_badge:c.badgeId,reason:'退出后转单'});stop();
+ assert.equal(moved.ok,false);assert.match(moved.error,/协作已结束/);assert.equal(JSON.parse(s.DB.raw.prepare('SELECT state FROM sop_records WHERE id=?').get(movable.id).state).owner_id,a.id);
+ await s.login(b);restore();stop=armLeaveAfterShareRead(s.DB);const batchPaused=await s.call('field','sop_bulk_batch_pause',{id:batch.batch_id,revision:1,reason:'退出后停批'});stop();
+ assert.equal(batchPaused.ok,false);assert.match(batchPaused.error,/协作已结束/);assert.equal(JSON.parse(s.DB.raw.prepare('SELECT state FROM sop_records WHERE id=?').get(batch.batch_id).state).status,'working');
+ restore();stop=armLeaveAfterShareRead(s.DB);const people=await s.call('field','sop_native_people',{job_id:external.job_id,revision:1,workers:[{id:hand.badgeId,name:hand.name}],lead_id:hand.badgeId,reason:'退出后换人'});stop();
+ assert.equal(people.ok,false);assert.match(people.error,/协作已结束/);assert.equal(s.DB.raw.prepare('SELECT revision FROM sop_records WHERE id=?').get(external.job_id).revision,1);
+ restore();stop=armLeaveAfterShareRead(s.DB);const nativePaused=await s.call('field','sop_native_pause',{job_id:external.job_id,revision:1,reason:'退出后暂停外部单'});stop();
+ assert.equal(nativePaused.ok,false);assert.match(nativePaused.error,/协作已结束/);assert.equal(s.DB.raw.prepare('SELECT status FROM v2_ops_jobs WHERE id=?').get(external.job_id).status,'working');
+ restore();stop=armLeaveAfterShareRead(s.DB);const finished=await s.call('field','v2_bulk_op_job_finish',{job_id:external.job_id,revision:1,worker_id:hand.badgeId,customer:'合成客户',label_count:3});stop();
+ assert.equal(finished.ok,false);assert.match(finished.error,/协作已结束/);assert.equal(s.DB.raw.prepare('SELECT status FROM v2_ops_jobs WHERE id=?').get(external.job_id).status,'working');
+ const cargo=cargoFixture();cargo.env.SOP_DISPATCH_SHARE_ENABLED='true';await ensureDispatchShare(cargo.env);
+ cargo.DB.raw.prepare("INSERT INTO ck_dispatch_share_pairs(id,person_lo,person_hi,invited_by,invitee_id,status,day,created_at) VALUES('DS-WINDOW','OWNER','PARTNER','OWNER','PARTNER','active','2026-11-02','2026-11-02T00:00:00Z')").run();
+ const partner={id:'PARTNER',name:'协作乙',role:'dispatcher',scope:'field',departments:['bulk']};
+ stop=armLeaveAfterShareRead(cargo.DB);
+ await assert.rejects(()=>cargoExecution(cargo.body('sop_cargo_group_complete',{group_id:'G0',quantity:3,unit:'箱'}),cargo.env,partner),/协作已结束/);
+ stop();assert.equal(cargo.DB.raw.prepare("SELECT revision FROM sop_records WHERE id='N'").get().revision,1);assert.equal(JSON.parse(cargo.DB.raw.prepare("SELECT state FROM sop_records WHERE id='T'").get().state).status,'working');
+});
 test('photo compression and staging config stay unchanged while the flag is absent',()=>{
  const photo=fs.readFileSync(new URL('../shared/photo-upload.js',import.meta.url),'utf8');
  assert.match(photo,/2048\/Math\.max/);assert.match(photo,/0\.86/);assert.match(photo,/不另存拍摄原图/);

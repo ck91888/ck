@@ -400,7 +400,7 @@ export async function handleSop(b,env) {
    return await save(env,b,u,row,{title:issue.issue_description,initial_requirement:issue.issue_description,requirement_text:issue.issue_description,legacy_id:issue.id,native:!!b.native,status:['completed','closed'].includes(issue.status)?'closed':issue.status==='cancelled'?'cancelled':issue.status==='responded'?'responded':'open',messages:[],changes:[],requirement_version:0,ack_version:0,created_at:t});
   }
   if(!row)fail('记录不存在');
-  const d=structuredClone(row.data),extra=[];
+  const d=structuredClone(row.data),extra=[];let viaShare=false;
   permit(u,executionDepartment(row),roles);
   if(b.action==='sop_owner_transfer'){
    await ensureDailyDispatch(env);
@@ -446,14 +446,16 @@ export async function handleSop(b,env) {
         AND (absent.person_id=json_extract(NEW.before_json,'$.owner_id') OR EXISTS(SELECT 1 FROM ck_daily_dispatch_links l WHERE l.permanent_person_id=json_extract(NEW.before_json,'$.owner_id') AND l.daily_person_id=absent.person_id AND l.day=absent.day))
         AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=absent.id AND b.ended_at=''))))
    ) THEN RAISE(ABORT,'owner_transfer_changed') END; END`).run();
-   return await save(env,b,u,row,next,await bulkOwnerTransferStatements(env,row,next,u,b,t),await partnerShareGuard(env,row,u));
+   return await save(env,b,u,row,next,await bulkOwnerTransferStatements(env,row,next,u,b,t),await partnerShareGuard(env,row,u,shareOwner));
   }
   if(b.action.startsWith('sop_task_')) {
    if(row.kind!=='task')fail('记录类型错误');
    permit(u,executionDepartment(row),['manager','dispatcher','reviewer']);
    const groupedNeed=d.need_id?await read(env,d.need_id):null;
    if(groupedNeed?.data.cargo_groups&&['sop_task_finish','sop_task_complete_review','sop_task_review','sop_task_cancel'].includes(b.action))fail('此计划按资料组完成和审核，请使用分组操作；不得整单重复登记');
-   const allowedOwner=u.role==='manager'||d.owner_id===u.id||(d.delegates||[]).includes(u.id)&&!(d.owner_transfers||[]).some(x=>x.from_id===u.id)||isBulkShareRecord(row,d)&&await isActivePartner(env,u.id,d.owner_id);
+   const validDelegate=(d.delegates||[]).includes(u.id)&&!(d.owner_transfers||[]).some(x=>x.from_id===u.id);
+   viaShare=u.role==='dispatcher'&&d.owner_id!==u.id&&!validDelegate&&isBulkShareRecord(row,d)&&await isActivePartner(env,u.id,d.owner_id);
+   const allowedOwner=u.role==='manager'||d.owner_id===u.id||validDelegate||viaShare;
    if(b.action!=='sop_task_review' && !allowedOwner)fail('仅本任务负责人或获授权人员可操作');
    if(b.action==='sop_task_start') {
     if(groupedNeed?.data.cargo_groups&&taskGroups(groupedNeed.data.cargo_groups,{id:row.id,data:d}).some(g=>g.ack_version!==(g.mapping_version||1)))fail('请先在资料分组中确认最新版本，再恢复作业');
@@ -697,7 +699,7 @@ export async function handleSop(b,env) {
     if(b.action==='sop_issue_cancel')extra.push(stmt(env,"UPDATE v2_issue_tickets SET status='cancelled',updated_at=? WHERE id=?",t,d.legacy_id));
    }
   } else fail('未知操作');
-  return await save(env,b,u,row,d,extra,await partnerShareGuard(env,row,u));
+  return await save(env,b,u,row,d,extra,await partnerShareGuard(env,row,u,viaShare));
  }catch(e){
   // Shipping corrections validate their own payload and authorization on replay.
   if((b.action.startsWith('sop_shipping_output_')||b.action==='sop_shipping_expectation_save'))return {ok:false,error:/revision_conflict/.test(e.message)?'记录已更新，请刷新后再操作':e.message};

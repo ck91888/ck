@@ -4,7 +4,7 @@ import {sameBadgeSignature} from './badge-request-signature.js';
 import {ensureSchema} from './schema-ready.js';
 // Staging dispatch ownership and validation shared by the original operation routes.
 import {nativeOwner} from './sop-dispatch.js';
-import {partnerShareGuard,shareConflict} from './dispatch-share.js';
+import {partnerShareGuard,shareConflict,notedShareGrant} from './dispatch-share.js';
 import {borrowedOut,crewBorrowStatements} from './crew-borrow.js';
 const q=(e,s,...a)=>e.DB.prepare(s).bind(...a);
 const rows=async(e,s,...a)=>(await q(e,s,...a).all()).results||[];
@@ -15,7 +15,9 @@ export async function validateNativeMutation(body,env){
  if(env.SOP_ENVIRONMENT!=='staging'||env.SOP_UPGRADE_ENABLED!=='true')return;
  if(!body.job_id||!(/_(finish|finalize|leave|resume)$/.test(body.action)||body.action==='v2_ops_job_result_update'))return;
  const record=await q(env,"SELECT state FROM sop_records WHERE id=? AND kind='dispatch'",body.job_id).first();if(!record)return;
- if(!await nativeOwner(body,env))fail('请由本任务派审员操作 / 이 작업의 배정 담당자가 처리하세요');
+ // Bulk finish already recorded a pair grant. Do not turn a later lookup into a
+ // denial here; atomicBulkFinish repeats that check inside the write transaction.
+ if(!await nativeOwner(body,env)&&!(notedShareGrant(body)&&body.action==='v2_bulk_op_job_finish'&&!body.leave_only))fail(notedShareGrant(body)?'记录已更新或协作已结束，请刷新后再操作':'请由本任务派审员操作 / 이 작업의 배정 담당자가 처리하세요');
  const job=await q(env,'SELECT * FROM v2_ops_jobs WHERE id=?',body.job_id).first();if(!job||job.status==='cancelled')fail('任务已取消或不存在 / 작업이 없거나 취소되었습니다');
  if(types[body.action]&&!types[body.action].includes(job.job_type))fail('作业类型与操作入口不符，请重新打开原任务 / 작업 종류가 일치하지 않습니다');
  if(body.action==='v2_ops_job_finish'&&Object.values(types).flat().includes(job.job_type))fail('请从原任务填写产出并结束 / 원래 작업에서 산출을 입력하고 종료하세요');
@@ -50,7 +52,9 @@ export function pickTeamStatements(env,jobId,t){
 }
 export async function nativePeople(body,env,{resume=false}={}){
  const action=resume?'sop_native_resume':'sop_native_people',resumeSignature=JSON.stringify({job_id:body.job_id,revision:body.revision,workers:body.workers,lead_id:body.lead_id});
- if(env.SOP_ENVIRONMENT!=='staging'||!await nativeOwner({job_id:body.job_id},env))fail('请由本任务派审员调整人员 / 담당자가 인원을 변경하세요');
+ // The grant must be recorded on this request body. A copied {job_id} would
+ // leave notedShareGrant false and drop the in-transaction pair check.
+ if(env.SOP_ENVIRONMENT!=='staging'||!await nativeOwner(body,env))fail('请由本任务派审员调整人员 / 담당자가 인원을 변경하세요');
  const request=String(body.client_req_id||'');if(!request||request.length>100)fail('缺少请求编号');
  const old=await q(env,'SELECT action,actor_id,record_id,after_json,result_json FROM sop_events WHERE request_id=?',request).first();
  if(old){if(old.action!==action||old.actor_id!==env.SOP_REQUEST_USER.id||old.record_id!==body.job_id||resume&&!sameBadgeSignature(JSON.parse(old.after_json)._resume_signature,resumeSignature))fail('请求已被使用');return JSON.parse(old.result_json);}
@@ -83,7 +87,7 @@ export async function nativePeople(body,env,{resume=false}={}){
  // Install after the SOP schema exists (legacy migrations run before SOP tables).
  await env.DB.prepare("CREATE TRIGGER IF NOT EXISTS ck_native_people_active BEFORE INSERT ON sop_events WHEN NEW.action='sop_native_people' AND NOT EXISTS(SELECT 1 FROM v2_ops_jobs WHERE id=NEW.record_id AND status IN ('pending','working','awaiting_close')) BEGIN SELECT RAISE(ABORT,'job_already_finished'); END").run();
  await ensureNativePauseGuards(env);
- sql.unshift(...await partnerShareGuard(env,row));
+ sql.unshift(...await partnerShareGuard(env,row,env.SOP_REQUEST_USER,notedShareGrant(body)));
  try{await env.DB.batch(sql);}catch(error){if(shareConflict.test(error.message||''))fail('记录已更新或协作已结束，请刷新后再操作');throw error;}
  return result;
 }
@@ -157,7 +161,7 @@ export async function pauseNative(body,env){
  const after={...before,status:'paused',pause_reason:reason,paused_at:t,pause_actor_id:env.SOP_REQUEST_USER.id,paused_workers:active,last_lead:before.last_lead||(before.workers||[]).find(w=>w.id===before.lead_id)};
  const result={ok:true,job_id:job.id,revision:row.revision+1,status:'paused'};
  await ensureNativePauseGuards(env);
- const shareGuard=await partnerShareGuard(env,row);
+ const shareGuard=await partnerShareGuard(env,row,env.SOP_REQUEST_USER,notedShareGrant(body));
  try{await env.DB.batch([
  ...shareGuard,
  q(env,'INSERT INTO sop_events VALUES(?,?,?,?,?,?,?,?,?,?)',request,job.id,row.revision,'sop_native_pause',env.SOP_REQUEST_USER.id,env.SOP_REQUEST_USER.name,row.state,JSON.stringify(after),JSON.stringify(result),t),
