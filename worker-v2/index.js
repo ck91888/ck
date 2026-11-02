@@ -53,6 +53,7 @@ import { workPlanStatements } from './sop-planning.js';
 import { nextOutboundDisplayNo } from './outbound-number.js';
 import { handleSop, guardLegacy, linkedNeeds, linkedCheck, outboundNeedStatements } from './sop.js';
 import { sessionUser, sessionAction } from './sop-session.js';
+import { handleDispatchShare } from './dispatch-share.js';
 import { prepareDemo } from './sop-demo.js';
 import { startNative, nativeOwner } from './sop-dispatch.js';
 /**
@@ -12935,6 +12936,9 @@ export default {
       return await handleMultipartUpload(formData, env);
     }
 
+    if(action.startsWith('sop_dispatch_share_')){
+      try{return json(await handleDispatchShare(body,env));}catch(e){return json({ok:false,error:e.message||'派审协作失败'},e.status||409);}
+    }
     // SOP rollout is opt-in; old clients and in-flight legacy jobs stay on original routes.
     if (action.startsWith('sop_')) {
       try { const result=await handleSop(body, env);if(result.ok&&action==='sop_get'&&result.record?.kind==='task')result.record.borrowed_out=await borrowedOut(env,result.record.id);if(result.ok&&action==='sop_field_resolve'&&result.task)result.task.borrowed_out=await borrowedOut(env,result.task.id);return json(result); }
