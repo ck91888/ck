@@ -113,6 +113,14 @@ test('grouped review records the collaborator and rejects an outsider',async()=>
  assert.equal(JSON.parse(s.DB.raw.prepare("SELECT state FROM sop_records WHERE id='T'").get().state).owner_id,'OWNER');
  await assert.rejects(()=>cargoExecution(s.body('sop_cargo_group_complete',{group_id:'G1',quantity:3,unit:'箱'}),s.env,{...partner,id:'OUTSIDER'}),/派审员|协作/);
 });
+test('photo compression and staging config stay unchanged while the flag is absent',()=>{
+ const photo=fs.readFileSync(new URL('../shared/photo-upload.js',import.meta.url),'utf8');
+ assert.match(photo,/2048\/Math\.max/);assert.match(photo,/0\.86/);assert.match(photo,/不另存拍摄原图/);
+ const staging=fs.readFileSync(new URL('../worker-v2/wrangler.sop-staging.toml',import.meta.url),'utf8');
+ const production=fs.readFileSync(new URL('../worker-v2/wrangler.toml',import.meta.url),'utf8');
+ assert.doesNotMatch(staging,/SOP_DISPATCH_SHARE_ENABLED/);assert.doesNotMatch(production,/SOP_DISPATCH_SHARE_ENABLED/);
+ assert.match(production,/name = "ck-v2-api"/);assert.match(staging,/ck-v2-api-sop-staging/);
+});
 test('home collaboration control stays hidden while the flag is off',async t=>{
  if(!process.env.CK_JSDOM_MODULE)return t.skip();
  const {JSDOM}=(await import(process.env.CK_JSDOM_MODULE)).default;
