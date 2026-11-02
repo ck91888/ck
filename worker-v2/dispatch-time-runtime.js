@@ -9,28 +9,30 @@ import {ensureDispatchShare} from './dispatch-share.js';
 import {workerBadgeMatch} from './daily-badge-identity.js';
 import {activeAttendanceSQL} from './attendance-management.js';
 import {dispatchTimeEnabled} from './dispatch-time.js';
-const q=(e,s,...a)=>e.DB.prepare(s).bind(...a),seen=new WeakMap();
+const q=(e,s,...a)=>e.DB.prepare(s).bind(...a),wrappers=new WeakMap(),bases=new WeakMap();
+const configDDL=`CREATE TABLE IF NOT EXISTS ck_dispatch_time_config(id INTEGER PRIMARY KEY CHECK(id=1),enabled INTEGER NOT NULL,sharing_enabled INTEGER NOT NULL)`;
+const configSQL='INSERT INTO ck_dispatch_time_config VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled,sharing_enabled=excluded.sharing_enabled WHERE enabled<>excluded.enabled OR sharing_enabled<>excluded.sharing_enabled';
 const open="('pending','assigned','working','paused','awaiting_close','awaiting_review','rework')";
 const now="strftime('%Y-%m-%dT%H:%M:%fZ','now')";
 const cutoff=t=>`strftime('%Y-%m-%dT%H:%M:%fZ',julianday(${t}),'+5 hours','start of day','-5 hours')`;
 const boundary=s=>`MIN(strftime('%Y-%m-%dT%H:%M:%fZ',julianday(${s}.started_at),'+9 hours','start of day','+1 day','-9 hours'),strftime('%Y-%m-%dT%H:%M:%fZ',julianday(${s}.started_at),'+5 hours','start of day','+1 day','-5 hours'))`;
-const pair=(person,owner,day)=>`EXISTS(SELECT 1 FROM ck_dispatch_share_pairs pair WHERE (SELECT sharing_enabled FROM ck_dispatch_time_config WHERE id=1)=1 AND pair.status='active' AND pair.day=${day} AND ((pair.person_lo=${person} AND pair.person_hi=${owner}) OR (pair.person_hi=${person} AND pair.person_lo=${owner})))`;
+const pair=(person,owner,day,grant='')=>`EXISTS(SELECT 1 FROM ck_dispatch_share_pairs pair WHERE (SELECT sharing_enabled FROM ck_dispatch_time_config WHERE id=1)=1 AND pair.status='active' AND pair.day=${day} AND ((pair.person_lo=${person} AND pair.person_hi=${owner}) OR (pair.person_hi=${person} AND pair.person_lo=${owner}))${grant?` AND pair.id=${grant}`:''})`;
 const delegate=(person,state)=>`EXISTS(SELECT 1 FROM json_each(${state},'$.delegates') WHERE value=${person}) AND NOT EXISTS(SELECT 1 FROM json_each(${state},'$.owner_transfers') WHERE json_extract(value,'$.from_id')=${person})`;
 const aliases=(person,worker)=>`EXISTS(SELECT 1 FROM ck_dispatch_time_aliases alias WHERE alias.person_id=${person} AND ${workerBadgeMatch(worker,'alias.worker_id')})`;
-const duties=(s,t)=>`EXISTS(SELECT 1 FROM ck_dispatch_time_links link JOIN sop_records record ON record.id=link.job_id JOIN v2_ops_jobs job ON job.id=link.job_id WHERE link.person_id=${s}.person_id AND link.attendance_id=${s}.attendance_id AND job.job_type='bulk_op' AND job.status IN ${open} AND json_extract(record.state,'$.status') IN ${open} AND julianday(link.engaged_at)>=julianday(${cutoff(t)}) AND (json_extract(record.state,'$.owner_id')=link.person_id OR (link.source='shared' AND ${pair('link.person_id',"json_extract(record.state,'$.owner_id')",`${s}.day`)}) OR (link.source='delegate' AND ${delegate('link.person_id','record.state')})))`;
-const identity="SELECT d.id,d.worker_id,d.name,d.agency,d.day,d.identity_key,d.signed_in,d.signed_out,d.version,d.person_id AS attendance_person_id,actual.enabled AS actual_enabled,p.id AS person_id,p.enabled AS person_enabled,p.badge_id AS permanent_badge,CASE WHEN p.badge_id LIKE 'EMP-%' THEN EXISTS(SELECT 1 FROM ck_employee_profiles employee WHERE employee.person_id=p.id AND p.badge_id='EMP-'||employee.employee_no) AND COALESCE((SELECT enabled FROM ck_field_access access WHERE access.person_id=p.id),1)=1 ELSE p.badge_id GLOB 'DAF-*' AND EXISTS(SELECT 1 FROM ck_daily_dispatch_grants grant_row WHERE grant_row.person_id=p.id AND grant_row.enabled=1 AND EXISTS(SELECT 1 FROM json_each(grant_row.departments) WHERE value='bulk')) END AS qualified FROM ck_attendance_days d JOIN ck_attendance_people actual ON actual.id=d.person_id JOIN ck_attendance_people p ON p.id=COALESCE((SELECT permanent_person_id FROM ck_daily_dispatch_links link WHERE link.daily_person_id=d.person_id AND link.day=d.day),d.person_id) WHERE "+activeAttendanceSQL('d');
-function status(s,t){return `(SELECT CASE
- WHEN attendance.id IS NULL OR attendance.day<>date(${t},'+9 hours') THEN 'pending_review'
+const duties=(s,t)=>`EXISTS(SELECT 1 FROM ck_dispatch_time_links link JOIN sop_records record ON record.id=link.job_id JOIN v2_ops_jobs job ON job.id=link.job_id WHERE link.person_id=${s}.person_id AND link.attendance_id=${s}.attendance_id AND job.job_type='bulk_op' AND job.status IN ${open} AND json_extract(record.state,'$.status') IN ${open} AND julianday(link.engaged_at)>=julianday(${cutoff(t)}) AND (json_extract(record.state,'$.owner_id')=link.person_id OR (link.source='shared' AND ${pair('link.person_id',"json_extract(record.state,'$.owner_id')",`${s}.day`,'link.share_pair_id')}) OR (link.source='delegate' AND ${delegate('link.person_id','record.state')})))`;
+const identity="SELECT d.id,d.worker_id,d.name,d.agency,d.day,d.identity_key,d.signed_in,d.signed_out,d.version,d.person_id AS attendance_person_id,actual.enabled AS actual_enabled,p.id AS person_id,p.enabled AS person_enabled,p.badge_id AS permanent_badge,CASE WHEN p.badge_id LIKE 'EMP-%' THEN EXISTS(SELECT 1 FROM ck_employee_profiles employee WHERE employee.person_id=p.id AND p.badge_id='EMP-'||employee.employee_no) AND COALESCE((SELECT enabled FROM ck_field_access access WHERE access.person_id=p.id),1)=1 ELSE p.badge_id GLOB 'DAF-*' AND EXISTS(SELECT 1 FROM ck_daily_dispatch_grants grant_row WHERE grant_row.person_id=p.id AND grant_row.enabled=1 AND EXISTS(SELECT 1 FROM json_each(grant_row.departments) WHERE value='bulk')) END AS qualified FROM ck_attendance_days d JOIN ck_attendance_people actual ON actual.id=d.person_id JOIN ck_attendance_people p ON p.id=COALESCE((SELECT permanent_person_id FROM ck_daily_dispatch_links link WHERE link.daily_person_id=d.person_id AND link.day=d.day),d.person_id) WHERE "+activeAttendanceSQL('d')+' AND '+workerBadgeMatch('d.worker_id','actual.badge_id');
+function status(s,t){return `COALESCE((SELECT CASE
+ WHEN attendance.day<>date(${t},'+9 hours') THEN 'pending_review'
  WHEN attendance.signed_out<>'' THEN 'out'
  WHEN ${s}.requires_action=1 THEN 'waiting_dispatch'
  WHEN (SELECT COUNT(*) FROM ck_dispatch_time_identity duplicate WHERE duplicate.person_id=${s}.person_id AND duplicate.day=${s}.day AND duplicate.signed_out='')<>1 THEN 'pending_review'
  WHEN attendance.person_enabled<>1 OR attendance.actual_enabled<>1 OR attendance.qualified<>1 THEN 'blocked'
  WHEN EXISTS(SELECT 1 FROM ck_attendance_breaks rest WHERE rest.attendance_id=attendance.id AND rest.ended_at='') THEN 'rest'
- WHEN EXISTS(SELECT 1 FROM v2_ops_job_workers worker LEFT JOIN v2_ops_jobs job ON job.id=worker.job_id WHERE COALESCE(worker.left_at,'')='' AND ${aliases(`${s}.person_id`,'worker.worker_id')} AND (job.id IS NULL OR job.status NOT IN ('working','pending','awaiting_close') OR julianday(worker.joined_at)<julianday(attendance.signed_in) OR date(worker.joined_at,'+9 hours')<>attendance.day)) THEN 'pending_review'
- WHEN EXISTS(SELECT 1 FROM v2_ops_job_workers worker WHERE COALESCE(worker.left_at,'')='' AND ${aliases(`${s}.person_id`,'worker.worker_id')}) THEN 'operating'
+ WHEN EXISTS(SELECT 1 FROM v2_ops_job_workers worker LEFT JOIN v2_ops_jobs job ON job.id=worker.job_id WHERE worker.left_at='' AND ${aliases(`${s}.person_id`,'worker.worker_id')} AND (job.id IS NULL OR job.status NOT IN ('working','pending','awaiting_close') OR julianday(worker.joined_at)<julianday(attendance.signed_in) OR date(worker.joined_at,'+9 hours')<>attendance.day)) THEN 'pending_review'
+ WHEN EXISTS(SELECT 1 FROM v2_ops_job_workers worker WHERE worker.left_at='' AND ${aliases(`${s}.person_id`,'worker.worker_id')}) THEN 'operating'
  WHEN EXISTS(SELECT 1 FROM ck_crew_borrows loan WHERE loan.status IN ('borrowed','return_pending') AND ${aliases(`${s}.person_id`,'loan.worker_id')}) THEN 'blocked'
  WHEN NOT ${duties(s,t)} THEN CASE WHEN ${s}.needs_review=1 THEN 'pending_review' ELSE 'waiting_dispatch' END
- ELSE 'dispatching' END FROM (SELECT 1) singleton LEFT JOIN ck_dispatch_time_identity attendance ON attendance.id=${s}.attendance_id AND attendance.person_id=${s}.person_id)`;}
+ ELSE 'dispatching' END FROM ck_dispatch_time_identity attendance WHERE attendance.id=${s}.attendance_id AND attendance.person_id=${s}.person_id),'pending_review')`;}
 function tick(person,t,reason,key){return `INSERT INTO ck_dispatch_time_ticks(person_id,at,reason,event_key) SELECT ${person},${t},'${reason}',${key} WHERE ${person} IS NOT NULL;`;}
 const businessActions=['sop_task_dispatch','sop_native_start','sop_task_start','sop_task_people','sop_task_pause','sop_task_finish','sop_task_complete_review','sop_task_review','sop_native_people','sop_native_resume','sop_native_pause','sop_owner_transfer','sop_cargo_group_complete','sop_cargo_group_review','sop_cargo_job_finish','sop_cargo_groups_ack','sop_bulk_output_draft_save','sop_bulk_batch_resume','sop_bulk_batch_pause','sop_bulk_batch_people','sop_bulk_batch_cancel','sop_bulk_batch_switch'];
 function capture(eventKey,actor,job,t,state,action,admitted='1'){
@@ -40,16 +42,26 @@ function capture(eventKey,actor,job,t,state,action,admitted='1'){
 function schema(){
  const enabled="(SELECT enabled FROM ck_dispatch_time_config WHERE id=1)=1",t="MAX(NEW.at,COALESCE((SELECT MAX(updated_at) FROM ck_dispatch_time_days WHERE person_id=NEW.person_id),NEW.at))";
  const sql=[
- `CREATE TABLE IF NOT EXISTS ck_dispatch_time_config(id INTEGER PRIMARY KEY CHECK(id=1),enabled INTEGER NOT NULL,sharing_enabled INTEGER NOT NULL)`,
+ configDDL,
  `CREATE TABLE IF NOT EXISTS ck_dispatch_time_days(person_id TEXT NOT NULL,attendance_id TEXT NOT NULL,day TEXT NOT NULL,activated_at TEXT NOT NULL,updated_at TEXT NOT NULL,status TEXT NOT NULL,needs_review INTEGER NOT NULL DEFAULT 0,requires_action INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(person_id,attendance_id))`,
- `CREATE TABLE IF NOT EXISTS ck_dispatch_time_links(person_id TEXT NOT NULL,attendance_id TEXT NOT NULL,job_id TEXT NOT NULL,source TEXT NOT NULL,engaged_at TEXT NOT NULL,PRIMARY KEY(person_id,attendance_id,job_id))`,
+ `CREATE TABLE IF NOT EXISTS ck_dispatch_time_links(person_id TEXT NOT NULL,attendance_id TEXT NOT NULL,job_id TEXT NOT NULL,source TEXT NOT NULL,engaged_at TEXT NOT NULL,share_pair_id TEXT NOT NULL DEFAULT '',PRIMARY KEY(person_id,attendance_id,job_id))`,
  `CREATE TABLE IF NOT EXISTS ck_dispatch_time_spans(id TEXT PRIMARY KEY,person_id TEXT NOT NULL,attendance_id TEXT NOT NULL,day TEXT NOT NULL,started_at TEXT NOT NULL,ended_at TEXT NOT NULL DEFAULT '',start_reason TEXT NOT NULL,end_reason TEXT NOT NULL DEFAULT '',needs_review INTEGER NOT NULL DEFAULT 0,source_event TEXT NOT NULL)`,
  `CREATE UNIQUE INDEX IF NOT EXISTS ck_dispatch_time_one_open_span ON ck_dispatch_time_spans(person_id) WHERE ended_at=''`,
  `CREATE INDEX IF NOT EXISTS ck_dispatch_time_span_attendance ON ck_dispatch_time_spans(attendance_id,started_at)`,
+ `CREATE INDEX IF NOT EXISTS ck_dispatch_time_days_date ON ck_dispatch_time_days(day,attendance_id)`,
+ `CREATE INDEX IF NOT EXISTS ck_dispatch_time_days_attendance ON ck_dispatch_time_days(attendance_id)`,
+ `CREATE INDEX IF NOT EXISTS ck_dispatch_time_links_job ON ck_dispatch_time_links(job_id,person_id)`,
+ `CREATE INDEX IF NOT EXISTS ck_dispatch_time_spans_date ON ck_dispatch_time_spans(day,started_at,id)`,
+ `CREATE INDEX IF NOT EXISTS ck_dispatch_time_open_workers ON v2_ops_job_workers(worker_id,job_id,joined_at) WHERE left_at=''`,
+ `CREATE INDEX IF NOT EXISTS ck_dispatch_time_pending_loans ON ck_crew_borrows(worker_id) WHERE status IN ('borrowed','return_pending')`,
+ `CREATE INDEX IF NOT EXISTS ck_dispatch_time_active_pairs ON ck_dispatch_share_pairs(day,person_lo,person_hi) WHERE status='active'`,
+ `CREATE INDEX IF NOT EXISTS ck_dispatch_time_job_events ON sop_events(record_id,created_at)`,
+ `CREATE INDEX IF NOT EXISTS ck_dispatch_time_job_results ON v2_ops_job_results(job_id,created_at)`,
  `CREATE TABLE IF NOT EXISTS ck_dispatch_time_actions(event_key TEXT PRIMARY KEY,person_id TEXT NOT NULL,actor_id TEXT NOT NULL,job_id TEXT NOT NULL,at TEXT NOT NULL,source TEXT NOT NULL,action TEXT NOT NULL)`,
  `CREATE TABLE IF NOT EXISTS ck_dispatch_time_ticks(id INTEGER PRIMARY KEY,person_id TEXT NOT NULL,at TEXT NOT NULL,reason TEXT NOT NULL,event_key TEXT NOT NULL)`,
  `CREATE VIEW IF NOT EXISTS ck_dispatch_time_identity AS ${identity}`,
- `CREATE VIEW IF NOT EXISTS ck_dispatch_time_aliases AS SELECT DISTINCT person_id,worker_id FROM ck_dispatch_time_identity UNION SELECT id AS person_id,badge_id AS worker_id FROM ck_attendance_people WHERE kind='permanent'`,
+ // UNION ALL permits predicate pushdown to the indexed person/attendance/link keys.
+ `CREATE VIEW IF NOT EXISTS ck_dispatch_time_aliases AS SELECT d.person_id,d.worker_id FROM ck_attendance_days d WHERE NOT EXISTS(SELECT 1 FROM ck_daily_dispatch_links link WHERE link.daily_person_id=d.person_id AND link.day=d.day) UNION ALL SELECT link.permanent_person_id,d.worker_id FROM ck_daily_dispatch_links link JOIN ck_attendance_days d ON d.person_id=link.daily_person_id AND d.day=link.day UNION ALL SELECT id,badge_id FROM ck_attendance_people WHERE kind='permanent'`,
  `CREATE TRIGGER IF NOT EXISTS ck_dispatch_time_tick AFTER INSERT ON ck_dispatch_time_ticks BEGIN
  UPDATE ck_dispatch_time_days SET needs_review=1 WHERE person_id=NEW.person_id AND EXISTS(SELECT 1 FROM ck_dispatch_time_spans span WHERE span.person_id=NEW.person_id AND span.attendance_id=ck_dispatch_time_days.attendance_id AND span.ended_at='' AND julianday(${boundary('span')})<=julianday(${t}));
  UPDATE ck_dispatch_time_spans SET ended_at=${boundary('ck_dispatch_time_spans')},end_reason='system_cutoff:unverified',needs_review=1 WHERE person_id=NEW.person_id AND ended_at='' AND julianday(${boundary('ck_dispatch_time_spans')})<=julianday(${t});
@@ -62,7 +74,7 @@ function schema(){
  `CREATE TRIGGER IF NOT EXISTS ck_dispatch_time_engage AFTER INSERT ON ck_dispatch_time_actions WHEN ${enabled} BEGIN
  INSERT OR IGNORE INTO ck_dispatch_time_days(person_id,attendance_id,day,activated_at,updated_at,status) SELECT NEW.person_id,attendance.id,attendance.day,NEW.at,NEW.at,'waiting_dispatch' FROM ck_dispatch_time_identity attendance WHERE attendance.person_id=NEW.person_id AND attendance.day=date(NEW.at,'+9 hours') AND attendance.signed_out='' AND attendance.person_enabled=1 AND attendance.actual_enabled=1 AND attendance.qualified=1 AND julianday(attendance.signed_in)<=julianday(NEW.at) AND (SELECT COUNT(*) FROM ck_dispatch_time_identity duplicate WHERE duplicate.person_id=NEW.person_id AND duplicate.day=attendance.day AND duplicate.signed_out='')=1;
  UPDATE ck_dispatch_time_days SET requires_action=0 WHERE person_id=NEW.person_id AND day=date(NEW.at,'+9 hours') AND EXISTS(SELECT 1 FROM ck_dispatch_time_identity attendance WHERE attendance.id=ck_dispatch_time_days.attendance_id AND attendance.signed_out='');
- INSERT INTO ck_dispatch_time_links SELECT state.person_id,state.attendance_id,NEW.job_id,NEW.source,NEW.at FROM ck_dispatch_time_days state WHERE state.person_id=NEW.person_id AND state.day=date(NEW.at,'+9 hours') AND EXISTS(SELECT 1 FROM ck_dispatch_time_identity attendance WHERE attendance.id=state.attendance_id AND attendance.signed_out='') ON CONFLICT(person_id,attendance_id,job_id) DO UPDATE SET source=excluded.source,engaged_at=MAX(engaged_at,excluded.engaged_at);
+ INSERT INTO ck_dispatch_time_links(person_id,attendance_id,job_id,source,engaged_at,share_pair_id) SELECT state.person_id,state.attendance_id,NEW.job_id,NEW.source,NEW.at,CASE WHEN NEW.source='shared' THEN COALESCE((SELECT pair.id FROM ck_dispatch_share_pairs pair WHERE pair.status='active' AND pair.day=state.day AND ((pair.person_lo=NEW.person_id AND pair.person_hi=(SELECT json_extract(state,'$.owner_id') FROM sop_records WHERE id=NEW.job_id)) OR (pair.person_hi=NEW.person_id AND pair.person_lo=(SELECT json_extract(state,'$.owner_id') FROM sop_records WHERE id=NEW.job_id))) LIMIT 1),'') ELSE '' END FROM ck_dispatch_time_days state WHERE state.person_id=NEW.person_id AND state.day=date(NEW.at,'+9 hours') AND EXISTS(SELECT 1 FROM ck_dispatch_time_identity attendance WHERE attendance.id=state.attendance_id AND attendance.signed_out='') ON CONFLICT(person_id,attendance_id,job_id) DO UPDATE SET source=excluded.source,engaged_at=MAX(engaged_at,excluded.engaged_at),share_pair_id=excluded.share_pair_id;
  ${tick('NEW.person_id','NEW.at','business_action','NEW.event_key')}
  END`,
  `CREATE TRIGGER IF NOT EXISTS ck_dispatch_time_sop_action AFTER INSERT ON sop_events WHEN ${enabled} AND json_extract(NEW.after_json,'$.job_type')='bulk_op' AND NEW.action IN (${businessActions.map(x=>"'"+x+"'").join(',')}) BEGIN
@@ -82,28 +94,53 @@ function schema(){
  trigger('job_insert','INSERT','v2_ops_jobs',jobTick);trigger('job_update','UPDATE OF status','v2_ops_jobs',jobTick);
  const workerTick=`INSERT INTO ck_dispatch_time_ticks(person_id,at,reason,event_key) SELECT DISTINCT person_id,CASE WHEN COALESCE(NEW.left_at,'')='' THEN NEW.joined_at ELSE NEW.left_at END,'operation_change',NEW.id FROM ck_dispatch_time_aliases alias WHERE ${workerBadgeMatch('NEW.worker_id','alias.worker_id')};`;
  trigger('worker_insert','INSERT','v2_ops_job_workers',workerTick);trigger('worker_update','UPDATE OF left_at,worker_id,joined_at','v2_ops_job_workers',workerTick);
- trigger('attendance','UPDATE OF signed_out,signed_in','ck_attendance_days',`UPDATE ck_dispatch_time_days SET requires_action=1 WHERE attendance_id=NEW.id AND NEW.signed_out<>''; INSERT INTO ck_dispatch_time_ticks(person_id,at,reason,event_key) SELECT DISTINCT person_id,CASE WHEN NEW.signed_out<>'' THEN NEW.signed_out ELSE COALESCE((SELECT MAX(at) FROM ck_attendance_events WHERE record_id=NEW.id),${now}) END,'attendance_change',NEW.id FROM ck_dispatch_time_days WHERE attendance_id=NEW.id;`);
+ const stablePerson=(person,day)=>`COALESCE((SELECT permanent_person_id FROM ck_daily_dispatch_links WHERE daily_person_id=${person} AND day=${day}),${person})`;
+ const attendancePeople=`SELECT person_id FROM ck_dispatch_time_days WHERE attendance_id=NEW.id UNION SELECT ${stablePerson('NEW.person_id','NEW.day')}`;
+ trigger('attendance_insert','INSERT','ck_attendance_days',`INSERT INTO ck_dispatch_time_ticks(person_id,at,reason,event_key) SELECT person_id,NEW.signed_in,'attendance_insert',NEW.id FROM (${attendancePeople});`);
+ trigger('attendance','UPDATE OF signed_out,signed_in,person_id,worker_id,day','ck_attendance_days',`UPDATE ck_dispatch_time_days SET requires_action=1 WHERE attendance_id=NEW.id AND NEW.signed_out<>''; INSERT INTO ck_dispatch_time_ticks(person_id,at,reason,event_key) SELECT person_id,CASE WHEN NEW.person_id<>OLD.person_id OR NEW.worker_id<>OLD.worker_id OR NEW.day<>OLD.day THEN ${now} WHEN NEW.signed_out<>'' THEN NEW.signed_out ELSE COALESCE((SELECT MAX(at) FROM ck_attendance_events WHERE record_id=NEW.id),${now}) END,'attendance_change',NEW.id FROM (${attendancePeople});`);
+ trigger('link_insert','INSERT','ck_daily_dispatch_links',tick('NEW.permanent_person_id','NEW.created_at','identity_link','NEW.daily_person_id'));
+ trigger('link_update','UPDATE','ck_daily_dispatch_links',tick('OLD.permanent_person_id',now,'identity_link','NEW.daily_person_id')+tick('NEW.permanent_person_id',now,'identity_link','NEW.daily_person_id'));
  for(const op of ['INSERT','UPDATE'])trigger('rest_'+op.toLowerCase(),op,'ck_attendance_breaks',`INSERT INTO ck_dispatch_time_ticks(person_id,at,reason,event_key) SELECT DISTINCT person_id,CASE WHEN NEW.ended_at='' THEN NEW.started_at ELSE NEW.ended_at END,'rest_change',NEW.id FROM ck_dispatch_time_days WHERE attendance_id=NEW.attendance_id;`);
  trigger('grant','UPDATE','ck_daily_dispatch_grants',tick('NEW.person_id','NEW.updated_at','qualification_change',"'grant:'||NEW.person_id"));
  for(const op of ['INSERT','UPDATE'])trigger('access_'+op.toLowerCase(),op,'ck_field_access',tick('NEW.person_id','NEW.updated_at','qualification_change',"'access:'||NEW.person_id"));
  trigger('person','UPDATE OF enabled','ck_attendance_people',`INSERT INTO ck_dispatch_time_ticks(person_id,at,reason,event_key) SELECT DISTINCT person_id,${now},'person_change',NEW.id FROM ck_dispatch_time_identity WHERE person_id=NEW.id OR attendance_person_id=NEW.id;`);
  trigger('share','UPDATE OF status','ck_dispatch_share_pairs',tick('NEW.person_lo',`COALESCE(NULLIF(NEW.ended_at,''),NULLIF(NEW.accepted_at,''),NEW.created_at)`,'sharing_change',"'pair:'||NEW.id")+tick('NEW.person_hi',`COALESCE(NULLIF(NEW.ended_at,''),NULLIF(NEW.accepted_at,''),NEW.created_at)`,'sharing_change',"'pair:'||NEW.id"));
  trigger('loan','UPDATE OF status','ck_crew_borrows',`INSERT INTO ck_dispatch_time_ticks(person_id,at,reason,event_key) SELECT DISTINCT person_id,MAX(COALESCE(NEW.returned_at,''),COALESCE(NEW.released_at,''),NEW.borrowed_at),'loan_change',NEW.id FROM ck_dispatch_time_aliases alias WHERE ${workerBadgeMatch('NEW.worker_id','alias.worker_id')};`);
- for(const op of ['INSERT','UPDATE'])trigger('attendance_management_'+op.toLowerCase(),op,'ck_attendance_management',`UPDATE ck_dispatch_time_days SET requires_action=1 WHERE attendance_id=NEW.attendance_id AND NEW.voided_at<>''; INSERT INTO ck_dispatch_time_ticks(person_id,at,reason,event_key) SELECT person_id,CASE WHEN NEW.voided_at<>'' THEN NEW.voided_at ELSE ${now} END,'attendance_management',NEW.attendance_id FROM ck_dispatch_time_days WHERE attendance_id=NEW.attendance_id;`);
+ for(const op of ['INSERT','UPDATE'])trigger('attendance_management_'+op.toLowerCase(),op,'ck_attendance_management',`UPDATE ck_dispatch_time_days SET requires_action=1 WHERE attendance_id=NEW.attendance_id AND NEW.voided_at<>''; INSERT INTO ck_dispatch_time_ticks(person_id,at,reason,event_key) SELECT person_id,CASE WHEN NEW.voided_at<>'' THEN NEW.voided_at ELSE ${now} END,'attendance_management',NEW.attendance_id FROM (SELECT person_id FROM ck_dispatch_time_days WHERE attendance_id=NEW.attendance_id UNION SELECT ${stablePerson('d.person_id','d.day')} FROM ck_attendance_days d WHERE d.id=NEW.attendance_id);`);
  for(const op of ['INSERT','UPDATE'])sql.push(`CREATE TRIGGER IF NOT EXISTS ck_dispatch_time_void_${op.toLowerCase()} BEFORE ${op} ON ck_attendance_management WHEN NEW.voided_at<>'' AND EXISTS(SELECT 1 FROM ck_dispatch_time_days WHERE attendance_id=NEW.attendance_id) BEGIN SELECT RAISE(ABORT,'Attendance has dispatch labor; cannot void'); END`);
  trigger('config','UPDATE','ck_dispatch_time_config',`UPDATE ck_dispatch_time_days SET requires_action=1 WHERE NEW.enabled=0; INSERT INTO ck_dispatch_time_ticks(person_id,at,reason,event_key) SELECT DISTINCT person_id,${now},'feature_config','config' FROM ck_dispatch_time_days;`,'OLD.enabled<>NEW.enabled OR OLD.sharing_enabled<>NEW.sharing_enabled');
  return sql;
 }
 export async function ensureAutoDispatchTime(e){
+ if(e.SOP_ENVIRONMENT!=='staging')return e.DB;
+ const db=bases.get(e.DB)||e.DB;
  const enabled=dispatchTimeEnabled(e),sharing=e.SOP_DISPATCH_SHARE_ENABLED==='true';
- const signature=enabled+':'+sharing;if(seen.get(e.DB)===signature)return;
+ const source={...e,DB:db};
+ // Only DDL may be cached. Every request and every business transaction reapplies
+ // its own flags; another isolate/binding wrapper cannot leave this request enabled.
+ await ensureSchema(db,'auto-dispatch-config-v1',()=>db.prepare(configDDL).run());
  if(enabled){
-  await ensureAttendance(e);await ensureAccess(e);await ensureDailyDispatch(e);await ensureCrewBorrow(e);
+  await ensureAttendance(source);await ensureAccess(source);await ensureDailyDispatch(source);await ensureCrewBorrow(source);
   // Schema initialization does not turn on shared permissions; the actual flag remains authoritative.
-  await ensureDispatchShare({...e,SOP_DISPATCH_SHARE_ENABLED:'true'});
-  await ensureSchema(e.DB,'auto-dispatch-runtime-v1',()=>e.DB.batch(schema().map(s=>e.DB.prepare(s))));
- }else if(!await q(e,"SELECT name FROM sqlite_master WHERE type='table' AND name='ck_dispatch_time_config'").first()){seen.set(e.DB,signature);return;}
- await q(e,'INSERT INTO ck_dispatch_time_config VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled,sharing_enabled=excluded.sharing_enabled WHERE enabled<>excluded.enabled OR sharing_enabled<>excluded.sharing_enabled',enabled?1:0,sharing?1:0).run();seen.set(e.DB,signature);
+  await ensureDispatchShare({...source,SOP_DISPATCH_SHARE_ENABLED:'true'});
+  await ensureSchema(db,'auto-dispatch-runtime-v2',async()=>{
+   const info=await db.batch([db.prepare('PRAGMA table_info(ck_dispatch_time_days)'),db.prepare('PRAGMA table_info(ck_dispatch_time_links)')]),columns=info[0].results,linkColumns=info[1].results;
+   const sql=schema(),triggers=sql.filter(s=>s.startsWith('CREATE TRIGGER')).map(s=>s.match(/EXISTS (\w+)/)[1]);
+   await db.batch([
+    ...(columns.length&&!columns.some(c=>c.name==='requires_action')?[db.prepare('ALTER TABLE ck_dispatch_time_days ADD COLUMN requires_action INTEGER NOT NULL DEFAULT 0')]:[]),
+    ...(linkColumns.length&&!linkColumns.some(c=>c.name==='share_pair_id')?[db.prepare("ALTER TABLE ck_dispatch_time_links ADD COLUMN share_pair_id TEXT NOT NULL DEFAULT ''")]:[]),
+    ...triggers.map(name=>db.prepare('DROP TRIGGER IF EXISTS '+name)),
+    db.prepare('DROP VIEW IF EXISTS ck_dispatch_time_aliases'),db.prepare('DROP VIEW IF EXISTS ck_dispatch_time_identity'),
+    ...sql.map(s=>db.prepare(s)),db.prepare(`INSERT INTO ck_dispatch_time_ticks(person_id,at,reason,event_key) SELECT DISTINCT person_id,${now},'ledger_upgrade','runtime-v2' FROM ck_dispatch_time_days`)
+   ]);
+  });
+ }
+ const sync=()=>db.prepare(configSQL).bind(enabled?1:0,sharing?1:0);
+ await sync().run();
+ const signature=enabled+':'+sharing;let variants=wrappers.get(db);if(!variants)wrappers.set(db,variants=new Map());if(variants.has(signature))return variants.get(signature);
+ const originals=new WeakMap(),batch=async statements=>(await db.batch([sync(),...statements.map(s=>originals.get(s)||s)])).slice(1);
+ const prepare=sql=>{const wrap=statement=>{const proxy=new Proxy(statement,{get(target,key){if(key==='bind')return(...args)=>wrap(target.bind(...args));if(key==='run')return async()=>(await batch([target]))[0];if(typeof key==='string'&&/^(all|first)$/.test(key)&&/^\s*(INSERT|UPDATE|DELETE|REPLACE|WITH)\b/i.test(sql))return async()=>{const r=(await batch([target]))[0];return key==='first'?r.results?.[0]||null:r;};const value=target[key];return typeof value==='function'?value.bind(target):value;}});originals.set(proxy,statement);return proxy;};return wrap(db.prepare(sql));};
+ const wrapper=new Proxy(db,{get(target,key){if(key==='prepare')return prepare;if(key==='batch')return batch;const value=target[key];return typeof value==='function'?value.bind(target):value;}});bases.set(wrapper,db);variants.set(signature,wrapper);return wrapper;
 }
 export async function dispatchTimeAttendance(e,date,asOf){
  if(!dispatchTimeEnabled(e))return new Map();

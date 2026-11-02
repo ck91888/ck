@@ -12821,7 +12821,7 @@ route('v2_003_purchase_order_close', async (body, env) => {
 // Worker fetch entry
 // =====================================================
 export default {
-  async scheduled(controller,env){await ensureMigrated(env.DB);return runSystemCutoff(env,Math.max(Number(controller.scheduledTime)||0,Date.now()));},
+  async scheduled(controller,env){await ensureMigrated(env.DB);const DB=await ensureAutoDispatchTime(env);return runSystemCutoff({...env,DB},Math.max(Number(controller.scheduledTime)||0,Date.now()));},
   async fetch(request, env) {
     if (request.method === "OPTIONS") {
       return new Response(null, { headers: CORS });
@@ -12834,7 +12834,7 @@ export default {
       await ensureInboundDocuments(env);
       await ensureBatchMaterialState(env);
       await ensureReferenceHistory(env);
-      await ensureAutoDispatchTime(env);
+      env={...env,DB:await ensureAutoDispatchTime(env)};
       await runSystemCutoff(env);
     } catch (e) {
       return json({ ok: false, error: "migration failed: " + e.message }, 500);

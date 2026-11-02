@@ -7,7 +7,7 @@ const q=(e,s,...a)=>e.DB.prepare(s).bind(...a);
 const actions=new Set(['dispatch','transfer_in','shared_handle','continue','assignment_end','transfer_out','operation_start','operation_end','rest_start','rest_end','checkout','qualification_change','cutoff']);
 // New-day activity must have an actual successful business event; reads and sign-in never activate it.
 const resumptions=new Set(['dispatch','transfer_in','shared_handle','continue']);
-export const dispatchTimeEnabled=e=>e.SOP_ENVIRONMENT==='staging'&&e.SOP_AUTO_DISPATCH_TIME_ENABLED==='true';
+export const dispatchTimeEnabled=e=>e.SOP_ENVIRONMENT==='staging'&&e.SOP_AUTO_DISPATCH_TIME_ENABLED==='true'&&['SOP_ATTENDANCE_ENABLED','SOP_ACCESS_CONTROL','SOP_UPGRADE_ENABLED','SOP_WORK_CHAIN_ENABLED'].every(k=>e[k]==='true');
 export const DISPATCH_TIME_SCHEMA=[
  `CREATE TABLE IF NOT EXISTS ck_dispatch_time_sessions(id TEXT PRIMARY KEY,person_id TEXT NOT NULL,attendance_id TEXT NOT NULL,day TEXT NOT NULL,version INTEGER NOT NULL,state TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(person_id,attendance_id))`,
  `CREATE TABLE IF NOT EXISTS ck_dispatch_time_events(request_id TEXT PRIMARY KEY,session_id TEXT NOT NULL,expected_version INTEGER NOT NULL,action TEXT NOT NULL,actor_id TEXT NOT NULL,at TEXT NOT NULL,signature TEXT NOT NULL,before_json TEXT NOT NULL,after_json TEXT NOT NULL)`,

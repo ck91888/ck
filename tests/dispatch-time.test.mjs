@@ -52,7 +52,7 @@ test('04:00 uses the existing server cutoff boundary and retains its provisional
 test('another identity, another attendance and stale events are rejected',()=>{
  const s=step(null,'dispatch',10);for(const c of [{personId:'OTHER'},{attendanceId:'OTHER'},{day:'2026-11-03'}])assert.throws(()=>step(s,'qualification_change',20,c));assert.throws(()=>step(s,'qualification_change',9),/早于/);
 });
-function fixture(t){const DB=database();t.after(()=>DB.raw.close());DB.raw.exec('CREATE TABLE synthetic_dispatch_business(id TEXT PRIMARY KEY)');return {DB,env:{DB,SOP_ENVIRONMENT:'staging',SOP_AUTO_DISPATCH_TIME_ENABLED:'true'}};}
+function fixture(t){const DB=database();t.after(()=>DB.raw.close());DB.raw.exec('CREATE TABLE synthetic_dispatch_business(id TEXT PRIMARY KEY)');return {DB,env:{DB,SOP_ENVIRONMENT:'staging',SOP_AUTO_DISPATCH_TIME_ENABLED:'true',SOP_ATTENDANCE_ENABLED:'true',SOP_ACCESS_CONTROL:'true',SOP_UPGRADE_ENABLED:'true',SOP_WORK_CHAIN_ENABLED:'true'}};}
 test('business failure rolls the clock and assignment back, then the same request retries exactly once',async t=>{
  const f=fixture(t),e=event('dispatch',0),c=base();await ensureDispatchTime(f.env);const bad=f.DB.prepare('INSERT INTO synthetic_dispatch_business VALUES(?)').bind('SYNTH-ORDER');
  f.DB.raw.exec("CREATE TRIGGER synthetic_fail BEFORE INSERT ON synthetic_dispatch_business BEGIN SELECT RAISE(ABORT,'synthetic_failure'); END");await assert.rejects(()=>commitDispatchTime(f.env,e,c,[bad]));assert.equal(f.DB.raw.prepare('SELECT count(*) n FROM ck_dispatch_time_sessions').get().n,0);
