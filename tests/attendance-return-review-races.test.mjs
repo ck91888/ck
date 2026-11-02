@@ -68,3 +68,30 @@ test('revoking and restoring a transfer target grant while the transaction waits
  try{f.advance(1);await f.ok('office','sop_daily_dispatch_update',{person_id:p.id,badge:p.badgeId,enabled:false,departments:['bulk'],version:1,reason:'合成临时撤销'});f.advance(1);await f.ok('office','sop_daily_dispatch_update',{person_id:p.id,badge:p.badgeId,enabled:true,departments:['bulk'],version:2,reason:'合成核实恢复'});}finally{hold.release();}
  assert.equal((await pending).ok,false);hold.restore();assert.equal(JSON.parse((await f.first('SELECT state FROM sop_records WHERE id=?',job.id)).state).owner_id,f.people.A.id);
 });
+
+for(const initial of ['implicit','explicit'])test('field access revoke and restore invalidates a prepared employee transfer from '+initial+' permission state',async t=>{
+ const f=await fixture(t);let version=0;if(initial==='explicit'){const grant=await f.ok('office','sop_access_update',{person_id:f.people.B.id,enabled:true,version:0});version=grant.version;}
+ const job=await f.task('A','合成职员现场权限往返'+initial),row=await f.first('SELECT revision FROM sop_records WHERE id=?',job.id),body={id:job.id,revision:row.revision,target_badge:f.people.B.badgeId,reason:'合成现场权限版本已变化',client_req_id:crypto.randomUUID()},hold=await holdBatch(f,'sop_owner_transfer'),pending=f.call('A','sop_owner_transfer',body);await hold.ready;
+ try{f.advance(1);const revoked=await f.ok('office','sop_access_update',{person_id:f.people.B.id,enabled:false,version});f.advance(1);await f.ok('office','sop_access_update',{person_id:f.people.B.id,enabled:true,version:revoked.version});}finally{hold.release();}
+ const result=await pending;hold.restore();assert.equal(result.ok,false,JSON.stringify(result));assert.match(result.error,/出勤状态已变化/);assert.equal(JSON.parse((await f.first('SELECT state FROM sop_records WHERE id=?',job.id)).state).owner_id,f.people.A.id);assert.equal((await f.first("SELECT COUNT(*) n FROM sop_events WHERE record_id=? AND action='sop_owner_transfer'",job.id)).n,0);
+ await f.ok('A','sop_owner_transfer',body);const saved=JSON.parse((await f.first('SELECT state FROM sop_records WHERE id=?',job.id)).state);assert.equal(saved.owner_id,f.people.B.id);assert.equal(saved.last_owner_transfer.at,new Date().toISOString());
+});
+test('field access kept revoked rejects the waiting transfer and a fresh transfer without changing the original owner',async t=>{
+ const f=await fixture(t),job=await f.task('A','合成现场权限持续撤销'),row=await f.first('SELECT revision FROM sop_records WHERE id=?',job.id),body={id:job.id,revision:row.revision,target_badge:f.people.B.badgeId,reason:'合成拒绝失去现场权限的接收人'},hold=await holdBatch(f,'sop_owner_transfer'),pending=f.call('A','sop_owner_transfer',body);await hold.ready;
+ try{await f.ok('office','sop_access_update',{person_id:f.people.B.id,enabled:false,version:0});}finally{hold.release();}
+ assert.equal((await pending).ok,false);hold.restore();assert.equal((await f.call('A','sop_owner_transfer',body)).ok,false);assert.equal(JSON.parse((await f.first('SELECT state FROM sop_records WHERE id=?',job.id)).state).owner_id,f.people.A.id);
+});
+test('an unrelated employee field permission round trip does not invalidate a scoped transfer',async t=>{
+ const f=await fixture(t),c=(await f.ok('office','sop_attendance_employee_register',{employeeNo:'FIELD-UNRELATED',name:'合成无关职员',department:'bulk'})).person,job=await f.task('A','合成无关人员授权变化'),row=await f.first('SELECT revision FROM sop_records WHERE id=?',job.id),hold=await holdBatch(f,'sop_owner_transfer'),pending=f.call('A','sop_owner_transfer',{id:job.id,revision:row.revision,target_badge:f.people.B.badgeId,reason:'合成只校验相关人员'});await hold.ready;
+ try{await f.ok('office','sop_access_update',{person_id:c.id,enabled:false,version:0});await f.ok('office','sop_access_update',{person_id:c.id,enabled:true,version:1});}finally{hold.release();}
+ const result=await pending;hold.restore();assert.equal(result.ok,true,JSON.stringify(result));assert.equal(JSON.parse((await f.first('SELECT state FROM sop_records WHERE id=?',job.id)).state).owner_id,f.people.B.id);
+});
+test('an actor field permission round trip rejects its old session and requires a new login before transfer',async t=>{
+ const f=await fixture(t),job=await f.task('A','合成操作者现场权限往返'),row=await f.first('SELECT revision FROM sop_records WHERE id=?',job.id),body={id:job.id,revision:row.revision,target_badge:f.people.B.badgeId,reason:'合成旧会话不得恢复'},hold=await holdBatch(f,'sop_owner_transfer'),pending=f.call('A','sop_owner_transfer',body);await hold.ready;
+ try{await f.ok('office','sop_access_update',{person_id:f.people.A.id,enabled:false,version:0});await f.ok('office','sop_access_update',{person_id:f.people.A.id,enabled:true,version:1});}finally{hold.release();}
+ assert.equal((await pending).ok,false);hold.restore();assert.equal((await f.call('A','sop_owner_transfer',body)).ok,false);await f.ok('A','sop_login',{badge:f.people.A.badgeId});await f.ok('A','sop_owner_transfer',body);
+});
+test('static field login denial does not change an enabled employee attendance or physical worker assignment rule',async t=>{
+ const f=await fixture(t);await f.ok('office','sop_access_update',{person_id:f.people.B.id,enabled:false,version:0});assert.equal((await f.call('B','sop_login',{badge:f.people.B.badgeId})).ok,false);
+ const job=await f.task('A','合成保留实际操作员准入',f.people.B);assert.ok(job.id);assert.equal((await f.first("SELECT COUNT(*) n FROM v2_ops_job_workers WHERE job_id=? AND worker_id=? AND left_at=''",job.id,f.people.B.badgeId)).n,1);
+});
