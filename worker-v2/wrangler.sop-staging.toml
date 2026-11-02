@@ -23,6 +23,7 @@ SOP_AUTO_OUTBOUND = "true"
 SOP_ROLLOUT_DEPARTMENTS = "bulk"
 SOP_ENVIRONMENT = "staging"
 SOP_ATTENDANCE_ENABLED = "true"
+SOP_ATTENDANCE_RETURNS_ENABLED = "true"
 SOP_DAILY_CUTOFF_ENABLED = "true"
 # Recalculate all attendance dates on reads; preserve original punch/work/rest rows.
 SOP_ATTENDANCE_SHIFT_ACCOUNTING = "true"

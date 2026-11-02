@@ -213,3 +213,19 @@ ac72独立复审指出职员现场权限`ck_field_access.version`未纳入在途
 - 构建、Wrangler本地dry-run与diff检查通过。浏览器脚本串行完成，未跳过或隐藏失败。
 
 所有自测使用隔离合成数据。只推送独立返岗分支，不合测试、不部署，不启用返岗开关，不修改真实出勤或正式版。
+
+## 测试发布准备：staging启用配置待QA核验
+
+总管已转达固定独立QA对`0e7c063fce9cfa1d7c6f54823fe1b6f421a8e982`明确放行测试站发布并启用：独立全量1524/0/0，D1串行26/0/0、原独立19/0/0、返岗业务23/0/0及UI/CSV/草稿/照片通过。本次只准备配置，不将业务QA结论冒充本配置提交已获审核，也未执行发布。
+
+发布准备前远端核验：测试分支`upgrade/sop-safe-rollout-20260917`仍为`9f3bfd66f338904e4ab0f9f0c0868b63e285e0d6`；main仍为`4671f49b9dd74c729e738abbe1440223bdf6af0f`；业务候选为该测试基线后代，没有需要整合的他人新提交。
+
+本提交仅三个文件：
+
+- `worker-v2/wrangler.sop-staging.toml`新增`SOP_ATTENDANCE_RETURNS_ENABLED = "true"`。其余vars、目标Worker `ck-v2-api-sop-staging`、D1 `ck_v2_sop_staging`、R2 `ck-v2-sop-staging-files`和cron逐项比较保持原值；目标仅`sop-test.ck91888.cn`。
+- `worker-v2/build-sop-staging.mjs`只将release.json的发布标识从`20261102-auto-dispatch-time`改为`20261102-attendance-return`；commit仍从构建时Git HEAD读取。
+- 本节发布准备记录。业务逻辑、生产wrangler配置均无修改；生产配置与main逐字节一致，生产环境返岗门禁关闭。
+
+已通过：TOML结构精确差异检查、staging/production/缺失依赖门禁断言；相关测试21/0/0（`/tmp/ck-return-release-prep-tests.log`）；本地构建及Wrangler dry-run（`/tmp/ck-return-release-prep-build.log`、`/tmp/ck-return-release-prep-dry-run.log`）。固定提交后会再次构建核验release.json中的精确SHA，并做本地dry-run；结果在开发页交接。未重复修改或运行已获独立放行的业务源码。
+
+只推送独立`feature/attendance-return-20261102`供QA核配置，不推测试分支、不部署、不执行远端D1或人员更正。配置QA通过并收到总管通知后，发布步骤沿用现有Workers Builds测试分支流程；发布时再次核测试HEAD，不force、不覆盖他人提交。只有精确提交的staging部署check成功并取得Worker版本后，才记录发布完成；本节不是部署证据。
