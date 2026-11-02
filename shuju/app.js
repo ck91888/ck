@@ -891,6 +891,7 @@ async function openOrderDetail(jobId) {
   html += '<table class="data-table"><tr><th>作业计划号</th><td>' + esc(j.work_plan_no || '--') + '</td>';
   html += '<th>业务单号</th><td>' + esc(window.CKDocumentLabels.jobLabel(j)) + '</td></tr>';
   html += '<tr><th>派审员 / 배정·검수 담당자</th><td colspan="3">' + esc(window.CKDocumentLabels.jobDispatcher(j)) + '</td></tr>';
+  if(j.review&&j.review.by)html += '<tr><th>实际审核人</th><td colspan="3">' + esc(j.review.by) + '</td></tr>';
   html += '<tr><th>业务阶段</th><td>' + esc(flowLabel(j.flow_stage)) + '</td>';
   html += '<th>任务类型</th><td>' + esc(jobTypeLabel(j.job_type)) + '</td></tr>';
   html += '<tr><th>业务分类</th><td>' + esc(bizLabel(j.biz_class)) + '</td>';

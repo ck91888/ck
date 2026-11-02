@@ -1,4 +1,4 @@
-import test from 'node:test';import assert from 'node:assert/strict';
+import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';
 import worker from '../worker-v2/index.js';import {database} from './d1-adapter.mjs';import {digest} from '../worker-v2/access-control.js';
 import {cargoFixture} from './cargo-fixture.mjs';import {cargoExecution} from '../worker-v2/cargo-execution.js';import {ensureDispatchShare} from '../worker-v2/dispatch-share.js';
 import {operationHeaders,rememberOperation,confirmOperation} from './office-operator-fixture.mjs';
@@ -112,4 +112,14 @@ test('grouped review records the collaborator and rejects an outsider',async()=>
  assert.equal(reviewed.ok,true);assert.equal(s.state().cargo_groups.groups[0].outputs[0].review.actor_id,'PARTNER');
  assert.equal(JSON.parse(s.DB.raw.prepare("SELECT state FROM sop_records WHERE id='T'").get().state).owner_id,'OWNER');
  await assert.rejects(()=>cargoExecution(s.body('sop_cargo_group_complete',{group_id:'G1',quantity:3,unit:'箱'}),s.env,{...partner,id:'OUTSIDER'}),/派审员|协作/);
+});
+test('home collaboration control stays hidden while the flag is off',async t=>{
+ if(!process.env.CK_JSDOM_MODULE)return t.skip();
+ const {JSDOM}=(await import(process.env.CK_JSDOM_MODULE)).default;
+ const dom=new JSDOM('<!doctype html><body><main id="home"></main></body>',{url:'https://fixture.local/001/',runScripts:'outside-only'});
+ const w=dom.window;let enabled=false;w.CKSession={request:async action=>{if(action!=='sop_dispatch_share_status')throw Error(action);return {ok:true,enabled,incoming:[],outgoing:[],partners:[]};}};
+ w.eval(fs.readFileSync(new URL('../shared/dispatch-share-ui.js',import.meta.url),'utf8'));
+ await w.CKDispatchShare.install(w.document.getElementById('home'));assert.equal(w.document.querySelector('[data-dispatch-share]'),null);
+ enabled=true;await w.CKDispatchShare.install(w.document.getElementById('home'));assert.match(w.document.querySelector('[data-dispatch-share]').textContent,/派审协作/);
+ dom.window.close();
 });

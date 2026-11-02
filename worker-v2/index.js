@@ -6842,7 +6842,7 @@ route("v2_ops_job_detail", async (body, env) => {
   job.active_worker_count=new Set(workers.results.filter(w=>!w.left_at).map(w=>badgeKey(env,w.worker_id))).size;
   if(job.job_type==='pick_direct')job.planned_pick_workload=readPickWorkload(JSON.parse(dispatchRows?.results[0]?.state||'{}').planned_pick_workload);
   return json({
-    ok: true, dispatch: inboundFlowEnabled(env)?dispatchRows?.results[0]||null:null, job, can_manage_dispatch: canManage, can_view_resting: await restingDispatch(env,job_id), unload_plans: job.job_type==='unload'?await tripPlans(env,job_id):[],
+    ok: true, dispatch: inboundFlowEnabled(env)?dispatchRows?.results[0]||null:null, job, can_manage_dispatch: canManage, share_managed: !!(shareEnabled(env)&&job.job_type==='bulk_op'&&await isActivePartner(env,env.SOP_REQUEST_USER?.id,JSON.parse(dispatchRows?.results[0]?.state||'{}').owner_id)), can_view_resting: await restingDispatch(env,job_id), unload_plans: job.job_type==='unload'?await tripPlans(env,job_id):[],
     putaway_refs: job.job_type===putawayType?await putawayReferences(env,job.id):[],
     load_orders: await loadOrdersForJob(env,job),
     load_trip: loadTripEnabled(env)&&job.job_type==='load_outbound'?await env.DB.prepare('SELECT vehicle_no,driver_name,finished_at FROM ck_load_trips WHERE job_id=?').bind(job.id).first():null,

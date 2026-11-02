@@ -230,7 +230,8 @@ export async function handleSop(b,env) {
    let source=null;if(need?.data.source_id&&['inbound','outbound'].includes(need.data.source_type))source=await verifySource(env,need.data.source_type,need.data.source_id);
    const shipping=need&&workChainEnabled(env)?await chainAllocation(env,need.data):null;
    const numbered=await recordNumbers(env,[need,...(relatedTasks.length?relatedTasks:[task])].filter(Boolean).map(publicState));
-   return {ok:true,tasks:relatedTasks.map(t=>numbered.find(x=>x.id===t.id)),need:need?numbered.find(x=>x.id===need.id):null,task:task?numbered.find(x=>x.id===task.id):null,shipping,source:source?{id:source.id,number:source.display_no||'来源单号待补充',customer:source.customer}:null,segments,changed:code[0]==='CKWORK'&&Number(code[2])!==(need?.data.requirement_version||1)};
+   const taskView=task?numbered.find(x=>x.id===task.id):null;if(taskView&&isBulkShareRecord(task)&&await isActivePartner(env,u.id,task.data.owner_id))taskView.shared=true;
+   return {ok:true,tasks:relatedTasks.map(t=>numbered.find(x=>x.id===t.id)),need:need?numbered.find(x=>x.id===need.id):null,task:taskView,shipping,source:source?{id:source.id,number:source.display_no||'来源单号待补充',customer:source.customer}:null,segments,changed:code[0]==='CKWORK'&&Number(code[2])!==(need?.data.requirement_version||1)};
   }
   if(b.action==='sop_need_groups')return await needGroups(env,u,b);
   if(b.action==='sop_list') {

@@ -44,7 +44,7 @@
      next=r.items.length?nativeState(await api('v2_ops_job_detail',{job_id:r.items[0].id})):{external:true,need:{display_no:code,title:'外部作业 / 외부 작업',customer:'',instructions:'按纸质作业单核对本次操作要求。 / 인쇄된 작업서를 확인하세요.'},task:null,segments:[]};
     }
    }
-   if(closed||sequence!==loadSequence)return;if(next.task?.bulk_batch_id&&!options.batchChild&&options.onBatch&&(next.task.owner_id===CKSession.user?.id||CKSession.user?.scope==='office'&&CKSession.user?.role==='manager'))return options.onBatch(next.task.bulk_batch_id);current=next;options.onChange?.(next.task);draw();
+   if(closed||sequence!==loadSequence)return;if(next.task?.bulk_batch_id&&!options.batchChild&&options.onBatch&&(next.task.owner_id===CKSession.user?.id||next.task.shared||CKSession.user?.scope==='office'&&CKSession.user?.role==='manager'))return options.onBatch(next.task.bulk_batch_id);current=next;options.onChange?.(next.task);draw();
   }
   async function home(){
    const sequence=++loadSequence;await cleanup();if(closed||sequence!==loadSequence)return;
@@ -90,7 +90,7 @@
    if(!t){$('content').innerHTML='<p class="ck-muted">此作业已完成或暂不能派工，请联系订单处理组核对。</p>';return;}
    $('content').innerHTML=`<section class="ck-work-sheet"><span class="ck-step">02 / PEOPLE & EXECUTION</span><h3>参与人员 / 참여 인원</h3><p>${options.batchChild?(t.workers||[]).map(w=>esc(w.name)).join(' · ')+' · 批次统一记录工时 / 일괄 시간 기록':live.length?live.map(w=>esc(w.worker_name)).join(' · '):'当前无人计时 / 현재 작업 인원 없음'}</p><p class="ck-muted">${t.started_at?'开始 '+CKAttendance.at(t.started_at):'人员到位后开始记录工时'} · 派审员 / 배정·검수 담당자：${esc(jobDispatcher(t))}</p><div class="ck-actions" data-actions></div><div data-editor></div></section>`;
    const action=(label,fn)=>{if(options.batchChild&&/调整人员|核对人员并开始|暂停整个|恢复整个|暂停作业|转移派审员|个人休息/.test(label))return;const b=document.createElement('button');b.className='ck-small';b.textContent=label;b.onclick=async()=>{b.disabled=true;try{await fn();}catch(x){error(x);}finally{b.disabled=false;}};$('actions').append(b);};
-   if(['assigned','pending','working','paused','awaiting_close','awaiting_review','rework'].includes(t.status)&&t.owner_id===CKSession.user?.id&&CKSession.user?.can_dispatch!==false)action('转移派审员 / 담당자 이관',()=>CKTransferOwner(t,()=>options.batchChild?options.onTransferred?.():complete()));
+   if(['assigned','pending','working','paused','awaiting_close','awaiting_review','rework'].includes(t.status)&&(t.owner_id===CKSession.user?.id||t.shared)&&CKSession.user?.can_dispatch!==false)action('转移派审员 / 담당자 이관',()=>CKTransferOwner({...t,share_managed:!!t.shared&&t.owner_id!==CKSession.user?.id},()=>options.batchChild?options.onTransferred?.():complete()));
    if(!external&&t.owner_id!==CKSession.user?.id&&['assigned','working','paused','awaiting_review','rework'].includes(t.status)){
     const taskId=t.id;api('sop_owner_transfer_options',{id:taskId}).then(option=>{if(current?.task?.id===taskId&&option.can_claim)action('原负责人离岗 · 本人接班 / 담당자 부재 · 인계',async()=>{const fresh=await api('sop_owner_transfer_options',{id:taskId});if(!fresh.can_claim)throw Error('接班条件已变化，请刷新');await CKClaimOwner(fresh,()=>resolve(taskId));});}).catch(()=>{});
    }
