@@ -108,7 +108,7 @@ test('multi-order review by a collaborator releases the worker once',async()=>{
 });
 test('grouped review records the collaborator and rejects an outsider',async()=>{
  const s=cargoFixture();s.env.SOP_DISPATCH_SHARE_ENABLED='true';await ensureDispatchShare(s.env);
- s.DB.raw.prepare("INSERT INTO ck_dispatch_share_pairs(id,person_lo,person_hi,invited_by,invitee_id,status,day,created_at) VALUES('DS-GROUP','OWNER','PARTNER','OWNER','PARTNER','active','2026-11-02','2026-11-02T00:00:00Z')").run();
+ s.DB.raw.prepare("INSERT INTO ck_dispatch_share_pairs(id,person_lo,person_hi,invited_by,invitee_id,status,day,created_at) VALUES('DS-GROUP','OWNER','PARTNER','OWNER','PARTNER','active',?,?)").run(new Date(Date.now()+32400000).toISOString().slice(0,10),new Date().toISOString());
  const partner={id:'PARTNER',name:'协作乙',role:'dispatcher',scope:'field',departments:['bulk']};
  await cargoExecution(s.body('sop_cargo_group_complete',{group_id:'G0',quantity:3,unit:'箱'}),s.env,partner);
  const reviewed=await cargoExecution(s.body('sop_cargo_group_review',{group_id:'G0',decision:'pass',reason:'协作核对分组'}),s.env,partner);
@@ -252,7 +252,7 @@ test('a leave after the first share check still rejects every in-flight partner 
  restore();const back=await s.ok('field','v2_ops_job_resume',{parent_job_id:external.job_id,worker_id:hand.badgeId,worker_name:hand.name});
  assert.equal(s.DB.raw.prepare('SELECT status FROM v2_ops_jobs WHERE id=?').get(external.job_id).status,'working');assert.equal(s.DB.raw.prepare("SELECT COUNT(*) n FROM v2_ops_job_workers WHERE job_id=? AND left_at=''").get(external.job_id).n,1);assert.equal(back.ok,true);
  const cargo=cargoFixture();cargo.env.SOP_DISPATCH_SHARE_ENABLED='true';await ensureDispatchShare(cargo.env);
- cargo.DB.raw.prepare("INSERT INTO ck_dispatch_share_pairs(id,person_lo,person_hi,invited_by,invitee_id,status,day,created_at) VALUES('DS-WINDOW','OWNER','PARTNER','OWNER','PARTNER','active','2026-11-02','2026-11-02T00:00:00Z')").run();
+ cargo.DB.raw.prepare("INSERT INTO ck_dispatch_share_pairs(id,person_lo,person_hi,invited_by,invitee_id,status,day,created_at) VALUES('DS-WINDOW','OWNER','PARTNER','OWNER','PARTNER','active',?,?)").run(new Date(Date.now()+32400000).toISOString().slice(0,10),new Date().toISOString());
  const partner={id:'PARTNER',name:'协作乙',role:'dispatcher',scope:'field',departments:['bulk']};
  stop=armLeaveAfterShareRead(cargo.DB);
  await assert.rejects(()=>cargoExecution(cargo.body('sop_cargo_group_complete',{group_id:'G0',quantity:3,unit:'箱'}),cargo.env,partner),/协作已结束/);
