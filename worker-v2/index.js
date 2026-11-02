@@ -43,6 +43,8 @@ import {handleCourier,validateCourierLines,courierPlanStatements,courierProgress
 import {ensureCourierClaims,courierCancellationAudit} from './courier-claims.js';
 import { inboundFlowEnabled, inboundCode, inboundCodes, inboundReferenceValue, inboundCodeProgress, selectInboundReference, validateInboundCode, resolveInboundPlan, putawayTaskBiz, completeUnloadedDispositions, bindInboundCode, inboundLabels, inboundReferenceData, departmentCodes, putawayClasses } from './inbound-flow.js';
 import { handleAttendance, guardAttendance, ensureAttendance, attendanceEnabled } from './attendance.js';
+import {ensureAttendanceReturns} from './attendance-return.js';
+import {attendanceReturnEnabled} from './attendance-return-schema.js';
 import {runSystemCutoff,guardSystemCutoffMutation,correctSystemCutoff,forcedClock} from './system-cutoff.js';
 import {normalizeDailyBadgeRequest,workerBadgeMatch,canonicalWorkerSQL,resolveDailyBadge} from './daily-badge-identity.js';
 import {canonicalDailyBadge,sameWorkerBadge} from '../shared/badge-identity.js';
@@ -12835,6 +12837,7 @@ export default {
       await ensureBatchMaterialState(env);
       await ensureReferenceHistory(env);
       env={...env,DB:await ensureAutoDispatchTime(env)};
+      if(attendanceReturnEnabled(env)){await ensureAttendance(env);await ensureAttendanceReturns(env);}
       await runSystemCutoff(env);
     } catch (e) {
       return json({ ok: false, error: "migration failed: " + e.message }, 500);

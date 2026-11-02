@@ -1,5 +1,6 @@
 import {dispatchTimeEnabled} from './dispatch-time.js';
 import {dispatchTimeAttendance} from './dispatch-time-runtime.js';
+import {handleAttendanceReturn} from './attendance-return.js';
 import {ensureSchema} from './schema-ready.js';
 import {retireCompletedWorkClocks} from './completed-work-clocks.js';
 import {jobNumbers,jobDisplayMetadata} from './document-numbers.js';
@@ -134,6 +135,7 @@ async function overview(env,date,t,scope='daily',detailPersonId=''){
 export async function handleAttendance(b,env){
  if(!attendanceEnabled(env))return {ok:false,error:'签到尚未启用'};
  await ensureAttendance(env);const u=access(env),t=new Date().toISOString(),day=kstDay(t),action=b.action;
+ const returned=await handleAttendanceReturn(b,env,{publicDay,closePerson});if(returned)return returned;
  if(action==='sop_attendance_config')return {ok:true,day,asOf:t,agencies,employeeDepartments,user:{id:u.id,name:u.name,role:u.role},publicTest:!!u.public_test};
  if(action==='sop_attendance_employee_work_detail'){employeeWorkdayAccess(env);const personId=typeof b.person_id==='string'?b.person_id:'';if(!personId||!await q(env,"SELECT p.id FROM ck_attendance_people p JOIN ck_employee_profiles e ON e.person_id=p.id WHERE p.id=? AND p.badge_id='EMP-'||e.employee_no AND p.kind='permanent'",personId).first())fail('职员身份不存在 / 직원 정보가 없습니다');return overview(env,dateOf(b.date||day),t,'employee',personId);}
  if(action==='sop_attendance_summary'){access(env,['manager','dispatcher','reviewer','viewer']);return overview(env,dateOf(b.date||day),t,b.scope);}

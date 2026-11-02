@@ -134,7 +134,7 @@ v2_issue_ops_list v2_issue_tickets v2_issue_detail v2_issue_create v2_issue_hand
 v2_verify_batch_detail v2_verify_batch_list v2_verify_job_finish v2_verify_scan_submit
 v2_attachment_list v2_attachment_upload v2_correction_request_create
 `.trim().split(/\s+/));
-const KIOSK_ACTIONS=new Set('sop_identity sop_logout sop_login sop_attendance_config sop_attendance_employee_search sop_attendance_lookup sop_attendance_search sop_attendance_checkin sop_attendance_checkout sop_attendance_company sop_attendance_print'.split(' '));
+const KIOSK_ACTIONS=new Set('sop_identity sop_logout sop_login sop_attendance_config sop_attendance_employee_search sop_attendance_lookup sop_attendance_search sop_attendance_checkin sop_attendance_checkout sop_attendance_company sop_attendance_print sop_attendance_return_preview sop_attendance_return_confirm'.split(' '));
 export function accessGuard(b,env,request){
  if(!accessEnabled(env))return null;
  const url=new URL(request.url),scope=accessScope(request),action=String(b.action||'').trim();
