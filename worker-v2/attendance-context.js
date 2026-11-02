@@ -11,8 +11,8 @@ export async function ensureAttendanceCurrentView(e){
  // Dispatch initialization may create an empty child schema with the switch off;
  // that is metadata only and never generates historical attendance or labor.
  await ensureAttendanceReturnSchema({...e,SOP_ATTENDANCE_RETURNS_ENABLED:'true'});
- await ensureSchema(e.DB,'attendance-current-view-v3',()=>e.DB.batch([
- e.DB.prepare(configDDL),e.DB.prepare('INSERT OR IGNORE INTO ck_attendance_return_config VALUES(1,0)'),e.DB.prepare('DROP VIEW IF EXISTS ck_attendance_current_days'),
+ await ensureSchema(e.DB,'attendance-current-view-v4',()=>e.DB.batch([
+ e.DB.prepare('CREATE TABLE IF NOT EXISTS ck_attendance_return_migration_guard(id INTEGER PRIMARY KEY CHECK(id=1))'),e.DB.prepare(configDDL),e.DB.prepare('INSERT OR IGNORE INTO ck_attendance_return_config VALUES(1,0)'),e.DB.prepare('DROP VIEW IF EXISTS ck_attendance_current_days'),
  e.DB.prepare(`CREATE VIEW IF NOT EXISTS ck_attendance_current_days AS
  SELECT d.*,d.day AS origin_day,d.person_id AS origin_person_id,'' AS attendance_span_id,CASE WHEN d.signed_out='' THEN 'open' ELSE 'closed' END AS span_status FROM ck_attendance_return_config cfg CROSS JOIN ck_attendance_days d WHERE cfg.id=1 AND cfg.enabled=0
  UNION ALL
@@ -55,4 +55,11 @@ export function guardAttendanceSession(e){
  const batch=async statements=>{const source=statements.map(s=>originals.get(s)||s);if(!statements.some(s=>writes(sqls.get(s))))return db.batch(source);const id='session:'+crypto.randomUUID(),guard=db.prepare("INSERT INTO ck_attendance_span_checks VALUES(?,CASE WHEN EXISTS(SELECT 1 FROM ck_access_sessions WHERE token_hash=? AND scope='field' AND expires_at>?) THEN 1 ELSE 0 END)").bind(id,hash,Date.now());return(await db.batch([guard,...source,db.prepare('DELETE FROM ck_attendance_span_checks WHERE id=?').bind(id)])).slice(1,-1);};
  const prepare=sql=>{const wrap=s=>{sqls.set(s,sql);const proxy=new Proxy(s,{get(target,key){if(key==='bind')return(...a)=>wrap(target.bind(...a));if(key==='run'&&writes(sql))return async()=>(await batch([target]))[0];if(['all','first'].includes(key)&&writes(sql))return async column=>{const r=(await batch([target]))[0],row=r.results?.[0]||null;return key==='first'?(column&&row?row[column]:row):r;};const value=target[key];return typeof value==='function'?value.bind(target):value;}});originals.set(proxy,s);sqls.set(proxy,sql);return proxy;};return wrap(db.prepare(sql));};
  const wrapper=new Proxy(db,{get(target,key){if(key==='prepare')return prepare;if(key==='batch')return batch;const value=target[key];return typeof value==='function'?value.bind(target):value;}});shareSchemaBinding(wrapper,db);e.DB=wrapper;
+}
+// Metadata association only. Never alter labor start/end, status, needs_review or minutes.
+export function attendanceDispatchBindingSQL(table){
+ if(!['ck_dispatch_time_days','ck_dispatch_time_spans','ck_dispatch_time_links'].includes(table))throw Error('Unknown attendance ledger');
+ const time=table==='ck_dispatch_time_links'?'engaged_at':table==='ck_dispatch_time_spans'?'started_at':'';
+ const candidate=`s.attendance_id=${table}.attendance_id AND s.person_id=${table}.person_id AND ${time?`julianday(s.started_at)<=julianday(${table}.${time}) AND julianday(COALESCE(NULLIF(s.ended_at,''),NULLIF(s.provisional_end_at,''),${attendanceCutoffSQL('s.started_at')}))>julianday(${table}.${time})`:"s.ordinal=1 AND s.kind='normal'"}`;
+ return `UPDATE ${table} SET attendance_span_id=(SELECT s.id FROM ck_attendance_spans s WHERE ${candidate} LIMIT 1) WHERE attendance_span_id='' AND (SELECT COUNT(*) FROM ck_attendance_spans s WHERE ${candidate})=1`;
 }

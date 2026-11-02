@@ -92,3 +92,16 @@ PC/手机页面、导出、最终全量与完整容量回归仍在进行，未�
 `node --test --test-name-pattern='successful first|joining oneself|rest and signout|shared|explicit transfer|external|daily permanent|direct permanent|multiple devices|group|one-person|actual loading|office and field|last cancellation|concurrent first|formal transfer|saving pre' tests/dispatch-time-return-mode.mjs`
 
 此后应用源码仍为0460fb2，仅增合成回归及其说明；重新固定后跑最终全量。产出草稿真实浏览器六组及照片压缩全矩阵已通过，开关均为真实启用的本地合成环境，未触及远端业务数据。
+
+## 阶段7：独立8ca复审新增P1及3项P2（不同于原5项）
+
+最新四项已按独立复现场景修复，尚未放行：
+
+- P1首次启用抹劳动：旧签到派生在事务内设置迁移标记，禁止把快照当业务动作。旧版无迁移保护的子段触发器先安全替换；已有派审/职责只补关联元数据，不改开始、结束、分钟或原出勤版本。账本迁移本身不新开劳动段。已有60分钟、开放段不关闭、不重开；包括旧无保护触发器+冷绑定升级。
+- P2旧职责跨返岗：职责表新增出勤子段ID；新动作写当前子段，旧职责只有重新成功处理该单才更新归属。返岗只处理新单，新单结束即待派单；旧未结单不维持新段计时。
+- P2关闭后未签退过04：新返岗暂停但允许次日正常签到，原未结子段转待核实并记录临时截止，真实结束仍空，新人日只开一个段，原首次签退不变；不会自动续旧派审。
+- P2临时牌大小写身份：复用原dailyIdentityMap全档案检查，大小写歧义仍官方劳动0、身份待核实；子段明细与人日冲突合计一致，不把旧歧义60分钟变正式工时。
+
+新增 `tests/attendance-return-lifecycle.test.mjs` 五个变体：Node 5通过/0失败/0跳过，原生本地workerd D1同组5通过/0失败/0跳过，分别为 `/tmp/ck-attendance-return-lifecycle-five-final.log` 和 `/tmp/ck-attendance-return-lifecycle-five-final-d1.log`。原生命令：`CK_RETURN_NATIVE_D1=true CODEX_PRIMARY_RUNTIME_NODE_MODULES=/tmp/ck-dispatch-d1-deps/node_modules node --test tests/attendance-return-lifecycle.test.mjs`。这里明确包含新增四项，不用原六组测试替代。
+
+第三轮全量仍有1项同日造数回跨午夜失败（native-pause回移30分钟），未宣称全绿；正在固定该合成测试的同日时间并核查其余读取首次签退的业务入口。容量新增全扫已在阶段6从约13万降至3万行，后续仍对最终代码复测。代码只在独立返岗分支，不合测试、不启用部署开关、不操作真实出勤数据。
