@@ -292,13 +292,13 @@ test('location upload is unchanged while the share flag is off',async()=>{
  const photo=await s.upload('field','sop_task',task.id);assert.equal(photo.ok,true,photo.error);assert.equal(s.files.size,1);assert.equal(s.DB.raw.prepare("SELECT COUNT(*) n FROM v2_attachments WHERE related_doc_id=?").get(task.id).n,1);
  assert.equal(s.DB.raw.prepare("SELECT name FROM sqlite_master WHERE name='ck_dispatch_share_checks'").get(),undefined);
 });
-test('photo compression and staging config stay unchanged while the flag is absent',()=>{
+test('photo compression stays unchanged and only staging turns sharing on',()=>{
  const photo=fs.readFileSync(new URL('../shared/photo-upload.js',import.meta.url),'utf8');
  assert.match(photo,/2048\/Math\.max/);assert.match(photo,/0\.86/);assert.match(photo,/不另存拍摄原图/);
  const staging=fs.readFileSync(new URL('../worker-v2/wrangler.sop-staging.toml',import.meta.url),'utf8');
  const production=fs.readFileSync(new URL('../worker-v2/wrangler.toml',import.meta.url),'utf8');
- assert.doesNotMatch(staging,/SOP_DISPATCH_SHARE_ENABLED/);assert.doesNotMatch(production,/SOP_DISPATCH_SHARE_ENABLED/);
- assert.match(production,/name = "ck-v2-api"/);assert.match(staging,/ck-v2-api-sop-staging/);
+ assert.match(staging,/SOP_DISPATCH_SHARE_ENABLED = "true"/);assert.doesNotMatch(production,/SOP_DISPATCH_SHARE_ENABLED/);
+ assert.match(production,/name = "ck-v2-api"/);assert.match(staging,/ck-v2-api-sop-staging/);assert.match(staging,/ck_v2_sop_staging/);
 });
 test('home collaboration control stays hidden while the flag is off',async t=>{
  if(!process.env.CK_JSDOM_MODULE)return t.skip();
