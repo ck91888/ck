@@ -1,6 +1,6 @@
 import {attendanceReturnOverview} from './attendance-return-overview.js';
 import {attendanceReturnEnabled,attendanceReturnsRequested} from './attendance-return-schema.js';
-import {attendanceSource,attendanceDaySQL,attendanceCurrentSQL} from './attendance-context.js';
+import {attendanceSource,attendanceDaySQL,attendanceCurrentSQL,guardAttendanceState} from './attendance-context.js';
 import {nextAttendanceCutoff} from './attendance-return-time.js';
 import {dispatchTimeEnabled} from './dispatch-time.js';
 import {dispatchTimeAttendance} from './dispatch-time-runtime.js';
@@ -283,7 +283,7 @@ export async function guardAttendance(body,env){
  if(['sop_task_start','sop_task_people','sop_native_people','sop_native_resume'].includes(action)&&jobId)workers=await sourceActiveWorkers(env,jobId,workers);
  if(!workers.length&&(source.worker_id||source.handler_id))workers=[{id:source.worker_id||source.handler_id}];
  const daily=workers.filter(w=>isAttendanceBadge(w.id));if(!daily.length)return null;
- await ensureAttendance(env);const day=kstDay(new Date().toISOString());
+ await ensureAttendance(env);await guardAttendanceState(env,{personIds:[env.SOP_REQUEST_USER?.id],workerIds:daily.map(w=>canonicalDailyBadge(w.id))});const day=kstDay(new Date().toISOString());
  for(const w of daily)await resolveDailyBadge(env,w.id,{day});
  const ids=JSON.stringify([...new Set(daily.map(w=>canonicalDailyBadge(w.id)))]);
  const [days,rests,busy]=await env.DB.batch([

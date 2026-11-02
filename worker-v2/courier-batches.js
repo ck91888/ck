@@ -1,4 +1,4 @@
-import {attendanceSource,attendanceDaySQL,attendanceCurrentSQL} from './attendance-context.js';
+import {attendanceSource,attendanceDaySQL,attendanceCurrentSQL,guardAttendanceState} from './attendance-context.js';
 import {jobNumbers} from './document-numbers.js';
 import {ensureSchema} from './schema-ready.js';
 import {activeAttendanceSQL} from './attendance-management.js';
@@ -45,7 +45,7 @@ export async function courierBatchList(e,b={}){
 // Canonical attendance names, rather than names supplied by a scanner or client.
 async function staff(e,b,allowEmpty=false){
  if(!Array.isArray(b.workers)||b.workers.length>50||(!allowEmpty&&!b.workers.length)||new Set(b.workers.map(w=>w.id)).size!==b.workers.length)fail('请扫描操作人员工牌 / 작업자 명찰을 스캔하세요');
- await ensureAttendance(e);
+ await ensureAttendance(e);await guardAttendanceState(e,{personIds:[e.SOP_REQUEST_USER?.id],workerIds:b.workers.map(w=>w.id)});
  const t=new Date().toISOString(),day=new Date(Date.parse(t)+9*3600000).toISOString().slice(0,10),out=[];
  const names=await rows(e,`SELECT d.worker_id,d.name FROM ${attendanceSource(e)} d JOIN ck_attendance_people p ON p.id=d.person_id WHERE d.worker_id IN (SELECT value FROM json_each(?)) AND p.enabled=1 AND d.signed_out='' AND ${activeAttendanceSQL('d')} AND d.signed_in<=? AND ${attendanceCurrentSQL(e,'d')} AND (${attendanceDaySQL(e,'d','?')} OR EXISTS(SELECT 1 FROM v2_ops_job_workers s WHERE s.job_id=? AND s.worker_id=d.worker_id AND s.left_at='' AND date(s.joined_at,'+9 hours')=d.day)) AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks r WHERE r.attendance_id=d.id AND r.ended_at='') ORDER BY d.day DESC`,JSON.stringify(b.workers.map(w=>w.id)),t,day,b.batch_id||'');
  for(const w of b.workers){const person=names.find(x=>x.worker_id===w.id);if(!person||person.name!==w.name)fail('工牌无效、未签到、已签退或休息中 / 명찰·출근 상태를 확인하세요');out.push({id:w.id,name:person.name});}

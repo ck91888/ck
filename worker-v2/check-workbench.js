@@ -1,4 +1,4 @@
-import {attendanceSource,attendanceDaySQL,attendanceCurrentSQL} from './attendance-context.js';
+import {attendanceSource,attendanceDaySQL,attendanceCurrentSQL,guardAttendanceState} from './attendance-context.js';
 import {ensureSchema} from './schema-ready.js';
 import {nativeOwner} from './sop-dispatch.js';
 import {dispatchAccess} from './dispatch-access.js';
@@ -32,6 +32,7 @@ export async function scanCheck(b,e){
  const u=e.SOP_REQUEST_USER,key=required(b.client_req_id,'请求编号'),jobId=required(b.job_id,'任务'),batchId=required(b.batch_id,'批次'),barcode=required(b.barcode,'条码'),pallet=required(b.pallet_no,'托盘号'),workerId=required(b.worker_id,'操作员工牌');
  const signature=JSON.stringify({action:b.action,actor:u?.id,scope:u?.scope,jobId,batchId,barcode,pallet,workerId});
  const cached=await replay(e,key,signature);if(cached)return cached;
+ await guardAttendanceState(e,{personIds:[u?.id],workerIds:[workerId]});
  for(let attempt=0;attempt<8;attempt++){
   if(!await nativeOwner({job_id:jobId},e))throw Error('仅本任务派审员或在岗人员可扫码 / 담당 작업자만 스캔할 수 있습니다');
   const job=await q(e,'SELECT * FROM v2_ops_jobs WHERE id=?',jobId).first();

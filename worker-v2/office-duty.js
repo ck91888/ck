@@ -1,4 +1,4 @@
-import {attendanceSource,attendanceDaySQL,attendanceCurrentSQL} from './attendance-context.js';
+import {attendanceSource,attendanceDaySQL,attendanceCurrentSQL,guardAttendanceState} from './attendance-context.js';
 // Staging office duty uses the same jobs, personal segments and crew loans as field work.
 import {activeAttendanceSQL} from './attendance-management.js';
 import {ensureAttendance} from './attendance.js';
@@ -41,6 +41,7 @@ export async function handleOfficeDuty(b,e){
  const start=b.action==='sop_office_duty_start',open=start||b.action==='sop_office_duty_resume',t=new Date().toISOString();
  if(open&&!p.enabled)fail('职员已停用');
  if(open){
+  await guardAttendanceState(e,{personIds:[p.id,u.id]});
   const day=new Date(Date.parse(t)+9*3600000).toISOString().slice(0,10);
   const attendance=await q(e,`SELECT d.id FROM ${attendanceSource(e)} d WHERE d.person_id=? AND d.worker_id=? AND ${attendanceDaySQL(e,'d','?')} AND ${attendanceCurrentSQL(e,'d')} AND d.signed_in<=? AND d.signed_out='' AND ${activeAttendanceSQL('d')} AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks r WHERE r.attendance_id=d.id AND r.ended_at='')`,p.id,p.badge_id,day,t).first();
   if(!attendance)fail('请先核对韩国当天有效签到并结束休息 / 당일 출근·휴식 상태를 확인하세요');

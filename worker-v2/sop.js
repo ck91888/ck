@@ -1,4 +1,4 @@
-import {attendanceSource,attendanceDaySQL,attendanceCurrentSQL,ensureAttendanceCurrentView,attendanceEventDaySQL,attendanceEventCurrentSQL} from './attendance-context.js';
+import {attendanceSource,attendanceDaySQL,attendanceCurrentSQL,ensureAttendanceCurrentView,attendanceEventDaySQL,attendanceEventCurrentSQL,guardAttendanceState} from './attendance-context.js';
 import {attendanceReturnEnabled} from './attendance-return-schema.js';
 import {ensureSchema} from './schema-ready.js';
 import {bulkOutputDraft} from './bulk-output-draft.js';
@@ -172,6 +172,7 @@ async function verifyTakeover(env,u,b){
  if(!row||row.kind!=='dispatch'||job?.job_type!=='verify_scan'||job.related_doc_type!=='verify_batch')fail('原核对任务不存在');
  permit(u,executionDepartment(row),['manager','dispatcher']);
  if(Number(b.revision)!==row.revision)fail('任务已变化，请刷新后重试 / 작업이 변경되었습니다');
+ await guardAttendanceState(env,{personIds:[row.data.owner_id,u.id]});
  if(!await verifyTakeoverAllowed(env,u,{...row,state:JSON.stringify(row.data)},job))fail('当前不能接班；请由原派审员或管理员处理 / 담당자에게 문의하세요');
  const t=now(),old=row.data,next=transferState(old,u,u,'原负责人离岗，接续核对',t);
  await ensureAttendanceCurrentView(env);
@@ -414,6 +415,7 @@ export async function handleSop(b,env) {
    if(!['dispatch','task'].includes(row.kind))fail('仅未完成的派工任务可转移');
    const job=await stmt(env,'SELECT status FROM v2_ops_jobs WHERE id=?',row.id).first();
    if(!job||!['pending','working','paused','awaiting_close'].includes(job.status)||['completed','cancelled'].includes(d.status))fail('任务已结束，不能转移');
+   await guardAttendanceState(env,{personIds:[d.owner_id,u.id],workerIds:[text(b.target_badge).split('|')[0]]});
    const shareOwner=u.role==='dispatcher'&&isBulkShareRecord(row)&&await isActivePartner(env,u.id,d.owner_id);
    const manager=u.role==='manager'&&u.scope==='office',owner=u.role==='dispatcher'&&(u.id===d.owner_id||shareOwner),claim=!owner&&!manager&&await canClaimOwner(env,u,row);
    if(!owner&&!manager&&!claim)fail('仅当前负责人可移交；原负责人离岗时须由本部门在岗派审员接班');

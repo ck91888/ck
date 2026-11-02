@@ -1,4 +1,4 @@
-import {attendanceSource,attendanceDaySQL,attendanceCurrentSQL,attendanceCutoffSQL} from './attendance-context.js';
+import {attendanceSource,attendanceDaySQL,attendanceCurrentSQL,attendanceCutoffSQL,guardAttendanceState} from './attendance-context.js';
 import {canonicalDailyBadge,isAttendanceBadge,sameWorkerBadge} from '../shared/badge-identity.js';
 import {workerBadgeMatch,resolveDailyBadge} from './daily-badge-identity.js';
 import {sameBadgeSignature} from './badge-request-signature.js';
@@ -52,6 +52,7 @@ export async function canCrewDestination(e,b){try{await destination(e,b);return 
 async function eligibility(e,id,t){
  if(!isAttendanceBadge(id))return '';
  if(e.SOP_ATTENDANCE_ENABLED!=='true')return '须先启用当天考勤核验';
+ await guardAttendanceState(e,{workerIds:[id]});
  await resolveDailyBadge(e,id,{day:kstDay(t)});
  const d=await q(e,`SELECT d.*,p.enabled FROM ${attendanceSource(e)} d JOIN ck_attendance_people p ON p.id=d.person_id WHERE ${workerBadgeMatch('d.worker_id','?')} AND ${attendanceDaySQL(e,'d','?')} AND ${attendanceCurrentSQL(e,'d')} AND `+activeAttendanceSQL('d'),id,kstDay(t)).first();
  if(!d||!d.enabled)return '人员已停用或没有韩国当天签到';if(d.signed_out)return '人员已签退';
