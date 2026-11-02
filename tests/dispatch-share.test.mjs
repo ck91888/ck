@@ -3,8 +3,9 @@ import worker from '../worker-v2/index.js';import {database} from './d1-adapter.
 import {handleSop} from '../worker-v2/sop.js';
 import {cargoFixture} from './cargo-fixture.mjs';import {cargoExecution} from '../worker-v2/cargo-execution.js';import {ensureDispatchShare} from '../worker-v2/dispatch-share.js';
 import {operationHeaders,rememberOperation,confirmOperation} from './office-operator-fixture.mjs';
+const photoPng=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a3ioAAAAASUVORK5CYII=','base64');
 async function setup(enabled=true){
- const DB=database(),env={DB,SOP_ENVIRONMENT:'staging',SOP_UPGRADE_ENABLED:'true',SOP_ACCEPT_NEW:'true',SOP_ATTENDANCE_ENABLED:'true',SOP_ACCESS_CONTROL:'true',SOP_WORK_CHAIN_ENABLED:'true',SOP_ADMIN_CODE_SHA256:await digest('synthetic-dispatch-share'),...(enabled?{SOP_DISPATCH_SHARE_ENABLED:'true'}:{})},cookies={office:'',field:''};
+ const DB=database(),files=new Map(),env={DB,SOP_ENVIRONMENT:'staging',SOP_UPGRADE_ENABLED:'true',SOP_ACCEPT_NEW:'true',SOP_ATTENDANCE_ENABLED:'true',SOP_ACCESS_CONTROL:'true',SOP_WORK_CHAIN_ENABLED:'true',SOP_ADMIN_CODE_SHA256:await digest('synthetic-dispatch-share'),R2_BUCKET:{async put(key,body,meta){files.set(key,{body,meta});},async get(key){return files.get(key)||null;},async delete(key){files.delete(key);}},...(enabled?{SOP_DISPATCH_SHARE_ENABLED:'true'}:{})},cookies={office:'',field:''};
  async function call(scope,action,b={},cookie){const r=await worker.fetch(new Request('https://fixture.local'+(scope==='field'?'/001/api':'/api'),{method:'POST',headers:{'Content-Type':'application/json',Cookie:cookie??cookies[scope],...operationHeaders(cookie??cookies[scope])},body:JSON.stringify({action,client_req_id:crypto.randomUUID(),...b})}),env);if(action==='sop_login'&&r.ok)cookies[scope]=r.headers.get('set-cookie').split(';')[0];return rememberOperation(await r.json(),cookies[scope]);}
  const ok=async(s,a,b={},c)=>{const r=await call(s,a,b,c);assert.equal(r.ok,true,a+': '+(r.error||''));return r;};
  await ok('office','sop_login',{sop_key:'synthetic-dispatch-share'});await confirmOperation((a,b)=>call('office',a,b),'合成协作管理员');await ok('office','sop_attendance_config');
@@ -12,7 +13,8 @@ async function setup(enabled=true){
  const checkin=async p=>(await ok('office','sop_attendance_checkin',{badge:p.badgeId,agency:p.agency})).record;
  const grant=(p,departments=['bulk'])=>ok('office','sop_daily_dispatch_update',{person_id:p.id,badge:p.badgeId,enabled:true,version:0,departments,reason:'合成核实授权'});
  const login=p=>ok('field','sop_login',{badge:p.badgeId});
- return {DB,env,cookies,call,ok,permanent,checkin,grant,login};
+ async function upload(scope,doc,id){const fd=new FormData();for(const [k,v] of Object.entries({action:'v2_attachment_upload',related_doc_type:doc,related_doc_id:id,attachment_category:'location_photo',uploaded_by:'伪造上传人'}))fd.append(k,v);fd.append('file',new File([photoPng],'location.png',{type:'image/png'}));return (await worker.fetch(new Request('https://fixture.local'+(scope==='field'?'/001/api':'/api'),{method:'POST',headers:{Cookie:cookies[scope]},body:fd}),env)).json();}
+ return {DB,env,files,cookies,call,ok,permanent,checkin,grant,login,upload};
 }
 const table=db=>db.raw.prepare("SELECT name FROM sqlite_master WHERE name='ck_dispatch_share_pairs'").get();
 test('disabled flag leaves collaboration closed and does not create tables',async()=>{
@@ -219,6 +221,7 @@ test('a leave after the first share check still rejects every in-flight partner 
  const task=await s.ok('field','sop_task_dispatch',{need_id:need.id,department:'bulk',title:'窗口普通单',job_type:'bulk_op',workers:[{id:worker.badgeId,name:worker.name}],lead_id:worker.badgeId,estimated_minutes:10});
  const movable=await s.ok('field','sop_task_dispatch',{need_id:moveNeed.id,department:'bulk',title:'窗口转单',job_type:'bulk_op',workers:[{id:mover.badgeId,name:mover.name}],lead_id:mover.badgeId,estimated_minutes:10});
  const external=await s.ok('field','sop_native_start',{payload:{action:'v2_bulk_op_job_start',work_order_no:'EXT-WINDOW',customer:'合成客户',client_req_id:'EXT-WINDOW'},workers:[{id:hand.badgeId,name:hand.name}],lead_id:hand.badgeId,estimated_minutes:10,labor_department:'bulk'});
+ const ownerPhoto=await s.upload('field','sop_task',task.id);assert.equal(ownerPhoto.ok,true,ownerPhoto.error);assert.equal(s.files.size,1);assert.equal(s.DB.raw.prepare("SELECT COUNT(*) n FROM v2_attachments WHERE related_doc_id=?").get(task.id).n,1);
  const restore=()=>s.DB.raw.prepare("UPDATE ck_dispatch_share_pairs SET status='active',ended_at='',ended_by='' WHERE ended_by='race'").run();
  await s.login(b);
  let stop=armLeaveAfterShareRead(s.DB);let paused=await s.call('field','sop_task_pause',{id:task.id,revision:task.revision,reason:'退出后暂停'});stop();
@@ -233,12 +236,35 @@ test('a leave after the first share check still rejects every in-flight partner 
  assert.equal(nativePaused.ok,false);assert.match(nativePaused.error,/协作已结束/);assert.equal(s.DB.raw.prepare('SELECT status FROM v2_ops_jobs WHERE id=?').get(external.job_id).status,'working');
  restore();stop=armLeaveAfterShareRead(s.DB);const finished=await s.call('field','v2_bulk_op_job_finish',{job_id:external.job_id,revision:1,worker_id:hand.badgeId,customer:'合成客户',label_count:3});stop();
  assert.equal(finished.ok,false);assert.match(finished.error,/协作已结束/);assert.equal(s.DB.raw.prepare('SELECT status FROM v2_ops_jobs WHERE id=?').get(external.job_id).status,'working');
+ restore();stop=armLeaveAfterShareRead(s.DB);const left=await s.call('field','v2_ops_job_leave',{job_id:external.job_id,worker_id:hand.badgeId});stop();
+ assert.equal(left.ok,false);assert.match(left.error,/协作已结束/);assert.equal(s.DB.raw.prepare("SELECT COUNT(*) n FROM v2_ops_job_workers WHERE job_id=? AND left_at=''").get(external.job_id).n,1);assert.equal(s.DB.raw.prepare('SELECT status FROM v2_ops_jobs WHERE id=?').get(external.job_id).status,'working');
+ restore();stop=armLeaveAfterShareRead(s.DB);const leaveOnly=await s.call('field','v2_bulk_op_job_finish',{job_id:external.job_id,worker_id:hand.badgeId,leave_only:true});stop();
+ assert.equal(leaveOnly.ok,false);assert.match(leaveOnly.error,/协作已结束/);assert.equal(s.DB.raw.prepare("SELECT COUNT(*) n FROM v2_ops_job_workers WHERE job_id=? AND left_at=''").get(external.job_id).n,1);
+ const watch=(run)=>{let puts=0,deletes=0;const put=s.env.R2_BUCKET.put,del=s.env.R2_BUCKET.delete;s.env.R2_BUCKET.put=async(...a)=>{puts++;return put(...a);};s.env.R2_BUCKET.delete=async(...a)=>{deletes++;return del(...a);};return run().finally(()=>{s.env.R2_BUCKET.put=put;s.env.R2_BUCKET.delete=del;}).then(value=>({value,puts,deletes}));};
+ restore();const taskPhoto=await watch(()=>{stop=armLeaveAfterShareRead(s.DB);return s.upload('field','sop_task',task.id).finally(()=>stop());});
+ assert.equal(taskPhoto.value.ok,false);assert.match(taskPhoto.value.error,/协作已结束/);assert.equal(taskPhoto.puts,1);assert.equal(taskPhoto.deletes,1);assert.equal(s.DB.raw.prepare("SELECT COUNT(*) n FROM v2_attachments WHERE related_doc_id=?").get(task.id).n,1);assert.equal(s.files.size,1);
+ restore();const nativePhoto=await watch(()=>{stop=armLeaveAfterShareRead(s.DB);return s.upload('field','ops_job',external.job_id).finally(()=>stop());});
+ assert.equal(nativePhoto.value.ok,false);assert.match(nativePhoto.value.error,/协作已结束/);assert.equal(nativePhoto.puts,1);assert.equal(nativePhoto.deletes,1);assert.equal(s.DB.raw.prepare("SELECT COUNT(*) n FROM v2_attachments WHERE related_doc_id=?").get(external.job_id).n,0);assert.equal(s.files.size,1);
+ restore();const closed=await s.call('field','v2_bulk_op_job_finish',{job_id:external.job_id,worker_id:hand.badgeId,leave_only:true});
+ assert.equal(closed.ok,true,closed.error);assert.equal(s.DB.raw.prepare('SELECT status FROM v2_ops_jobs WHERE id=?').get(external.job_id).status,'awaiting_close');assert.equal(s.DB.raw.prepare("SELECT COUNT(*) n FROM v2_ops_job_workers WHERE job_id=? AND left_at=''").get(external.job_id).n,0);
+ stop=armLeaveAfterShareRead(s.DB);const resumed=await s.call('field','v2_ops_job_resume',{parent_job_id:external.job_id,worker_id:hand.badgeId,worker_name:hand.name});stop();
+ assert.equal(resumed.ok,false);assert.match(resumed.error,/协作已结束/);assert.equal(s.DB.raw.prepare('SELECT status FROM v2_ops_jobs WHERE id=?').get(external.job_id).status,'awaiting_close');assert.equal(s.DB.raw.prepare("SELECT COUNT(*) n FROM v2_ops_job_workers WHERE job_id=? AND left_at=''").get(external.job_id).n,0);
+ restore();const back=await s.ok('field','v2_ops_job_resume',{parent_job_id:external.job_id,worker_id:hand.badgeId,worker_name:hand.name});
+ assert.equal(s.DB.raw.prepare('SELECT status FROM v2_ops_jobs WHERE id=?').get(external.job_id).status,'working');assert.equal(s.DB.raw.prepare("SELECT COUNT(*) n FROM v2_ops_job_workers WHERE job_id=? AND left_at=''").get(external.job_id).n,1);assert.equal(back.ok,true);
  const cargo=cargoFixture();cargo.env.SOP_DISPATCH_SHARE_ENABLED='true';await ensureDispatchShare(cargo.env);
  cargo.DB.raw.prepare("INSERT INTO ck_dispatch_share_pairs(id,person_lo,person_hi,invited_by,invitee_id,status,day,created_at) VALUES('DS-WINDOW','OWNER','PARTNER','OWNER','PARTNER','active','2026-11-02','2026-11-02T00:00:00Z')").run();
  const partner={id:'PARTNER',name:'协作乙',role:'dispatcher',scope:'field',departments:['bulk']};
  stop=armLeaveAfterShareRead(cargo.DB);
  await assert.rejects(()=>cargoExecution(cargo.body('sop_cargo_group_complete',{group_id:'G0',quantity:3,unit:'箱'}),cargo.env,partner),/协作已结束/);
  stop();assert.equal(cargo.DB.raw.prepare("SELECT revision FROM sop_records WHERE id='N'").get().revision,1);assert.equal(JSON.parse(cargo.DB.raw.prepare("SELECT state FROM sop_records WHERE id='T'").get().state).status,'working');
+});
+test('location upload is unchanged while the share flag is off',async()=>{
+ const s=await setup(false),a=await s.permanent('合成关闭照片'),worker=await s.permanent('合成关闭照片操作');
+ await s.checkin(a);await s.checkin(worker);await s.grant(a);await s.login(a);
+ const need=await s.ok('office','sop_need_create',{department:'bulk',source_type:'inventory',supply_chain_no:'SHARE-PHOTO-OFF',title:'关闭上传',customer:'合成客户',instructions:'照片',owner:'合成'});
+ const task=await s.ok('field','sop_task_dispatch',{need_id:need.id,department:'bulk',title:'关闭上传',job_type:'bulk_op',workers:[{id:worker.badgeId,name:worker.name}],lead_id:worker.badgeId,estimated_minutes:10});
+ const photo=await s.upload('field','sop_task',task.id);assert.equal(photo.ok,true,photo.error);assert.equal(s.files.size,1);assert.equal(s.DB.raw.prepare("SELECT COUNT(*) n FROM v2_attachments WHERE related_doc_id=?").get(task.id).n,1);
+ assert.equal(s.DB.raw.prepare("SELECT name FROM sqlite_master WHERE name='ck_dispatch_share_checks'").get(),undefined);
 });
 test('photo compression and staging config stay unchanged while the flag is absent',()=>{
  const photo=fs.readFileSync(new URL('../shared/photo-upload.js',import.meta.url),'utf8');

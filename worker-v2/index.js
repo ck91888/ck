@@ -53,7 +53,7 @@ import { workPlanStatements } from './sop-planning.js';
 import { nextOutboundDisplayNo } from './outbound-number.js';
 import { handleSop, guardLegacy, linkedNeeds, linkedCheck, outboundNeedStatements } from './sop.js';
 import { sessionUser, sessionAction } from './sop-session.js';
-import { handleDispatchShare,isActivePartner,isBulkShareRecord,shareEnabled } from './dispatch-share.js';
+import { handleDispatchShare,isActivePartner,isBulkShareRecord,shareEnabled,noteShareGrant,notedShareGrant,partnerShareGuard,shareConflict } from './dispatch-share.js';
 import { prepareDemo } from './sop-demo.js';
 import { startNative, nativeOwner } from './sop-dispatch.js';
 /**
@@ -355,6 +355,28 @@ async function withIdem(env, body, action, fn) {
 
 // Daily aliases are scoped to the staging attendance rollout.
 const badgeSQL=(env,a,b)=>attendanceEnabled(env)?workerBadgeMatch(a,b):`${a}=${b}`;
+// Pair-only grants recheck the collaboration inside the clock write. Returning
+// false means the caller keeps its original statements; those paths were not
+// admitted by the pair. Owner, manager, reviewer, delegate and claim stay there.
+async function commitNotedShare(env,subject,jobId,statements){
+ if(!notedShareGrant(subject))return false;
+ const record=await env.DB.prepare("SELECT * FROM sop_records WHERE id=? AND kind IN ('dispatch','task')").bind(jobId).first();
+ if(!record)throw Error('记录已更新或协作已结束，请刷新后再操作');
+ const guard=await partnerShareGuard(env,record,env.SOP_REQUEST_USER,true);
+ if(!guard.length)return false;
+ try{await env.DB.batch([...guard,...statements]);return true;}
+ catch(error){if(shareConflict.test(error.message||''))throw Error('记录已更新或协作已结束，请刷新后再操作');throw error;}
+}
+async function notedShareLeave(env,body,jobId,workerId,t,reason){
+ if(!notedShareGrant(body))return false;
+ const segs=(await env.DB.prepare(`SELECT * FROM v2_ops_job_workers WHERE job_id=? AND ${badgeSQL(env,'worker_id','?')} AND left_at=''`).bind(jobId,workerId).all()).results||[];
+ const sql=segs.map(seg=>{const minutes=Math.round((new Date(t).getTime()-new Date(seg.joined_at).getTime())/60000*10)/10;return env.DB.prepare("UPDATE v2_ops_job_workers SET left_at=?, minutes_worked=?, leave_reason=? WHERE id=? AND left_at=''").bind(t,Math.max(0,minutes),reason,seg.id);});
+ sql.push(env.DB.prepare(`UPDATE v2_ops_jobs SET active_worker_count=(SELECT COUNT(DISTINCT ${badgeColumn(env,'worker_id')}) FROM v2_ops_job_workers WHERE job_id=? AND left_at='') WHERE id=?`).bind(jobId,jobId));
+ sql.push(env.DB.prepare(`UPDATE v2_ops_jobs SET status=CASE WHEN EXISTS(SELECT 1 FROM v2_ops_job_results WHERE job_id=v2_ops_jobs.id) THEN 'completed' ELSE 'awaiting_close' END, finished_at=CASE WHEN EXISTS(SELECT 1 FROM v2_ops_job_results WHERE job_id=v2_ops_jobs.id) THEN COALESCE(NULLIF(finished_at,''), ?) ELSE finished_at END, updated_at=?, active_worker_count=0, result_summary=CASE WHEN EXISTS(SELECT 1 FROM v2_ops_job_results WHERE job_id=v2_ops_jobs.id) THEN result_summary ELSE COALESCE(NULLIF(result_summary,''), '待补充产出数据') END WHERE id=? AND job_type='bulk_op' AND status NOT IN ('completed','cancelled') AND NOT EXISTS(SELECT 1 FROM v2_ops_job_workers WHERE job_id=? AND left_at='')`).bind(t,t,jobId,jobId));
+ if(!await commitNotedShare(env,body,jobId,sql))return false;
+ const count=await env.DB.prepare(`SELECT COUNT(DISTINCT ${badgeColumn(env,'worker_id')}) c FROM v2_ops_job_workers WHERE job_id=? AND left_at=''`).bind(jobId).first();
+ return {ok:true,active_worker_count:Number(count?.c||0)};
+}
 const badgeKey=(env,id)=>attendanceEnabled(env)?canonicalDailyBadge(id):id;
 const badgeColumn=(env,id)=>attendanceEnabled(env)?canonicalWorkerSQL(id):id;
 
@@ -6762,6 +6784,8 @@ route("v2_ops_job_leave", async (body, env) => {
 
   return withIdem(env, body, "v2_ops_job_leave", async () => {
     const t = now();
+    const sharedLeave=await notedShareLeave(env,body,job_id,worker_id,t,String(body.leave_reason||'leave'));
+    if(sharedLeave)return {ok:true};
     await closeAllOpenSegs(env, job_id, worker_id, t, String(body.leave_reason || 'leave'));
     const realCount = await recalcActiveCount(env, job_id, t);
 
@@ -6958,6 +6982,14 @@ route("v2_ops_job_resume", async (body, env) => {
     if(occupied)return {ok:false,error:'人员仍在其他任务中，不能重复恢复计时'};
 
     const dup = await findOpenSeg(env, parent_job_id, worker_id);
+    if(notedShareGrant(body)){
+      if(dup&&job.status!=='awaiting_close')return {ok:true,worker_seg_id:dup.id,already_joined:true};
+      const segId=dup?.id||('WS-'+uid()),sql=[];
+      if(!dup)sql.push(env.DB.prepare("INSERT INTO v2_ops_job_workers(id, job_id, worker_id, worker_name, joined_at) VALUES(?,?,?,?,?)").bind(segId,parent_job_id,worker_id,worker_name,t));
+      sql.push(env.DB.prepare(`UPDATE v2_ops_jobs SET active_worker_count=(SELECT COUNT(DISTINCT ${badgeColumn(env,'worker_id')}) FROM v2_ops_job_workers WHERE job_id=? AND left_at='') WHERE id=?`).bind(parent_job_id,parent_job_id));
+      if(job.status==='awaiting_close')sql.push(env.DB.prepare("UPDATE v2_ops_jobs SET status='working', resumed_at=?, updated_at=? WHERE id=? AND status='awaiting_close' AND (SELECT COUNT(DISTINCT "+badgeColumn(env,'worker_id')+") FROM v2_ops_job_workers WHERE job_id=? AND left_at='')>0").bind(t,t,parent_job_id,parent_job_id));
+      if(await commitNotedShare(env,body,parent_job_id,sql))return {ok:true,worker_seg_id:segId,...(dup?{already_joined:true}:{})};
+    }
     if (dup) {
       if (job.status === "awaiting_close") {
         await recalcActiveCount(env, parent_job_id, t);
@@ -8405,12 +8437,20 @@ route("v2_bulk_op_job_finish", async (body, env) => {
 
     const jobCheck = await env.DB.prepare("SELECT status FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
     if (jobCheck && jobCheck.status === 'completed') {
+      if(notedShareGrant(body)){
+        const segs=(await env.DB.prepare("SELECT id, joined_at FROM v2_ops_job_workers WHERE job_id=? AND left_at=''").bind(job_id).all()).results||[];
+        const sql=segs.map(seg=>{const joinedMs=Date.parse(seg.joined_at||''),leftMs=Date.parse(t);const minutes=Number.isFinite(joinedMs)&&Number.isFinite(leftMs)?Math.max(0,Math.round((leftMs-joinedMs)/60000*10)/10):0;return env.DB.prepare("UPDATE v2_ops_job_workers SET left_at=?, minutes_worked=?, leave_reason=? WHERE id=? AND left_at=''").bind(t,minutes,'already_completed_cleanup',seg.id);});
+        if(segs.length)sql.push(env.DB.prepare("UPDATE v2_ops_jobs SET active_worker_count=0, updated_at=? WHERE id=?").bind(t,job_id));
+        if(await commitNotedShare(env,body,job_id,sql))return {ok:true,already_completed:true,error:'already_completed',cleaned_open_segments:segs.length,message:'任务已完成'};
+      }
       const cleaned = await closeOpenWorkerSegmentsForJob(env, job_id, t, 'already_completed_cleanup');
       return { ok: true, already_completed: true, error: "already_completed", cleaned_open_segments: cleaned, message: "任务已完成" };
     }
 
     // Leave-only: close segments, recalc; bulk_op 是结果型 → 无人后 awaiting_close（autoClose 兜底）
     if (leave_only) {
+      const sharedLeave=await notedShareLeave(env,body,job_id,worker_id,t,'leave');
+      if(sharedLeave)return {ok:true,left:true,active_worker_count:sharedLeave.active_worker_count};
       await closeAllOpenSegs(env, job_id, worker_id, t, 'leave');
       const leaveCount = await recalcActiveCount(env, job_id, t);
       if (leaveCount === 0) await autoCloseJobIfNoOpenWorkers(env, job_id, t);
@@ -12849,7 +12889,7 @@ export default {
     if(accessEnabled(env)&&env.SOP_REQUEST_USER?.scope==='field'&&isMultipart){
       const doc=formData.get('related_doc_type'),id=formData.get('related_doc_id');
       if(!['inbound_plan','outbound_order','field_feedback','ops_job','issue_ticket','issue_handle_run','sop_task'].includes(doc))return err('现场无此附件上传权限',403);
-      if(doc==='ops_job'&&!await nativeOwner({job_id:id},env))return err('仅本任务派审员可上传附件',403);
+      if(doc==='ops_job'){const probe={job_id:String(id||'')};if(!await nativeOwner(probe,env))return err('仅本任务派审员可上传附件',403);if(notedShareGrant(probe))noteShareGrant(formData,true);}
       if(doc==='issue_handle_run'){
         const run=await env.DB.prepare("SELECT r.job_id,t.biz_class FROM v2_issue_handle_runs r JOIN v2_ops_jobs j ON j.id=r.job_id JOIN v2_issue_tickets t ON t.id=r.issue_id WHERE r.id=? AND r.run_status='working' AND j.status NOT IN ('completed','cancelled')").bind(id).first();
         const file=formData.get('file');
@@ -13010,7 +13050,9 @@ async function handleMultipartUpload(formData, env) {
       const task=await env.DB.prepare("SELECT state,department,kind FROM sop_records WHERE id=? AND kind=?").bind(related_doc_id,related_doc_type==='sop_task'?'task':'dispatch').first(),u=env.SOP_REQUEST_USER;
       if(!task||!u)return err('任务不存在或未授权',403);
       const data=JSON.parse(task.state),native=related_doc_type==='ops_job',job=native?await env.DB.prepare('SELECT job_type,status FROM v2_ops_jobs WHERE id=?').bind(related_doc_id).first():null;
-      const allowed=native?await nativeOwner({job_id:related_doc_id},env):u.role==='manager'||u.role==='dispatcher'&&(u.departments||[]).includes(executionDepartment(task))&&(data.owner_id===u.id||(data.delegates||[]).includes(u.id)||isBulkShareRecord(task,data)&&await isActivePartner(env,u.id,data.owner_id));
+      let allowed=false;
+      if(native){const probe={job_id:related_doc_id};allowed=await nativeOwner(probe,env);if(notedShareGrant(probe)||notedShareGrant(formData)){noteShareGrant(formData,true);allowed=true;}}
+      else{const inDept=(u.departments||[]).includes(executionDepartment(task)),direct=u.role==='manager'||u.role==='dispatcher'&&inDept&&(data.owner_id===u.id||(data.delegates||[]).includes(u.id)),paired=!direct&&u.role==='dispatcher'&&inDept&&isBulkShareRecord(task,data)&&await isActivePartner(env,u.id,data.owner_id);if(paired)noteShareGrant(formData,true);allowed=direct||paired;}
       if(!allowed||(native?job?.job_type!=='bulk_op'||!['working','awaiting_close'].includes(job?.status):data.status!=='working'))return err('只有本任务派审员可在作业中上传货位照片',403);
       if(!['image/jpeg','image/png','image/webp'].includes(file.type)||!file.size||file.size>10*1024*1024)return err('仅支持10MB以内的JPG、PNG、WebP照片');
       const bytes=new Uint8Array(await file.slice(0,12).arrayBuffer());
@@ -13041,12 +13083,24 @@ async function handleMultipartUpload(formData, env) {
       httpMetadata: { contentType: file.type }
     });
 
-    await env.DB.prepare(`
+    const attachmentInsert=env.DB.prepare(`
       INSERT INTO v2_attachments(id, related_doc_type, related_doc_id, attachment_category,
         file_name, file_key, file_size, content_type, uploaded_by, created_at)
       VALUES(?,?,?,?,?,?,?,?,?,?)
     `).bind(id, related_doc_type, related_doc_id, attachment_category,
-        file.name, fileKey, file.size, file.type, uploaded_by, t).run();
+        file.name, fileKey, file.size, file.type, uploaded_by, t);
+    if(notedShareGrant(formData)){
+      const record=await env.DB.prepare('SELECT * FROM sop_records WHERE id=?').bind(related_doc_id).first();
+      const guard=record?await partnerShareGuard(env,record,env.SOP_REQUEST_USER,true):[];
+      try{if(!guard.length)throw Error('ck_dispatch_share_checks');await env.DB.batch([...guard,attachmentInsert]);}
+      catch(error){
+        if(!await env.DB.prepare('SELECT id FROM v2_attachments WHERE id=?').bind(id).first()){try{await env.R2_BUCKET.delete(fileKey);}catch{}}
+        if(shareConflict.test(error.message||''))return json({ok:false,error:'记录已更新或协作已结束，请刷新后再操作'},409);
+        throw error;
+      }
+      return json({ ok: true, id, file_key: fileKey });
+    }
+    await attachmentInsert.run();
 
     return json({ ok: true, id, file_key: fileKey });
   } catch (e) {
