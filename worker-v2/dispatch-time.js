@@ -5,7 +5,8 @@ import {kstDay} from './attendance-time.js';
 import {latestCutoff} from './system-cutoff.js';
 const q=(e,s,...a)=>e.DB.prepare(s).bind(...a);
 const actions=new Set(['dispatch','transfer_in','assignment_end','transfer_out','operation_start','operation_end','rest_start','rest_end','checkout','qualification_change','cutoff']);
-const resumptions=new Set(['dispatch','transfer_in','operation_end','rest_end','qualification_change']);
+// Cross-boundary continuation policy remains unconfirmed; only a new real assignment is allowed here.
+const resumptions=new Set(['dispatch','transfer_in']);
 export const dispatchTimeEnabled=e=>e.SOP_ENVIRONMENT==='staging'&&e.SOP_AUTO_DISPATCH_TIME_ENABLED==='true';
 export const DISPATCH_TIME_SCHEMA=[
  `CREATE TABLE IF NOT EXISTS ck_dispatch_time_sessions(id TEXT PRIMARY KEY,person_id TEXT NOT NULL,attendance_id TEXT NOT NULL,day TEXT NOT NULL,version INTEGER NOT NULL,state TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(person_id,attendance_id))`,
