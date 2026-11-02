@@ -1,6 +1,6 @@
 import {executionDepartment} from './work-execution.js';
 import {nativeOwner} from './sop-dispatch.js';
-import {isActivePartner,isBulkShareRecord,partnerShareGuard,shareConflict} from './dispatch-share.js';
+import {isActivePartner,isBulkShareRecord,partnerShareGuard,shareConflict,notedShareGrant} from './dispatch-share.js';
 import {taskGroups,taskProcess} from './cargo-processes.js';
 const q=(e,s,...a)=>e.DB.prepare(s).bind(...a),text=v=>String(v??'').trim();
 const open=['pending','assigned','working','paused','system_closed','awaiting_close','rework'];
@@ -22,9 +22,12 @@ async function target(e,b,u){
  else{
   const d=row.data,job=await q(e,'SELECT * FROM v2_ops_jobs WHERE id=?',row.id).first();
   if(d.job_type!=='bulk_op'||!job||job.job_type!=='bulk_op'||!open.includes(job.status)||!open.includes(d.status))throw Error('任务已结束、取消或已提交审核，不能修改草稿');
-  if(row.kind==='dispatch'){const probe={job_id:row.id};if(!await nativeOwner(probe,e))throw Error('仅本任务派审员或获授权人员可操作');}
+  if(row.kind==='dispatch'){
+   const probe={job_id:row.id};if(!await nativeOwner(probe,e))throw Error('仅本任务派审员或获授权人员可操作');
+   // Preserve why the first authorization passed, even if sharing ends before the write.
+   shared=notedShareGrant(probe);
+  }
   else{const delegate=(d.delegates||[]).includes(u.id)&&!(d.owner_transfers||[]).some(x=>x.from_id===u.id);shared=u.role==='dispatcher'&&d.owner_id!==u.id&&!delegate&&isBulkShareRecord(row)&&await isActivePartner(e,u.id,d.owner_id);if(u.role!=='manager'&&d.owner_id!==u.id&&!delegate&&!shared)throw Error('仅本任务派审员或获授权人员可操作');}
-  if(row.kind==='dispatch')shared=u.role!=='manager'&&d.owner_id!==u.id&&isBulkShareRecord(row)&&await isActivePartner(e,u.id,d.owner_id);
   if(d.need_id)source=await read(e,d.need_id);
   else if(row.kind==='dispatch'&&job.related_doc_type==='work_order')source=await read(e,await externalId({id:d.owner_transfers?.[0]?.from_id||d.owner_id},job.related_doc_id));
   if(source&&['cancelled','closed'].includes(source.data.status))throw Error('作业计划已关闭');
