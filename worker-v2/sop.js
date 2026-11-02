@@ -347,6 +347,7 @@ export async function handleSop(b,env) {
    const department=(need||b.job_type==='bulk_op')?'bulk':required(b.department,'部门');permit(u,department,['manager','dispatcher']);
    const workers=validateWorkers(b.workers,b.lead_id);
    if(need) {
+    if(need.data.status==='cancelled')fail('作业计划已作废，不能派给现场');
     if(workChainEnabled(env)&&need.data.operation_kind==='direct_forward')fail('直接转发不创建加工任务，请在作业需求中确认可发货');
     if(need.data.needs_clarification)fail('请先补充完整作业要求');
     if(need.data.cargo_groups){if(['closed','cancelled'].includes(need.data.status))fail('作业计划已关闭');}else if(need.data.status!=='pending') fail('需求已派工或已完成，不得重复建任务');}
@@ -516,7 +517,22 @@ export async function handleSop(b,env) {
   } else if(b.action.startsWith('sop_need_')||b.action==='sop_work_material_remove') {
    if(d.cargo_groups&&['sop_need_forward_ready','sop_need_link','sop_need_plan_quantity'].includes(b.action))fail('分组计划请按已审核组安排出库，不能整单确认或占用');
    if(row.kind!=='need')fail('记录类型错误');permit(u,executionDepartment(row),b.action==='sop_work_material_remove'?['manager','service','dispatcher','reviewer']:['manager','service','dispatcher']);
-   if(b.action==='sop_work_material_remove') {
+   if(d.status==='cancelled')fail('作业计划已作废');
+   if(b.action==='sop_need_cancel') {
+    if(u.scope==='field')fail('请在办公室的作业计划中作废');
+    if(d.status!=='pending'||d.result||d.task_id||d.bulk_batch_id)fail('只有待安排、尚未开始作业的计划可以作废');
+    const groups=d.cargo_groups?.groups||[];
+    if(groups.some(g=>(g.outputs||[]).length||g.status==='approved'||(g.processes||[]).some(p=>p.result||(p.status&&!['pending','cancelled'].includes(p.status)))))fail('分组作业已有进度或成果，不能作废');
+    const tasks=await all(env,"SELECT id,state FROM sop_records WHERE kind='task' AND json_extract(state,'$.need_id')=?",row.id);
+    if(tasks.some(task=>JSON.parse(task.state).status!=='cancelled'))fail('已有现场任务，不能作废作业计划');
+    const taskIds=JSON.stringify(tasks.map(task=>task.id));
+    if(tasks.length&&await stmt(env,"SELECT 1 FROM v2_ops_jobs WHERE id IN (SELECT value FROM json_each(?)) AND status!='cancelled' LIMIT 1",taskIds).first())fail('已有现场任务，不能作废作业计划');
+    if(tasks.length&&await stmt(env,"SELECT 1 FROM v2_ops_job_workers WHERE job_id IN (SELECT value FROM json_each(?)) LIMIT 1",taskIds).first())fail('现场已经开始过作业，不能作废');
+    if(tasks.length&&await stmt(env,"SELECT 1 FROM v2_ops_job_results WHERE job_id IN (SELECT value FROM json_each(?)) LIMIT 1",taskIds).first())fail('已有作业成果，不能作废');
+    const linkIds=JSON.stringify([...new Set((d.links||[]).map(l=>l.outbound_id).filter(Boolean))]);
+    if(JSON.parse(linkIds).length&&await stmt(env,"SELECT 1 FROM v2_outbound_orders WHERE id IN (SELECT value FROM json_each(?)) AND status!='cancelled' LIMIT 1",linkIds).first())fail('请先取消此计划下尚未作废的出库预约，再作废作业计划');
+    d.status='cancelled';d.cancel_reason=required(b.reason,'作废原因');d.cancelled_by=u.name;d.cancelled_by_id=u.id;d.cancelled_at=t;
+   } else if(b.action==='sop_work_material_remove') {
     if(!workChainEnabled(env))fail('功能未启用');if(['closed','cancelled'].includes(d.status))fail('作业已关闭');
     const f=(await workMaterials(env,[row])).find(f=>f.id===b.attachment_id&&f.related_doc_type==='sop_need'&&f.related_doc_id===row.id);
     if(!f)fail('资料不存在；历史来源资料保留只读');
@@ -727,6 +743,8 @@ async function needGroups(env,u,b){
  if(b.need_id)items=items.filter(g=>g.items.some(x=>x.id===b.need_id));
  if(b.source_id)items=items.filter(g=>g.source_id===b.source_id&&(!b.source_type||g.source_type===b.source_type));
  if(b.group_key)items=items.filter(g=>g.key===b.group_key);
+ const history=String(b.status||'')==='cancelled';
+ if(!history){for(const g of items)g.items=g.items.filter(x=>!x.cancelled_by);items=items.filter(g=>g.items.length);}
  const rich=workPlanListEnabled(env,u);let offset=Math.max(0,Math.floor(Number(b.offset)||0)),total=items.length;const limit=rich?Math.min(100,Math.max(1,Math.floor(Number(b.limit)||50))):50;if(!rich)items=items.slice(offset,offset+limit);
  const ibIds=[...new Set(items.filter(g=>g.source_type==='inbound'&&g.source_id).map(g=>g.source_id))];
  const obIds=[...new Set(items.flatMap(g=>[...(g.source_type==='outbound'&&g.source_id?[g.source_id]:[]),...(rich?g.items.flatMap(n=>(n.links||[]).map(l=>l.outbound_id)):[])]))];
@@ -744,7 +762,7 @@ async function needGroups(env,u,b){
   g.print_status=workNeedPrintSummary(g.items);
   g.status=!active.length?'cancelled':g.completed===active.length?'completed':active.some(x=>x.status!=='pending')?'working':'pending';
  }
- if(rich){await workPlanFacts(env,items,plans,outbounds);items=filterWorkPlans(items,b);total=items.length;offset=Math.min(offset,Math.max(0,(Math.ceil(total/limit)-1)*limit));items=items.slice(offset,offset+limit);}
+ if(rich){await workPlanFacts(env,items,plans,outbounds);items=filterWorkPlans(items,history?{...b,status:''}:b);if(history){items=items.filter(g=>g.status==='cancelled'||g.items.some(x=>x.cancelled_by));for(const g of items)if(g.status!=='cancelled')g.items=g.items.filter(x=>x.cancelled_by);}total=items.length;offset=Math.min(offset,Math.max(0,(Math.ceil(total/limit)-1)*limit));items=items.slice(offset,offset+limit);}
  return {ok:true,items,total,offset,limit,more:offset+limit<total};
 }
 async function dashboard(env,u,b){
