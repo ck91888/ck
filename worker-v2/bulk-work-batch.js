@@ -9,6 +9,7 @@ import {workerBadgeMatch} from './daily-badge-identity.js';
 import {assignCargoProcess,processNames,taskGroups} from './cargo-processes.js';
 import {recordNumbers,resolveRecordId} from './document-numbers.js';
 import {documentCodeError} from '../shared/document-code.js';
+import {isActivePartner,shareEnabled,shareMutationGuard,ensureDispatchShare} from './dispatch-share.js';
 const q=(e,s,...a)=>e.DB.prepare(s).bind(...a),rows=async(e,s,...a)=>(await q(e,s,...a).all()).results;
 const text=v=>String(v??'').trim(),terminal=d=>['completed','cancelled'].includes(d.status);
 const read=async(e,id)=>{if(!id)return null;const r=await q(e,'SELECT * FROM sop_records WHERE id=?',id).first();return r?{...r,data:JSON.parse(r.state)}:null;};
@@ -36,7 +37,7 @@ async function permit(e,u,owner='',admission=false){
   if(u.role!=='dispatcher'||u.daily_dispatch&&!u.can_dispatch||!(u.daily_dispatch?u.dispatch_departments||[]:u.departments||[]).includes('bulk'))throw Error('无大货派工权限');
   if(!await q(e,"SELECT 1 FROM ck_attendance_days d WHERE d.id=? AND d.day=date('now','+9 hours') AND d.signed_out='' AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at='')",u.attendance_id||'').first())throw Error('派审员须已签到且不在休息中');
  }
- if(owner&&owner!==u.id&&!(u.role==='manager'&&u.scope==='office'))throw Error('请由本批派审员操作；原负责人离岗时请先办理接班');
+ if(owner&&owner!==u.id&&!(u.role==='manager'&&u.scope==='office')&&!await isActivePartner(e,u.id,owner))throw Error('请由本批派审员操作；原负责人离岗时请先办理接班');
 }
 async function person(e,workers,lead){
  if(!Array.isArray(workers)||workers.length!==1||!workers[0]?.id||!sameWorkerBadge(workers[0].id,lead))throw Error('一人多单必须且只能选择1名实际操作员');
@@ -64,7 +65,8 @@ async function candidate(e,item,helpers){
 async function batchItems(e,id){return (await rows(e,'SELECT s.*,i.position,i.source_type AS batch_source_type,i.source_id AS batch_source_id,j.status AS job_status,j.active_worker_count FROM ck_bulk_work_batch_items i JOIN sop_records s ON s.id=i.job_id JOIN v2_ops_jobs j ON j.id=s.id WHERE i.batch_id=? ORDER BY i.position',id)).map(r=>({...r,data:{...JSON.parse(r.state),...(r.kind==='dispatch'?{status:r.job_status}:{})}}));}
 async function commit(e,b,u,row,data,sql,result){
  const t=new Date().toISOString(),signature=JSON.stringify(b),answer={ok:true,id:row.id,revision:row.revision+1,...result,_bulk_signature:signature};
- try{await e.DB.batch([...event(e,row,data,u,b.client_req_id,b.action,t,answer),...sql]);}catch(error){const prior=await replay(e,b,u);if(prior)return prior;throw error;}return answer;
+ const guard=shareEnabled(e)&&row.revision?(await ensureDispatchShare(e),shareMutationGuard(e,u,row.id,row.revision)):null;
+ try{await e.DB.batch([...(guard?[guard]:[]),...event(e,row,data,u,b.client_req_id,b.action,t,answer),...sql]);}catch(error){const prior=await replay(e,b,u);if(prior)return prior;if(/ck_dispatch_share_checks|CHECK constraint failed/.test(error.message||''))throw Error('记录已更新或协作已结束，请刷新后再操作');throw error;}return answer;
 }
 async function replay(e,b,u){if(!b.client_req_id)return null;const r=await q(e,'SELECT * FROM sop_events WHERE request_id=?',b.client_req_id).first();if(!r)return null;const a=JSON.parse(r.result_json);if(r.actor_id!==u.id||r.action!==b.action||a._bulk_signature!==JSON.stringify(b))throw Error('请求编号已使用，内容已变化');return a;}
 export async function handleBulkBatch(b,e,helpers){

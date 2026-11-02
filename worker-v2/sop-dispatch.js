@@ -3,6 +3,7 @@ import {workerBadgeMatch} from './daily-badge-identity.js';
 import {sameBadgeSignature} from './badge-request-signature.js';
 import {pickTeamStatements} from './native-lifecycle.js';
 import {dispatchAccess} from './dispatch-access.js';
+import {shareEnabled,isActivePartner,isBulkShareRecord} from './dispatch-share.js';
 import {documentCodeError} from '../shared/document-code.js';
 import {loadTripEnabled,startLoadTrip} from './outbound-load-trip.js';
 import {startBorrowableSimple} from './crew-borrow.js';
@@ -87,7 +88,12 @@ export async function startNative(body,env,invoke,guard,helpers={}){
 export async function nativeOwner(body,env){
  if(env.SOP_ENVIRONMENT!=='staging'||!env.SOP_REQUEST_USER||!body.job_id)return false;
  const access=dispatchAccess(env.SOP_REQUEST_USER);
- return !!await env.DB.prepare("SELECT s.id FROM sop_records s WHERE s.id=? AND s.kind='dispatch' AND "+access.sql).bind(body.job_id,...access.args).first();
+ if(await env.DB.prepare("SELECT s.id FROM sop_records s WHERE s.id=? AND s.kind='dispatch' AND "+access.sql).bind(body.job_id,...access.args).first())return true;
+ if(!shareEnabled(env))return false;
+ const row=await env.DB.prepare('SELECT kind,department,state FROM sop_records WHERE id=?').bind(body.job_id).first();
+ if(!row)return false;
+ let data={};try{data=JSON.parse(row.state||'{}');}catch{return false;}
+ return isBulkShareRecord({kind:row.kind,department:row.department,data})&&await isActivePartner(env,env.SOP_REQUEST_USER.id,data.owner_id);
 }
 
 // A fresh dispatch must not silently join only the new lead to an existing crew.

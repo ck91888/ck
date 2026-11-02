@@ -3,6 +3,7 @@ import {syncGroupReservations} from './cargo-reservations.js';
 import {advanceBatchProcesses} from './bulk-batch-labor.js';
 import {taskGroups,taskProcess,allProcessesApproved} from './cargo-processes.js';
 import {chainNeed,chainEvent,workChainEnabled} from './work-chain.js';
+import {isActivePartner,isBulkShareRecord,shareEnabled,shareMutationGuard,ensureDispatchShare} from './dispatch-share.js';
 const q=(env,sql,...args)=>env.DB.prepare(sql).bind(...args),text=v=>String(v??'').trim();
 const actions=new Set(['sop_cargo_group_complete','sop_cargo_group_review','sop_cargo_job_finish','sop_cargo_groups_ack']);
 const fields=['label_count','packed_box_count','total_operated_box_count','pallet_count','used_carton_large_count','used_carton_small_count','packed_sku_count','repaired_box_count','reboxed_count','forklift_location_count'];
@@ -11,7 +12,8 @@ export async function cargoTask(env,row,u,requested=''){
  const task=id?await q(env,"SELECT * FROM sop_records WHERE id=? AND kind='task'",id).first():null;
  if(task){task.data=JSON.parse(task.state);if(task.data.need_id!==row.id)throw Error('任务不属于此计划');}
  const owner=!!task&&(u.role==='manager'||(u.departments||[]).includes(executionDepartment(task))&&(task.data.owner_id===u.id||(task.data.delegates||[]).includes(u.id)&&!(task.data.owner_transfers||[]).some(x=>x.from_id===u.id)));
- return {task,can_complete:owner&&['manager','dispatcher','reviewer'].includes(u.role),can_review:!!task&&(['manager','reviewer'].includes(u.role)||u.role==='dispatcher'&&owner)};
+ const shared=!!task&&isBulkShareRecord(task)&&await isActivePartner(env,u.id,task.data.owner_id);
+ return {task,can_complete:(owner||shared)&&['manager','dispatcher','reviewer'].includes(u.role),can_review:!!task&&(['manager','reviewer'].includes(u.role)||u.role==='dispatcher'&&(owner||shared))};
 }
 export async function cargoExecution(b,env,u){
  if(!actions.has(b.action))return null;
@@ -65,6 +67,7 @@ export async function cargoExecution(b,env,u){
  // Both plan and task revisions are claimed in the same batch, including pause races.
  task.data.cargo_last_action={action:b.action,group_id:group?.id||'',by:u.name,at:t};
  const result={ok:true,id:row.id,revision:row.revision+1,fingerprint};
- try{await env.DB.batch([...chainEvent(env,row,data,u,request,b.action,t,result),...chainEvent(env,task,task.data,u,request+'-task',b.action,t),...extra]);}catch(error){const committed=await previous();if(committed)return committed;throw error;}
+ const shareGuard=shareEnabled(env)&&task&&isBulkShareRecord(task)?(await ensureDispatchShare(env),shareMutationGuard(env,u,task.id,task.revision)):null;
+ try{await env.DB.batch([...(shareGuard?[shareGuard]:[]),...chainEvent(env,row,data,u,request,b.action,t,result),...chainEvent(env,task,task.data,u,request+'-task',b.action,t),...extra]);}catch(error){const committed=await previous();if(committed)return committed;if(/ck_dispatch_share_checks|CHECK constraint failed/.test(error.message||''))throw Error('记录已更新或协作已结束，请刷新后再操作');throw error;}
  return result;
 }

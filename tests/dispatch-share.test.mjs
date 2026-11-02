@@ -1,5 +1,6 @@
 import test from 'node:test';import assert from 'node:assert/strict';
 import worker from '../worker-v2/index.js';import {database} from './d1-adapter.mjs';import {digest} from '../worker-v2/access-control.js';
+import {cargoFixture} from './cargo-fixture.mjs';import {cargoExecution} from '../worker-v2/cargo-execution.js';import {ensureDispatchShare} from '../worker-v2/dispatch-share.js';
 import {operationHeaders,rememberOperation,confirmOperation} from './office-operator-fixture.mjs';
 async function setup(enabled=true){
  const DB=database(),env={DB,SOP_ENVIRONMENT:'staging',SOP_UPGRADE_ENABLED:'true',SOP_ACCEPT_NEW:'true',SOP_ATTENDANCE_ENABLED:'true',SOP_ACCESS_CONTROL:'true',SOP_WORK_CHAIN_ENABLED:'true',SOP_ADMIN_CODE_SHA256:await digest('synthetic-dispatch-share'),...(enabled?{SOP_DISPATCH_SHARE_ENABLED:'true'}:{})},cookies={office:'',field:''};
@@ -48,4 +49,67 @@ test('invite, confirm, cancel, leave and same-day expiry stay pairwise',async()=
  s.DB.raw.prepare("UPDATE ck_dispatch_share_pairs SET status='pending',day='2000-01-01',ended_at='',ended_by='' WHERE id=?").run(again.pair.id);
  assert.equal((await s.ok('field','sop_dispatch_share_status')).incoming.length,0);
  assert.match((await s.call('field','sop_dispatch_share_accept',{pair_id:again.pair.id})).error,/过期|结束/);
+});
+async function collaborate(s,a,b){
+ await s.login(a);const invited=await s.ok('field','sop_dispatch_share_invite',{target_badge:b.badgeId});
+ await s.login(b);await s.ok('field','sop_dispatch_share_accept',{pair_id:invited.pair.id});return invited.pair.id;
+}
+const resultOf=task=>({id:task.id,revision:task.revision,decision:'pass',reason:'协作审核',result:{quantity:2,unit:'托',pallet_count:2,operated_box_count:4}});
+test('a collaborator can review, pause, reassign and transfer bulk work, and nothing else',async()=>{
+ const s=await setup(),a=await s.permanent('合成权限甲'),b=await s.permanent('合成权限乙'),c=await s.permanent('合成权限丙'),worker=await s.permanent('合成操作员'),helper=await s.permanent('合成盘点员');
+ for(const p of [a,b,c,worker,helper]){await s.checkin(p);await s.grant(p);}await collaborate(s,a,b);
+ const need=await s.ok('office','sop_need_create',{department:'bulk',source_type:'inventory',supply_chain_no:'SHARE-NEED-1',title:'协作普通单',customer:'合成客户',instructions:'分别审核',owner:'合成'});
+ await s.login(a);const task=await s.ok('field','sop_task_dispatch',{need_id:need.id,department:'bulk',title:'协作普通单',job_type:'bulk_op',workers:[{id:worker.badgeId,name:worker.name}],lead_id:worker.badgeId,estimated_minutes:15});
+ await s.login(b);const mine=await s.ok('field','sop_dispatch_list',{view:'mine'});assert.equal(mine.items.find(x=>x.id===task.id)?.shared,true);
+ await s.login(c);assert.equal((await s.ok('field','sop_dispatch_list',{view:'mine'})).items.some(x=>x.id===task.id),false);
+ assert.equal((await s.call('field','sop_task_pause',{id:task.id,revision:task.revision,reason:'外人'})).ok,false);
+ await s.login(b);await s.ok('field','sop_task_people',{id:task.id,revision:task.revision,workers:[{id:worker.badgeId,name:worker.name}],lead_id:worker.badgeId,reason:'协作换人核对'});
+ await s.ok('field','sop_task_pause',{id:task.id,revision:task.revision+1,reason:'协作暂停'});
+ await s.ok('field','sop_task_start',{id:task.id,revision:task.revision+2,workers:[{id:worker.badgeId,name:worker.name}],lead_id:worker.badgeId});
+ const reviewed=await s.ok('field','sop_task_complete_review',resultOf({id:task.id,revision:task.revision+3}));
+ const state=JSON.parse(s.DB.raw.prepare('SELECT state FROM sop_records WHERE id=?').get(task.id).state);
+ assert.equal(state.owner_id,a.id);assert.equal(state.review.by,b.name);assert.equal(s.DB.raw.prepare('SELECT COUNT(*) n FROM v2_ops_job_results WHERE job_id=?').get(task.id).n,1);
+ assert.equal(reviewed.revision,task.revision+4);
+ const second=await s.ok('office','sop_need_create',{department:'bulk',source_type:'inventory',supply_chain_no:'SHARE-NEED-2',title:'协作转单',customer:'合成客户',instructions:'转给丙',owner:'合成'});
+ await s.login(a);const movable=await s.ok('field','sop_task_dispatch',{need_id:second.id,department:'bulk',title:'协作转单',job_type:'bulk_op',workers:[{id:worker.badgeId,name:worker.name}],lead_id:worker.badgeId,estimated_minutes:10});
+ await s.login(b);await s.ok('field','sop_owner_transfer',{id:movable.id,revision:movable.revision,target_badge:c.badgeId,reason:'协作人转给丙'});
+ assert.equal(JSON.parse(s.DB.raw.prepare('SELECT state FROM sop_records WHERE id=?').get(movable.id).state).owner_id,c.id);
+ assert.equal((await s.ok('field','sop_dispatch_list',{view:'mine'})).items.some(x=>x.id===movable.id),false);
+ await s.login(a);const inventory=await s.ok('field','sop_native_start',{payload:{action:'v2_ops_job_start',job_type:'inventory',inventory_type:'precise',internal_metrics:{inventory_count:0,location_count:0,used_forklift:false},flow_stage:'internal',client_req_id:'SHARE-INVENTORY'},workers:[{id:helper.badgeId,name:helper.name}],lead_id:helper.badgeId,estimated_minutes:10,labor_department:'bulk'});
+ await s.login(b);assert.equal((await s.ok('field','sop_dispatch_list',{view:'mine'})).items.some(x=>x.id===inventory.job_id),false);
+ assert.equal((await s.call('field','sop_native_pause',{job_id:inventory.job_id,revision:1,reason:'不该暂停盘点'})).ok,false);
+ const raceNeed=await s.ok('office','sop_need_create',{department:'bulk',source_type:'inventory',supply_chain_no:'SHARE-NEED-3',title:'同时审核',customer:'合成客户',instructions:'只记一次',owner:'合成'});
+ await s.login(a);const race=await s.ok('field','sop_task_dispatch',{need_id:raceNeed.id,department:'bulk',title:'同时审核',job_type:'bulk_op',workers:[{id:a.badgeId,name:a.name}],lead_id:a.badgeId,estimated_minutes:10});
+ await s.call('field','sop_login',{badge:a.badgeId},'');const cookieA=s.cookies.field;await s.call('field','sop_login',{badge:b.badgeId},'');const cookieB=s.cookies.field;
+ const body=resultOf(race);const [first,secondReview]=await Promise.all([s.call('field','sop_task_complete_review',body,cookieA),s.call('field','sop_task_complete_review',{...body,client_req_id:'SHARE-RACE-B'},cookieB)]);
+ assert.equal([first,secondReview].filter(x=>x.ok).length,1,JSON.stringify([first.error,secondReview.error]));assert.equal(s.DB.raw.prepare('SELECT COUNT(*) n FROM v2_ops_job_results WHERE job_id=?').get(race.id).n,1);
+ const left=await s.ok('office','sop_need_create',{department:'bulk',source_type:'inventory',supply_chain_no:'SHARE-NEED-4',title:'退出后',customer:'合成客户',instructions:'不能再审',owner:'合成'});
+ await s.login(a);const after=await s.ok('field','sop_task_dispatch',{need_id:left.id,department:'bulk',title:'退出后',job_type:'bulk_op',workers:[{id:a.badgeId,name:a.name}],lead_id:a.badgeId,estimated_minutes:10});
+ const pair=(await s.ok('field','sop_dispatch_share_status')).partners.find(p=>p.partner.id===b.id);
+ await s.ok('field','sop_dispatch_share_leave',{pair_id:pair.id});
+ await s.login(b);const denied=await s.call('field','sop_task_complete_review',resultOf(after));assert.equal(denied.ok,false);assert.equal(s.DB.raw.prepare('SELECT COUNT(*) n FROM v2_ops_job_results WHERE job_id=?').get(after.id).n,0);
+});
+test('multi-order review by a collaborator releases the worker once',async()=>{
+ const s=await setup(),a=await s.permanent('合成多单甲'),b=await s.permanent('合成多单乙'),worker=await s.permanent('合成多单操作');
+ for(const p of [a,b,worker]){await s.checkin(p);await s.grant(p);}await collaborate(s,a,b);
+ const needs=[];for(const n of [1,2])needs.push(await s.ok('office','sop_need_create',{department:'bulk',source_type:'inventory',supply_chain_no:'SHARE-BATCH-'+n,title:'小单'+n,customer:'合成客户',instructions:'逐单审核',owner:'合成'}));
+ await s.login(a);const batch=await s.ok('field','sop_bulk_batch_create',{items:needs.map(n=>({source_type:'need',id:n.id,revision:1})),workers:[{id:worker.badgeId,name:worker.name}],lead_id:worker.badgeId});
+ await s.login(b);let detail=await s.ok('field','sop_bulk_batch_get',{id:batch.batch_id});
+ await s.ok('field','sop_task_complete_review',resultOf(detail.items[0]));
+ assert.equal(s.DB.raw.prepare('SELECT COUNT(*) n FROM ck_bulk_labor_finishes').get().n,1);
+ detail=await s.ok('field','sop_bulk_batch_get',{id:batch.batch_id});
+ await s.ok('field','sop_task_complete_review',resultOf(detail.items[1]));
+ assert.equal(s.DB.raw.prepare('SELECT COUNT(*) n FROM ck_bulk_labor_finishes').get().n,1);
+ assert.equal(s.DB.raw.prepare('SELECT COUNT(*) n FROM v2_ops_job_results').get().n,2);
+ assert.equal(JSON.parse(s.DB.raw.prepare('SELECT state FROM sop_records WHERE id=?').get(batch.batch_id).state).owner_id,a.id);
+});
+test('grouped review records the collaborator and rejects an outsider',async()=>{
+ const s=cargoFixture();s.env.SOP_DISPATCH_SHARE_ENABLED='true';await ensureDispatchShare(s.env);
+ s.DB.raw.prepare("INSERT INTO ck_dispatch_share_pairs(id,person_lo,person_hi,invited_by,invitee_id,status,day,created_at) VALUES('DS-GROUP','OWNER','PARTNER','OWNER','PARTNER','active','2026-11-02','2026-11-02T00:00:00Z')").run();
+ const partner={id:'PARTNER',name:'协作乙',role:'dispatcher',scope:'field',departments:['bulk']};
+ await cargoExecution(s.body('sop_cargo_group_complete',{group_id:'G0',quantity:3,unit:'箱'}),s.env,partner);
+ const reviewed=await cargoExecution(s.body('sop_cargo_group_review',{group_id:'G0',decision:'pass',reason:'协作核对分组'}),s.env,partner);
+ assert.equal(reviewed.ok,true);assert.equal(s.state().cargo_groups.groups[0].outputs[0].review.actor_id,'PARTNER');
+ assert.equal(JSON.parse(s.DB.raw.prepare("SELECT state FROM sop_records WHERE id='T'").get().state).owner_id,'OWNER');
+ await assert.rejects(()=>cargoExecution(s.body('sop_cargo_group_complete',{group_id:'G1',quantity:3,unit:'箱'}),s.env,{...partner,id:'OUTSIDER'}),/派审员|协作/);
 });

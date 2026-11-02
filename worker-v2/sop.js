@@ -28,6 +28,7 @@ import { workChainEnabled, chainOutboundStatements, chainAllocation, guardWorkCh
 import { workPlanStatements } from './sop-planning.js';
 import { dispatchAccess } from './dispatch-access.js';
 import {ensureDailyDispatch,dispatchTransferTarget} from './daily-dispatch-permissions.js';
+import {shareEnabled,activePartnerIds,isActivePartner,isBulkShareRecord,shareMutationGuard,ensureDispatchShare} from './dispatch-share.js';
 import {sourceActiveWorkers} from './crew-borrow.js';
 import {effectiveResults} from './effective-results.js';
 /* SOP pilot: explicit opt-in, revision checked atomic mutations, immutable history.
@@ -82,14 +83,14 @@ function publicState(row) {
  execution_department:executionDepartment(row),
  ...(row.kind==='check'?{summary:checkSummary(row.data)}:{})};
 }
-async function save(env,b,u,row,data,extra=[]) {
+async function save(env,b,u,row,data,extra=[],leading=[]) {
  const request=required(b.client_req_id,'请求编号');
  const t=now(), revision=(row?.revision||0)+1;
  const id=row.id, kind=row.kind, department=row.department;
  const result={ok:true,id,revision},eventResult={...result,...await needCreateReceiptMeta(b,env,u)};
  if(row.kind==='check')syncCheck(env,extra,row,data,u,t,b);
  const before=JSON.stringify(row.data||{}),after=JSON.stringify(data);
- const statements=[
+ const statements=[...leading,
   stmt(env,`INSERT INTO sop_events VALUES(?,?,?,?,?,?,?,?,?,?)`,request,id,revision-1,b.action,u.id,u.name,before,after,JSON.stringify(eventResult),t),
   stmt(env,`INSERT INTO sop_records VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,state=excluded.state,updated_at=excluded.updated_at`,id,kind,revision,department,after,t),...extra
  ];
@@ -197,7 +198,7 @@ export async function handleSop(b,env) {
    if(!row||!['dispatch','task'].includes(row.kind))fail('派工任务不存在');permit(u,executionDepartment(row),['manager','dispatcher']);
    const job=await stmt(env,'SELECT status FROM v2_ops_jobs WHERE id=?',row.id).first();
    const open=!!job&&['pending','working','paused','awaiting_close'].includes(job.status)&&!['completed','cancelled'].includes(row.data.status);
-   return {ok:true,id:row.id,revision:row.revision,owner_id:row.data.owner_id,owner:row.data.owner||'',can_claim:open&&await canClaimOwner(env,u,row),can_transfer:open&&(u.role==='manager'&&u.scope==='office'||u.role==='dispatcher'&&row.data.owner_id===u.id)};
+   return {ok:true,id:row.id,revision:row.revision,owner_id:row.data.owner_id,owner:row.data.owner||'',can_claim:open&&await canClaimOwner(env,u,row),can_transfer:open&&(u.role==='manager'&&u.scope==='office'||u.role==='dispatcher'&&(row.data.owner_id===u.id||isBulkShareRecord(row)&&await isActivePartner(env,u.id,row.data.owner_id)))};
   }
   if(b.action==='sop_need_print_request'){try{return await recordWorkNeedPrint(b,env,u,items=>recordNumbers(env,items));}catch(error){return {ok:false,error:String(error.message||error)};}}
   const cancelledDraft=await cancelCargoDraft(b,env,u);if(cancelledDraft)return cancelledDraft;
@@ -237,8 +238,9 @@ export async function handleSop(b,env) {
    const offset=Math.max(0,Number(b.offset)||0),limit=50;
    const dep=u.role==='manager'?'':` AND ${executionDepartmentSQL()} IN (${(u.departments||[]).map(()=>'?').join(',')||"''"})`;
    const args=u.role==='manager'?[]:u.departments||[];
-   const mine=b.view==='mine'&&b.kind==='task',owned=mine?" AND json_extract(state,'$.owner_id')=?":'';
-   const rows=await all(env,`SELECT * FROM sop_records WHERE kind=?${dep}${owned} ORDER BY updated_at DESC LIMIT ? OFFSET ?`,b.kind,...args,...(mine?[u.id]:[]),limit+1,offset);
+   const mine=b.view==='mine'&&b.kind==='task',listPartners=shareEnabled(env)&&mine?await activePartnerIds(env,u.id):[];
+   const owned=mine?listPartners.length?` AND (json_extract(state,'$.owner_id')=? OR (json_extract(state,'$.job_type')='bulk_op' AND json_extract(state,'$.owner_id') IN (${listPartners.map(()=>'?').join(',')})))`:" AND json_extract(state,'$.owner_id')=?":'';
+   const rows=await all(env,`SELECT * FROM sop_records WHERE kind=?${dep}${owned} ORDER BY updated_at DESC LIMIT ? OFFSET ?`,b.kind,...args,...(mine?[u.id,...listPartners]:[]),limit+1,offset);
    return {ok:true,items:await recordNumbers(env,rows.slice(0,limit).map(r=>publicState({...r,data:JSON.parse(r.state)}))),more:rows.length>limit,offset};
   }
   if(b.action==='sop_source_detail') {
@@ -269,7 +271,10 @@ export async function handleSop(b,env) {
   }
   if(b.action==='sop_dispatch_list'){
    if(!['manager','dispatcher'].includes(u.role))fail('仅派审员可查看现场派工');
-   const mine=b.view==='mine',owned=mine?" AND json_extract(s.state,'$.owner_id')=?":'';
+   const mine=b.view==='mine',partnerIds=shareEnabled(env)&&mine?await activePartnerIds(env,u.id):[];
+   const shareSql=partnerIds.length?`json_extract(s.state,'$.owner_id') IN (${partnerIds.map(()=>'?').join(',')}) AND j.job_type='bulk_op'`:'';
+   const owned=mine?partnerIds.length?` AND (json_extract(s.state,'$.owner_id')=? OR (${shareSql}))`:" AND json_extract(s.state,'$.owner_id')=?":'';
+   const shareVisible=shareSql?` OR (${shareSql})`:'';
    const access=dispatchAccess(u),rest=restingDispatchAccess(u),externalCode=text(b.external_code);
    let claimDepartments=u.scope==='field'&&u.role==='dispatcher'&&u.attendance_id?(u.daily_dispatch?u.can_dispatch?u.dispatch_departments||[]:[]:u.departments||[]):[];
    if(claimDepartments.length){await ensureDailyDispatch(env);if(!await stmt(env,"SELECT 1 FROM ck_attendance_days d WHERE d.id=? AND d.day=date(?,'+9 hours') AND d.signed_out='' AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at='')",u.attendance_id,now()).first())claimDepartments=[];}
@@ -294,14 +299,14 @@ export async function handleSop(b,env) {
     LEFT JOIN v2_outbound_orders ob ON ob.id=CASE WHEN j.linked_outbound_order_id!='' THEN j.linked_outbound_order_id WHEN j.related_doc_type='outbound_order' THEN j.related_doc_id END
     LEFT JOIN v2_field_feedbacks fb ON j.related_doc_type='field_feedback' AND fb.id=j.related_doc_id
      WHERE j.status NOT IN ('completed','cancelled')
-     AND ((s.kind='dispatch' AND (${access.sql} OR ${rest.sql})) OR ${claimSql} OR (s.kind='task' AND ${executionDepartmentSQL('s')}='bulk' AND (?='manager' OR ${executionDepartmentSQL('s')} IN (SELECT value FROM json_each(?)))) OR (s.id IS NULL AND j.job_type='load_outbound' AND j.related_doc_type='outbound_order' AND (?='manager' OR j.biz_class IN (SELECT value FROM json_each(?)))))
+     AND ((s.kind='dispatch' AND (${access.sql} OR ${rest.sql})) OR ${claimSql} OR (s.kind='task' AND ${executionDepartmentSQL('s')}='bulk' AND (?='manager' OR ${executionDepartmentSQL('s')} IN (SELECT value FROM json_each(?)))) OR (s.id IS NULL AND j.job_type='load_outbound' AND j.related_doc_type='outbound_order' AND (?='manager' OR j.biz_class IN (SELECT value FROM json_each(?))))${shareVisible})
     ${owned} AND (?='' OR (s.kind='dispatch' AND j.job_type='bulk_op' AND (j.id=? OR j.related_doc_id=? OR j.display_no=? OR ob.display_no=? OR ob.wms_work_order_no=?)))
-     ORDER BY j.updated_at DESC LIMIT 200`,...access.args,...rest.args,...(claimDepartments.length?[JSON.stringify(claimDepartments),u.id]:[]),u.role,JSON.stringify(u.departments||[]),u.role,JSON.stringify(u.departments||[]),...(mine?[u.id]:[]),...Array(6).fill(externalCode));
+     ORDER BY j.updated_at DESC LIMIT 200`,...access.args,...rest.args,...(claimDepartments.length?[JSON.stringify(claimDepartments),u.id]:[]),u.role,JSON.stringify(u.departments||[]),u.role,JSON.stringify(u.departments||[]),...(shareSql?partnerIds:[]),...(mine?[u.id,...(shareSql?partnerIds:[])]:[]),...Array(6).fill(externalCode));
    return {ok:true,...(mine?{view:'mine',viewer_id:u.id}:{}),items:await Promise.all((await jobNumbers(env,rows)).map(async r=>{
     const d=JSON.parse(r.state),putaways=JSON.parse(r.putaway_plans||'[]'),plans=JSON.parse(r.unload_plans||'[]'),loads=JSON.parse(r.load_orders||'[]'),picks=JSON.parse(r.pick_numbers||'[]');
     const customer=[...new Set(putaways.length?putaways.map(p=>p.customer||'未记录 / 미기록'):loads.length?loads.map(o=>o.customer).filter(Boolean):plans.length?plans.map(p=>p.customer).filter(Boolean):[r.customer||r.inbound_customer||r.outbound_customer].filter(Boolean))].join('、');
     const canClaim=(r.task_kind==='dispatch'||!!d.bulk_batch_id)&&claimDepartments.includes(executionDepartment({kind:r.task_kind,department:r.dispatch_department,data:d}))&&await canClaimOwner(env,u,{kind:r.task_kind,department:r.dispatch_department,data:d});
-    return {id:r.id,bulk_batch_id:d.bulk_batch_id||'',assigned_workers:d.workers||[],...jobDisplayMetadata(r),task_no:r.task_no||'',task_kind:r.task_kind,job_type:r.job_type,title:r.task_kind==='task'?JSON.parse(r.need_state||'{}').title||d.title:loads.length?'本车装货 · '+loads.length+' 单':'',status:r.task_kind==='task'?d.status:r.status,source_type:r.related_doc_type,source_id:r.related_doc_id,lead_id:d.lead_id,last_lead:d.last_lead,display_no:r.display_no,business_no:r.business_no,customer,putaway_refs:putaways,workers:JSON.parse(r.active_crew||'[]'),owner:d.owner,can_claim:canClaim,estimated_minutes:d.estimated_minutes};
+    return {id:r.id,bulk_batch_id:d.bulk_batch_id||'',assigned_workers:d.workers||[],...jobDisplayMetadata(r),task_no:r.task_no||'',task_kind:r.task_kind,job_type:r.job_type,title:r.task_kind==='task'?JSON.parse(r.need_state||'{}').title||d.title:loads.length?'本车装货 · '+loads.length+' 单':'',status:r.task_kind==='task'?d.status:r.status,source_type:r.related_doc_type,source_id:r.related_doc_id,lead_id:d.lead_id,last_lead:d.last_lead,display_no:r.display_no,business_no:r.business_no,customer,putaway_refs:putaways,workers:JSON.parse(r.active_crew||'[]'),owner:d.owner,owner_id:d.owner_id||'',shared:!!(d.owner_id&&d.owner_id!==u.id&&partnerIds.includes(d.owner_id)&&r.job_type==='bulk_op'),can_claim:canClaim,estimated_minutes:d.estimated_minutes};
    }))};
   }
   if(b.action==='sop_dashboard') return await dashboard(env,u,b);
@@ -401,7 +406,8 @@ export async function handleSop(b,env) {
    if(!['dispatch','task'].includes(row.kind))fail('仅未完成的派工任务可转移');
    const job=await stmt(env,'SELECT status FROM v2_ops_jobs WHERE id=?',row.id).first();
    if(!job||!['pending','working','paused','awaiting_close'].includes(job.status)||['completed','cancelled'].includes(d.status))fail('任务已结束，不能转移');
-   const manager=u.role==='manager'&&u.scope==='office',owner=u.role==='dispatcher'&&u.id===d.owner_id,claim=!owner&&!manager&&await canClaimOwner(env,u,row);
+   const shareOwner=u.role==='dispatcher'&&isBulkShareRecord(row)&&await isActivePartner(env,u.id,d.owner_id);
+   const manager=u.role==='manager'&&u.scope==='office',owner=u.role==='dispatcher'&&(u.id===d.owner_id||shareOwner),claim=!owner&&!manager&&await canClaimOwner(env,u,row);
    if(!owner&&!manager&&!claim)fail('仅当前负责人可移交；原负责人离岗时须由本部门在岗派审员接班');
    if(u.scope==='field'&&(u.role!=='dispatcher'||!u.attendance_id||u.daily_dispatch&&!u.can_dispatch||!(u.daily_dispatch?u.dispatch_departments||[]:u.departments||[]).includes(executionDepartment(row))
     ||!await stmt(env,"SELECT 1 FROM ck_attendance_days d WHERE d.id=? AND d.signed_out='' AND d.day=date(?,'+9 hours') AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at='')",u.attendance_id,t).first()))fail('原派审员须在岗并有本部门派工权限');
@@ -439,14 +445,15 @@ export async function handleSop(b,env) {
         AND (absent.person_id=json_extract(NEW.before_json,'$.owner_id') OR EXISTS(SELECT 1 FROM ck_daily_dispatch_links l WHERE l.permanent_person_id=json_extract(NEW.before_json,'$.owner_id') AND l.daily_person_id=absent.person_id AND l.day=absent.day))
         AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=absent.id AND b.ended_at=''))))
    ) THEN RAISE(ABORT,'owner_transfer_changed') END; END`).run();
-   return await save(env,b,u,row,next,await bulkOwnerTransferStatements(env,row,next,u,b,t));
+   const transferGuard=shareEnabled(env)&&isBulkShareRecord(row)?(await ensureDispatchShare(env),shareMutationGuard(env,u,row.id,row.revision)):null;
+   return await save(env,b,u,row,next,await bulkOwnerTransferStatements(env,row,next,u,b,t),transferGuard?[transferGuard]:[]);
   }
   if(b.action.startsWith('sop_task_')) {
    if(row.kind!=='task')fail('记录类型错误');
    permit(u,executionDepartment(row),['manager','dispatcher','reviewer']);
    const groupedNeed=d.need_id?await read(env,d.need_id):null;
    if(groupedNeed?.data.cargo_groups&&['sop_task_finish','sop_task_complete_review','sop_task_review','sop_task_cancel'].includes(b.action))fail('此计划按资料组完成和审核，请使用分组操作；不得整单重复登记');
-   const allowedOwner=u.role==='manager'||d.owner_id===u.id||(d.delegates||[]).includes(u.id)&&!(d.owner_transfers||[]).some(x=>x.from_id===u.id);
+   const allowedOwner=u.role==='manager'||d.owner_id===u.id||(d.delegates||[]).includes(u.id)&&!(d.owner_transfers||[]).some(x=>x.from_id===u.id)||isBulkShareRecord(row,d)&&await isActivePartner(env,u.id,d.owner_id);
    if(b.action!=='sop_task_review' && !allowedOwner)fail('仅本任务负责人或获授权人员可操作');
    if(b.action==='sop_task_start') {
     if(groupedNeed?.data.cargo_groups&&taskGroups(groupedNeed.data.cargo_groups,{id:row.id,data:d}).some(g=>g.ack_version!==(g.mapping_version||1)))fail('请先在资料分组中确认最新版本，再恢复作业');
@@ -690,13 +697,14 @@ export async function handleSop(b,env) {
     if(b.action==='sop_issue_cancel')extra.push(stmt(env,"UPDATE v2_issue_tickets SET status='cancelled',updated_at=? WHERE id=?",t,d.legacy_id));
    }
   } else fail('未知操作');
-  return await save(env,b,u,row,d,extra);
+  const shareGuard=shareEnabled(env)&&row&&isBulkShareRecord(row,d)?(await ensureDispatchShare(env),shareMutationGuard(env,u,row.id,row.revision)):null;
+  return await save(env,b,u,row,d,extra,shareGuard?[shareGuard]:[]);
  }catch(e){
   // Shipping corrections validate their own payload and authorization on replay.
   if((b.action.startsWith('sop_shipping_output_')||b.action==='sop_shipping_expectation_save'))return {ok:false,error:/revision_conflict/.test(e.message)?'记录已更新，请刷新后再操作':e.message};
   // A lost response retried with the same request id never applies the mutation twice.
   if(b.client_req_id){const cached=await stmt(env,'SELECT actor_id,action,result_json FROM sop_events WHERE request_id=?',b.client_req_id).first();if(cached&&cached.actor_id===u.id&&cached.action===b.action){const saved=JSON.parse(cached.result_json);if(b.action==='sop_need_create'&&saved._create_signature){try{return await needCreateReplay(b,env,u);}catch(error){return {ok:false,error:error.message};}}return saved;}}
-  return {ok:false,error:/revision_conflict/.test(e.message)?'记录已更新，请刷新后再操作':e.message};
+  return {ok:false,error:/ck_dispatch_share_checks|CHECK constraint failed/.test(e.message)?'记录已更新或协作已结束，请刷新后再操作':/revision_conflict/.test(e.message)?'记录已更新，请刷新后再操作':e.message};
  }
 }
 function appendRelated(env,extra,key,u,row,data,action,t){

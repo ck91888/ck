@@ -53,7 +53,7 @@ import { workPlanStatements } from './sop-planning.js';
 import { nextOutboundDisplayNo } from './outbound-number.js';
 import { handleSop, guardLegacy, linkedNeeds, linkedCheck, outboundNeedStatements } from './sop.js';
 import { sessionUser, sessionAction } from './sop-session.js';
-import { handleDispatchShare } from './dispatch-share.js';
+import { handleDispatchShare,isActivePartner,isBulkShareRecord,shareEnabled } from './dispatch-share.js';
 import { prepareDemo } from './sop-demo.js';
 import { startNative, nativeOwner } from './sop-dispatch.js';
 /**
@@ -13010,7 +13010,7 @@ async function handleMultipartUpload(formData, env) {
       const task=await env.DB.prepare("SELECT state,department,kind FROM sop_records WHERE id=? AND kind=?").bind(related_doc_id,related_doc_type==='sop_task'?'task':'dispatch').first(),u=env.SOP_REQUEST_USER;
       if(!task||!u)return err('任务不存在或未授权',403);
       const data=JSON.parse(task.state),native=related_doc_type==='ops_job',job=native?await env.DB.prepare('SELECT job_type,status FROM v2_ops_jobs WHERE id=?').bind(related_doc_id).first():null;
-      const allowed=native?await nativeOwner({job_id:related_doc_id},env):u.role==='manager'||u.role==='dispatcher'&&(u.departments||[]).includes(executionDepartment(task))&&(data.owner_id===u.id||(data.delegates||[]).includes(u.id));
+      const allowed=native?await nativeOwner({job_id:related_doc_id},env):u.role==='manager'||u.role==='dispatcher'&&(u.departments||[]).includes(executionDepartment(task))&&(data.owner_id===u.id||(data.delegates||[]).includes(u.id)||isBulkShareRecord(task,data)&&await isActivePartner(env,u.id,data.owner_id));
       if(!allowed||(native?job?.job_type!=='bulk_op'||!['working','awaiting_close'].includes(job?.status):data.status!=='working'))return err('只有本任务派审员可在作业中上传货位照片',403);
       if(!['image/jpeg','image/png','image/webp'].includes(file.type)||!file.size||file.size>10*1024*1024)return err('仅支持10MB以内的JPG、PNG、WebP照片');
       const bytes=new Uint8Array(await file.slice(0,12).arrayBuffer());
