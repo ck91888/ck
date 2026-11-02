@@ -10,7 +10,7 @@ async function read(e,id){const r=await q(e,'SELECT * FROM sop_records WHERE id=
 function permit(u,row){if(!['manager','dispatcher','reviewer'].includes(u.role)||u.role!=='manager'&&!(u.departments||[]).includes(executionDepartment(row)))throw Error('无此操作权限');}
 async function externalId(u,code){const bytes=new TextEncoder().encode(u.id+'\0'+code);return 'BOD-'+Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),x=>x.toString(16).padStart(2,'0')).join('');}
 async function target(e,b,u){
- let row,source=null,shared=false,group=null;
+ let row,source=null,shared=false,group=null,processIndex=0;
  if(b.external_code){const code=text(b.external_code);if(!code||code.length>200)throw Error('外部作业单号无效');permit(u,{department:'bulk',data:{job_type:'bulk_op'}});
   const existing=await q(e,"SELECT id FROM v2_ops_jobs WHERE job_type='bulk_op' AND related_doc_id=? AND status NOT IN ('completed','cancelled')",code).first();if(existing)throw Error('此单已派工，请打开当前任务保存产出');
   const id=await externalId(u,code);row=await read(e,id)||{id,kind:'bulk_output_draft',revision:0,department:'bulk',data:{owner_id:u.id,external_code:code,status:'pending'}};
@@ -18,7 +18,7 @@ async function target(e,b,u){
  if(!row||!['task','dispatch','need','bulk_output_draft'].includes(row.kind))throw Error('大货作业单不存在');
  permit(u,row);
  if(row.kind==='bulk_output_draft'){if(row.data.owner_id!==u.id)throw Error('无此操作权限');if(await q(e,"SELECT id FROM v2_ops_jobs WHERE job_type='bulk_op' AND related_doc_id=? LIMIT 1",row.data.external_code).first())throw Error('此单已有任务，请打开任务操作；已结束任务不能修改草稿');}
- else if(row.kind==='need'){if(row.data.status!=='pending'||row.data.task_id||row.data.bulk_batch_id)throw Error('此单已派工或结束，请打开当前任务');if(row.data.operation_kind==='direct_forward')throw Error('直接转发不登记操作产出');}
+ else if(row.kind==='need'){const grouped=b.phase==='group'&&row.data.cargo_groups;if(grouped?!['pending','assigned'].includes(row.data.status):row.data.status!=='pending'||row.data.task_id||row.data.bulk_batch_id)throw Error('此单已派工或结束，请打开当前任务');if(row.data.operation_kind==='direct_forward')throw Error('直接转发不登记操作产出');}
  else{
   const d=row.data,job=await q(e,'SELECT * FROM v2_ops_jobs WHERE id=?',row.id).first();
   if(d.job_type!=='bulk_op'||!job||job.job_type!=='bulk_op'||!open.includes(job.status)||!open.includes(d.status))throw Error('任务已结束、取消或已提交审核，不能修改草稿');
@@ -32,15 +32,16 @@ async function target(e,b,u){
  const need=row.kind==='need'?row:source,cargo=need?.data.cargo_groups;
  const phase=b.phase||'output';if(!['output','group','metrics'].includes(phase))throw Error('草稿类型无效');
  if(cargo){
-  if(phase==='output')throw Error('此计划请按资料组填写产出草稿');
+  if(phase==='output')throw Error('此计划请按资料组填写产出草稿');if(row.kind==='need'&&phase==='metrics')throw Error('工耗请在派工后按实际任务预填写，避免跨任务重复');
   if(phase==='group'){
    group=(row.kind==='need'?cargo.groups:taskGroups(cargo,row)).find(g=>g.id===b.group_id);if(!group)throw Error('资料组不属于此任务');
-   const process=row.kind==='need'?null:taskProcess(group,row),output=process?.result||(!group.processes?group.outputs?.find(o=>o.id===group.current_output_id):null);
+   processIndex=Number(row.kind==='need'?b.process_index||0:row.data.cargo_process_index||0);const processes=group.processes||group.process_names||['作业'];if(!Number.isSafeInteger(processIndex)||processIndex<0||processIndex>=processes.length)throw Error('本组工序不存在');if(row.kind==='need'&&group.processes?.[processIndex]?.task_id)throw Error('此工序已派工，请从对应任务保存草稿');const process=row.kind==='need'?null:taskProcess(group,row);if(row.kind!=='need'&&group.processes&&!process)throw Error('此工序不属于当前任务');const output=process?.result||(!group.processes?group.outputs?.find(o=>o.id===group.current_output_id):null);
    if(output&&output.status!=='returned')throw Error('本组已提交成果，不能修改草稿');
   }
  }else if(phase!=='output')throw Error('此任务没有资料分组');
- const slot=phase==='group'?'group:'+group.id:phase;
- const own=row.data.output_drafts?.[slot],inherited=source?.data.output_drafts?.[slot];
+ const baseSlot=phase==='group'?'group:'+group.id:phase,sourceSlot=phase==='group'?baseSlot+':process:'+processIndex:baseSlot;
+ const slot=row.kind==='need'&&phase==='group'?sourceSlot:baseSlot;
+ const own=row.data.output_drafts?.[slot],inherited=source?.data.output_drafts?.[sourceSlot];
  const draft=own||inherited||null;
  return {row,source,shared,group,slot,draft,own,scope_version:group?.mapping_version||need?.data.requirement_version||1};
 }
