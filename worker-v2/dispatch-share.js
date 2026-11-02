@@ -27,6 +27,8 @@ export async function ensureDispatchShare(e){
     ended_by TEXT NOT NULL DEFAULT ''
   )`),
   q(e,`CREATE UNIQUE INDEX IF NOT EXISTS ck_dispatch_share_open_pair ON ck_dispatch_share_pairs(person_lo,person_hi) WHERE status IN ('pending','active')`),
+  q(e,`CREATE TRIGGER IF NOT EXISTS ck_dispatch_share_one_partner_insert BEFORE INSERT ON ck_dispatch_share_pairs WHEN NEW.status IN ('pending','active') AND EXISTS(SELECT 1 FROM ck_dispatch_share_pairs WHERE status IN ('pending','active') AND (person_lo IN (NEW.person_lo,NEW.person_hi) OR person_hi IN (NEW.person_lo,NEW.person_hi))) BEGIN SELECT RAISE(ABORT,'ck_dispatch_share_one_partner'); END`),
+  q(e,`CREATE TRIGGER IF NOT EXISTS ck_dispatch_share_one_partner_update BEFORE UPDATE OF status ON ck_dispatch_share_pairs WHEN NEW.status IN ('pending','active') AND EXISTS(SELECT 1 FROM ck_dispatch_share_pairs WHERE id<>NEW.id AND status IN ('pending','active') AND (person_lo IN (NEW.person_lo,NEW.person_hi) OR person_hi IN (NEW.person_lo,NEW.person_hi))) BEGIN SELECT RAISE(ABORT,'ck_dispatch_share_one_partner'); END`),
   q(e,`CREATE TABLE IF NOT EXISTS ck_dispatch_share_events(
     request_id TEXT PRIMARY KEY,
     pair_id TEXT NOT NULL,
@@ -41,7 +43,7 @@ export async function ensureDispatchShare(e){
  ]));
 }
 async function expire(e){
- await q(e,"UPDATE ck_dispatch_share_pairs SET status='expired',ended_at=?,ended_by='expired' WHERE status='pending' AND day<>?",new Date().toISOString(),day()).run();
+ await q(e,"UPDATE ck_dispatch_share_pairs SET status='expired',ended_at=?,ended_by='expired' WHERE status IN ('pending','active') AND day<>?",new Date().toISOString(),day()).run();
 }
 function caller(e){
  const u=e.SOP_REQUEST_USER;
@@ -77,6 +79,9 @@ export async function shareStatus(e){
  const view=p=>({...pub(p),inviter:named(names,p.invited_by),invitee:named(names,p.invitee_id),partner:named(names,p.person_lo===u.id?p.person_hi:p.person_lo)});
  return {ok:true,enabled:true,incoming:list.filter(p=>p.status==='pending'&&p.invitee_id===u.id).map(view),outgoing:list.filter(p=>p.status==='pending'&&p.invited_by===u.id).map(view),partners:list.filter(p=>p.status==='active').map(view)};
 }
+async function occupied(e,personId){
+ return q(e,"SELECT id FROM ck_dispatch_share_pairs WHERE status IN ('pending','active') AND (person_lo=? OR person_hi=?)",personId,personId).first();
+}
 async function openPair(e,a,b){
  const [lo,hi]=pairOf(a,b);
  return q(e,"SELECT * FROM ck_dispatch_share_pairs WHERE person_lo=? AND person_hi=? AND status IN ('pending','active')",lo,hi).first();
@@ -84,7 +89,7 @@ async function openPair(e,a,b){
 export async function activePartnerIds(e,personId){
  if(!shareEnabled(e)||!personId)return [];
  await ensureDispatchShare(e);await expire(e);
- const list=await rows(e,"SELECT person_lo,person_hi FROM ck_dispatch_share_pairs WHERE status='active' AND (person_lo=? OR person_hi=?)",personId,personId);
+ const list=await rows(e,"SELECT person_lo,person_hi FROM ck_dispatch_share_pairs WHERE status='active' AND day=? AND (person_lo=? OR person_hi=?)",day(),personId,personId);
  return list.map(p=>p.person_lo===personId?p.person_hi:p.person_lo);
 }
 export async function isActivePartner(e,actorId,ownerId){
@@ -114,10 +119,10 @@ export function shareGuardStatements(e,actor,recordId,revision){
  const id=crypto.randomUUID();
  return [q(e,`INSERT INTO ck_dispatch_share_checks(id,allowed)
   SELECT ?, CASE WHEN (SELECT revision FROM sop_records WHERE id=?)=?
-   AND EXISTS(SELECT 1 FROM ck_dispatch_share_pairs WHERE status='active' AND (
+   AND EXISTS(SELECT 1 FROM ck_dispatch_share_pairs WHERE status='active' AND day=? AND (
      (person_lo=? AND person_hi=json_extract((SELECT state FROM sop_records WHERE id=?),'$.owner_id'))
      OR (person_hi=? AND person_lo=json_extract((SELECT state FROM sop_records WHERE id=?),'$.owner_id'))
-   )) THEN 1 ELSE 0 END`,id,recordId,revision,actor.id,recordId,actor.id,recordId),
+   )) THEN 1 ELSE 0 END`,id,recordId,revision,day(),actor.id,recordId,actor.id,recordId),
   q(e,'DELETE FROM ck_dispatch_share_checks WHERE id=?',id)];
 }
 export async function partnerShareGuard(e,record,actor=e.SOP_REQUEST_USER,viaShare=false){
@@ -146,12 +151,14 @@ export async function handleDispatchShare(b,e){
   const signature=JSON.stringify({target:target.id});
   const prior=await replay(e,u,b.action,request,signature);if(prior)return prior;
   if(await openPair(e,u.id,target.id))fail('已有待确认或进行中的协作');
+  if(await occupied(e,u.id))fail('不能同时配对两组，请先结束当前协作');
+  if(await occupied(e,target.id))fail('对方已有协作，不能同时配对两组');
   const [lo,hi]=pairOf(u.id,target.id),id='DS-'+crypto.randomUUID(),t=new Date().toISOString();
   const response={ok:true,enabled:true,pair:{id,status:'pending',day:day(),invited_by:u.id,invitee_id:target.id,partner:{id:target.id,name:target.name}}};
   try{await e.DB.batch([
    q(e,'INSERT INTO ck_dispatch_share_pairs(id,person_lo,person_hi,invited_by,invitee_id,status,day,created_at) VALUES(?,?,?,?,?,?,?,?)',id,lo,hi,u.id,target.id,'pending',day(),t),
    q(e,'INSERT INTO ck_dispatch_share_events(request_id,pair_id,action,actor_id,actor_name,signature,response_json,created_at) VALUES(?,?,?,?,?,?,?,?)',request,id,b.action,u.id,u.name,signature,JSON.stringify(response),t)
-  ]);}catch(error){if(/UNIQUE/i.test(error.message||''))fail('已有待确认或进行中的协作');throw error;}
+  ]);}catch(error){if(/ck_dispatch_share_one_partner/i.test(error.message||''))fail('不能同时配对两组，请先结束当前协作');if(/UNIQUE/i.test(error.message||''))fail('已有待确认或进行中的协作');throw error;}
   return response;
  }
  const pair=await q(e,'SELECT * FROM ck_dispatch_share_pairs WHERE id=?',String(b.pair_id||'')).first();
@@ -165,6 +172,7 @@ export async function handleDispatchShare(b,e){
   if(pair.invitee_id!==u.id)fail('请由被邀请的派审员确认');
   if(pair.status!=='pending')fail('邀请已结束，请刷新');
   if(pair.day!==day())fail('邀请已过期，请重新发起');
+  if(await q(e,"SELECT id FROM ck_dispatch_share_pairs WHERE id<>? AND status IN ('pending','active') AND (person_lo IN (?,?) OR person_hi IN (?,?))",pair.id,pair.person_lo,pair.person_hi,pair.person_lo,pair.person_hi).first())fail('不能同时配对两组，请先结束当前协作');
   next='active';
  }else if(b.action==='sop_dispatch_share_cancel'){
   if(pair.invited_by!==u.id||pair.status!=='pending')fail('只能取消自己发出且尚未确认的邀请');
@@ -180,6 +188,6 @@ export async function handleDispatchShare(b,e){
   q(e,`INSERT INTO ck_dispatch_share_checks(id,allowed) SELECT ?, CASE WHEN changes()=1 AND (SELECT status FROM ck_dispatch_share_pairs WHERE id=?)=? THEN 1 ELSE 0 END`,checkId,pair.id,next),
   q(e,'DELETE FROM ck_dispatch_share_checks WHERE id=?',checkId),
   q(e,'INSERT INTO ck_dispatch_share_events(request_id,pair_id,action,actor_id,actor_name,signature,response_json,created_at) VALUES(?,?,?,?,?,?,?,?)',request,pair.id,b.action,u.id,u.name,signature,JSON.stringify(response),t)
- ]);}catch(error){const saved=await replay(e,u,b.action,request,signature);if(saved)return saved;if(shareConflict.test(error.message||''))fail('邀请已确认或已结束，请刷新');throw error;}
+ ]);}catch(error){const saved=await replay(e,u,b.action,request,signature);if(saved)return saved;if(/ck_dispatch_share_one_partner/i.test(error.message||''))fail('不能同时配对两组，请先结束当前协作');if(shareConflict.test(error.message||''))fail('邀请已确认或已结束，请刷新');throw error;}
  return response;
 }

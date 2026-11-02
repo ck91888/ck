@@ -40,9 +40,9 @@ test('invite, confirm, cancel, leave and same-day expiry stay pairwise',async()=
  assert.equal((await s.ok('field','sop_dispatch_share_accept',{pair_id:invited.pair.id,client_req_id:'SHARE-ACCEPT-AB'})).pair.status,'active');
  await s.login(a);const partners=await s.ok('field','sop_dispatch_share_status');assert.equal(partners.partners.length,1);assert.equal(partners.partners[0].partner.id,b.id);
  await s.login(c);assert.equal((await s.call('field','sop_dispatch_share_accept',{pair_id:invited.pair.id})).ok,false);
- await s.login(a);await s.ok('field','sop_dispatch_share_invite',{target_badge:c.badgeId});await s.login(c);const ac=(await s.ok('field','sop_dispatch_share_status')).incoming[0];await s.ok('field','sop_dispatch_share_accept',{pair_id:ac.id});
- const seen=await s.ok('field','sop_dispatch_share_status');assert.equal(seen.partners.length,1);assert.equal(seen.partners[0].partner.id,a.id);
- await s.login(b);assert.equal((await s.ok('field','sop_dispatch_share_status')).partners.some(p=>p.partner.id===c.id),false);
+ const second=await s.call('field','sop_dispatch_share_invite',{target_badge:a.badgeId});assert.equal(second.ok,false);assert.match(second.error,/不能同时配对两组/);
+ await s.login(a);const blocked=await s.call('field','sop_dispatch_share_invite',{target_badge:c.badgeId});assert.equal(blocked.ok,false);assert.match(blocked.error,/不能同时配对两组/);
+ await s.login(b);assert.equal((await s.ok('field','sop_dispatch_share_status')).partners.length,1);assert.equal((await s.ok('field','sop_dispatch_share_status')).partners[0].partner.id,a.id);
  await s.login(a);await s.ok('field','sop_dispatch_share_leave',{pair_id:invited.pair.id,client_req_id:'SHARE-LEAVE-AB'});
  assert.equal((await s.ok('field','sop_dispatch_share_leave',{pair_id:invited.pair.id,client_req_id:'SHARE-LEAVE-AB'})).pair.status,'ended');
  assert.equal((await s.ok('field','sop_dispatch_share_status')).partners.some(p=>p.partner.id===b.id),false);
@@ -257,6 +257,32 @@ test('a leave after the first share check still rejects every in-flight partner 
  stop=armLeaveAfterShareRead(cargo.DB);
  await assert.rejects(()=>cargoExecution(cargo.body('sop_cargo_group_complete',{group_id:'G0',quantity:3,unit:'箱'}),cargo.env,partner),/协作已结束/);
  stop();assert.equal(cargo.DB.raw.prepare("SELECT revision FROM sop_records WHERE id='N'").get().revision,1);assert.equal(JSON.parse(cargo.DB.raw.prepare("SELECT state FROM sop_records WHERE id='T'").get().state).status,'working');
+});
+test('a confirmed pair ends on the next business day and one person cannot hold two pairs',async()=>{
+ const s=await setup(),a=await s.permanent('合成单日甲'),b=await s.permanent('合成单日乙'),c=await s.permanent('合成单日丙'),worker=await s.permanent('合成单日操作'),hand=await s.permanent('合成单日操作乙');
+ for(const p of [a,b,c,worker,hand]){await s.checkin(p);await s.grant(p);}await s.login(a);const cookie=s.cookies.field;
+ const raced=await Promise.all([b,c].map((p,i)=>s.call('field','sop_dispatch_share_invite',{target_badge:p.badgeId,client_req_id:'SHARE-ONE-'+i},cookie)));
+ assert.equal(raced.filter(r=>r.ok).length,1);assert.match(raced.find(r=>!r.ok).error,/不能同时配对两组/);
+ assert.equal(s.DB.raw.prepare("SELECT COUNT(*) n FROM ck_dispatch_share_pairs WHERE status IN ('pending','active')").get().n,1);
+ const pending=raced.find(r=>r.ok).pair;await s.login(pending.invitee_id===b.id?b:c);await s.ok('field','sop_dispatch_share_accept',{pair_id:pending.id});
+ const need=await s.ok('office','sop_need_create',{department:'bulk',source_type:'inventory',supply_chain_no:'SHARE-DAY',title:'隔天失效',customer:'合成客户',instructions:'隔天',owner:'合成'});
+ await s.login(a);const task=await s.ok('field','sop_task_dispatch',{need_id:need.id,department:'bulk',title:'隔天失效',job_type:'bulk_op',workers:[{id:worker.badgeId,name:worker.name}],lead_id:worker.badgeId,estimated_minutes:10});
+ s.DB.raw.prepare("UPDATE ck_dispatch_share_pairs SET day='2000-01-01' WHERE status='active'").run();
+ await s.login(b);const stale=await s.call('field','sop_task_pause',{id:task.id,revision:task.revision,reason:'隔天后暂停'});
+ assert.equal(stale.ok,false);assert.equal(JSON.parse(s.DB.raw.prepare('SELECT state FROM sop_records WHERE id=?').get(task.id).state).status,'working');
+ assert.equal(s.DB.raw.prepare("SELECT status FROM ck_dispatch_share_pairs WHERE status='active'").get(),undefined);
+ await collaborate(s,a,b);
+ let armed=true;const original=s.DB.prepare.bind(s.DB);
+ s.DB.prepare=sql=>{const statement=original(sql);if(!armed||!String(sql).includes("FROM ck_dispatch_share_pairs WHERE status='active' AND day="))return statement;const all=statement.all.bind(statement);statement.all=async(...args)=>{const value=await all(...args);if(armed){armed=false;s.DB.raw.prepare("UPDATE ck_dispatch_share_pairs SET day='2000-01-01' WHERE status='active'").run();}return value;};return statement;};
+ await s.login(b);const racedDay=await s.call('field','sop_task_pause',{id:task.id,revision:task.revision,reason:'校验时已过业务日'});s.DB.prepare=original;
+ assert.equal(racedDay.ok,false);assert.match(racedDay.error,/协作已结束/);assert.equal(JSON.parse(s.DB.raw.prepare('SELECT state FROM sop_records WHERE id=?').get(task.id).state).status,'working');
+ await s.login(a);await s.ok('field','sop_dispatch_share_status');await collaborate(s,a,b);await s.login(a);
+ const external=await s.ok('field','sop_native_start',{payload:{action:'v2_bulk_op_job_start',work_order_no:'EXT-DAY-DONE',customer:'合成客户',client_req_id:'EXT-DAY-DONE'},workers:[{id:hand.badgeId,name:hand.name}],lead_id:hand.badgeId,estimated_minutes:10,labor_department:'bulk'});
+ await s.login(a);await s.ok('field','v2_bulk_op_job_finish',{job_id:external.job_id,worker_id:hand.badgeId,customer:'合成客户',label_count:2});
+ const segment=s.DB.raw.prepare('SELECT id,worker_id FROM v2_ops_job_workers WHERE job_id=?').get(external.job_id);
+ s.DB.raw.prepare("UPDATE v2_ops_job_workers SET left_at='',leave_reason='' WHERE id=?").run(segment.id);
+ await s.login(b);const cleared=await s.ok('field','v2_ops_job_leave',{job_id:external.job_id,worker_id:segment.worker_id});
+ assert.equal(cleared.ok,true);assert.equal(s.DB.raw.prepare('SELECT status FROM v2_ops_jobs WHERE id=?').get(external.job_id).status,'completed');assert.notEqual(s.DB.raw.prepare('SELECT left_at FROM v2_ops_job_workers WHERE id=?').get(segment.id).left_at,'');
 });
 test('location upload is unchanged while the share flag is off',async()=>{
  const s=await setup(false),a=await s.permanent('合成关闭照片'),worker=await s.permanent('合成关闭照片操作');

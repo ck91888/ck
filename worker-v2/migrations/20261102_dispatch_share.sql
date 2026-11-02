@@ -15,6 +15,8 @@ CREATE TABLE IF NOT EXISTS ck_dispatch_share_pairs(
   ended_by TEXT NOT NULL DEFAULT ''
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ck_dispatch_share_open_pair ON ck_dispatch_share_pairs(person_lo,person_hi) WHERE status IN ('pending','active');
+CREATE TRIGGER IF NOT EXISTS ck_dispatch_share_one_partner_insert BEFORE INSERT ON ck_dispatch_share_pairs WHEN NEW.status IN ('pending','active') AND EXISTS(SELECT 1 FROM ck_dispatch_share_pairs WHERE status IN ('pending','active') AND (person_lo IN (NEW.person_lo,NEW.person_hi) OR person_hi IN (NEW.person_lo,NEW.person_hi))) BEGIN SELECT RAISE(ABORT,'ck_dispatch_share_one_partner'); END;
+CREATE TRIGGER IF NOT EXISTS ck_dispatch_share_one_partner_update BEFORE UPDATE OF status ON ck_dispatch_share_pairs WHEN NEW.status IN ('pending','active') AND EXISTS(SELECT 1 FROM ck_dispatch_share_pairs WHERE id<>NEW.id AND status IN ('pending','active') AND (person_lo IN (NEW.person_lo,NEW.person_hi) OR person_hi IN (NEW.person_lo,NEW.person_hi))) BEGIN SELECT RAISE(ABORT,'ck_dispatch_share_one_partner'); END;
 CREATE TABLE IF NOT EXISTS ck_dispatch_share_events(
   request_id TEXT PRIMARY KEY,
   pair_id TEXT NOT NULL,
