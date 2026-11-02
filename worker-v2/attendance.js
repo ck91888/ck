@@ -1,3 +1,6 @@
+import {attendanceReturnEnabled} from './attendance-return-schema.js';
+import {attendanceSource,attendanceDaySQL,attendanceCurrentSQL} from './attendance-context.js';
+import {nextAttendanceCutoff} from './attendance-return-time.js';
 import {dispatchTimeEnabled} from './dispatch-time.js';
 import {dispatchTimeAttendance} from './dispatch-time-runtime.js';
 import {handleAttendanceReturn} from './attendance-return.js';
@@ -64,8 +67,8 @@ async function commit(env,b,u,before,after,statements,result){
  return result;
 }
 function updateDay(env,before,after){return q(env,'UPDATE ck_attendance_days SET agency=?,signed_in=?,signed_out=?,version=CASE WHEN version=? THEN ? ELSE NULL END WHERE id=?',after.agency,after.signed_in,after.signed_out,before.version,after.version,before.id);}
-async function findRecord(env,b,t){let r=b.id?await readDay(env,b.id):await todayRecord(env,badgeOf(b.badge),t);if(!r)fail('没有当天签到记录，请核对工牌 / 오늘 출근 기록이 없습니다');await resolveDailyBadge(env,r.worker_id,{day:r.day});if(isSystemDailyBadge(r.worker_id)){const active=await rows(env,`SELECT DISTINCT worker_id FROM v2_ops_job_workers WHERE ${workerBadgeMatch('worker_id','?')} AND left_at=''`,r.worker_id);if(active.length>1)fail('工牌大小写存在重复活动记录，请负责人核对 / 중복 작업 기록을 확인하세요');}return r;}
-function currentDay(r,t){if(r.day!==kstDay(t))fail('仅能操作当天工牌；补卡请联系办公室 / 오늘 명찰만 사용할 수 있습니다');}
+async function findRecord(env,b,t){let r=b.id?await readDay(env,b.id):await todayRecord(env,badgeOf(b.badge),t);if(attendanceReturnEnabled(env)&&!b.id){const active=await q(env,`SELECT d.id FROM ${attendanceSource(env)} d WHERE ${workerBadgeMatch('d.worker_id','?')} AND ${attendanceDaySQL(env,'d','?')} ORDER BY d.signed_in DESC LIMIT 1`,badgeOf(b.badge),kstDay(t)).first();if(active)r=await readDay(env,active.id);}if(!r)fail('没有当天签到记录，请核对工牌 / 오늘 출근 기록이 없습니다');await resolveDailyBadge(env,r.worker_id,{day:r.day});if(isSystemDailyBadge(r.worker_id)){const active=await rows(env,`SELECT DISTINCT worker_id FROM v2_ops_job_workers WHERE ${workerBadgeMatch('worker_id','?')} AND left_at=''`,r.worker_id);if(active.length>1)fail('工牌大小写存在重复活动记录，请负责人核对 / 중복 작업 기록을 확인하세요');}return r;}
+function currentDay(r,t){if(r.day!==kstDay(t)&&!(r.attendance_span_id&&Date.parse(t)<nextAttendanceCutoff(r.signed_in)))fail('仅能操作当天工牌；补卡请联系办公室 / 오늘 명찰만 사용할 수 있습니다');}
 function validVersion(b,r){if(Number(b.version)!==r.version)fail('记录已更新，请重新打开 / 기록이 변경되었습니다');}
 const countJobs=(env,jobIds,t)=>jobIds.map(id=>q(env,"UPDATE v2_ops_jobs SET active_worker_count=(SELECT COUNT(*) FROM v2_ops_job_workers WHERE job_id=? AND left_at=''),updated_at=? WHERE id=?",id,t,id));
 const clockStatus=status=>({working:'作业中 / 작업 중',pending:'待开始 / 시작 대기',awaiting_close:'待收尾 / 마감 대기',paused:'已暂停 / 일시 중지',completed:'已完成 / 완료',cancelled:'已取消 / 취소'}[status]||'任务资料或状态待核实 / 작업 기록 확인 필요');
@@ -191,6 +194,7 @@ export async function handleAttendance(b,env){
   return commit(env,b,u,null,r,statements,{ok:true,record:publicDay(r),existing:false});
  }
  const before=await findRecord(env,b,t),after={...before,version:before.version+1};
+ const workRecord=attendanceReturnEnabled(env)?await q(env,`SELECT d.* FROM ${attendanceSource(env)} d WHERE d.id=? AND ${attendanceCurrentSQL(env,'d')}`,before.id).first():before;
  if(['sop_attendance_department','sop_attendance_void','sop_attendance_restore'].includes(action)){
   if(isEmployee(before.worker_id))fail('此操作仅用于日当签到 / 일용직 출근 기록에만 사용할 수 있습니다');
   validVersion(b,before);
@@ -227,22 +231,22 @@ export async function handleAttendance(b,env){
   currentDay(before,t);const id=uid('PRINT');return commit(env,b,u,before,after,[updateDay(env,before,after),q(env,'INSERT INTO ck_attendance_prints VALUES(?,?,?,?,?)',id,before.id,t,u.id,'requested')],{ok:true,record:publicDay(after),printId:id,status:'requested'});
  }
  if(action==='sop_attendance_break_start'){
-  access(env,['manager','dispatcher']);currentDay(before,t);if(before.signed_out)fail('已签退，不能登记休息');
+  access(env,['manager','dispatcher']);if(!workRecord)fail('当前无有效开放出勤段，请先扫码确认返岗');currentDay(workRecord,t);if(workRecord.signed_out)fail('已签退，不能登记休息');
   const open=await q(env,"SELECT * FROM ck_attendance_breaks WHERE attendance_id=? AND ended_at=''",before.id).first();if(open)return {ok:true,existing:true,record:publicDay(before)};
-  const closed=await closePerson(env,before,t,'rest');const validJobs=closed.valid.map(s=>s.job_id);
+  const closed=await closePerson(env,workRecord,t,'rest');const validJobs=closed.valid.map(s=>s.job_id);
   return commit(env,b,u,before,after,[updateDay(env,before,after),...closed.sql,q(env,'INSERT INTO ck_attendance_breaks VALUES(?,?,?,?,?,?)',uid('BREAK'),before.id,t,'',JSON.stringify([...new Set(validJobs)]),u.id)],{ok:true,record:publicDay(after)});
  }
  if(action==='sop_attendance_break_end'){
-  access(env,['manager','dispatcher']);currentDay(before,t);if(before.signed_out)fail('已签退，不能恢复作业');
+  access(env,['manager','dispatcher']);if(!workRecord)fail('当前无有效开放出勤段，请先扫码确认返岗');currentDay(workRecord,t);if(workRecord.signed_out)fail('已签退，不能恢复作业');
   const open=await q(env,"SELECT * FROM ck_attendance_breaks WHERE attendance_id=? AND ended_at=''",before.id).first();if(!open)fail('没有进行中的休息');
-  const busy=await q(env,`SELECT id FROM v2_ops_job_workers WHERE ${workerBadgeMatch('worker_id','?')} AND left_at='' LIMIT 1`,before.worker_id).first();
-  const eligible=[];if(!busy)for(const id of JSON.parse(open.job_ids_json)){const j=await q(env,"SELECT * FROM v2_ops_jobs WHERE id=? AND status IN ('working','awaiting_close')",id).first();if(j){const record=await q(env,"SELECT state FROM sop_records WHERE id=? AND kind IN ('dispatch','task','bulk_batch')",id).first();const data=record?JSON.parse(record.state):null;if(!data||(data.status!=='paused'&&(data.workers||[]).some(w=>sameWorkerBadge(w.id,before.worker_id))))eligible.push(j);}}
+  const busy=await q(env,`SELECT id FROM v2_ops_job_workers WHERE ${workerBadgeMatch('worker_id','?')} AND left_at='' LIMIT 1`,workRecord.worker_id).first();
+  const eligible=[];if(!busy)for(const id of JSON.parse(open.job_ids_json)){const j=await q(env,"SELECT * FROM v2_ops_jobs WHERE id=? AND status IN ('working','awaiting_close')",id).first();if(j){const record=await q(env,"SELECT state FROM sop_records WHERE id=? AND kind IN ('dispatch','task','bulk_batch')",id).first();const data=record?JSON.parse(record.state):null;if(!data||(data.status!=='paused'&&(data.workers||[]).some(w=>sameWorkerBadge(w.id,workRecord.worker_id))))eligible.push(j);}}
   await ensureSchema(env.DB,'attendance-rest-resume-v3',()=>env.DB.batch([q(env,'DROP TRIGGER IF EXISTS ck_rest_resume_guard'),q(env,`CREATE TRIGGER IF NOT EXISTS ck_rest_resume_guard BEFORE INSERT ON v2_ops_job_workers WHEN NEW.id LIKE 'WS-REST-%' BEGIN SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM v2_ops_jobs j WHERE j.id=NEW.job_id AND j.status IN ('working','awaiting_close')) OR EXISTS(SELECT 1 FROM sop_records s WHERE s.id=NEW.job_id AND s.kind IN ('task','dispatch','bulk_batch') AND (json_extract(s.state,'$.status') IN ('paused','labor_done') OR NOT EXISTS(SELECT 1 FROM json_each(s.state,'$.workers') w WHERE ${workerBadgeMatch("json_extract(w.value,'$.id')",'NEW.worker_id')}))) THEN RAISE(ABORT,'rest_assignment_changed') END; END`)]));
   // Never restore multiple disputed concurrent jobs. A dispatcher must select one.
-  const disabledPermanent=before.worker_id.startsWith('DAF-')&&!await q(env,'SELECT id FROM ck_attendance_people WHERE id=? AND enabled=1',before.person_id).first();
-  const resume=!disabledPermanent&&eligible.length===1&&!await personHasPendingReturn(env,before.worker_id)?eligible:[],statements=[updateDay(env,before,after),q(env,"UPDATE ck_attendance_breaks SET ended_at=? WHERE id=? AND ended_at=''",t,open.id)];
-  for(const j of resume){const seg=uid('WS-REST');statements.push(q(env,"INSERT INTO v2_ops_job_workers(id,job_id,worker_id,worker_name,joined_at) VALUES(?,?,?,?,?)",seg,j.id,canonicalDailyBadge(before.worker_id),before.name,t));
-   if(j.job_type==='pick_direct')statements.push(q(env,`INSERT INTO v2_pick_worker_docs(id,job_id,segment_id,worker_id,worker_name,pick_doc_no,started_at,status,created_at) SELECT ?||'-'||id,?,?,?,?,pick_doc_no,?,'working',? FROM v2_ops_job_pick_docs WHERE job_id=? AND pick_status!='completed'`,seg,j.id,seg,canonicalDailyBadge(before.worker_id),before.name,t,t,j.id));
+  const disabledPermanent=workRecord.worker_id.startsWith('DAF-')&&!await q(env,'SELECT id FROM ck_attendance_people WHERE id=? AND enabled=1',before.person_id).first();
+  const resume=!disabledPermanent&&eligible.length===1&&!await personHasPendingReturn(env,workRecord.worker_id)?eligible:[],statements=[updateDay(env,before,after),q(env,"UPDATE ck_attendance_breaks SET ended_at=? WHERE id=? AND ended_at=''",t,open.id)];
+  for(const j of resume){const seg=uid('WS-REST');statements.push(q(env,"INSERT INTO v2_ops_job_workers(id,job_id,worker_id,worker_name,joined_at) VALUES(?,?,?,?,?)",seg,j.id,canonicalDailyBadge(workRecord.worker_id),before.name,t));
+   if(j.job_type==='pick_direct')statements.push(q(env,`INSERT INTO v2_pick_worker_docs(id,job_id,segment_id,worker_id,worker_name,pick_doc_no,started_at,status,created_at) SELECT ?||'-'||id,?,?,?,?,pick_doc_no,?,'working',? FROM v2_ops_job_pick_docs WHERE job_id=? AND pick_status!='completed'`,seg,j.id,seg,canonicalDailyBadge(workRecord.worker_id),before.name,t,t,j.id));
   }
   statements.push(...countJobs(env,resume.map(j=>j.id),t));return commit(env,b,u,before,after,statements,{ok:true,record:publicDay(after),resumedJobs:resume.map(j=>j.id)});
  }
@@ -281,12 +285,12 @@ export async function guardAttendance(body,env){
  for(const w of daily)await resolveDailyBadge(env,w.id,{day});
  const ids=JSON.stringify([...new Set(daily.map(w=>canonicalDailyBadge(w.id)))]);
  const [days,rests,busy]=await env.DB.batch([
-  q(env,`SELECT d.*,p.enabled AS employee_enabled,e.person_id AS employee_profile FROM ck_attendance_days d LEFT JOIN ck_attendance_people p ON p.id=d.person_id LEFT JOIN ck_employee_profiles e ON e.person_id=p.id WHERE d.day=? AND ${canonicalWorkerSQL('d.worker_id')} IN (SELECT value FROM json_each(?)) AND `+activeAttendanceSQL('d'),day,ids),
-  q(env,`SELECT d.worker_id FROM ck_attendance_breaks b JOIN ck_attendance_days d ON d.id=b.attendance_id WHERE d.day=? AND ${canonicalWorkerSQL('d.worker_id')} IN (SELECT value FROM json_each(?)) AND b.ended_at=''`,day,ids),
+  q(env,`SELECT d.*,p.enabled AS employee_enabled,e.person_id AS employee_profile FROM ${attendanceSource(env)} d LEFT JOIN ck_attendance_people p ON p.id=d.person_id LEFT JOIN ck_employee_profiles e ON e.person_id=p.id WHERE ${attendanceDaySQL(env,'d','?')} AND ${canonicalWorkerSQL('d.worker_id')} IN (SELECT value FROM json_each(?)) AND `+activeAttendanceSQL('d'),day,ids),
+  q(env,`SELECT d.worker_id FROM ck_attendance_breaks b JOIN ${attendanceSource(env)} d ON d.id=b.attendance_id WHERE ${attendanceDaySQL(env,'d','?')} AND ${canonicalWorkerSQL('d.worker_id')} IN (SELECT value FROM json_each(?)) AND b.ended_at=''`,day,ids),
   q(env,`SELECT DISTINCT worker_id,job_id FROM v2_ops_job_workers WHERE ${canonicalWorkerSQL('worker_id')} IN (SELECT value FROM json_each(?)) AND left_at=''`,ids)
  ]);
  const records=new Map(days.results.map(r=>[canonicalDailyBadge(r.worker_id),r])),resting=new Set(rests.results.map(r=>canonicalDailyBadge(r.worker_id))),retained=new Set(['sop_task_people','sop_native_people'].includes(action)?busy.results.filter(r=>r.job_id===jobId).map(r=>canonicalDailyBadge(r.worker_id)):[]);
- for(const w of daily){const id=canonicalDailyBadge(w.id),record=records.get(id);if(!record)return missingAttendanceMessage(w,day);if(isEmployee(id)&&(!record.employee_enabled||!record.employee_profile))return record.name+' 已停用或未登记，不能加入作业 / 비활성 직원입니다';if(id.startsWith('DAF-')&&!record.employee_enabled&&!retained.has(id))return record.name+' 工牌已停用，不能加入新作业 / 비활성 명찰은 새 작업에 배정할 수 없습니다';if(isSystemDailyBadge(id)&&!record.employee_enabled)return record.name+' 工牌已停用，不能加入作业';if(record.signed_out)return record.name+' 已签退，不能开始作业 / 이미 퇴근했습니다';if(resting.has(id))return record.name+' 正在休息，请先结束休息 / 휴식을 먼저 종료하세요';}
+ for(const w of daily){const id=canonicalDailyBadge(w.id),record=records.get(id);if(!record)return missingAttendanceMessage(w,day);if(isEmployee(id)&&(!record.employee_enabled||!record.employee_profile))return record.name+' 已停用或未登记，不能加入作业 / 비활성 직원입니다';if(id.startsWith('DAF-')&&!record.employee_enabled&&!retained.has(id))return record.name+' 工牌已停用，不能加入新作业 / 비활성 명찰은 새 작업에 배정할 수 없습니다';if(isSystemDailyBadge(id)&&!record.employee_enabled)return record.name+' 工牌已停用，不能加入作业';if(record.signed_out||attendanceReturnEnabled(env)&&!await q(env,`SELECT 1 FROM ${attendanceSource(env)} d WHERE d.id=? AND ${attendanceCurrentSQL(env,'d')}`,record.id).first())return record.name+' 已签退，不能开始作业 / 이미 퇴근했습니다';if(resting.has(id))return record.name+' 正在休息，请先结束休息 / 휴식을 먼저 종료하세요';}
  const repaired=await retireCompletedWorkClocks(env,daily);if(repaired.length)env.SOP_COMPLETED_CLOCK_REPAIRS=repaired;busy.results=(await q(env,`SELECT DISTINCT w.worker_id,w.job_id,w.joined_at,j.job_type,j.display_no,j.status AS job_status FROM v2_ops_job_workers w LEFT JOIN v2_ops_jobs j ON j.id=w.job_id WHERE ${canonicalWorkerSQL('w.worker_id')} IN (SELECT value FROM json_each(?)) AND w.left_at=''`,ids).all()).results;
  const occupied=new Set(busy.results.filter(r=>r.job_id!==jobId).map(r=>canonicalDailyBadge(r.worker_id)));
  for(const w of daily){const id=canonicalDailyBadge(w.id),record=records.get(id);if(new Set(busy.results.filter(r=>sameWorkerBadge(r.worker_id,id)).map(r=>r.worker_id)).size>1)return record.name+' 工牌大小写存在重复活动记录，请负责人核对';if(occupied.has(id)&&!env.SOP_CREW_BORROW?.plans.some(p=>sameWorkerBadge(p.worker.id,id))){

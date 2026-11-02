@@ -1,3 +1,4 @@
+import {attendanceSource,attendanceDaySQL,attendanceCurrentSQL,rememberFieldSession} from './attendance-context.js';
 import {dailyDispatchEnabled,dailyFieldLogin,dailyFieldSession} from './daily-dispatch-permissions.js';
 import {ensureSchema} from './schema-ready.js';
 // Separate, revocable sessions for office, field dispatch and the fixed attendance terminal.
@@ -67,11 +68,11 @@ export async function accessUser(request,env){
  const scope=accessScope(request),raw=rawToken(request,scope);if(!/^[a-f0-9]{64}$/.test(raw))return null;await ensureAccess(env);
  const s=await q(env,'SELECT * FROM ck_access_sessions WHERE token_hash=? AND scope=? AND expires_at>?',await digest(raw),scope,Date.now()).first();if(!s)return null;
  if(scope==='field'){
-  if(s.credential_hash==='daily-dispatch-v1'&&dailyDispatchEnabled(env))return dailyFieldSession(env,s);
-  const row=await q(env,`SELECT p.name,p.badge_id FROM ck_attendance_people p JOIN ck_employee_profiles e ON e.person_id=p.id LEFT JOIN ck_field_access a ON a.person_id=p.id JOIN ck_attendance_days d ON d.person_id=p.id
-   WHERE p.id=? AND p.enabled=1 AND COALESCE(a.enabled,1)=1 AND COALESCE(a.version,0)=? AND d.id=? AND d.day=? AND d.signed_out='' AND d.signed_in<=?`,s.user_id,s.grant_version,s.attendance_id,kstDay(new Date().toISOString()),new Date().toISOString()).first();
+  if(s.credential_hash==='daily-dispatch-v1'&&dailyDispatchEnabled(env))return rememberFieldSession(await dailyFieldSession(env,s),s.token_hash);
+  const row=await q(env,`SELECT p.name,p.badge_id FROM ck_attendance_people p JOIN ck_employee_profiles e ON e.person_id=p.id LEFT JOIN ck_field_access a ON a.person_id=p.id JOIN ${attendanceSource(env)} d ON d.person_id=p.id
+   WHERE p.id=? AND p.enabled=1 AND COALESCE(a.enabled,1)=1 AND COALESCE(a.version,0)=? AND d.id=? AND ${attendanceDaySQL(env,'d','?')} AND d.signed_out='' AND d.signed_in<=? AND ${attendanceCurrentSQL(env,'d')}`,s.user_id,s.grant_version,s.attendance_id,kstDay(new Date().toISOString()),new Date().toISOString()).first();
   if(!row){await q(env,'DELETE FROM ck_access_sessions WHERE token_hash=?',s.token_hash).run();return null;}
-  return {...safeUser(s),name:row.name,badge:row.badge_id,attendance_id:s.attendance_id};
+  return rememberFieldSession({...safeUser(s),name:row.name,badge:row.badge_id,attendance_id:s.attendance_id},s.token_hash);
  }
  if(!await credentialCurrent(s,env)){await q(env,'DELETE FROM ck_access_sessions WHERE token_hash=?',s.token_hash).run();return null;}
  return safeUser(s);
@@ -95,7 +96,7 @@ export async function accessSessionAction(b,env,request){
   // remains authoritative across edits, imports and deployments.
   const p=await q(env,`SELECT p.id,p.name,COALESCE(a.version,0) AS version FROM ck_attendance_people p JOIN ck_employee_profiles e ON e.person_id=p.id LEFT JOIN ck_field_access a ON a.person_id=p.id WHERE p.badge_id=? AND p.enabled=1 AND COALESCE(a.enabled,1)=1`,badge).first();
   if(!p)return denied('职员未登记、已停用或现场权限已关闭，请联系管理员 / 직원 등록·재직 상태와 현장 권한을 확인하세요',403);
-  const day=await q(env,"SELECT id FROM ck_attendance_days WHERE person_id=? AND day=? AND signed_out='' AND signed_in<=?",p.id,kstDay(new Date().toISOString()),new Date().toISOString()).first();
+  const day=await q(env,`SELECT d.id FROM ${attendanceSource(env)} d WHERE d.person_id=? AND ${attendanceDaySQL(env,'d','?')} AND d.signed_out='' AND d.signed_in<=? AND ${attendanceCurrentSQL(env,'d')}`,p.id,kstDay(new Date().toISOString()),new Date().toISOString()).first();
   if(!day)return denied('今天尚未上班签到或已经签退，请先在签到点打卡 / 오늘 출근 등록을 먼저 해주세요',403);
   u={id:p.id,name:p.name,role:'dispatcher',departments:['bulk','direct_ship','import','other']};attendance=day.id;version=p.version;
   }

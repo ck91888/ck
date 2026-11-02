@@ -1,3 +1,4 @@
+import {attendanceSource,attendanceDaySQL,attendanceCurrentSQL} from './attendance-context.js';
 import {resolveRecordId} from './document-numbers.js';
 import {executionDepartment} from './work-execution.js';
 import {ensureSchema} from './schema-ready.js';
@@ -18,17 +19,17 @@ export async function ensureDailyDispatch(e){await ensureSchema(e.DB,'daily-disp
 const stable=(e,id)=>q(e,"SELECT * FROM ck_attendance_people WHERE id=? AND kind='permanent' AND badge_id GLOB 'DAF-*'",id).first();
 const pub=p=>({id:p.id,badge:p.badge_id,name:p.name,agency:p.agency,enabled:!!p.enabled});
 const grantPublic=g=>({enabled:!!g?.enabled,departments:g?JSON.parse(g.departments):[],version:g?.version||0,updatedBy:g?.updated_by||'',updatedName:g?.updated_name||'',updatedAt:g?.updated_at||''});
-async function dayRows(e,personId,day){return rows(e,`SELECT d.*,p.enabled AS person_enabled FROM ck_attendance_days d JOIN ck_attendance_people p ON p.id=d.person_id WHERE d.person_id=? AND d.day=? AND ${activeAttendanceSQL('d')}`,personId,day);}
+async function dayRows(e,personId,day){return rows(e,`SELECT d.*,p.enabled AS person_enabled FROM ${attendanceSource(e)} d JOIN ck_attendance_people p ON p.id=d.person_id WHERE d.person_id=? AND ${attendanceDaySQL(e,'d','?')} AND ${activeAttendanceSQL('d')}`,personId,day);}
 async function linkedDay(e,p,day){
- const direct=await dayRows(e,p.id,day),links=await rows(e,'SELECT daily_person_id FROM ck_daily_dispatch_links WHERE permanent_person_id=? AND day=?',p.id,day);
+ const direct=await dayRows(e,p.id,day),links=await rows(e,`SELECT daily_person_id FROM ck_daily_dispatch_links WHERE permanent_person_id=? AND (day=?${attendanceSource(e)==='ck_attendance_days'?'':` OR EXISTS(SELECT 1 FROM ck_attendance_current_days d WHERE d.origin_person_id=ck_daily_dispatch_links.daily_person_id AND d.origin_day=ck_daily_dispatch_links.day AND ${attendanceDaySQL(e,'d',"'"+day+"'")} AND ${attendanceCurrentSQL(e,'d')})`})`,p.id,day);
  let all=[...direct];for(const link of links)all.push(...await dayRows(e,link.daily_person_id,day));
  const active=all.filter(d=>!d.signed_out);if(active.length>1)fail('长期与临时工牌存在多份有效签到，请先核实 / 중복 출근 기록을 확인하세요');return active[0]||all[0]||null;
 }
-async function validAttendance(e,p,d,t){if(!(p?.enabled&&d?.person_enabled&&d.day===kstDay(t)&&!d.signed_out&&d.signed_in<=t))return false;const actual=await linkedDay(e,p,d.day).catch(()=>null);return actual?.id===d.id&&!await q(e,"SELECT 1 FROM ck_attendance_breaks WHERE attendance_id=? AND ended_at=''",d.id).first();}
+async function validAttendance(e,p,d,t){if(!(p?.enabled&&d?.person_enabled&&!d.signed_out&&d.signed_in<=t))return false;if(!await q(e,`SELECT 1 FROM ${attendanceSource(e)} d WHERE d.id=? AND ${attendanceCurrentSQL(e,'d')}`,d.id).first())return false;const actual=await linkedDay(e,p,kstDay(t)).catch(()=>null);return actual?.id===d.id&&!await q(e,"SELECT 1 FROM ck_attendance_breaks WHERE attendance_id=? AND ended_at=''",d.id).first();}
 export async function dailyFieldLogin(e,value){
  await ensureDailyDispatch(e);const badge=canonicalDailyBadge(String(value||'').trim().split('|')[0]),day=kstDay(new Date().toISOString());let p,d;
  if(badge.startsWith('DAF-')){p=await q(e,"SELECT * FROM ck_attendance_people WHERE badge_id=? AND kind='permanent'",badge).first();if(p)d=await linkedDay(e,p,day);}
- else{const found=await resolveDailyBadge(e,badge,{day});if(found.person){const link=await q(e,'SELECT * FROM ck_daily_dispatch_links WHERE daily_person_id=? AND day=?',found.person.id,day).first();if(link){p=await stable(e,link.permanent_person_id);if(p)d=await linkedDay(e,p,day);if(d?.person_id!==found.person.id)d=null;}}}
+ else{const found=await resolveDailyBadge(e,badge,{day});if(found.person){const link=await q(e,'SELECT * FROM ck_daily_dispatch_links WHERE daily_person_id=? AND day=?',found.person.id,found.attendance?.origin_day||day).first();if(link){p=await stable(e,link.permanent_person_id);if(p)d=await linkedDay(e,p,day);if(d?.person_id!==found.person.id)d=null;}}}
  if(!p||!d)fail('日当派工须先由管理员授权长期档案；临时牌须明确关联本人档案，并完成当天签到 / 고정 인물 권한·임시 명찰 연결·당일 출근을 확인하세요');
  const g=await q(e,'SELECT * FROM ck_daily_dispatch_grants WHERE person_id=?',p.id).first(),valid=await validAttendance(e,p,d,new Date().toISOString());
  const unfinished=await q(e,"SELECT 1 FROM sop_records s JOIN v2_ops_jobs j ON j.id=s.id WHERE s.kind IN ('dispatch','task') AND json_extract(s.state,'$.owner_id')=? AND j.status IN ('pending','working','paused','awaiting_close') LIMIT 1",p.id).first();
@@ -38,8 +39,8 @@ export async function dailyFieldLogin(e,value){
 }
 export async function dailyFieldSession(e,s){
  await ensureDailyDispatch(e);const p=await stable(e,s.user_id);if(!p)return null;
- const d=await q(e,`SELECT d.*,p.enabled AS person_enabled FROM ck_attendance_days d JOIN ck_attendance_people p ON p.id=d.person_id WHERE d.id=? AND ${activeAttendanceSQL('d')}`,s.attendance_id).first();
- if(!d||d.person_id!==p.id&&!await q(e,'SELECT 1 FROM ck_daily_dispatch_links WHERE daily_person_id=? AND permanent_person_id=? AND day=?',d.person_id,p.id,d.day).first())return null;
+ const d=await q(e,`SELECT d.*,p.enabled AS person_enabled FROM ${attendanceSource(e)} d JOIN ck_attendance_people p ON p.id=d.person_id WHERE d.id=? AND ${activeAttendanceSQL('d')}`,s.attendance_id).first();
+ if(!d||d.person_id!==p.id&&!await q(e,'SELECT 1 FROM ck_daily_dispatch_links WHERE daily_person_id=? AND permanent_person_id=? AND day=?',d.origin_person_id||d.person_id,p.id,d.origin_day||d.day).first())return null;
  const g=await q(e,'SELECT * FROM ck_daily_dispatch_grants WHERE person_id=?',p.id).first();
  return {id:p.id,name:p.name,role:'dispatcher',scope:'field',departments:[...new Set([...JSON.parse(s.departments),...JSON.parse(g?.departments||'[]')])],badge:d.worker_id,attendance_id:d.id,daily_dispatch:true,can_dispatch:!!g?.enabled&&await validAttendance(e,p,d,new Date().toISOString()),dispatch_departments:JSON.parse(g?.departments||'[]'),dispatch_version:g?.version||0};
 }
@@ -50,8 +51,8 @@ export async function dispatchTransferTarget(e,badge,department){
  const code=String(badge||'').trim().split('|')[0].toUpperCase();
  if(code.startsWith('EMP-')){
   const p=await q(e,`SELECT p.id,p.name,d.id AS attendance_id FROM ck_attendance_people p JOIN ck_employee_profiles employee ON employee.person_id=p.id
-   LEFT JOIN ck_field_access a ON a.person_id=p.id JOIN ck_attendance_days d ON d.person_id=p.id
-   WHERE p.badge_id=? AND p.enabled=1 AND COALESCE(a.enabled,1)=1 AND d.day=? AND d.signed_out='' AND d.signed_in<=?
+   LEFT JOIN ck_field_access a ON a.person_id=p.id JOIN ${attendanceSource(e)} d ON d.person_id=p.id
+   WHERE p.badge_id=? AND p.enabled=1 AND COALESCE(a.enabled,1)=1 AND ${attendanceDaySQL(e,'d','?')} AND d.signed_out='' AND ${attendanceCurrentSQL(e,'d')} AND d.signed_in<=?
     AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at='') LIMIT 1`,code,kstDay(new Date().toISOString()),new Date().toISOString()).first();
   if(!p||!['bulk','direct_ship','import','other'].includes(department))fail('接收派审员未在岗、休息中或无本部门派工权限');
   return {id:p.id,name:p.name,attendance_id:p.attendance_id,can_dispatch:true,departments:['bulk','direct_ship','import','other']};
@@ -98,7 +99,7 @@ export async function dailyDispatchAdmin(b,e){
  }else{
   const x=await temporary(e,b,p);if(b.daily_person_id!==x.person.id||b.attendance_id!==x.day.id)fail('临时牌信息已变化，请重新核对');if(x.old)fail('此临时工牌已明确关联，无需重复保存');before={};after={daily_person_id:x.person.id,permanent_person_id:p.id,day:x.day.day,version:1,created_by:u.id,created_name:u.name,created_at:t};
   sql.push(q(e,`INSERT INTO ck_daily_dispatch_links VALUES(?,?,?,?,?,?,?)`,...Object.values(after)));
-  sql.unshift(q(e,`INSERT INTO ck_daily_dispatch_checks VALUES(?,CASE WHEN EXISTS(SELECT 1 FROM ck_attendance_days d JOIN ck_attendance_people p ON p.id=d.person_id WHERE d.id=? AND d.person_id=? AND d.day=? AND d.signed_out='' AND p.enabled=1 AND ${activeAttendanceSQL('d')}) AND EXISTS(SELECT 1 FROM ck_attendance_people WHERE id=? AND enabled=1) AND NOT EXISTS(SELECT 1 FROM ck_attendance_days d WHERE d.person_id=? AND d.day=? AND d.signed_out='' AND ${activeAttendanceSQL('d')}) THEN 1 ELSE 0 END)`,request,x.day.id,x.person.id,x.day.day,p.id,p.id,x.day.day));
+  sql.unshift(q(e,`INSERT INTO ck_daily_dispatch_checks VALUES(?,CASE WHEN EXISTS(SELECT 1 FROM ${attendanceSource(e)} d JOIN ck_attendance_people p ON p.id=d.person_id WHERE d.id=? AND d.person_id=? AND ${attendanceDaySQL(e,'d','?')} AND d.signed_out='' AND p.enabled=1 AND ${activeAttendanceSQL('d')}) AND EXISTS(SELECT 1 FROM ck_attendance_people WHERE id=? AND enabled=1) AND NOT EXISTS(SELECT 1 FROM ${attendanceSource(e)} d WHERE d.person_id=? AND ${attendanceDaySQL(e,'d','?')} AND d.signed_out='' AND ${activeAttendanceSQL('d')}) THEN 1 ELSE 0 END)`,request,x.day.id,x.person.id,x.day.day,p.id,p.id,x.day.day));
  }
  const response={ok:true,person_id:p.id,version:after.version};sql.push(q(e,'INSERT INTO ck_daily_dispatch_events VALUES(?,?,?,?,?,?,?,?,?,?,?)',request,p.id,b.action,u.id,u.name,t,JSON.stringify(before||{}),JSON.stringify(after),reason,signature,JSON.stringify(response)),q(e,'DELETE FROM ck_daily_dispatch_checks WHERE id=?',request));
  try{await e.DB.batch(sql);}catch{const saved=await q(e,'SELECT signature,response_json FROM ck_daily_dispatch_events WHERE request_id=?',request).first();if(saved?.signature===signature)return JSON.parse(saved.response_json);fail('资料或权限已变化，请刷新后重试 / 정보가 변경되었습니다. 새로고침하세요');}return response;
@@ -126,11 +127,11 @@ export async function guardDailyDispatch(b,e){
  // Recheck admission within every transaction of this new dispatch. A revoke,
  // sign-out or disable racing the request rolls the entire business batch back.
  const guardedBatch=async statements=>{const t=new Date().toISOString(),id=crypto.randomUUID();const guard=original.prepare(`INSERT INTO ck_daily_dispatch_checks VALUES(?,CASE WHEN EXISTS(
- SELECT 1 FROM ck_daily_dispatch_grants g JOIN ck_attendance_people p ON p.id=g.person_id JOIN ck_attendance_days d ON d.id=? JOIN ck_attendance_people a ON a.id=d.person_id
+ SELECT 1 FROM ck_daily_dispatch_grants g JOIN ck_attendance_people p ON p.id=g.person_id JOIN ${attendanceSource(e)} d ON d.id=? JOIN ck_attendance_people a ON a.id=d.person_id
  WHERE g.person_id=? AND g.enabled=1 AND g.version=? AND p.enabled=1 AND a.enabled=1 AND EXISTS(SELECT 1 FROM json_each(g.departments) WHERE value=?)
- AND d.day=? AND d.signed_out='' AND d.signed_in<=? AND ${activeAttendanceSQL('d')} AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks r WHERE r.attendance_id=d.id AND r.ended_at='')
- AND NOT EXISTS(SELECT 1 FROM ck_attendance_days other WHERE other.id!=d.id AND other.day=d.day AND other.signed_out='' AND ${activeAttendanceSQL('other')} AND (other.person_id=p.id OR EXISTS(SELECT 1 FROM ck_daily_dispatch_links duplicate WHERE duplicate.daily_person_id=other.person_id AND duplicate.permanent_person_id=p.id AND duplicate.day=other.day)))
- AND (d.person_id=p.id OR EXISTS(SELECT 1 FROM ck_daily_dispatch_links l WHERE l.daily_person_id=d.person_id AND l.permanent_person_id=p.id AND l.day=d.day))) THEN 1 ELSE 0 END)`).bind(id,u.attendance_id,u.id,version,department,kstDay(t),t);
+ AND ${attendanceDaySQL(e,'d','?')} AND d.signed_out='' AND ${attendanceCurrentSQL(e,'d')} AND d.signed_in<=? AND ${activeAttendanceSQL('d')} AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks r WHERE r.attendance_id=d.id AND r.ended_at='')
+ AND NOT EXISTS(SELECT 1 FROM ${attendanceSource(e)} other WHERE other.id!=d.id AND other.day=d.day AND other.signed_out='' AND ${activeAttendanceSQL('other')} AND (other.person_id=p.id OR EXISTS(SELECT 1 FROM ck_daily_dispatch_links duplicate WHERE duplicate.daily_person_id=other.person_id AND duplicate.permanent_person_id=p.id AND duplicate.day=${attendanceSource(e)==='ck_attendance_days'?'other.day':'other.origin_day'})))
+ AND (d.person_id=p.id OR EXISTS(SELECT 1 FROM ck_daily_dispatch_links l WHERE l.daily_person_id=${attendanceSource(e)==='ck_attendance_days'?'d.person_id':'d.origin_person_id'} AND l.permanent_person_id=p.id AND l.day=${attendanceSource(e)==='ck_attendance_days'?'d.day':'d.origin_day'}))) THEN 1 ELSE 0 END)`).bind(id,u.attendance_id,u.id,version,department,kstDay(t),t);
  try{const result=await original.batch([guard,...statements,original.prepare('DELETE FROM ck_daily_dispatch_checks WHERE id=?').bind(id)]);return result.slice(1,-1);}catch(error){if(/CHECK constraint failed: allowed/.test(error.message))fail('派工权限或签到刚刚变化，本次未派工，请刷新 / 권한·출근 상태가 변경되었습니다');throw error;}};
  // Legacy additions sometimes use run(); guard those writes as well. Reads stay unchanged.
  e.DB={prepare(sql){const statement=original.prepare(sql);const wrap=s=>new Proxy(s,{get(target,key){if(key==='bind')return (...args)=>wrap(target.bind(...args));if(key==='run')return async()=> (await guardedBatch([target]))[0];const value=target[key];return typeof value==='function'?value.bind(target):value;}});return wrap(statement);},batch:guardedBatch};

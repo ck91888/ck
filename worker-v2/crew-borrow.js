@@ -1,3 +1,4 @@
+import {attendanceSource,attendanceDaySQL,attendanceCurrentSQL,attendanceCutoffSQL} from './attendance-context.js';
 import {canonicalDailyBadge,isAttendanceBadge,sameWorkerBadge} from '../shared/badge-identity.js';
 import {workerBadgeMatch,resolveDailyBadge} from './daily-badge-identity.js';
 import {sameBadgeSignature} from './badge-request-signature.js';
@@ -27,16 +28,18 @@ export const CREW_BORROW_SCHEMA=[
  SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM ck_crew_borrows b JOIN v2_ops_jobs j ON j.id=b.source_job_id WHERE 'WS-RETURN-'||b.id=NEW.id AND ${workerBadgeMatch('b.worker_id','NEW.worker_id')} AND b.source_job_id=NEW.job_id AND b.status='return_pending' AND j.status IN ('working','awaiting_close') AND NOT EXISTS(SELECT 1 FROM v2_ops_job_workers w WHERE w.job_id=b.destination_job_id AND ${workerBadgeMatch('w.worker_id','b.worker_id')} AND w.left_at='') AND (b.source_kind='legacy' OR EXISTS(SELECT 1 FROM sop_records s WHERE s.id=b.source_job_id AND s.kind=b.source_kind AND COALESCE(json_extract(s.state,'$.owner_id'),'')=b.source_owner_id AND (s.kind!='task' OR json_extract(s.state,'$.status')='working') AND EXISTS(SELECT 1 FROM json_each(s.state,'$.workers') w WHERE ${workerBadgeMatch("json_extract(w.value,'$.id')",'b.worker_id')})))) THEN RAISE(ABORT,'borrow_return_changed') END;
  END`
 ];
-const CREW_ATTENDANCE_SCHEMA=[
+export function crewAttendanceSchema(returns=false){const table=returns?'ck_attendance_current_days':'ck_attendance_days';
+ const at=(time)=>returns?`((COALESCE((SELECT enabled FROM ck_attendance_return_config WHERE id=1),0)=0 AND d.day=date(${time},'+9 hours')) OR ((SELECT enabled FROM ck_attendance_return_config WHERE id=1)=1 AND d.span_status='open' AND julianday(${attendanceCutoffSQL('d.signed_in')})>julianday(${time})))`:`d.day=date(${time},'+9 hours')`;return [
  `CREATE TRIGGER IF NOT EXISTS ck_crew_source_attendance BEFORE INSERT ON ck_crew_borrows WHEN lower(NEW.worker_id) GLOB 'da-*' OR lower(NEW.worker_id) GLOB 'daf-*' OR lower(NEW.worker_id) GLOB 'emp-*' BEGIN
- SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM ck_attendance_days d JOIN ck_attendance_people p ON p.id=d.person_id JOIN v2_ops_job_workers w ON w.id=NEW.source_segment_id WHERE ${workerBadgeMatch('d.worker_id','NEW.worker_id')} AND d.day=NEW.source_day AND p.enabled=1 AND d.signed_out='' AND ${activeAttendanceSQL('d')} AND d.signed_in<=w.joined_at AND date(w.joined_at,'+9 hours')=NEW.source_day AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks r WHERE r.attendance_id=d.id AND r.ended_at='')) THEN RAISE(ABORT,'borrow_source_attendance_changed') END; END`,
+ SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM ${table} d JOIN ck_attendance_people p ON p.id=d.person_id JOIN v2_ops_job_workers w ON w.id=NEW.source_segment_id WHERE ${workerBadgeMatch('d.worker_id','NEW.worker_id')} AND ${at('NEW.borrowed_at')} AND p.enabled=1 AND d.signed_out='' AND ${activeAttendanceSQL('d')} AND d.signed_in<=w.joined_at AND date(w.joined_at,'+9 hours')=NEW.source_day AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks r WHERE r.attendance_id=d.id AND r.ended_at='')) THEN RAISE(ABORT,'borrow_source_attendance_changed') END; END`,
  `CREATE TRIGGER IF NOT EXISTS ck_crew_return_attendance BEFORE INSERT ON v2_ops_job_workers WHEN NEW.id LIKE 'WS-RETURN-%' AND (lower(NEW.worker_id) GLOB 'da-*' OR lower(NEW.worker_id) GLOB 'daf-*' OR lower(NEW.worker_id) GLOB 'emp-*') BEGIN
- SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM ck_attendance_days d JOIN ck_attendance_people p ON p.id=d.person_id WHERE ${workerBadgeMatch('d.worker_id','NEW.worker_id')} AND d.day=date(NEW.joined_at,'+9 hours') AND p.enabled=1 AND d.signed_out='' AND ${activeAttendanceSQL('d')} AND d.signed_in<=NEW.joined_at AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks r WHERE r.attendance_id=d.id AND r.ended_at='')) THEN RAISE(ABORT,'borrow_return_attendance_changed') END; END`
-];
+ SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM ${table} d JOIN ck_attendance_people p ON p.id=d.person_id WHERE ${workerBadgeMatch('d.worker_id','NEW.worker_id')} AND ${at('NEW.joined_at')} AND p.enabled=1 AND d.signed_out='' AND ${activeAttendanceSQL('d')} AND d.signed_in<=NEW.joined_at ${returns?"AND (COALESCE((SELECT enabled FROM ck_attendance_return_config WHERE id=1),0)=0 OR EXISTS(SELECT 1 FROM ck_crew_borrows loan WHERE 'WS-RETURN-'||loan.id=NEW.id AND julianday(loan.borrowed_at)>=julianday(d.signed_in)))":''} AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks r WHERE r.attendance_id=d.id AND r.ended_at='')) THEN RAISE(ABORT,'borrow_return_attendance_changed') END; END`
+];}
+const CREW_ATTENDANCE_SCHEMA=crewAttendanceSchema();
 export async function ensureCrewBorrow(e){
  if(!crewBorrowEnabled(e))return;
  await ensureSchema(e.DB,'crew-borrow-v2-daily-alias',()=>e.DB.batch(['DROP TRIGGER IF EXISTS ck_crew_source_guard','DROP TRIGGER IF EXISTS ck_crew_one_clock','DROP TRIGGER IF EXISTS ck_crew_return_guard',...CREW_BORROW_SCHEMA].map(s=>e.DB.prepare(s))));
- if(e.SOP_ATTENDANCE_ENABLED==='true')await ensureSchema(e.DB,'crew-borrow-attendance-v3-daily-alias',()=>e.DB.batch(['DROP TRIGGER IF EXISTS ck_crew_source_attendance','DROP TRIGGER IF EXISTS ck_crew_return_attendance',...CREW_ATTENDANCE_SCHEMA].map(s=>e.DB.prepare(s))));
+ if(e.SOP_ATTENDANCE_ENABLED==='true')await ensureSchema(e.DB,'crew-borrow-attendance-v4-children',async()=>{const current=!!await q(e,"SELECT name FROM sqlite_master WHERE type='view' AND name='ck_attendance_current_days'").first();return e.DB.batch(['DROP TRIGGER IF EXISTS ck_crew_source_attendance','DROP TRIGGER IF EXISTS ck_crew_return_attendance',...crewAttendanceSchema(current)].map(s=>e.DB.prepare(s)));});
 }
 const hasLoanTable=async e=>!!await q(e,"SELECT name FROM sqlite_master WHERE type='table' AND name='ck_crew_borrows'").first();
 export function borrowablePayload(p={}){return ['v2_unload_job_start','v2_unplanned_unload_start','v2_outbound_load_start'].includes(p.action)||p.action==='v2_ops_job_start'&&p.job_type==='load_outbound'&&!p.related_doc_id;}
@@ -50,7 +53,7 @@ async function eligibility(e,id,t){
  if(!isAttendanceBadge(id))return '';
  if(e.SOP_ATTENDANCE_ENABLED!=='true')return '须先启用当天考勤核验';
  await resolveDailyBadge(e,id,{day:kstDay(t)});
- const d=await q(e,`SELECT d.*,p.enabled FROM ck_attendance_days d JOIN ck_attendance_people p ON p.id=d.person_id WHERE ${workerBadgeMatch('d.worker_id','?')} AND d.day=? AND `+activeAttendanceSQL('d'),id,kstDay(t)).first();
+ const d=await q(e,`SELECT d.*,p.enabled FROM ${attendanceSource(e)} d JOIN ck_attendance_people p ON p.id=d.person_id WHERE ${workerBadgeMatch('d.worker_id','?')} AND ${attendanceDaySQL(e,'d','?')} AND ${attendanceCurrentSQL(e,'d')} AND `+activeAttendanceSQL('d'),id,kstDay(t)).first();
  if(!d||!d.enabled)return '人员已停用或没有韩国当天签到';if(d.signed_out)return '人员已签退';
  if(await q(e,"SELECT id FROM ck_attendance_breaks WHERE attendance_id=? AND ended_at=''",d.id).first())return '人员正在休息';return '';
 }
@@ -65,8 +68,8 @@ export async function crewAvailability(e,b){
  if(segments.length!==1||!active.includes(segments[0].status))return {ok:true,worker_id:id,can_borrow:false,reason:'原计时状态异常，请由负责人先核实'};
  const s=segments[0],record=await q(e,"SELECT * FROM sop_records WHERE id=? AND kind IN ('task','dispatch')",s.job_id).first();
  if(isAttendanceBadge(id)){
-  const day=await q(e,`SELECT signed_in FROM ck_attendance_days WHERE ${workerBadgeMatch('worker_id','?')} AND day=?`,id,kstDay(t)).first();
-  if(kstDay(s.joined_at)!==kstDay(t)||s.joined_at<day.signed_in)return {ok:true,worker_id:id,can_borrow:false,reason:'原计时属于旧班次，请负责人先核实结束'};
+  const day=await q(e,`SELECT d.signed_in FROM ${attendanceSource(e)} d WHERE ${workerBadgeMatch('d.worker_id','?')} AND ${attendanceDaySQL(e,'d','?')}`,id,kstDay(t)).first();
+  if(!day||s.joined_at<day.signed_in)return {ok:true,worker_id:id,can_borrow:false,reason:'原计时属于旧班次，请负责人先核实结束'};
  }
  if(record?.kind==='task'&&parse(record.state).status!=='working')return {ok:true,worker_id:id,can_borrow:false,reason:'原作业计划当前不能借调'};
  const [display]=await jobNumbers(e,[{id:s.job_id}]);

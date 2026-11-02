@@ -1,3 +1,4 @@
+import {attendanceReturnDatabase,guardAttendanceSession} from './attendance-context.js';
 import {ensureAutoDispatchTime} from './dispatch-time-runtime.js';
 import {handleOfficeDuty,protectOfficeDuty} from './office-duty.js';
 import {materialFileResponse} from './material-file-response.js';
@@ -43,7 +44,7 @@ import {handleCourier,validateCourierLines,courierPlanStatements,courierProgress
 import {ensureCourierClaims,courierCancellationAudit} from './courier-claims.js';
 import { inboundFlowEnabled, inboundCode, inboundCodes, inboundReferenceValue, inboundCodeProgress, selectInboundReference, validateInboundCode, resolveInboundPlan, putawayTaskBiz, completeUnloadedDispositions, bindInboundCode, inboundLabels, inboundReferenceData, departmentCodes, putawayClasses } from './inbound-flow.js';
 import { handleAttendance, guardAttendance, ensureAttendance, attendanceEnabled } from './attendance.js';
-import {ensureAttendanceReturns} from './attendance-return.js';
+import {ensureAttendanceReturns,ensureAttendanceReturnAdmission} from './attendance-return.js';
 import {attendanceReturnEnabled} from './attendance-return-schema.js';
 import {runSystemCutoff,guardSystemCutoffMutation,correctSystemCutoff,forcedClock} from './system-cutoff.js';
 import {normalizeDailyBadgeRequest,workerBadgeMatch,canonicalWorkerSQL,resolveDailyBadge} from './daily-badge-identity.js';
@@ -12836,8 +12837,10 @@ export default {
       await ensureInboundDocuments(env);
       await ensureBatchMaterialState(env);
       await ensureReferenceHistory(env);
-      env={...env,DB:await ensureAutoDispatchTime(env)};
+      env={...env,DB:await attendanceReturnDatabase(env)};
       if(attendanceReturnEnabled(env)){await ensureAttendance(env);await ensureAttendanceReturns(env);}
+      env={...env,DB:await ensureAutoDispatchTime(env)};
+      if(attendanceReturnEnabled(env)){await ensureAttendanceReturns(env);await ensureAttendanceReturnAdmission(env);}
       await runSystemCutoff(env);
     } catch (e) {
       return json({ ok: false, error: "migration failed: " + e.message }, 500);
@@ -12890,6 +12893,7 @@ export default {
     // Staging reuses the original pages and routes under one personal session.
     // The principal is supplied only by a verified HttpOnly cookie, never request JSON.
     env = { ...env, SOP_REQUEST_USER: await sessionUser(request, env) };
+    guardAttendanceSession(env);
     if(attendanceEnabled(env)&&env.SOP_REQUEST_USER?.scope==='field'){try{await ensureAttendance(env);await resolveDailyBadge(env,env.SOP_REQUEST_USER.badge,{day:kstToday()});}catch(e){return json({ok:false,error:e.message},409);}}
     if(accessEnabled(env)&&env.SOP_REQUEST_USER?.scope==='field'&&isMultipart){
       const doc=formData.get('related_doc_type'),id=formData.get('related_doc_id');

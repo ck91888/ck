@@ -1,3 +1,4 @@
+import {attendanceSource,attendanceDaySQL,attendanceCurrentSQL} from './attendance-context.js';
 import {ensureSchema} from './schema-ready.js';
 import {kstDay} from './attendance-time.js';
 import {dispatchTransferTarget} from './daily-dispatch-permissions.js';
@@ -54,7 +55,7 @@ function caller(e){
 }
 async function onDuty(e,u){
  if(!u.attendance_id)fail('请先完成当天签到');
- const row=await q(e,"SELECT 1 FROM ck_attendance_days d WHERE d.id=? AND d.day=? AND d.signed_out='' AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at='')",u.attendance_id,day()).first();
+ const row=await q(e,`SELECT 1 FROM ${attendanceSource(e)} d WHERE d.id=? AND ${attendanceDaySQL(e,'d','?')} AND ${attendanceCurrentSQL(e,'d')} AND d.signed_out='' AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at='')`,u.attendance_id,day()).first();
  if(!row)fail('派审员须已签到且不在休息中');
 }
 const pub=p=>({id:p.id,person_lo:p.person_lo,person_hi:p.person_hi,invited_by:p.invited_by,invitee_id:p.invitee_id,status:p.status,day:p.day,created_at:p.created_at,accepted_at:p.accepted_at,ended_at:p.ended_at,ended_by:p.ended_by});

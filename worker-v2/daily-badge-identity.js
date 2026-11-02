@@ -1,3 +1,4 @@
+import {attendanceSource,attendanceDaySQL,attendanceCutoffSQL} from './attendance-context.js';
 import {canonicalDailyBadge,isSystemDailyBadge} from '../shared/badge-identity.js';
 import {ensureSchema} from './schema-ready.js';
 const q=(env,sql,...args)=>env.DB.prepare(sql).bind(...args);
@@ -18,7 +19,7 @@ export async function resolveDailyBadge(env,value,{day}={}){
  const people=await rows(env,`SELECT * FROM ck_attendance_people p WHERE ${workerBadgeMatch('p.badge_id','?')}`,id);
  if(people.length>1||people.length===1&&people[0].kind!=='daily')conflict();
  let attendance=null;
- if(day){const days=await rows(env,`SELECT * FROM ck_attendance_days d WHERE d.day=? AND ${workerBadgeMatch('d.worker_id','?')}`,day,id);
+ if(day){const days=await rows(env,`SELECT * FROM ${attendanceSource(env)} d WHERE ${attendanceDaySQL(env,'d','?')} AND ${workerBadgeMatch('d.worker_id','?')}`,day,id);
   if(days.length>1||days.length===1&&(!people[0]||days[0].person_id!==people[0].id))conflict();attendance=days[0]||null;}
  return {id,person:people[0]||null,attendance};
 }
@@ -48,13 +49,16 @@ export async function dailyIdentityMap(env,records){
 }
 
 const managed=x=>`(lower(${x}) GLOB 'da-*' OR lower(${x}) GLOB 'daf-*' OR lower(${x}) GLOB 'emp-*')`;
-const validAttendance=`SELECT d.id FROM ck_attendance_days d JOIN ck_attendance_people p ON p.id=d.person_id
+export function attendanceIdentitySchema(returns=false){
+const table=returns?'ck_attendance_current_days':'ck_attendance_days';
+const dayMatch=returns?`((COALESCE((SELECT enabled FROM ck_attendance_return_config WHERE id=1),0)=0 AND d.day=date(NEW.joined_at,'+9 hours')) OR ((SELECT enabled FROM ck_attendance_return_config WHERE id=1)=1 AND d.span_status='open' AND julianday(${attendanceCutoffSQL('d.signed_in')})>julianday(NEW.joined_at)))`:"d.day=date(NEW.joined_at,'+9 hours')";
+const validAttendance=`SELECT d.id FROM ${table} d JOIN ck_attendance_people p ON p.id=d.person_id
  WHERE ${workerBadgeMatch('d.worker_id','NEW.worker_id')} AND ${workerBadgeMatch('p.badge_id','d.worker_id')}
- AND d.day=date(NEW.joined_at,'+9 hours') AND d.signed_out='' AND julianday(d.signed_in)<=julianday(NEW.joined_at)
+ AND ${dayMatch} AND d.signed_out='' AND julianday(d.signed_in)<=julianday(NEW.joined_at)
  AND p.enabled=1 AND (NOT (${dailySQL('NEW.worker_id')}) OR p.kind='daily') AND (lower(NEW.worker_id) NOT GLOB 'emp-*' OR EXISTS(SELECT 1 FROM ck_employee_profiles e WHERE e.person_id=p.id))
  AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at='')
  AND NOT EXISTS(SELECT 1 FROM ck_attendance_management m WHERE m.attendance_id=d.id AND m.voided_at!='')`;
-export const DAILY_BADGE_IDENTITY_SCHEMA=[
+return [
  'DROP TRIGGER IF EXISTS ck_attendance_guard_join',
  'DROP TRIGGER IF EXISTS ck_daily_badge_join_insert','DROP TRIGGER IF EXISTS ck_daily_badge_join_update',
  ...['INSERT','UPDATE'].map(operation=>`CREATE TRIGGER IF NOT EXISTS ck_daily_badge_join_${operation.toLowerCase()} BEFORE ${operation} ON v2_ops_job_workers
@@ -63,9 +67,11 @@ export const DAILY_BADGE_IDENTITY_SCHEMA=[
  SELECT CASE WHEN lower(NEW.worker_id) GLOB 'emp-*' AND NOT EXISTS(SELECT 1 FROM ck_attendance_people p JOIN ck_employee_profiles e ON e.person_id=p.id WHERE p.badge_id=NEW.worker_id AND p.enabled=1) THEN RAISE(ABORT,'Employee disabled or unregistered') END;
  SELECT CASE WHEN lower(NEW.worker_id) GLOB 'daf-*' AND NOT EXISTS(SELECT 1 FROM ck_attendance_people p WHERE p.badge_id=NEW.worker_id AND p.kind='permanent' AND p.enabled=1) THEN RAISE(ABORT,'Permanent badge disabled or unregistered') END;
  SELECT CASE WHEN lower(NEW.worker_id) GLOB 'emp-*' AND NOT EXISTS(${validAttendance}) THEN RAISE(ABORT,'Employee attendance required: signed out, resting, voided, or not signed in') END;
- SELECT CASE WHEN (SELECT COUNT(*) FROM ck_attendance_people p WHERE ${workerBadgeMatch('p.badge_id','NEW.worker_id')})!=1 OR (SELECT COUNT(*) FROM ck_attendance_days d WHERE d.day=date(NEW.joined_at,'+9 hours') AND ${workerBadgeMatch('d.worker_id','NEW.worker_id')})!=1 THEN RAISE(ABORT,'Attendance badge identity missing or ambiguous') END;
+ SELECT CASE WHEN (SELECT COUNT(*) FROM ck_attendance_people p WHERE ${workerBadgeMatch('p.badge_id','NEW.worker_id')})!=1 OR (SELECT COUNT(*) FROM ${table} d WHERE ${dayMatch} AND ${workerBadgeMatch('d.worker_id','NEW.worker_id')})!=1 THEN RAISE(ABORT,'Attendance badge identity missing or ambiguous') END;
  SELECT CASE WHEN NOT EXISTS(${validAttendance}) THEN RAISE(ABORT,'Attendance required: signed out, resting, voided, or not signed in') END;
  SELECT CASE WHEN EXISTS(SELECT 1 FROM v2_ops_job_workers w WHERE w.left_at='' AND w.id!=NEW.id AND ${workerBadgeMatch('w.worker_id','NEW.worker_id')}) THEN RAISE(ABORT,'Attendance worker already assigned') END;
  END`)
 ];
-export async function ensureDailyBadgeIdentity(env){if(enabled(env))await ensureSchema(env.DB,'daily-badge-identity-v2',()=>env.DB.batch(DAILY_BADGE_IDENTITY_SCHEMA.map(sql=>q(env,sql))));}
+}
+export const DAILY_BADGE_IDENTITY_SCHEMA=attendanceIdentitySchema();
+export async function ensureDailyBadgeIdentity(env){if(enabled(env))await ensureSchema(env.DB,'daily-badge-identity-bootstrap-v3',async()=>{const current=!!await q(env,"SELECT name FROM sqlite_master WHERE type='view' AND name='ck_attendance_current_days'").first();await env.DB.batch([...(current?[q(env,'DROP TRIGGER IF EXISTS ck_employee_guard_join')]:[]),...attendanceIdentitySchema(current).map(sql=>q(env,sql))]);});}

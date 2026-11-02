@@ -1,4 +1,7 @@
+import {ensureCrewBorrow,crewAttendanceSchema} from './crew-borrow.js';
 // Real attendance facts and append-only audit; approval is not payroll settlement.
+import {attendanceIdentitySchema} from './daily-badge-identity.js';
+import {ensureAttendanceCurrentView} from './attendance-context.js';
 import {ensureSchema} from './schema-ready.js';
 import {attendanceReturnEnabled,ensureAttendanceReturnSchema} from './attendance-return-schema.js';
 import {nextAttendanceCutoff} from './attendance-return-time.js';
@@ -17,7 +20,7 @@ const legacySelect=(d,t)=>`'ATS-LEGACY-'||${d}.id,${d}.id,${stable(d+'.person_id
 const legacyColumns='id,attendance_id,person_id,source_person_id,badge_id,shift_id,kind,started_at,ended_at,status,provisional_end_at,overtime_state,version,started_by,ended_by,created_at,ordinal';
 export async function ensureAttendanceReturns(e){
  if(!attendanceReturnEnabled(e))return false;
- await ensureAttendanceReturnSchema(e);await ensureDailyDispatch(e);
+ await ensureAttendanceReturnSchema(e);await ensureDailyDispatch(e);await ensureAttendanceCurrentView(e);
  await ensureSchema(e.DB,'attendance-return-runtime-v1',()=>{const at="'"+stamp()+"'";return e.DB.batch([
   q(e,"CREATE INDEX IF NOT EXISTS ck_attendance_return_open_parents ON ck_attendance_days(person_id,signed_in) WHERE signed_out=''"),
   q(e,`INSERT OR IGNORE INTO ck_attendance_spans(${legacyColumns}) SELECT ${legacySelect('d',at)} FROM ck_attendance_days d WHERE NOT EXISTS(SELECT 1 FROM ck_attendance_spans s WHERE s.attendance_id=d.id)`),
@@ -28,6 +31,7 @@ export async function ensureAttendanceReturns(e){
   ...['INSERT','UPDATE'].map(op=>q(e,`CREATE TRIGGER IF NOT EXISTS ck_attendance_return_void_state_${op.toLowerCase()} AFTER ${op} ON ck_attendance_management WHEN NEW.voided_at<>'' BEGIN UPDATE ck_attendance_spans SET status='pending_review',version=version+1 WHERE attendance_id=NEW.attendance_id AND status='open'; END`))
  ]);});return true;
 }
+export async function ensureAttendanceReturnAdmission(e){if(!attendanceReturnEnabled(e))return;await ensureCrewBorrow(e);await ensureSchema(e.DB,'attendance-return-admission-v2',()=>e.DB.batch([q(e,'DROP TRIGGER IF EXISTS ck_employee_guard_join'),...attendanceIdentitySchema(true).map(sql=>q(e,sql)),q(e,'DROP TRIGGER IF EXISTS ck_crew_source_attendance'),q(e,'DROP TRIGGER IF EXISTS ck_crew_return_attendance'),...crewAttendanceSchema(true).map(sql=>q(e,sql))]));}
 export const publicAttendanceSpan=s=>({id:s.id,attendanceId:s.attendance_id,personId:s.person_id,badgeId:s.badge_id,shiftId:s.shift_id,kind:s.kind,start:s.started_at,end:s.ended_at,status:s.status,provisionalEnd:s.provisional_end_at,overtimeState:s.overtime_state,version:s.version,ordinal:s.ordinal,resumeAuthorized:!!s.resume_authorized,identityVerifiedBy:s.identity_verified_by||''});
 export async function attendanceSpans(e,id){return rows(e,'SELECT * FROM ck_attendance_spans WHERE attendance_id=? ORDER BY ordinal,started_at,id',id);}
 export async function activeAttendanceSpan(e,id,at=stamp()){
@@ -59,27 +63,30 @@ async function save(e,b,u,x,{action,span,beforeSpan=x.last,sql=[],result,at=stam
  try{await e.DB.batch(statements);}catch(error){const old=await replay(e,b,u);if(old)return old;fail('资料已变化或保存未确认，请保留原请求后刷新核对');}return response;
 }
 export async function handleAttendanceReturn(b,e,{publicDay,closePerson}={}){
- if(!attendanceReturnEnabled(e))return null;const names=new Set(['sop_attendance_return_preview','sop_attendance_return_confirm','sop_attendance_return_identity_verify','sop_attendance_span_correct','sop_attendance_overtime_decide','sop_attendance_checkout']);if(!names.has(b.action))return null;
+ if(!attendanceReturnEnabled(e))return null;const names=new Set(['sop_attendance_correct','sop_attendance_checkin','sop_attendance_return_preview','sop_attendance_return_confirm','sop_attendance_return_identity_verify','sop_attendance_span_correct','sop_attendance_overtime_decide','sop_attendance_checkout']);if(!names.has(b.action))return null;
  await ensureAttendanceReturns(e);const u=e.SOP_REQUEST_USER;if(!u||!['manager','dispatcher','kiosk'].includes(u.role)||u.scope==='field')fail('请在原签到点扫码，或由有权限的办公室人员办理');
- const at=stamp(),manager=['sop_attendance_return_identity_verify','sop_attendance_span_correct','sop_attendance_overtime_decide'].includes(b.action);if(manager&&(u.scope!=='office'||u.role!=='manager'))fail('仅主管可核实更正、身份或加班属性');
- const cached=b.action==='sop_attendance_return_preview'?null:await replay(e,b,u);if(cached)return cached;
- const x=await resolve(e,b,{allowDisabled:b.action==='sop_attendance_checkout',allowStoredBadge:manager||b.action==='sop_attendance_checkout'});if(b.action==='sop_attendance_overtime_decide'&&b.span_id){const target=x.spans.find(s=>s.id===b.span_id);if(!target)fail('返岗子段不属于该人日记录');x.last=target;}const active=await activeAttendanceSpan(e,x.parent.id,at),mode=modeFor(x.last,at),proof=await identityProof(e,x,at);
+ const at=stamp(),manager=['sop_attendance_correct','sop_attendance_return_identity_verify','sop_attendance_span_correct','sop_attendance_overtime_decide'].includes(b.action);if(manager&&(u.scope!=='office'||u.role!=='manager'))fail('仅主管可核实更正、身份或加班属性');
+ if(b.action==='sop_attendance_checkin'&&!b.badge)return null;
+ const cached=['sop_attendance_return_preview','sop_attendance_checkin'].includes(b.action)?null:await replay(e,b,u);if(cached)return cached;
+ let x;try{x=await resolve(e,b,{allowDisabled:b.action==='sop_attendance_checkout',allowStoredBadge:manager||b.action==='sop_attendance_checkout'});}catch(error){if(b.action==='sop_attendance_checkin'&&/没有可核对的原签到/.test(error.message))return null;throw error;}if(b.action==='sop_attendance_overtime_decide'&&b.span_id){const target=x.spans.find(s=>s.id===b.span_id);if(!target)fail('返岗子段不属于该人日记录');x.last=target;}const active=await activeAttendanceSpan(e,x.parent.id,at),mode=modeFor(x.last,at),proof=await identityProof(e,x,at);
+ if(b.action==='sop_attendance_checkin'){if(!active&&!mode)return null;return {ok:true,existing:!!active,record:publicDay(x.parent),activeSpan:active?publicAttendanceSpan(active):null,returnRequired:!active,mode};}
  if(b.action==='sop_attendance_return_preview')return {ok:true,record:publicDay(x.parent),spans:x.spans.map(publicAttendanceSpan),activeSpan:active?publicAttendanceSpan(active):null,returnRequired:!active&&!!mode,normalCheckinRequired:!active&&!mode&&!!x.last.ended_at,mode,version:x.parent.version,span_id:x.last.id,span_version:x.last.version,requiresIdentityVerification:expiredBadge(x.badge,at)&&!proof,requiresCutoffConfirmation:mode==='continuation'};
- if(b.action!=='sop_attendance_checkout'||b.version!==undefined||b.span_id!==undefined)version(b,x);
+ if(b.action==='sop_attendance_correct'){if(x.spans.length===1&&b.outAt)return null;if(b.outAt)fail('多段出勤请逐段核实更正，不能覆盖首进末出');if(!x.last.ended_at)fail('最后一段尚未签退，请核对原记录');if(Number(b.version)!==x.parent.version)fail('出勤记录已更新，请重新扫码核对');}
+ else if(b.action!=='sop_attendance_checkout'||b.version!==undefined||b.span_id!==undefined)version(b,x);
  if(b.action==='sop_attendance_return_confirm'){
   if(b.confirmed!==true)fail('请先扫码核对本人并确认返岗');if(active)fail('当前已有开放出勤段，请刷新');if(!mode)fail('旧出勤仍开放或状态待核实，不能另开');if(mode==='continuation'&&b.confirm_cutoff!==true)fail('旧段未签退且已到04:00保护，请明确确认新段从现在开始');if(expiredBadge(x.badge,at)&&!proof)fail('临时牌已过期，请主管先核验本人身份');
   if(await q(e,"SELECT id FROM ck_attendance_spans WHERE person_id=? AND status='open' AND ended_at='' AND id<>?",x.personId,x.last.id).first())fail('该人员仍有其它开放出勤段，请主管核实');if(await q(e,"SELECT id FROM ck_attendance_breaks WHERE attendance_id=? AND ended_at=''",x.parent.id).first())fail('原休息记录尚未核实关闭');
   const s={id:uid('ATS'),attendance_id:x.parent.id,person_id:x.personId,source_person_id:x.person.id,badge_id:x.badge,shift_id:x.last.shift_id,kind:mode,started_at:at,ended_at:'',status:'open',provisional_end_at:'',overtime_state:mode==='return'?'pending':'none',version:1,started_by:u.id,ended_by:'',created_at:at,ordinal:x.last.ordinal+1,resume_authorized:0,resume_authorized_by:'',resume_authorized_at:'',identity_verified_by:proof?.verified_by||'',identity_verified_at:proof?.verified_at||''},sql=[];
   if(mode==='continuation')sql.push(q(e,"UPDATE ck_attendance_spans SET status='pending_review',provisional_end_at=?,version=version+1 WHERE id=? AND version=?",new Date(nextAttendanceCutoff(x.last.started_at)).toISOString(),x.last.id,x.last.version));
   if(mode==='correction_resume')sql.push(q(e,"UPDATE ck_attendance_spans SET resume_authorized=0,version=version+1 WHERE id=? AND version=?",x.last.id,x.last.version));
-  if(proof)sql.push(q(e,"UPDATE ck_attendance_return_identities SET used_by=? WHERE request_id=? AND used_by=''",b.client_req_id,proof.request_id));sql.push(insertSpan(e,s));
+  if(proof)sql.push(q(e,"UPDATE ck_attendance_return_identities SET used_by=? WHERE request_id=? AND used_by=''",b.client_req_id,proof.request_id));sql.push(q(e,"DELETE FROM ck_access_sessions WHERE scope='field' AND attendance_id=?",x.parent.id),insertSpan(e,s));
   return save(e,b,u,x,{action:'return',span:s,sql,at,result:{record:{...publicDay(x.parent),version:x.parent.version+1},span:publicAttendanceSpan(s),returned:true,resumeWork:false,resumeDispatch:false}});
  }
  if(b.action==='sop_attendance_return_identity_verify'){
   reason(b);if(!expiredBadge(x.badge,at))fail('该原工牌未过期，无需重复核验');const sql=[q(e,'INSERT INTO ck_attendance_return_identities VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',b.client_req_id,x.parent.id,x.personId,x.badge,kstDay(at),new Date(nextAttendanceCutoff(at)).toISOString(),x.parent.version+1,u.id,u.name||u.id,at,b.reason,'')];return save(e,b,u,x,{action:'identity_verify',span:x.last,sql,at,result:{verified:true,version:x.parent.version+1,span_id:x.last.id,span_version:x.last.version}});
  }
- if(b.action==='sop_attendance_span_correct'){
-  reason(b);if(b.mode!=='mistaken_checkout'||!x.last.ended_at)fail('误签退核实须选择已签退的最后一段');const s={...x.last,resume_authorized:1,resume_authorized_by:u.id,resume_authorized_at:at,version:x.last.version+1},sql=[q(e,'UPDATE ck_attendance_spans SET resume_authorized=1,resume_authorized_by=?,resume_authorized_at=?,version=version+1 WHERE id=? AND version=?',u.id,at,s.id,x.last.version)];return save(e,b,u,x,{action:'mistaken_checkout',span:s,sql,at,result:{span:publicAttendanceSpan(s),resumeRequired:true,version:x.parent.version+1}});
+ if(b.action==='sop_attendance_span_correct'||b.action==='sop_attendance_correct'){
+  reason(b);if(b.action!=='sop_attendance_correct'&&b.mode!=='mistaken_checkout'||!x.last.ended_at)fail('误签退核实须选择已签退的最后一段');const s={...x.last,resume_authorized:1,resume_authorized_by:u.id,resume_authorized_at:at,version:x.last.version+1},sql=[q(e,'UPDATE ck_attendance_spans SET resume_authorized=1,resume_authorized_by=?,resume_authorized_at=?,version=version+1 WHERE id=? AND version=?',u.id,at,s.id,x.last.version)];return save(e,b,u,x,{action:'mistaken_checkout',span:s,sql,at,result:{record:{...publicDay(x.parent),version:x.parent.version+1},span:publicAttendanceSpan(s),resumeRequired:true,version:x.parent.version+1}});
  }
  if(b.action==='sop_attendance_overtime_decide'){
   reason(b);if(x.last.kind!=='return'||!['approved','denied'].includes(b.decision))fail('请选择返岗段并明确加班属性');const s={...x.last,overtime_state:b.decision,version:x.last.version+1};return save(e,b,u,x,{action:'overtime_decide',span:s,at,sql:[q(e,'UPDATE ck_attendance_spans SET overtime_state=?,version=version+1 WHERE id=? AND version=?',b.decision,s.id,x.last.version)],result:{span:publicAttendanceSpan(s),version:x.parent.version+1,payrollSettled:false}});

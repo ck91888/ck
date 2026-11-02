@@ -1,3 +1,4 @@
+import {attendanceSource} from './attendance-context.js';
 export const employeeDepartments={bulk:'大货 / 대량',direct_ship:'代发 / 직배송',import:'进口 / 수입',order_processing:'订单处理 / 주문 처리',customer_service:'客服 / 고객 서비스',office:'办公室 / 사무실',management:'管理 / 관리',other:'其他 / 기타'};
 export const EMPLOYEE_SCHEMA=[
  `CREATE TABLE IF NOT EXISTS ck_employee_profiles(person_id TEXT PRIMARY KEY,employee_no TEXT NOT NULL UNIQUE,department TEXT NOT NULL,version INTEGER NOT NULL DEFAULT 1)`,
@@ -41,7 +42,7 @@ export async function employeeAction(b,env,h){
  const before=await q(env,select+' WHERE p.id=?',String(b.id||'')).first();if(!before)fail('职员不存在 / 직원 정보가 없습니다');
  if(Number(b.version)!==before.version)fail('资料已更新，请刷新后重试 / 새로고침 후 다시 시도하세요');
  if(typeof b.enabled!=='boolean')fail('在职状态无效');
- if(!b.enabled&&(await q(env,"SELECT id FROM ck_attendance_days WHERE person_id=? AND signed_out='' LIMIT 1",before.id).first()||await q(env,"SELECT id FROM v2_ops_job_workers WHERE worker_id=? AND left_at='' LIMIT 1",before.badge_id).first()))fail('该职员尚未签退或仍在任务中，请先核实结束 / 출퇴근·작업 상태를 먼저 확인하세요');
+ if(!b.enabled&&(await q(env,`SELECT id FROM ${attendanceSource(env)} WHERE person_id=? AND signed_out='' LIMIT 1`,before.id).first()||await q(env,"SELECT id FROM v2_ops_job_workers WHERE worker_id=? AND left_at='' LIMIT 1",before.badge_id).first()))fail('该职员尚未签退或仍在任务中，请先核实结束 / 출퇴근·작업 상태를 먼저 확인하세요');
  const after={...before,name,agency:department,department,enabled:b.enabled?1:0,version:before.version+1};
-  return commit(env,b,u,before,after,[q(env,"UPDATE ck_employee_profiles SET department=?,version=CASE WHEN version=? AND (?=1 OR (NOT EXISTS(SELECT 1 FROM ck_attendance_days WHERE person_id=? AND signed_out='') AND NOT EXISTS(SELECT 1 FROM v2_ops_job_workers WHERE worker_id=? AND left_at=''))) THEN ? ELSE NULL END WHERE person_id=?",department,before.version,after.enabled,before.id,before.badge_id,after.version,before.id),q(env,'UPDATE ck_attendance_people SET name=?,agency=?,enabled=? WHERE id=?',name,department,after.enabled,before.id)],{ok:true,person:person(after)});
+  return commit(env,b,u,before,after,[q(env,`UPDATE ck_employee_profiles SET department=?,version=CASE WHEN version=? AND (?=1 OR (NOT EXISTS(SELECT 1 FROM ${attendanceSource(env)} WHERE person_id=? AND signed_out='') AND NOT EXISTS(SELECT 1 FROM v2_ops_job_workers WHERE worker_id=? AND left_at=''))) THEN ? ELSE NULL END WHERE person_id=?`,department,before.version,after.enabled,before.id,before.badge_id,after.version,before.id),q(env,'UPDATE ck_attendance_people SET name=?,agency=?,enabled=? WHERE id=?',name,department,after.enabled,before.id)],{ok:true,person:person(after)});
 }
