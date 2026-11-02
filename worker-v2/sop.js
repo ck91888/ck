@@ -529,8 +529,8 @@ export async function handleSop(b,env) {
     if(tasks.length&&await stmt(env,"SELECT 1 FROM v2_ops_jobs WHERE id IN (SELECT value FROM json_each(?)) AND status!='cancelled' LIMIT 1",taskIds).first())fail('已有现场任务，不能作废作业计划');
     if(tasks.length&&await stmt(env,"SELECT 1 FROM v2_ops_job_workers WHERE job_id IN (SELECT value FROM json_each(?)) LIMIT 1",taskIds).first())fail('现场已经开始过作业，不能作废');
     if(tasks.length&&await stmt(env,"SELECT 1 FROM v2_ops_job_results WHERE job_id IN (SELECT value FROM json_each(?)) LIMIT 1",taskIds).first())fail('已有作业成果，不能作废');
-    const linkIds=JSON.stringify([...new Set((d.links||[]).map(l=>l.outbound_id).filter(Boolean))]);
-    if(JSON.parse(linkIds).length&&await stmt(env,"SELECT 1 FROM v2_outbound_orders WHERE id IN (SELECT value FROM json_each(?)) AND status!='cancelled' LIMIT 1",linkIds).first())fail('请先取消此计划下尚未作废的出库预约，再作废作业计划');
+    const outboundIds=JSON.stringify([...new Set([...(d.links||[]).map(l=>l.outbound_id),...(d.source_type==='outbound'&&d.source_id?[d.source_id]:[])].filter(Boolean))]);
+    if(JSON.parse(outboundIds).length&&await stmt(env,"SELECT 1 FROM v2_outbound_orders WHERE id IN (SELECT value FROM json_each(?)) AND status!='cancelled' LIMIT 1",outboundIds).first())fail('请先取消此计划下尚未作废的出库预约，再作废作业计划');
     d.status='cancelled';d.cancel_reason=required(b.reason,'作废原因');d.cancelled_by=u.name;d.cancelled_by_id=u.id;d.cancelled_at=t;
    } else if(b.action==='sop_work_material_remove') {
     if(!workChainEnabled(env))fail('功能未启用');if(['closed','cancelled'].includes(d.status))fail('作业已关闭');
@@ -744,7 +744,8 @@ async function needGroups(env,u,b){
  if(b.source_id)items=items.filter(g=>g.source_id===b.source_id&&(!b.source_type||g.source_type===b.source_type));
  if(b.group_key)items=items.filter(g=>g.key===b.group_key);
  const history=String(b.status||'')==='cancelled';
- if(!history){for(const g of items)g.items=g.items.filter(x=>!x.cancelled_by);items=items.filter(g=>g.items.length);}
+ for(const g of items)g.items=g.items.filter(x=>history?x.cancelled_by||x.status==='cancelled':!x.cancelled_by);
+ items=items.filter(g=>g.items.length);
  const rich=workPlanListEnabled(env,u);let offset=Math.max(0,Math.floor(Number(b.offset)||0)),total=items.length;const limit=rich?Math.min(100,Math.max(1,Math.floor(Number(b.limit)||50))):50;if(!rich)items=items.slice(offset,offset+limit);
  const ibIds=[...new Set(items.filter(g=>g.source_type==='inbound'&&g.source_id).map(g=>g.source_id))];
  const obIds=[...new Set(items.flatMap(g=>[...(g.source_type==='outbound'&&g.source_id?[g.source_id]:[]),...(rich?g.items.flatMap(n=>(n.links||[]).map(l=>l.outbound_id)):[])]))];
@@ -762,7 +763,7 @@ async function needGroups(env,u,b){
   g.print_status=workNeedPrintSummary(g.items);
   g.status=!active.length?'cancelled':g.completed===active.length?'completed':active.some(x=>x.status!=='pending')?'working':'pending';
  }
- if(rich){await workPlanFacts(env,items,plans,outbounds);items=filterWorkPlans(items,history?{...b,status:''}:b);if(history){items=items.filter(g=>g.status==='cancelled'||g.items.some(x=>x.cancelled_by));for(const g of items)if(g.status!=='cancelled')g.items=g.items.filter(x=>x.cancelled_by);}total=items.length;offset=Math.min(offset,Math.max(0,(Math.ceil(total/limit)-1)*limit));items=items.slice(offset,offset+limit);}
+ if(rich){await workPlanFacts(env,items,plans,outbounds);items=filterWorkPlans(items,history?{...b,status:''}:b);total=items.length;offset=Math.min(offset,Math.max(0,(Math.ceil(total/limit)-1)*limit));items=items.slice(offset,offset+limit);}
  return {ok:true,items,total,offset,limit,more:offset+limit<total};
 }
 async function dashboard(env,u,b){
@@ -815,7 +816,7 @@ export async function linkedCheck(env,id){
 export async function linkedNeeds(env,id,knownRows){
  if(env.SOP_UPGRADE_ENABLED!=='true')return [];
  const rows=knownRows||await all(env,"SELECT * FROM sop_records WHERE kind='need' AND (json_extract(state,'$.source_id')=? OR EXISTS(SELECT 1 FROM json_each(json_extract(state,'$.links')) l WHERE json_extract(l.value,'$.outbound_id')=?))",id,id);
- return recordNumbers(env,rows.map(r=>publicState({...r,data:JSON.parse(r.state)})));
+ return recordNumbers(env,rows.filter(r=>JSON.parse(r.state).status!=='cancelled').map(r=>publicState({...r,data:JSON.parse(r.state)})));
 }
 export async function guardLegacy(b,env){
  if(env.SOP_UPGRADE_ENABLED!=='true')return null;

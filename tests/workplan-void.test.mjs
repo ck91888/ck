@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {database} from './d1-adapter.mjs';
-import {handleSop} from '../worker-v2/sop.js';
+import {handleSop,linkedNeeds} from '../worker-v2/sop.js';
 import {handleBulkBatch} from '../worker-v2/bulk-work-batch.js';
 import {FIELD_ACTIONS} from '../worker-v2/access-control.js';
 
@@ -111,6 +111,38 @@ test('assigned, started, finished and open outbound plans stay unchanged',async(
   DB.raw.prepare("UPDATE v2_outbound_orders SET status='cancelled' WHERE id='OB-VOID'").run();
   assert.equal((await mutate('sop_need_cancel',booked.id,{reason:'预约已取消'})).ok,true);
   assert.equal(DB.raw.prepare("SELECT status FROM v2_outbound_orders WHERE id='OB-VOID'").get().status,'cancelled');
+ }finally{DB.raw.close();}
+});
+
+test('a live source outbound blocks void, cancelled history is summarized from the voided rows, and unload requirements omit them',async()=>{
+ const {DB,env,call,get,mutate,need}=setup();
+ try{
+  const kept=await need({supply_chain_no:'SAME-HISTORY',title:'仍要做'});
+  const gone=await need({supply_chain_no:'SAME-HISTORY',title:'写错的子计划'});
+  assert.equal((await mutate('sop_need_cancel',gone.id,{reason:'这张写错'})).ok,true);
+  const saved=await get(gone.id);
+  const history=await call('sop_need_groups',{status:'cancelled',reference:saved.display_no});
+  assert.equal(history.items.length,1);
+  const group=history.items[0];
+  assert.deepEqual(group.items.map(x=>x.id),[gone.id]);
+  assert.equal(group.status,'cancelled');assert.equal(group.count,0);assert.equal(group.completed,0);assert.equal(group.print_status.count,0);assert.equal(group.print_status.state,'cancelled');
+  assert.equal(ids(await call('sop_need_groups',{reference:kept.display_no||'仍要做'})).includes(gone.id),false);
+  const sourced=await need();
+  DB.raw.prepare("INSERT INTO v2_outbound_orders(id,display_no,status,customer) VALUES('OB-SRC','CK-SRC','issued','牛奶快递')").run();
+  const state=JSON.parse(DB.raw.prepare('SELECT state FROM sop_records WHERE id=?').get(sourced.id).state);
+  state.source_type='outbound';state.source_id='OB-SRC';state.links=[];
+  DB.raw.prepare('UPDATE sop_records SET state=? WHERE id=?').run(JSON.stringify(state),sourced.id);
+  assert.match((await mutate('sop_need_cancel',sourced.id,{reason:'源出库仍有效'})).error,/出库预约/);
+  assert.equal((await linkedNeeds(env,'OB-SRC')).some(x=>x.id===sourced.id),true);
+  DB.raw.prepare("UPDATE v2_outbound_orders SET status='cancelled' WHERE id='OB-SRC'").run();
+  assert.equal((await mutate('sop_need_cancel',sourced.id,{reason:'源出库已取消'})).ok,true);
+  assert.equal((await linkedNeeds(env,'OB-SRC')).some(x=>x.id===sourced.id),false);
+  const archived=await need();
+  const old=JSON.parse(DB.raw.prepare('SELECT state FROM sop_records WHERE id=?').get(archived.id).state);
+  old.status='cancelled';old.cancel_reason='来源入库已取消，重传时封存未派工作业';
+  DB.raw.prepare('UPDATE sop_records SET state=? WHERE id=?').run(JSON.stringify(old),archived.id);
+  assert.match((await mutate('sop_need_update',archived.id,{instructions:'不能改归档',owner:'客服'})).error,/已作废/);
+  assert.equal(JSON.parse(DB.raw.prepare('SELECT state FROM sop_records WHERE id=?').get(archived.id).state).cancel_reason,old.cancel_reason);
  }finally{DB.raw.close();}
 });
 
