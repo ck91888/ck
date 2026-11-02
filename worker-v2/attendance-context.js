@@ -11,7 +11,8 @@ export async function ensureAttendanceCurrentView(e){
  // Dispatch initialization may create an empty child schema with the switch off;
  // that is metadata only and never generates historical attendance or labor.
  await ensureAttendanceReturnSchema({...e,SOP_ATTENDANCE_RETURNS_ENABLED:'true'});
- await ensureSchema(e.DB,'attendance-current-view-v5',()=>e.DB.batch([
+ await ensureSchema(e.DB,'attendance-current-view-v6',()=>e.DB.batch([
+ e.DB.prepare('CREATE INDEX IF NOT EXISTS ck_attendance_state_registry_badge ON ck_attendance_people(badge_id COLLATE NOCASE)'),
  e.DB.prepare('CREATE TABLE IF NOT EXISTS ck_attendance_return_migration_guard(id INTEGER PRIMARY KEY CHECK(id=1))'),e.DB.prepare(configDDL),e.DB.prepare('INSERT OR IGNORE INTO ck_attendance_return_config VALUES(1,0)'),e.DB.prepare('DROP VIEW IF EXISTS ck_attendance_current_days'),
  e.DB.prepare(`CREATE VIEW IF NOT EXISTS ck_attendance_current_days AS
  SELECT d.*,d.day AS origin_day,d.person_id AS origin_person_id,'' AS attendance_span_id,CASE WHEN d.signed_out='' THEN 'open' ELSE 'closed' END AS span_status FROM ck_attendance_return_config cfg CROSS JOIN ck_attendance_days d WHERE cfg.id=1 AND cfg.enabled=0
