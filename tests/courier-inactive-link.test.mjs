@@ -98,7 +98,7 @@ test('inactive plan does not mask purchase ownership checks or cause purchase in
  assert.equal((await f.scan()).ok,false);const received=await f.scan(A,{owner:'supplies'});assert.equal(received.ok,true,received.error);assert.equal(received.item.plan_id,null);assert.equal(received.item.shipment_id,'SYNTHETIC-PURCHASE');assert.equal(f.rows('v2_003_purchase_shipments')[0].status,'pending');
 });
 for(const change of ["status='cancelled'","status='deleted'",'is_deleted=1'])test('plan becomes inactive between receipt and arrival synchronization: '+change,async t=>{
- const f=await fixture(t),p=await f.create(),prepare=f.DB.prepare.bind(f.DB);let injected=false,frozen;
- f.DB.prepare=sql=>{const s=prepare(sql);if(sql.startsWith('UPDATE v2_inbound_plan_lines SET actual_qty=')){const run=s.run;s.run=async()=>{if(!injected){injected=true;f.DB.raw.prepare('UPDATE v2_inbound_plans SET '+change+' WHERE id=?').run(p.id);frozen={plans:f.rows('v2_inbound_plans'),lines:f.rows('v2_inbound_plan_lines'),tasks:f.rows('v2_inbound_plan_biz_tasks')};}return run();};}return s;};
+ const f=await fixture(t),p=await f.create(),batch=f.DB.batch.bind(f.DB);let injected=false,frozen;
+ f.DB.batch=async statements=>{if(!injected&&statements.some(s=>s.sql.startsWith('UPDATE v2_inbound_plan_lines SET actual_qty='))){injected=true;f.DB.raw.prepare('UPDATE v2_inbound_plans SET '+change+' WHERE id=?').run(p.id);frozen={plans:f.rows('v2_inbound_plans'),lines:f.rows('v2_inbound_plan_lines'),tasks:f.rows('v2_inbound_plan_biz_tasks')};}return batch(statements);};
  const received=await f.scan();assert.equal(injected,true);assert.equal(received.ok,true,received.error);assert.equal(received.plan,null);assert.equal(received.item.plan_id,null);assert.deepEqual({plans:f.rows('v2_inbound_plans'),lines:f.rows('v2_inbound_plan_lines'),tasks:f.rows('v2_inbound_plan_biz_tasks')},frozen);assert.equal((await f.scan()).duplicate,true);assert.equal(f.rows('ck_courier_events').length,1);
 });

@@ -70,7 +70,7 @@ test('concurrent supplier retries with the same request key return one atomicall
  const f=await fixture(),p={order_id:f.order.id,delivery_method:'supplier',client_req_id:'FIXTURE-SUPPLIER-RACE',items:[{order_line_id:f.lines[0].id,expected_qty:4}]};const r=await race(f,[p,p]);assert.equal(r.every(x=>x.ok),true);assert.equal(r[0].id,r[1].id);assert.equal(f.DB.raw.prepare('SELECT COUNT(*) n FROM v2_003_purchase_shipments').get().n,1);assert.equal(f.DB.raw.prepare('SELECT SUM(expected_qty) n FROM v2_003_purchase_shipment_items').get().n,4);
 });
 test('shipment transaction rechecks a cancellation made after validation',async()=>{
- const f=await fixture(),batch=f.DB.batch.bind(f.DB);let injected=false;f.DB.batch=async statements=>{if(!injected&&statements[0].sql.includes('INSERT INTO v2_003_purchase_shipments')){injected=true;f.DB.raw.prepare("UPDATE v2_003_purchase_orders SET status='cancelled' WHERE id=?").run(f.order.id);}return batch(statements);};
+ const f=await fixture(),batch=f.DB.batch.bind(f.DB);let injected=false;f.DB.batch=async statements=>{if(!injected&&statements.some(s=>s.sql.includes('INSERT INTO v2_003_purchase_shipments'))){injected=true;f.DB.raw.prepare("UPDATE v2_003_purchase_orders SET status='cancelled' WHERE id=?").run(f.order.id);}return batch(statements);};
  const r=await f.api('v2_003_purchase_shipment_create',{order_id:f.order.id,delivery_method:'express',tracking_no:'FIXTURE-CANCEL-RACE',items:[{order_line_id:f.lines[0].id,expected_qty:5}]});assert.equal(r.error,'purchase_order_closed');assert.equal(f.DB.raw.prepare('SELECT COUNT(*) n FROM v2_003_purchase_shipments').get().n,0);assert.equal(f.DB.raw.prepare('SELECT COUNT(*) n FROM v2_003_purchase_shipment_items').get().n,0);
 });
 test('surplus of one item cannot complete a purchase while another item is short',async()=>{
@@ -84,7 +84,7 @@ test('incomplete or invalid-location receipt is rejected without stock writes',a
 });
 test('receipt batch failure rolls back inventory, ledger and receipt before a clean retry',async()=>{
  const f=await fixture(),s=await f.ship(),d=await f.ok('v2_003_receiving_lookup',{code:s.shipment_no}),p={shipment_id:s.id,items:[{shipment_item_id:d.items[0].id,received_qty:5,location_code:'FIXTURE-A01'}]},batch=f.DB.batch.bind(f.DB);let fail=true;
- f.DB.batch=async statements=>{if(fail&&statements[0].sql.includes('INSERT INTO v2_003_purchase_receipts')){fail=false;return batch([...statements,f.DB.prepare('INSERT INTO nonexistent_fixture_table VALUES(1)')]);}return batch(statements);};
+ f.DB.batch=async statements=>{if(fail&&statements.some(s=>s.sql.includes('INSERT INTO v2_003_purchase_receipts'))){fail=false;return batch([...statements,f.DB.prepare('INSERT INTO nonexistent_fixture_table VALUES(1)')]);}return batch(statements);};
  assert.equal((await f.api('v2_003_receipt_confirm',p)).ok,false);assert.equal(f.DB.raw.prepare('SELECT COUNT(*) n FROM v2_003_purchase_receipts').get().n,0);assert.equal(f.DB.raw.prepare('SELECT SUM(current_qty) n FROM v2_003_materials').get().n,0);assert.equal(f.DB.raw.prepare('SELECT COUNT(*) n FROM v2_003_material_txns').get().n,0);await f.ok('v2_003_receipt_confirm',p);assert.equal(f.DB.raw.prepare('SELECT current_qty FROM v2_003_materials WHERE id=?').get(f.lines[0].material_id).current_qty,5);
 });
 test('supplier arrival photo prerequisite and cancelled purchase cannot create receipts',async()=>{

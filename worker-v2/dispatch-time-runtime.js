@@ -1,6 +1,6 @@
 // Event-driven dispatch labor. SQL triggers share the transaction of the real business write.
 // No browser presence, synthetic jobs, historical backfill, or client-supplied person names.
-import {ensureSchema} from './schema-ready.js';
+import {ensureSchema,shareSchemaBinding} from './schema-ready.js';
 import {ensureAttendance} from './attendance.js';
 import {ensureAccess} from './access-control.js';
 import {ensureDailyDispatch} from './daily-dispatch-permissions.js';
@@ -9,7 +9,7 @@ import {ensureDispatchShare} from './dispatch-share.js';
 import {workerBadgeMatch} from './daily-badge-identity.js';
 import {activeAttendanceSQL} from './attendance-management.js';
 import {dispatchTimeEnabled} from './dispatch-time.js';
-const q=(e,s,...a)=>e.DB.prepare(s).bind(...a),wrappers=new WeakMap(),bases=new WeakMap();
+const q=(e,s,...a)=>e.DB.prepare(s).bind(...a),wrappers=new WeakMap(),bases=new WeakMap(),configExists=new WeakSet();
 const configDDL=`CREATE TABLE IF NOT EXISTS ck_dispatch_time_config(id INTEGER PRIMARY KEY CHECK(id=1),enabled INTEGER NOT NULL,sharing_enabled INTEGER NOT NULL)`;
 const configSQL='INSERT INTO ck_dispatch_time_config VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled,sharing_enabled=excluded.sharing_enabled WHERE enabled<>excluded.enabled OR sharing_enabled<>excluded.sharing_enabled';
 const open="('pending','assigned','working','paused','awaiting_close','awaiting_review','rework')";
@@ -118,12 +118,15 @@ export async function ensureAutoDispatchTime(e){
  const source={...e,DB:db};
  // Only DDL may be cached. Every request and every business transaction reapplies
  // its own flags; another isolate/binding wrapper cannot leave this request enabled.
- await ensureSchema(db,'auto-dispatch-config-v1',()=>db.prepare(configDDL).run());
+ let exists=configExists.has(db);
+ if(enabled){await ensureSchema(db,'auto-dispatch-config-v1',()=>db.prepare(configDDL).run());exists=true;configExists.add(db);}
+ else if(!exists&&await db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='ck_dispatch_time_config'").first()){exists=true;configExists.add(db);}
  if(enabled){
   await ensureAttendance(source);await ensureAccess(source);await ensureDailyDispatch(source);await ensureCrewBorrow(source);
   // Schema initialization does not turn on shared permissions; the actual flag remains authoritative.
   await ensureDispatchShare({...source,SOP_DISPATCH_SHARE_ENABLED:'true'});
   await ensureSchema(db,'auto-dispatch-runtime-v2',async()=>{
+   const migrate=async()=>{
    const info=await db.batch([db.prepare('PRAGMA table_info(ck_dispatch_time_days)'),db.prepare('PRAGMA table_info(ck_dispatch_time_links)')]),columns=info[0].results,linkColumns=info[1].results;
    const sql=schema(),triggers=sql.filter(s=>s.startsWith('CREATE TRIGGER')).map(s=>s.match(/EXISTS (\w+)/)[1]);
    await db.batch([
@@ -133,14 +136,17 @@ export async function ensureAutoDispatchTime(e){
     db.prepare('DROP VIEW IF EXISTS ck_dispatch_time_aliases'),db.prepare('DROP VIEW IF EXISTS ck_dispatch_time_identity'),
     ...sql.map(s=>db.prepare(s)),db.prepare(`INSERT INTO ck_dispatch_time_ticks(person_id,at,reason,event_key) SELECT DISTINCT person_id,${now},'ledger_upgrade','runtime-v2' FROM ck_dispatch_time_days`)
    ]);
+   };
+   try{await migrate();}catch(error){if(!/duplicate column name:\s*(requires_action|share_pair_id)/i.test(error.message||''))throw error;await migrate();}
   });
  }
  const sync=()=>db.prepare(configSQL).bind(enabled?1:0,sharing?1:0);
- await sync().run();
+ if(exists){const current=await db.prepare('SELECT enabled,sharing_enabled FROM ck_dispatch_time_config WHERE id=1').first();if(!current||current.enabled!==(enabled?1:0)||current.sharing_enabled!==(sharing?1:0))await sync().run();}
  const signature=enabled+':'+sharing;let variants=wrappers.get(db);if(!variants)wrappers.set(db,variants=new Map());if(variants.has(signature))return variants.get(signature);
- const originals=new WeakMap(),batch=async statements=>(await db.batch([sync(),...statements.map(s=>originals.get(s)||s)])).slice(1);
- const prepare=sql=>{const wrap=statement=>{const proxy=new Proxy(statement,{get(target,key){if(key==='bind')return(...args)=>wrap(target.bind(...args));if(key==='run')return async()=>(await batch([target]))[0];if(typeof key==='string'&&/^(all|first)$/.test(key)&&/^\s*(INSERT|UPDATE|DELETE|REPLACE|WITH)\b/i.test(sql))return async()=>{const r=(await batch([target]))[0];return key==='first'?r.results?.[0]||null:r;};const value=target[key];return typeof value==='function'?value.bind(target):value;}});originals.set(proxy,statement);return proxy;};return wrap(db.prepare(sql));};
- const wrapper=new Proxy(db,{get(target,key){if(key==='prepare')return prepare;if(key==='batch')return batch;const value=target[key];return typeof value==='function'?value.bind(target):value;}});bases.set(wrapper,db);variants.set(signature,wrapper);return wrapper;
+ const originals=new WeakMap(),statementsSQL=new WeakMap(),writes=sql=>!sql||!/^\s*(SELECT|EXPLAIN|PRAGMA)\b/i.test(sql);
+ const batch=async statements=>{const source=statements.map(s=>originals.get(s)||s);if(!statements.some(s=>writes(statementsSQL.get(s))))return db.batch(source);await ensureSchema(db,'auto-dispatch-config-v1',()=>db.prepare(configDDL).run());configExists.add(db);return(await db.batch([sync(),...source])).slice(1);};
+ const prepare=sql=>{const wrap=statement=>{statementsSQL.set(statement,sql);const proxy=new Proxy(statement,{get(target,key){if(key==='bind')return(...args)=>wrap(target.bind(...args));if(key==='run'&&writes(sql))return async()=>(await batch([target]))[0];if(typeof key==='string'&&/^(all|first)$/.test(key)&&writes(sql))return async column=>{const r=(await batch([target]))[0],row=r.results?.[0]||null;return key==='first'?(column&&row?row[column]:row):r;};const value=target[key];return typeof value==='function'?value.bind(target):value;}});originals.set(proxy,statement);statementsSQL.set(proxy,sql);return proxy;};return wrap(db.prepare(sql));};
+ const wrapper=new Proxy(db,{get(target,key){if(key==='prepare')return prepare;if(key==='batch')return batch;const value=target[key];return typeof value==='function'?value.bind(target):value;}});bases.set(wrapper,db);shareSchemaBinding(wrapper,db);variants.set(signature,wrapper);return wrapper;
 }
 export async function dispatchTimeAttendance(e,date,asOf){
  if(!dispatchTimeEnabled(e))return new Map();

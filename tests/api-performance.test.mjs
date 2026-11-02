@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {database} from './d1-adapter.mjs';
 import entry from '../worker-v2/staging-entry.js';
 import {digest} from '../worker-v2/access-control.js';
-import {ensureSchema} from '../worker-v2/schema-ready.js';
+import {ensureSchema,shareSchemaBinding} from '../worker-v2/schema-ready.js';
 import {STAGING_HOST,STAGING_DATABASE} from '../worker-v2/test-data-reset.js';
 import worker from '../worker-v2/index.js';
 
@@ -15,6 +15,7 @@ test('schema readiness is scoped to DB and version, retries failures, and retain
  await ensureSchema(b,'v1',init);await ensureSchema(a,'v2',init);assert.equal(count,3);
  await assert.rejects(ensureSchema(a,'retry',async()=>{throw Error('unavailable');}));
  await ensureSchema(a,'retry',init);assert.equal(count,4);
+ const wrapper={};shareSchemaBinding(wrapper,a);await ensureSchema(wrapper,'v1',init);assert.equal(count,4);await ensureSchema(wrapper,'wrapper-v3',init);await ensureSchema(a,'wrapper-v3',init);assert.equal(count,5);
 });
 
 test('polling job details derives current crew without writes and uses a fixed batch',async()=>{
@@ -26,7 +27,7 @@ test('polling job details derives current crew without writes and uses a fixed b
  const prepare=DB.prepare.bind(DB),batch=DB.batch.bind(DB);const calls=[];
  DB.prepare=sql=>{const s=prepare(sql);for(const method of ['first','all','run']){const f=s[method].bind(s);s[method]=async()=>{calls.push(sql);return f();};}return s;};
  DB.batch=async items=>{calls.push(items.map(x=>x.sql).join('\n'));return batch(items);};
- for(let i=0;i<2;i++){calls.length=0;const r=await api({action:'v2_ops_job_detail',job_id:'POLL'});assert.equal(r.ok,true,r.error);assert.equal(r.job.active_worker_count,8);assert.ok(calls.length<=4,calls.length);assert.ok(calls.every(sql=>!/^\s*(UPDATE|INSERT|DELETE)/m.test(sql)),calls.join('\n'));assert.equal(DB.raw.prepare("SELECT updated_at FROM v2_ops_jobs WHERE id='POLL'").get().updated_at,stamp);}
+ for(let i=0;i<2;i++){calls.length=0;const r=await api({action:'v2_ops_job_detail',job_id:'POLL'});assert.equal(r.ok,true,r.error);assert.equal(r.job.active_worker_count,8);assert.ok(calls.length<=5,calls.length);assert.ok(calls.every(sql=>!/^\s*(UPDATE|INSERT|DELETE)/m.test(sql)),calls.join('\n'));assert.equal(DB.raw.prepare("SELECT updated_at FROM v2_ops_jobs WHERE id='POLL'").get().updated_at,stamp);}
 });
 
 test('warm requests avoid DDL; detail query count is fixed as history grows and preserves latest output',async()=>{
@@ -42,8 +43,10 @@ test('warm requests avoid DDL; detail query count is fixed as history grows and 
  }
  await api('sop_login',{sop_key:'fixture-only'});await confirmOperation(api,'Fixture');await api('sop_attendance_config');
  const p=await api('v2_inbound_plan_create',{customer:'Fixture',biz_classes:['direct_ship'],external_inbound_nos:['FIXTURE-A','FIXTURE-B'],lines:[{unit_type:'carton',planned_qty:20}]});
- calls=[];await api('sop_identity');assert.equal(calls.length,3);assert.ok(calls.every(s=>!s.includes('CREATE')));
- calls=[];await api('v2_inbound_plan_detail',{id:p.id});const emptyCount=calls.length;assert.ok(emptyCount<=9);
+ // One authoritative feature-state read is needed per request across isolates;
+ // it is fixed-cost, does not write, and is not a cached permission decision.
+ calls=[];await api('sop_identity');assert.equal(calls.length,4);assert.ok(calls.every(s=>!s.includes('CREATE')));assert.ok(calls.every(s=>!/^\s*(INSERT|UPDATE|DELETE)/m.test(s)));
+ calls=[];await api('v2_inbound_plan_detail',{id:p.id});const emptyCount=calls.length;assert.ok(emptyCount<=10,JSON.stringify({emptyCount,calls:calls.map(s=>s.slice(0,100))}));
  for(let i=0;i<12;i++){
   const job='FIXTURE-JOB-'+i;
   DB.raw.prepare("INSERT INTO v2_ops_jobs(id,related_doc_type,related_doc_id,job_type,status,inbound_external_no,created_at,updated_at) VALUES(?,'inbound_plan',?,'inbound_direct','completed',?,'2026-01-01T01:00:00Z','2026-01-01T02:00:00Z')").run(job,p.id,i===0?'FIXTURE-A':'');
