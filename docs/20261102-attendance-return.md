@@ -17,7 +17,7 @@
 
 新增 `worker-v2/attendance-return-time.js`：按有效出勤区间计算，跨离岗间隔的原操作仅裁剪出勤交集，不把缺口计劳动。正常班次补休只从未归属转换，返岗只计真实休息；审批属性不改变事实。重叠/超04未签退保留待核实，不无限累计；已核实的真实晚于04签退不被截成虚假离岗。跨日普通班次暂沿用既有待核实、不自动补休规则。函数不修改原始输入或存量工时。
 
-新增 `tests/attendance-return-time.test.mjs` 16项，覆盖上述规则、旧单段、午夜/04、外人记录隔离及SQL唯一开放段与版本。连同既有派审工时归集、班次规则共48项通过，0失败、0跳过。命令 `node --test tests/attendance-return-time.test.mjs tests/dispatch-time-accounting.test.mjs tests/attendance-shift-policy.test.mjs`，日志 `/tmp/ck-attendance-return-foundation.log`。
+新增 `tests/attendance-return-time.test.mjs` 16项，覆盖上述规则、旧单段、午夜/04、外人记录隔离及SQL唯一开放段与版本。连同既有派审工时归集、班次规则共39项通过，0失败、0跳过。命令 `node --test tests/attendance-return-time.test.mjs tests/dispatch-time-accounting.test.mjs tests/attendance-shift-policy.test.mjs`，日志 `/tmp/ck-attendance-return-foundation.log`。
 
 ## 接续实施
 
