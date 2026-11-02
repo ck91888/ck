@@ -85,7 +85,7 @@ export async function handleCourier(b,env,recalc){
  if(b.action==='sop_courier_receive'&&b.operation)return courierBatchOperation(env,b);
  if(b.action==='sop_courier_config'&&b.operation==='batches')return courierBatchList(env,{active:true});
  if(b.action==='sop_courier_detail'&&b.batch_id)return {ok:true,batch:await courierBatchDetail(env,b.batch_id)};
- if(b.action==='sop_courier_config'&&b.operation==='scanner'){const access=courierCommitAccess(env,String(b.batch_id||''));const badge=String(b.badge||'').trim().split('|');const found=await q(env,`SELECT worker_id AS id,worker_name AS name FROM v2_ops_job_workers WHERE job_id=? AND worker_id=? AND left_at='' AND ${courierScanGuard} AND ${access.sql}`,String(b.batch_id||''),badge[0],String(b.batch_id||''),badge[0],...access.args).first();if(!found||found.name!==badge[1])fail('工牌不在本批、未在岗或本批已完成 / 차수·명찰 상태를 확인하세요');return {ok:true,scanner:found};}
+ if(b.action==='sop_courier_config'&&b.operation==='scanner'){const access=courierCommitAccess(env,String(b.batch_id||''));const badge=String(b.badge||'').trim().split('|');const found=await q(env,`SELECT worker_id AS id,worker_name AS name FROM v2_ops_job_workers WHERE job_id=? AND worker_id=? AND left_at='' AND ${courierScanGuard(env)} AND ${access.sql}`,String(b.batch_id||''),badge[0],String(b.batch_id||''),badge[0],...access.args).first();if(!found||found.name!==badge[1])fail('工牌不在本批、未在岗或本批已完成 / 차수·명찰 상태를 확인하세요');return {ok:true,scanner:found};}
  if(b.action==='sop_courier_config')return {ok:true,owners:courierOwners,user:{id:u.id,name:u.name},formats:'11–14位数字；LP/EZ + 9位数字 + CN；JJD + 18位数字'};
  if(b.action==='sop_courier_list'){
   if(b.mode==='batch_export'){
@@ -135,7 +135,7 @@ export async function handleCourier(b,env,recalc){
   const linked=await q(env,'SELECT p.* FROM ck_courier_active_plan_items i JOIN v2_inbound_plans p ON p.id=i.plan_id WHERE i.tracking_no=?',code).first();
   if(linked&&purchase)fail('此单同时关联入库计划和采购，请办公室核实后收货');
   const id='CR-'+crypto.randomUUID(),t=stamp(),access=courierCommitAccess(env,batchId);
-  const receiptGuard=`${courierScanGuard} AND ${access.sql}
+  const receiptGuard=`${courierScanGuard(env)} AND ${access.sql}
    AND NOT EXISTS(SELECT 1 FROM v2_003_purchase_shipments s WHERE s.tracking_no=? AND s.status!='cancelled' AND (? NOT IN ('supplies','purchase') OR EXISTS(SELECT 1 FROM ck_courier_active_plan_items ci WHERE ci.tracking_no=s.tracking_no)))`;
   await env.DB.batch([
    q(env,`SELECT CASE WHEN ${receiptGuard} THEN 1 ELSE json('courier_scan_state_changed') END`,batchId,badge,...access.args,code,owner),
@@ -147,7 +147,7 @@ export async function handleCourier(b,env,recalc){
   const r=await q(env,'SELECT * FROM ck_courier_receipts WHERE tracking_no=?',code).first();
   if(!r)fail('保存未完成：批次、人员或关联计划状态已变化，请刷新 / 차수·인원·계획 상태를 확인하세요');
   // A duplicate also needs a live scanner; it must not hide a closed or off-duty page.
-  if(r.id!==id&&!await q(env,`SELECT 1 WHERE ${courierScanGuard} AND ${access.sql}`,batchId,badge,...access.args).first())fail('批次或扫描人状态已变化，请刷新 / 차수·인원 상태 변경');
+  if(r.id!==id&&!await q(env,`SELECT 1 WHERE ${courierScanGuard(env)} AND ${access.sql}`,batchId,badge,...access.args).first())fail('批次或扫描人状态已变化，请刷新 / 차수·인원 상태 변경');
   const currentLink=await q(env,'SELECT plan_id FROM ck_courier_active_plan_items WHERE tracking_no=?',code).first();
   const plan=currentLink?await syncCourierArrival(env,currentLink.plan_id,recalc):null;
   return {ok:true,duplicate:r.id!==id,owner_conflict:r.owner!==owner,item:await joinedReceipt(env,r.id),plan,batch:await courierBatchDetail(env,batchId)};

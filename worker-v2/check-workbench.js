@@ -1,3 +1,4 @@
+import {attendanceSource,attendanceDaySQL,attendanceCurrentSQL} from './attendance-context.js';
 import {ensureSchema} from './schema-ready.js';
 import {nativeOwner} from './sop-dispatch.js';
 import {dispatchAccess} from './dispatch-access.js';
@@ -55,7 +56,7 @@ export async function scanCheck(b,e){
   const sql=[q(e,`INSERT INTO ck_verify_requests VALUES(?,?,?,?,CASE WHEN
    EXISTS(SELECT 1 FROM v2_ops_jobs j JOIN sop_records s ON s.id=j.id WHERE j.id=? AND j.status='working' AND s.kind='dispatch' AND ${access.sql})
    AND EXISTS(SELECT 1 FROM v2_ops_job_workers WHERE job_id=? AND worker_id=? AND left_at='')
-   ${attendance?`AND EXISTS(SELECT 1 FROM ck_attendance_days d JOIN ck_attendance_people p ON p.id=d.person_id WHERE ${workerBadgeMatch('d.worker_id','?')} AND d.day=date(?,'+9 hours') AND d.signed_out='' AND p.enabled=1 AND ${activeAttendanceSQL('d')} AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at=''))`:''}
+   ${attendance?`AND EXISTS(SELECT 1 FROM ${attendanceSource(e)} d JOIN ck_attendance_people p ON p.id=d.person_id WHERE ${workerBadgeMatch('d.worker_id','?')} AND ${attendanceDaySQL(e,'d',"date(?,'+9 hours')")} AND ${attendanceCurrentSQL(e,'d')} AND d.signed_out='' AND p.enabled=1 AND ${activeAttendanceSQL('d')} AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at=''))`:''}
    AND EXISTS(SELECT 1 FROM v2_verify_batches WHERE id=? AND status IN ('pending','verifying') AND updated_at=?)
    AND (SELECT COUNT(*) FROM v2_verify_scan_logs WHERE batch_id=?)=?
    AND (SELECT COUNT(*) FROM sop_records WHERE kind='check' AND json_extract(state,'$.legacy_id')=?)=? THEN 1 ELSE 0 END)`,key,signature,JSON.stringify(result),t,jobId,...access.args,jobId,worker.worker_id,...(attendance?[worker.worker_id,t]:[]),batchId,batch.updated_at,batchId,counts.total,batchId,check?1:0)];

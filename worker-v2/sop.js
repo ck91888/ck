@@ -1,3 +1,6 @@
+import {attendanceSource,attendanceDaySQL,attendanceCurrentSQL,ensureAttendanceCurrentView,attendanceEventDaySQL,attendanceEventCurrentSQL} from './attendance-context.js';
+import {attendanceReturnEnabled} from './attendance-return-schema.js';
+import {ensureSchema} from './schema-ready.js';
 import {bulkOutputDraft} from './bulk-output-draft.js';
 import {shippingExpectation} from './shipping-expectation.js';
 import {shippingOutput} from './shipping-output.js';
@@ -127,13 +130,13 @@ async function verifyTakeoverAllowed(env,u,row,job){
  const departments=u.daily_dispatch?u.can_dispatch?u.dispatch_departments||[]:[]:u.departments||[];
  if(!departments.includes(executionDepartment(row)))return false;
  if(await stmt(env,"SELECT 1 FROM v2_ops_job_workers WHERE job_id=? AND left_at='' LIMIT 1",job.id).first())return false;
- const actor=await stmt(env,"SELECT 1 FROM ck_attendance_days d WHERE d.id=? AND d.signed_out='' AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at='')",u.attendance_id).first();
+ const actor=await stmt(env,`SELECT 1 FROM ${attendanceSource(env)} d WHERE d.id=? AND ${attendanceCurrentSQL(env,'d')} AND d.signed_out='' AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at='')`,u.attendance_id).first();
  if(!actor)return false;
  const ownerId=JSON.parse(row.state).owner_id;if(!ownerId||ownerId===u.id)return false;
  if(!await stmt(env,'SELECT 1 FROM ck_attendance_people WHERE id=?',ownerId).first())return false;
  await ensureDailyDispatch(env);
  const today=new Date(Date.now()+9*3600000).toISOString().slice(0,10);
- const owner=await stmt(env,`SELECT d.signed_out,EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at='') AS resting FROM ck_attendance_days d WHERE d.day=? AND (d.person_id=? OR EXISTS(SELECT 1 FROM ck_daily_dispatch_links l WHERE l.permanent_person_id=? AND l.daily_person_id=d.person_id AND l.day=d.day)) ORDER BY d.signed_in DESC LIMIT 1`,today,ownerId,ownerId).first();
+ const owner=await stmt(env,`SELECT d.signed_out,EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at='') AS resting FROM ${attendanceSource(env)} d WHERE ${attendanceDaySQL(env,'d','?')} AND ${attendanceCurrentSQL(env,'d')} AND (d.person_id=? OR EXISTS(SELECT 1 FROM ck_daily_dispatch_links l WHERE l.permanent_person_id=? AND l.daily_person_id=d.person_id AND l.day=${attendanceReturnEnabled(env)?'d.origin_day':'d.day'})) ORDER BY d.signed_in DESC LIMIT 1`,today,ownerId,ownerId).first();
  return !owner||!!owner.signed_out||!!owner.resting;
 }
 function transferState(old,target,actor,reason,t,mode='transfer'){
@@ -143,15 +146,15 @@ function transferState(old,target,actor,reason,t,mode='transfer'){
 async function ownerAway(env,id){
  if(!id||!await stmt(env,'SELECT 1 FROM ck_attendance_people WHERE id=?',id).first())return false;
  await ensureDailyDispatch(env);const today=new Date(Date.now()+9*3600000).toISOString().slice(0,10);
- return !await stmt(env,`SELECT 1 FROM ck_attendance_days d WHERE d.day=? AND d.signed_out=''
-  AND (d.person_id=? OR EXISTS(SELECT 1 FROM ck_daily_dispatch_links l WHERE l.permanent_person_id=? AND l.daily_person_id=d.person_id AND l.day=d.day))
+ return !await stmt(env,`SELECT 1 FROM ${attendanceSource(env)} d WHERE ${attendanceDaySQL(env,'d','?')} AND ${attendanceCurrentSQL(env,'d')} AND d.signed_out=''
+  AND (d.person_id=? OR EXISTS(SELECT 1 FROM ck_daily_dispatch_links l WHERE l.permanent_person_id=? AND l.daily_person_id=d.person_id AND l.day=${attendanceReturnEnabled(env)?'d.origin_day':'d.day'}))
   AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at='') LIMIT 1`,today,id,id).first();
 }
 async function canClaimOwner(env,u,row){
  if(u?.scope!=='field'||u.role!=='dispatcher'||!u.attendance_id||!row?.data?.owner_id||u.id===row.data.owner_id)return false;
  const departments=u.daily_dispatch?u.can_dispatch?u.dispatch_departments||[]:[]:u.departments||[];
  if(!departments.includes(executionDepartment(row)))return false;
- if(!await stmt(env,"SELECT 1 FROM ck_attendance_days d WHERE d.id=? AND d.day=date(?,'+9 hours') AND d.signed_out='' AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at='')",u.attendance_id,now()).first())return false;
+ if(!await stmt(env,`SELECT 1 FROM ${attendanceSource(env)} d WHERE d.id=? AND ${attendanceDaySQL(env,'d',"date(?,'+9 hours')")} AND ${attendanceCurrentSQL(env,'d')} AND d.signed_out='' AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at='')`,u.attendance_id,now()).first())return false;
  return ownerAway(env,row.data.owner_id);
 }
 async function verifyActive(env,u,b){
@@ -171,18 +174,19 @@ async function verifyTakeover(env,u,b){
  if(Number(b.revision)!==row.revision)fail('任务已变化，请刷新后重试 / 작업이 변경되었습니다');
  if(!await verifyTakeoverAllowed(env,u,{...row,state:JSON.stringify(row.data)},job))fail('当前不能接班；请由原派审员或管理员处理 / 담당자에게 문의하세요');
  const t=now(),old=row.data,next=transferState(old,u,u,'原负责人离岗，接续核对',t);
- await stmt(env,`CREATE TRIGGER IF NOT EXISTS ck_verify_takeover_safe BEFORE INSERT ON sop_events WHEN NEW.action='sop_verify_takeover' BEGIN SELECT CASE WHEN NOT EXISTS(
+ await ensureAttendanceCurrentView(env);
+ await ensureSchema(env.DB,'verify-takeover-current-v3',()=>env.DB.batch([stmt(env,'DROP TRIGGER IF EXISTS ck_verify_takeover_safe'),stmt(env,`CREATE TRIGGER IF NOT EXISTS ck_verify_takeover_safe BEFORE INSERT ON sop_events WHEN NEW.action='sop_verify_takeover' BEGIN SELECT CASE WHEN NOT EXISTS(
   SELECT 1 FROM v2_ops_jobs j JOIN sop_records s ON s.id=j.id
   WHERE j.id=NEW.record_id AND s.kind='dispatch' AND s.state=NEW.before_json AND j.job_type='verify_scan'
    AND j.status IN ('pending','working','awaiting_close','paused')
    AND NOT EXISTS(SELECT 1 FROM v2_ops_job_workers w WHERE w.job_id=j.id AND w.left_at='')
-   AND EXISTS(SELECT 1 FROM ck_attendance_days d WHERE d.day=date(NEW.created_at,'+9 hours') AND d.signed_out='' AND d.signed_in<=NEW.created_at
-    AND (d.person_id=NEW.actor_id OR EXISTS(SELECT 1 FROM ck_daily_dispatch_links l WHERE l.permanent_person_id=NEW.actor_id AND l.daily_person_id=d.person_id AND l.day=d.day))
+   AND EXISTS(SELECT 1 FROM ck_attendance_current_days d WHERE ${attendanceEventDaySQL('d','NEW.created_at')} AND ${attendanceEventCurrentSQL('d','NEW.created_at')}
+    AND (d.person_id=NEW.actor_id OR EXISTS(SELECT 1 FROM ck_daily_dispatch_links l WHERE l.permanent_person_id=NEW.actor_id AND l.daily_person_id=d.person_id AND l.day=d.origin_day))
     AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at=''))
-   AND NOT EXISTS(SELECT 1 FROM ck_attendance_days d WHERE d.day=date(NEW.created_at,'+9 hours') AND d.signed_out=''
-    AND (d.person_id=json_extract(NEW.before_json,'$.owner_id') OR EXISTS(SELECT 1 FROM ck_daily_dispatch_links l WHERE l.permanent_person_id=json_extract(NEW.before_json,'$.owner_id') AND l.daily_person_id=d.person_id AND l.day=d.day))
+   AND NOT EXISTS(SELECT 1 FROM ck_attendance_current_days d WHERE ${attendanceEventDaySQL('d','NEW.created_at')} AND ${attendanceEventCurrentSQL('d','NEW.created_at')}
+    AND (d.person_id=json_extract(NEW.before_json,'$.owner_id') OR EXISTS(SELECT 1 FROM ck_daily_dispatch_links l WHERE l.permanent_person_id=json_extract(NEW.before_json,'$.owner_id') AND l.daily_person_id=d.person_id AND l.day=d.origin_day))
     AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at=''))
- ) THEN RAISE(ABORT,'verify_takeover_changed') END; END`).run();
+ ) THEN RAISE(ABORT,'verify_takeover_changed') END; END`)]));
  return save(env,b,u,row,next);
 }
 export async function handleSop(b,env) {
@@ -278,13 +282,13 @@ export async function handleSop(b,env) {
    const shareSql=partnerIds.length?`json_extract(s.state,'$.owner_id') IN (${partnerIds.map(()=>'?').join(',')}) AND j.job_type='bulk_op'`:'';
    const owned=mine?partnerIds.length?` AND (json_extract(s.state,'$.owner_id')=? OR (${shareSql}))`:" AND json_extract(s.state,'$.owner_id')=?":'';
    const shareVisible=shareSql?` OR (${shareSql})`:'';
-   const access=dispatchAccess(u),rest=restingDispatchAccess(u),externalCode=text(b.external_code);
+   const access=dispatchAccess(u),rest=restingDispatchAccess(u,env),externalCode=text(b.external_code);
    let claimDepartments=u.scope==='field'&&u.role==='dispatcher'&&u.attendance_id?(u.daily_dispatch?u.can_dispatch?u.dispatch_departments||[]:[]:u.departments||[]):[];
-   if(claimDepartments.length){await ensureDailyDispatch(env);if(!await stmt(env,"SELECT 1 FROM ck_attendance_days d WHERE d.id=? AND d.day=date(?,'+9 hours') AND d.signed_out='' AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at='')",u.attendance_id,now()).first())claimDepartments=[];}
+   if(claimDepartments.length){await ensureDailyDispatch(env);if(!await stmt(env,`SELECT 1 FROM ${attendanceSource(env)} d WHERE d.id=? AND ${attendanceDaySQL(env,'d',"date(?,'+9 hours')")} AND ${attendanceCurrentSQL(env,'d')} AND d.signed_out='' AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at='')`,u.attendance_id,now()).first())claimDepartments=[];}
    const claimSql=claimDepartments.length?`(s.kind='dispatch' AND s.department IN (SELECT value FROM json_each(?)) AND json_extract(s.state,'$.owner_id')<>?
     AND EXISTS(SELECT 1 FROM ck_attendance_people p WHERE p.id=json_extract(s.state,'$.owner_id'))
-    AND NOT EXISTS(SELECT 1 FROM ck_attendance_days d WHERE d.day=date('now','+9 hours') AND d.signed_out=''
-     AND (d.person_id=json_extract(s.state,'$.owner_id') OR EXISTS(SELECT 1 FROM ck_daily_dispatch_links l WHERE l.permanent_person_id=json_extract(s.state,'$.owner_id') AND l.daily_person_id=d.person_id AND l.day=d.day))
+    AND NOT EXISTS(SELECT 1 FROM ${attendanceSource(env)} d WHERE ${attendanceDaySQL(env,'d',"'"+new Date(Date.now()+9*3600000).toISOString().slice(0,10)+"'")} AND ${attendanceCurrentSQL(env,'d')} AND d.signed_out=''
+     AND (d.person_id=json_extract(s.state,'$.owner_id') OR EXISTS(SELECT 1 FROM ck_daily_dispatch_links l WHERE l.permanent_person_id=json_extract(s.state,'$.owner_id') AND l.daily_person_id=d.person_id AND l.day=${attendanceReturnEnabled(env)?'d.origin_day':'d.day'}))
      AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at='')))`:'0';
     const rows=await all(env,`SELECT COALESCE(s.kind,'legacy') AS task_kind,COALESCE(s.state,'{}') AS state,s.department AS dispatch_department,j.*,wn.display_no AS work_plan_no,n.state AS need_state,
     ib.display_no AS inbound_no,ib.customer AS inbound_customer,
@@ -414,7 +418,7 @@ export async function handleSop(b,env) {
    const manager=u.role==='manager'&&u.scope==='office',owner=u.role==='dispatcher'&&(u.id===d.owner_id||shareOwner),claim=!owner&&!manager&&await canClaimOwner(env,u,row);
    if(!owner&&!manager&&!claim)fail('仅当前负责人可移交；原负责人离岗时须由本部门在岗派审员接班');
    if(u.scope==='field'&&(u.role!=='dispatcher'||!u.attendance_id||u.daily_dispatch&&!u.can_dispatch||!(u.daily_dispatch?u.dispatch_departments||[]:u.departments||[]).includes(executionDepartment(row))
-    ||!await stmt(env,"SELECT 1 FROM ck_attendance_days d WHERE d.id=? AND d.signed_out='' AND d.day=date(?,'+9 hours') AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at='')",u.attendance_id,t).first()))fail('原派审员须在岗并有本部门派工权限');
+    ||!await stmt(env,`SELECT 1 FROM ${attendanceSource(env)} d WHERE d.id=? AND ${attendanceDaySQL(env,'d',"date(?,'+9 hours')")} AND ${attendanceCurrentSQL(env,'d')} AND d.signed_out='' AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at='')`,u.attendance_id,t).first()))fail('原派审员须在岗并有本部门派工权限');
    const reason=required(b.reason,'转移原因');if(reason.length>500)fail('转移原因不能超过500字');
    const target=await dispatchTransferTarget(env,required(b.target_badge,'新派审员工牌'),executionDepartment(row));
    if(claim&&target.id!==u.id)fail('接班人必须扫描本人工牌');
@@ -423,8 +427,8 @@ export async function handleSop(b,env) {
    if(!d.original_owner_id){const first=await stmt(env,"SELECT after_json FROM sop_events WHERE record_id=? AND expected_revision=0 ORDER BY created_at LIMIT 1",row.id).first();const original=first&&JSON.parse(first.after_json);if(original?.owner_id){next.original_owner_id=original.owner_id;next.original_owner=original.owner||'';}}
    // Delegations from the old assignment do not survive an owner transfer.
    if(row.kind==='task')next.delegates=[];
-   await stmt(env,'DROP TRIGGER IF EXISTS ck_owner_transfer_safe').run();
-   await stmt(env,`CREATE TRIGGER IF NOT EXISTS ck_owner_transfer_safe_v2 BEFORE INSERT ON sop_events WHEN NEW.action='sop_owner_transfer' BEGIN SELECT CASE WHEN NOT EXISTS(
+   await ensureAttendanceCurrentView(env);
+   await ensureSchema(env.DB,'owner-transfer-current-v3',()=>env.DB.batch([stmt(env,'DROP TRIGGER IF EXISTS ck_owner_transfer_safe'),stmt(env,'DROP TRIGGER IF EXISTS ck_owner_transfer_safe_v2'),stmt(env,`CREATE TRIGGER IF NOT EXISTS ck_owner_transfer_safe_v2 BEFORE INSERT ON sop_events WHEN NEW.action='sop_owner_transfer' BEGIN SELECT CASE WHEN NOT EXISTS(
     SELECT 1 FROM sop_records s JOIN v2_ops_jobs j ON j.id=s.id JOIN ck_attendance_people p ON p.id=json_extract(NEW.after_json,'$.owner_id')
     LEFT JOIN ck_daily_dispatch_grants g ON g.person_id=p.id
     WHERE s.id=NEW.record_id AND s.state=NEW.before_json AND s.kind IN ('dispatch','task')
@@ -432,23 +436,23 @@ export async function handleSop(b,env) {
      AND p.enabled=1 AND ((g.enabled=1 AND EXISTS(SELECT 1 FROM json_each(g.departments) WHERE value=${executionDepartmentSQL('s')}))
       OR (EXISTS(SELECT 1 FROM ck_employee_profiles employee WHERE employee.person_id=p.id)
        AND COALESCE((SELECT enabled FROM ck_field_access a WHERE a.person_id=p.id),1)=1 AND ${executionDepartmentSQL('s')} IN ('bulk','direct_ship','import','other')))
-     AND EXISTS(SELECT 1 FROM ck_attendance_days d JOIN ck_attendance_people a ON a.id=d.person_id
-      WHERE d.day=date(NEW.created_at,'+9 hours') AND d.signed_out='' AND d.signed_in<=NEW.created_at AND a.enabled=1
-       AND (d.person_id=p.id OR EXISTS(SELECT 1 FROM ck_daily_dispatch_links l WHERE l.daily_person_id=d.person_id AND l.permanent_person_id=p.id AND l.day=d.day))
+     AND EXISTS(SELECT 1 FROM ck_attendance_current_days d JOIN ck_attendance_people a ON a.id=d.person_id
+      WHERE ${attendanceEventDaySQL('d','NEW.created_at')} AND ${attendanceEventCurrentSQL('d','NEW.created_at')} AND a.enabled=1
+       AND (d.person_id=p.id OR EXISTS(SELECT 1 FROM ck_daily_dispatch_links l WHERE l.daily_person_id=d.person_id AND l.permanent_person_id=p.id AND l.day=d.origin_day))
        AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at=''))
      AND (json_extract(NEW.after_json,'$.last_owner_transfer.by_scope')='office' OR EXISTS(
-      SELECT 1 FROM ck_attendance_days actor JOIN ck_attendance_people actor_person ON actor_person.id=NEW.actor_id
-       WHERE actor.day=date(NEW.created_at,'+9 hours') AND actor.signed_out='' AND actor.signed_in<=NEW.created_at AND actor_person.enabled=1
-       AND (actor.person_id=NEW.actor_id OR EXISTS(SELECT 1 FROM ck_daily_dispatch_links l WHERE l.permanent_person_id=NEW.actor_id AND l.daily_person_id=actor.person_id AND l.day=actor.day))
+      SELECT 1 FROM ck_attendance_current_days actor JOIN ck_attendance_people actor_person ON actor_person.id=NEW.actor_id
+       WHERE ${attendanceEventDaySQL('actor','NEW.created_at')} AND ${attendanceEventCurrentSQL('actor','NEW.created_at')} AND actor_person.enabled=1
+       AND (actor.person_id=NEW.actor_id OR EXISTS(SELECT 1 FROM ck_daily_dispatch_links l WHERE l.permanent_person_id=NEW.actor_id AND l.daily_person_id=actor.person_id AND l.day=actor.origin_day))
        AND (EXISTS(SELECT 1 FROM ck_daily_dispatch_grants grant_row WHERE grant_row.person_id=NEW.actor_id AND grant_row.enabled=1 AND EXISTS(SELECT 1 FROM json_each(grant_row.departments) WHERE value=${executionDepartmentSQL('s')}))
         OR EXISTS(SELECT 1 FROM ck_employee_profiles employee WHERE employee.person_id=NEW.actor_id) AND COALESCE((SELECT enabled FROM ck_field_access access_row WHERE access_row.person_id=NEW.actor_id),1)=1)
        AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=actor.id AND b.ended_at='')))
      AND (json_extract(NEW.after_json,'$.last_owner_transfer.mode')<>'claim' OR (
       json_extract(NEW.after_json,'$.owner_id')=NEW.actor_id AND NOT EXISTS(
-       SELECT 1 FROM ck_attendance_days absent WHERE absent.day=date(NEW.created_at,'+9 hours') AND absent.signed_out=''
-        AND (absent.person_id=json_extract(NEW.before_json,'$.owner_id') OR EXISTS(SELECT 1 FROM ck_daily_dispatch_links l WHERE l.permanent_person_id=json_extract(NEW.before_json,'$.owner_id') AND l.daily_person_id=absent.person_id AND l.day=absent.day))
+       SELECT 1 FROM ck_attendance_current_days absent WHERE ${attendanceEventDaySQL('absent','NEW.created_at')} AND ${attendanceEventCurrentSQL('absent','NEW.created_at')}
+        AND (absent.person_id=json_extract(NEW.before_json,'$.owner_id') OR EXISTS(SELECT 1 FROM ck_daily_dispatch_links l WHERE l.permanent_person_id=json_extract(NEW.before_json,'$.owner_id') AND l.daily_person_id=absent.person_id AND l.day=absent.origin_day))
         AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=absent.id AND b.ended_at=''))))
-   ) THEN RAISE(ABORT,'owner_transfer_changed') END; END`).run();
+   ) THEN RAISE(ABORT,'owner_transfer_changed') END; END`)]));
    return await save(env,b,u,row,next,await bulkOwnerTransferStatements(env,row,next,u,b,t),await partnerShareGuard(env,row,u,shareOwner));
   }
   if(b.action.startsWith('sop_task_')) {

@@ -1,3 +1,5 @@
+import {attendanceSource,attendanceDaySQL,attendanceCurrentSQL} from './attendance-context.js';
+import {kstDay} from './attendance-time.js';
 import {executionDepartment} from './work-execution.js';
 import {simultaneous,ensureBatchLabor,batchFacts,closeLabor,openLabor,readyBatchProcesses} from './bulk-batch-labor.js';
 import {retireCompletedWorkClocks} from './completed-work-clocks.js';
@@ -35,7 +37,7 @@ async function permit(e,u,owner='',admission=false){
  if(!bulkBatchEnabled(e)||!['manager','dispatcher'].includes(u?.role))throw Error('仅大货派审员可办理一人多单');
  if(u.scope==='field'&&admission){
   if(u.role!=='dispatcher'||u.daily_dispatch&&!u.can_dispatch||!(u.daily_dispatch?u.dispatch_departments||[]:u.departments||[]).includes('bulk'))throw Error('无大货派工权限');
-  if(!await q(e,"SELECT 1 FROM ck_attendance_days d WHERE d.id=? AND d.day=date('now','+9 hours') AND d.signed_out='' AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at='')",u.attendance_id||'').first())throw Error('派审员须已签到且不在休息中');
+  if(!await q(e,`SELECT 1 FROM ${attendanceSource(e)} d WHERE d.id=? AND ${attendanceDaySQL(e,'d','?')} AND ${attendanceCurrentSQL(e,'d')} AND d.signed_out='' AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at='')`,u.attendance_id||'',kstDay(new Date().toISOString())).first())throw Error('派审员须已签到且不在休息中');
  }
  if(!owner||owner===u.id||u.role==='manager'&&u.scope==='office')return false;
  if(!await isActivePartner(e,u.id,owner))throw Error('请由本批派审员操作；原负责人离岗时请先办理接班');
@@ -43,7 +45,7 @@ async function permit(e,u,owner='',admission=false){
 }
 async function person(e,workers,lead){
  if(!Array.isArray(workers)||workers.length!==1||!workers[0]?.id||!sameWorkerBadge(workers[0].id,lead))throw Error('一人多单必须且只能选择1名实际操作员');
- const id=canonicalDailyBadge(workers[0].id),r=await q(e,`SELECT d.* FROM ck_attendance_days d JOIN ck_attendance_people p ON p.id=d.person_id LEFT JOIN ck_attendance_management m ON m.attendance_id=d.id WHERE ${workerBadgeMatch('d.worker_id','?')} AND d.day=date('now','+9 hours') AND d.signed_out='' AND p.enabled=1 AND COALESCE(m.voided_at,'')='' AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at='')`,id).first();
+ const id=canonicalDailyBadge(workers[0].id),r=await q(e,`SELECT d.* FROM ${attendanceSource(e)} d JOIN ck_attendance_people p ON p.id=d.person_id LEFT JOIN ck_attendance_management m ON m.attendance_id=d.id WHERE ${workerBadgeMatch('d.worker_id','?')} AND ${attendanceDaySQL(e,'d','?')} AND ${attendanceCurrentSQL(e,'d')} AND d.signed_out='' AND p.enabled=1 AND COALESCE(m.voided_at,'')='' AND NOT EXISTS(SELECT 1 FROM ck_attendance_breaks b WHERE b.attendance_id=d.id AND b.ended_at='')`,id,kstDay(new Date().toISOString())).first();
  if(!r)throw Error('操作员须已签到、未签退且不在休息中');await retireCompletedWorkClocks(e,[{id}]);return {id:canonicalDailyBadge(r.worker_id),name:r.name};
 }
 function readyProcesses(d){

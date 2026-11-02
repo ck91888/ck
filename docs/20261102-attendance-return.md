@@ -105,3 +105,13 @@ PC/手机页面、导出、最终全量与完整容量回归仍在进行，未�
 新增 `tests/attendance-return-lifecycle.test.mjs` 五个变体：Node 5通过/0失败/0跳过，原生本地workerd D1同组5通过/0失败/0跳过，分别为 `/tmp/ck-attendance-return-lifecycle-five-final.log` 和 `/tmp/ck-attendance-return-lifecycle-five-final-d1.log`。原生命令：`CK_RETURN_NATIVE_D1=true CODEX_PRIMARY_RUNTIME_NODE_MODULES=/tmp/ck-dispatch-d1-deps/node_modules node --test tests/attendance-return-lifecycle.test.mjs`。这里明确包含新增四项，不用原六组测试替代。
 
 第三轮全量仍有1项同日造数回跨午夜失败（native-pause回移30分钟），未宣称全绿；正在固定该合成测试的同日时间并核查其余读取首次签退的业务入口。容量新增全扫已在阶段6从约13万降至3万行，后续仍对最终代码复测。代码只在独立返岗分支，不合测试、不启用部署开关、不操作真实出勤数据。
+
+## 阶段8：返岗后的其余业务入口及旧功能兼容
+
+派单批次、转单/离岗接班、休息中任务可见、核对扫码、快递批次及其提交时校验、职员批量停用改用显式当前出勤段。转单与接班的持久化保护读取可切换的当前视图，不把某实例开关编译成永久权限；原负责人返岗在岗时，其他派审员不能误接班。临时长期牌关联仍按原签到日核对，不按姓名扩大权限。正常旧单段保持原准入。没有增加派审按钮或改变完工产出规则。
+
+补齐原签到可逆作废的兼容：未参与作业的首段作废后仍可按原权限恢复，同一有效班次只恢复原首段状态；超截止不重开，不新增返岗事实或劳动。已有返岗事实继续禁止作废。
+
+相关旧功能回归88通过/0失败/0跳过（`/tmp/ck-attendance-return-entry-regression.log`）；新增四项入口及首段恢复后，生命周期回归10通过/0失败/0跳过（`/tmp/ck-attendance-return-entries-ten.log`）。真实本地workerd D1前9项通过/0失败/0跳过（`/tmp/ck-attendance-return-entries-native.log`），最后增加的恢复用例将在固定代码最终D1轮验证。两项原同日时钟fixture都固定签到前09:00，保留业务断言，不放宽生产日期/会话规则。
+
+阶段8构建成功。新代码固定后仍须全量、原六组D1/双冷升级、容量、浏览器和草稿/照片最终回归；目前不是放行声明。独立分支持续推送，main及测试分支保持原SHA，未部署返岗。

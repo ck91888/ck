@@ -1,3 +1,4 @@
+import {attendanceSource,attendanceCurrentSQL} from './attendance-context.js';
 import {workerBadgeMatch} from './daily-badge-identity.js';
 // Used by both task discovery and mutation authorization. `s` is a dispatch
 // record alias; membership comes from live work segments, never request fields
@@ -16,15 +17,15 @@ export function dispatchAccess(user) {
 
 // A resting member may view their own still-assigned task, not manage its crew.
 // Only the verified session's current attendance break confers this narrow right.
-export function restingDispatchAccess(user){
+export function restingDispatchAccess(user,env={}){
  if(user?.scope!=='field'||!user.badge||!user.attendance_id)return {sql:'0',args:[]};
  return {sql:`(EXISTS(SELECT 1 FROM v2_ops_jobs j WHERE j.id=s.id AND j.status IN ('working','awaiting_close','paused'))
- AND EXISTS(SELECT 1 FROM ck_attendance_days d JOIN ck_attendance_breaks b ON b.attendance_id=d.id WHERE d.id=? AND ${workerBadgeMatch('d.worker_id','?')} AND d.signed_out='' AND b.ended_at='' AND EXISTS(SELECT 1 FROM json_each(b.job_ids_json) x WHERE x.value=s.id))
+ AND EXISTS(SELECT 1 FROM ${attendanceSource(env)} d JOIN ck_attendance_breaks b ON b.attendance_id=d.id WHERE d.id=? AND ${workerBadgeMatch('d.worker_id','?')} AND d.signed_out='' AND ${attendanceCurrentSQL(env,'d')} AND b.ended_at='' AND EXISTS(SELECT 1 FROM json_each(b.job_ids_json) x WHERE x.value=s.id))
  AND EXISTS(SELECT 1 FROM json_each(s.state,'$.workers') w WHERE ${workerBadgeMatch("json_extract(w.value,'$.id')",'?')})
  AND NOT EXISTS(SELECT 1 FROM json_each(s.state,'$.borrowed_worker_ids') w WHERE ${workerBadgeMatch('w.value','?')})
  AND NOT EXISTS(SELECT 1 FROM v2_ops_job_workers w WHERE ${workerBadgeMatch('w.worker_id','?')} AND w.left_at='' AND w.job_id!=s.id))`,args:[user.attendance_id,user.badge,user.badge,user.badge,user.badge]};
 }
 export async function restingDispatch(env,id){
- const a=restingDispatchAccess(env.SOP_REQUEST_USER);if(!a.args.length)return false;
+ const a=restingDispatchAccess(env.SOP_REQUEST_USER,env);if(!a.args.length)return false;
  return !!await env.DB.prepare("SELECT s.id FROM sop_records s WHERE s.kind='dispatch' AND s.id=? AND "+a.sql).bind(id,...a.args).first();
 }

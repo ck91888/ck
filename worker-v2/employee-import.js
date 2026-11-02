@@ -1,3 +1,4 @@
+import {attendanceSource} from './attendance-context.js';
 // A preview is read-only; all imported profiles and audit events commit together.
 const q=(env,sql,...args)=>env.DB.prepare(sql).bind(...args);
 export async function employeeImport(b,env,h,departments){
@@ -5,7 +6,7 @@ export async function employeeImport(b,env,h,departments){
  if(!Array.isArray(b.rows)||!b.rows.length||b.rows.length>200)fail('每次上传 1–200 名职员 / 한 번에 1–200명');
  const existing=(await q(env,'SELECT p.*,e.employee_no,e.department,e.version FROM ck_attendance_people p JOIN ck_employee_profiles e ON e.person_id=p.id').all()).results;
  const byNo=new Map(existing.map(p=>[p.employee_no,p]));
- const active=new Set((await q(env,"SELECT worker_id FROM ck_attendance_days WHERE signed_out='' UNION SELECT worker_id FROM v2_ops_job_workers WHERE left_at='' AND worker_id LIKE 'EMP-%'").all()).results.map(x=>x.worker_id));
+ const active=new Set((await q(env,`SELECT worker_id FROM ${attendanceSource(env)} WHERE signed_out='' UNION SELECT worker_id FROM v2_ops_job_workers WHERE left_at='' AND worker_id LIKE 'EMP-%'`).all()).results.map(x=>x.worker_id));
  const seen=new Map(),plans=b.rows.map((raw,i)=>{
   const errors=[],row=Number.isInteger(raw?.row)&&raw.row>=2?raw.row:i+2;
   let name='';try{name=nameOf(raw?.name);}catch(e){errors.push(e.message);}
@@ -37,7 +38,7 @@ export async function employeeImport(b,env,h,departments){
   statements.push(q(env,'INSERT INTO ck_attendance_events VALUES(?,?,?,?,?,?,?,?,?,?,?)','ATE-'+crypto.randomUUID(),b.client_req_id+'-row-'+i,after.id,after.version,b.action,u.id,t,JSON.stringify(before||{}),JSON.stringify(after),JSON.stringify({ok:true}),JSON.stringify({batch:b.client_req_id,row:p.row})));
   if(before){
    // Fail the transaction if the person clocks in after validation but before saving.
-   statements.push(q(env,"UPDATE ck_employee_profiles SET department=?,version=CASE WHEN version=? AND (?=1 OR (NOT EXISTS(SELECT 1 FROM ck_attendance_days WHERE person_id=? AND signed_out='') AND NOT EXISTS(SELECT 1 FROM v2_ops_job_workers WHERE worker_id=? AND left_at=''))) THEN ? ELSE NULL END WHERE person_id=?",after.department,before.version,after.enabled,before.id,before.badge_id,after.version,before.id));
+   statements.push(q(env,`UPDATE ck_employee_profiles SET department=?,version=CASE WHEN version=? AND (?=1 OR (NOT EXISTS(SELECT 1 FROM ${attendanceSource(env)} WHERE person_id=? AND signed_out='') AND NOT EXISTS(SELECT 1 FROM v2_ops_job_workers WHERE worker_id=? AND left_at=''))) THEN ? ELSE NULL END WHERE person_id=?`,after.department,before.version,after.enabled,before.id,before.badge_id,after.version,before.id));
    statements.push(q(env,'UPDATE ck_attendance_people SET name=?,agency=?,enabled=? WHERE id=?',after.name,after.agency,after.enabled,after.id));
   }else statements.push(q(env,'INSERT INTO ck_attendance_people VALUES(?,?,?,?,?,?,?)',after.id,after.badge_id,after.name,after.agency,'permanent',after.enabled,t),q(env,'INSERT INTO ck_employee_profiles VALUES(?,?,?,1)',after.id,p.employeeNo,after.department));
   changes.push({row:p.row,employeeNo:p.employeeNo,id:after.id,action:p.action});

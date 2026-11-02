@@ -4,7 +4,7 @@ import {ownedHomeFixture} from './field-owned-home-fixture.mjs';
 import {dispatchTimeAttendance} from '../worker-v2/dispatch-time-runtime.js';
 import {confirmOperation} from './office-operator-fixture.mjs';
 async function setup(t){
- const base=Date.now()-3600000;t.mock.timers.enable({apis:['Date'],now:base});
+ const base=Date.parse(new Date(Date.now()+9*3600000).toISOString().slice(0,10)+'T09:00:00+09:00');t.mock.timers.enable({apis:['Date'],now:base});
  const f=await ownedHomeFixture();t.after(()=>f.DB.raw.close());f.env.SOP_AUTO_DISPATCH_TIME_ENABLED='true';f.env.SOP_DISPATCH_SHARE_ENABLED='true';
  const advance=m=>t.mock.timers.tick(m*60000),personId=k=>f.people[k].id,att=k=>f.people[k].record.id;
  const state=k=>f.DB.raw.prepare('SELECT * FROM ck_dispatch_time_days WHERE person_id=? ORDER BY activated_at DESC LIMIT 1').get(personId(k));

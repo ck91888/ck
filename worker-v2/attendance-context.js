@@ -63,3 +63,8 @@ export function attendanceDispatchBindingSQL(table){
  const candidate=`s.attendance_id=${table}.attendance_id AND s.person_id=${table}.person_id AND ${time?`julianday(s.started_at)<=julianday(${table}.${time}) AND julianday(COALESCE(NULLIF(s.ended_at,''),NULLIF(s.provisional_end_at,''),${attendanceCutoffSQL('s.started_at')}))>julianday(${table}.${time})`:"s.ordinal=1 AND s.kind='normal'"}`;
  return `UPDATE ${table} SET attendance_span_id=(SELECT s.id FROM ck_attendance_spans s WHERE ${candidate} LIMIT 1) WHERE attendance_span_id='' AND (SELECT COUNT(*) FROM ck_attendance_spans s WHERE ${candidate})=1`;
 }
+
+// Persistent admission triggers use the view's row mode, so another isolate or
+// a switch change cannot leave a trigger compiled against obsolete raw punches.
+export const attendanceEventDaySQL=(d,at)=>`((${d}.attendance_span_id='' AND ${d}.day=date(${at},'+9 hours')) OR (${d}.attendance_span_id<>'' AND date(${at},'+9 hours') BETWEEN date(${d}.signed_in,'+9 hours') AND date(${attendanceCutoffSQL(d+'.signed_in')},'+9 hours','-0.001 seconds')))`;
+export const attendanceEventCurrentSQL=(d,at)=>`${d}.signed_out='' AND julianday(${d}.signed_in)<=julianday(${at}) AND (${d}.attendance_span_id='' OR (${d}.span_status='open' AND julianday(${attendanceCutoffSQL(d+'.signed_in')})>julianday(${at})))`;

@@ -11,7 +11,9 @@ function setup(){
  const person=async name=>{const d=(await ok('sop_attendance_checkin',{name,agency:'가온'})).record;return {d,w:{id:d.badgeId,name:d.name}};};
  return {DB,env,call,ok,start,active,status,person};
 }
-test('explicit pause keeps assignment, closes only this task, resumes once and preserves effective time',async()=>{
+test('explicit pause keeps assignment, closes only this task, resumes once and preserves effective time',async t=>{
+ // Thirty minutes of same-shift history must remain on the attendance day even near midnight.
+ t.mock.timers.enable({apis:['Date'],now:Date.parse(new Date(Date.now()+32400000).toISOString().slice(0,10)+'T09:00:00+09:00')});
  const f=setup(),a=await f.person('QA pause A'),b=await f.person('QA pause B'),other=await f.person('QA other');
  const j=await f.start([a.w,b.w]),k=await f.start([other.w]);
  const joinedAt=new Date(Date.now()-30*60000).toISOString();
