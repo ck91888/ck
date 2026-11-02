@@ -21,10 +21,35 @@
 
 测试站配置与构建已准备启用 `SOP_AUTO_DISPATCH_TIME_ENABLED`；仅测试环境可生效，当前尚未合测试分支或部署。不增加开始派审按钮。照片压缩和产出草稿沿用现有功能。
 
-## 当前验证与剩余工作
+## 开发自测结果
 
-基础状态模型21项、工时归集8项通过；实际登录 Worker API 26项通过，0失败、0跳过，覆盖普通/外部/分组/一人多单、末单、失败回滚、本人下场、休息签退、日当长期/临时牌关联、资格撤销、共享处理/退出、正式转单、多设备幂等与版本竞争、跨日续单、异常封顶、签退更正、真实装卸借调和职员工时/工作量归集。全部为合成身份与内存 SQLite，不操作真实历史数据。日志 `/tmp/ck-dispatch-time-runtime.log`。
+业务源码固定于 `3db3991da3c244b8880f248620b626806814008f`。最终验证记录提交只更新本报告和既有浏览器合成夹具的可选功能开关，不修改业务源码。
 
-界面脚本语法检查与 diff 检查通过。新增本地 workerd D1 实测已发现并修正触发器 UPDATE 别名兼容问题；修复后实际派单/休息/恢复/完成审核与职员归集通过。浏览器 1440/390/320 已通过职员与日当看板、状态筛选、独立工时明细、CSV和签到保护；另通过实际操作/派审互斥、休息恢复及末单结束状态切换。日志 `/tmp/ck-dispatch-time-d1.log`、`/tmp/ck-dispatch-time-browser.log`；合成截图 `/tmp/ck-dispatch-time-browser/`。先行基础阶段全量1418通过、0失败、0跳过属于此前版本结果，不能替代本轮完整回归。下一步：固定构建后全量及产出草稿/照片压缩回归，再返回固定候选 SHA 供独立审核。本轮不合测试或部署。
+| 验证 | 结果 | 本地证据 |
+| --- | --- | --- |
+| 固定构建后全量 `tests/*.test.mjs`，含 JSDOM | 1444通过、0失败、0跳过 | `/tmp/ck-dispatch-time-full.log` |
+| 真实登录 Worker API | 26通过、0失败、0跳过（已包含在全量） | `/tmp/ck-dispatch-time-runtime.log` |
+| 本地 workerd D1 | 真实派单、休息、恢复、审核结束与职员归集通过 | `/tmp/ck-dispatch-time-d1.log` |
+| 新功能浏览器 | 1440/390/320职员与关联日当看板、状态筛选、独立时段、CSV、签到保护、本人下场/退出、休息和末单待派单通过；页面/弹窗无溢出 | `/tmp/ck-dispatch-time-browser.log`、`/tmp/ck-dispatch-time-browser/` |
+| 开启自动计时后的产出草稿浏览器回归 | 普通、外部、分组、一人多单；预填、重开、双击幂等、跨设备冲突、响应丢失重试和最终修正全部通过 | `/tmp/ck-dispatch-time-output-regression.log` |
+| 开启自动计时后的照片压缩浏览器回归 | PC/手机/缩放矩阵、EXIF、透明图、故障恢复、原API上传与条码/二维码解码通过；合成图3462248→403880字节，2048×1536 | `/tmp/ck-dispatch-time-photo-regression.log` |
+| Worker包构建与deploy dry-run | 通过；只打包验证，没有部署 | `/tmp/ck-dispatch-time-build.log`、`/tmp/ck-dispatch-time-dry-run.log` |
 
-追加转单边界修复：共享仍有效时正式转单，不把转出的旧负责人重新认作共享接手人。独立合成复现确认6c080f0存在旧人继续派审的问题，修复后新增真实API回归通过；旧人停止、接收人从交接时刻开始。当前完整API26通过、0失败、0跳过。
+API覆盖：四类大货入口、末单完成/取消、失败回滚、本人下场与退出、日当长期/当天临时牌关联、休息签退、资格撤销、共享首次处理/退出、正式转单、多设备重试/版本竞争、不同单并发首次派工、跨日续单、异常封顶、误签退更正、真实装卸借调、职员工时/工作量归集与未派单预填不激活。全部为合成身份和隔离数据库，不补真实历史数据。
+
+已通过本地D1发现并修复触发器UPDATE别名兼容问题；已合成复现并修复共享仍有效时正式转单误将旧负责人重新认作协作者的问题。新回归确保旧人停止、接收人仅从交接时刻开始。当前无已知未修复失败。
+
+复现命令（依赖位于本执行环境临时目录，未提交依赖或凭据）：
+
+```sh
+node worker-v2/build-sop-staging.mjs
+CK_JSDOM_MODULE=/tmp/ck-output-deps/node_modules/jsdom/lib/api.js node --test tests/*.test.mjs
+CODEX_PRIMARY_RUNTIME_NODE_MODULES=/tmp/ck-dispatch-d1-deps/node_modules node tests/dispatch-time-d1.mjs
+node tests/dispatch-time-browser.mjs
+CK_AUTO_DISPATCH_TIME=true node tests/bulk-output-draft-browser.mjs
+CK_AUTO_DISPATCH_TIME=true node tests/photo-compression-browser.mjs
+```
+
+构建会清空测试资产目录，必须在读取这些资产的测试之前完成；浏览器串行执行。D1用Miniflare4和真实本地workerd，Node SQLite单测不能替代这一步。
+
+开发自测完成，下一步交固定独立审核任务复核最终候选。尚未合测试分支或部署，测试分支仍为7957cf1，main仍为4671f49。测试站现场验收尚未执行。独立审核通过后，由总管通知用户再安排测试发布；绝不更新正式版。
