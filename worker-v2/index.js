@@ -11939,8 +11939,18 @@ route('v2_003_material_txn', async (body, env) => {
   if (!['adjust', 'stocktake'].includes(txnType) && (!Number.isFinite(rawQty) || rawQty <= 0)) {
     return err('positive_qty_required');
   }
-  return withIdem(env, body, 'v2_003_material_txn', async () => {
+  const requestKey = String(body.client_req_id || '').trim();
+  const receipt = async () => {
+    if (!requestKey) return null;
+    const saved = await env.DB.prepare('SELECT action,response_json FROM v2_idempotency_keys WHERE idem_key=?').bind(requestKey).first();
+    if (!saved) return null;
+    if (saved.action !== 'v2_003_material_txn') throw new Error('request_id_conflict');
+    return JSON.parse(saved.response_json);
+  };
+  try {
     for (let attempt = 0; attempt < 4; attempt++) {
+      const saved = await receipt();
+      if (saved) return json(saved);
       const item = await env.DB.prepare('SELECT * FROM v2_003_materials WHERE id=?').bind(id).first();
       if (!item) throw new Error('not_found');
       if (item.status !== 'active' && !isAdmin(body, env)) throw new Error('material_inactive');
@@ -11963,7 +11973,8 @@ route('v2_003_material_txn', async (body, env) => {
       const cost = Math.max(0, v003Number(body.unit_cost, item.unit_cost));
       const supplier = v003Text(body.supplier || item.supplier, 160);
       const txId = v003Id('MTX');
-      const results = await env.DB.batch([
+      const result = { ok: true, id: txId, qty_before: before, qty_delta: delta, qty_after: after };
+      const statements = [
         // Insert only against the version actually read; the paired update is in this same transaction.
         env.DB.prepare(`INSERT INTO v2_003_material_txns
           (id, material_id, txn_type, qty_delta, qty_before, qty_after, warehouse_name, location_code,
@@ -11977,15 +11988,29 @@ route('v2_003_material_txn', async (body, env) => {
             v003Text(body.note, 1000), op.id, op.name, department, t, id, version),
         env.DB.prepare(`UPDATE v2_003_materials SET current_qty=?, location_code=?,
           unit_cost=?, supplier=?, stock_version=stock_version+1, updated_by=?, updated_at=?
-          WHERE id=? AND stock_version=?`)
-          .bind(after, location, cost, supplier, op.name, t, id, version)
-      ]);
+          WHERE id=? AND stock_version=? AND EXISTS(SELECT 1 FROM v2_003_material_txns WHERE id=?)`)
+          .bind(after, location, cost, supplier, op.name, t, id, version, txId)
+      ];
+      // A duplicate key aborts this entire batch, including its stock and ledger
+      // writes. Never publish the receipt after the business transaction commits.
+      if (requestKey) statements.push(env.DB.prepare(`INSERT INTO v2_idempotency_keys(idem_key,action,response_json,created_at)
+        SELECT ?,'v2_003_material_txn',?,? WHERE EXISTS(SELECT 1 FROM v2_003_material_txns WHERE id=?)`)
+        .bind(requestKey, JSON.stringify(result), t, txId));
+      let results;
+      try { results = await env.DB.batch(statements); }
+      catch (error) {
+        const saved = await receipt();
+        if (saved) return json(saved);
+        throw error;
+      }
       if (v003Changes(results[0]) === 1 && v003Changes(results[1]) === 1) {
-        return { ok: true, id: txId, qty_before: before, qty_delta: delta, qty_after: after };
+        return json(result);
       }
     }
     throw new Error('stock_changed_retry');
-  });
+  } catch (error) {
+    return json({ ok: false, error: error.message || 'internal error' }, error.message === 'request_id_conflict' ? 409 : 500);
+  }
 });
 
 route('v2_003_department_usage', async (body, env) => {
