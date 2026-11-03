@@ -29,6 +29,7 @@ import {dashboardRange,segmentMinutes,reportWorkerId} from './dashboard-time.js'
 import {atomicNativeFinish} from './atomic-native-finish.js';
 import {atomicBulkFinish} from './atomic-bulk-finish.js';
 import {nativeCompletionGuard,completionConflict,completionChanged} from './native-completion-guard.js';
+import {finishUnplannedUnload} from './unplanned-unload-finish.js';
 import {intentSignature,canonicalIntent,boundReceiptJSON,readBoundReceipt} from './transaction-receipt.js';
 import {ensureInboundReferenceGuard} from './inbound-reference-guard.js';
 import {referenceWriteBatch,ensureReferenceHistory} from './inbound-reference-history.js';
@@ -5084,81 +5085,8 @@ route("v2_unplanned_unload_finish", async (body, env) => {
   const worker_id = String(body.worker_id || "").trim();
   if (!job_id) return err("missing job_id");
 
-  return withIdem(env, body, "v2_unplanned_unload_finish", async () => {
-    const t = now();
-    const result_lines = body.result_lines || [];
-    const diff_note = String(body.diff_note || "").trim();
-    const remark = String(body.remark || "").trim();
-    const leave_only = body.leave_only === true;
-
-    if (!leave_only) {
-      const jobCheck = await env.DB.prepare("SELECT status FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
-      if (jobCheck && jobCheck.status === 'completed') {
-        const cleaned = await closeOpenWorkerSegmentsForJob(env, job_id, t, 'already_completed_cleanup');
-        // feedback 兜底 — 如果首次完成时未推进 feedback 状态，已完成 job 的 feedback 也强制推进
-        const _job = await env.DB.prepare("SELECT related_doc_type, related_doc_id FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
-        if (_job && _job.related_doc_type === 'field_feedback' && _job.related_doc_id) {
-          await env.DB.prepare(
-            "UPDATE v2_field_feedbacks SET status='unloaded_pending_info', updated_at=? WHERE id=? AND status='field_working'"
-          ).bind(t, _job.related_doc_id).run();
-        }
-        return { ok: true, already_completed: true, error: "already_completed", cleaned_open_segments: cleaned, message: "任务已完成" };
-      }
-    }
-
-    await closeAllOpenSegs(env, job_id, worker_id, t, leave_only ? 'leave' : 'finished');
-    const realCount = await recalcActiveCount(env, job_id, t);
-
-    if (leave_only) {
-      return { ok: true, left: true };
-    }
-
-    if (realCount > 0 && !env.SOP_GROUP_FINISH) {
-      return { ok: false, error: "others_still_working",
-        message: "您已退出此任务，还有 " + realCount + " 人继续作业",
-        active_worker_count: realCount };
-    }
-    const hasAnyQty = result_lines.some(ln => Number(ln.actual_qty || 0) > 0);
-    if (!hasAnyQty) {
-      return { ok: false, error: "empty_result", message: "至少填写一项实际数量" };
-    }
-
-    const job = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
-    if (!job) return { ok: false, error: "job not found" };
-
-    const result_id = "RES-" + uid();
-    await env.DB.prepare(`
-      INSERT INTO v2_ops_job_results(id, job_id, box_count, pallet_count, remark, result_json, result_lines_json, diff_note, created_by, created_at)
-      VALUES(?,?,0,0,?,?,?,?,?,?)
-    `).bind(result_id, job_id, remark,
-        JSON.stringify({ result_lines, diff_note, remark }),
-        JSON.stringify(result_lines), diff_note, worker_id, t).run();
-
-    // 防御性收口 — 关闭所有遗留 open segment（多人卸货必须确保所有人 left_at 写入）
-    await closeOpenWorkerSegmentsForJob(env, job_id, t, 'job_completed');
-
-    const sharedResult = JSON.stringify({ result_lines, diff_note, remark });
-    await env.DB.prepare(
-      "UPDATE v2_ops_jobs SET status='completed', shared_result_json=?, active_worker_count=0, updated_at=? WHERE id=?"
-    ).bind(sharedResult, t, job_id).run();
-
-    const fb_id = (job.related_doc_type === 'field_feedback') ? job.related_doc_id : '';
-    if (fb_id) {
-      const cargoSummary = result_lines.map(rl => (rl.unit_type || "") + " " + (rl.actual_qty || 0)).join(" / ");
-      await env.DB.prepare(`
-        UPDATE v2_field_feedbacks SET status='unloaded_pending_info',
-          result_lines_json=?, diff_note=?, remark=?,
-          completed_at=?, completed_by=?,
-          title=?, updated_at=? WHERE id=?
-      `).bind(
-        JSON.stringify(result_lines), diff_note, remark,
-        t, worker_id,
-        "计划外卸货完成: " + (cargoSummary || "无明细"), t, fb_id
-      ).run();
-    }
-
-    return { ok: true, result_id, feedback_id: fb_id };
-  });
+  const job=await env.DB.prepare('SELECT * FROM v2_ops_jobs WHERE id=?').bind(job_id).first();
+  return json(await finishUnplannedUnload(env,body,job));
 });
 
 // List active (field_working) unplanned unload feedbacks for join
@@ -5506,6 +5434,13 @@ route("v2_unload_job_finish", async (body, env) => {
   const job_id = String(body.job_id || "").trim();
   const worker_id = String(body.worker_id || "").trim();
   if (!job_id) return err("missing job_id");
+
+  // Historical no-document/dynamic jobs share the same atomic completion.
+  const legacyJob=await env.DB.prepare('SELECT * FROM v2_ops_jobs WHERE id=?').bind(job_id).first();
+  const legacyPlan=legacyJob?.related_doc_type==='inbound_plan'&&legacyJob.related_doc_id
+    ?await env.DB.prepare('SELECT * FROM v2_inbound_plans WHERE id=?').bind(legacyJob.related_doc_id).first():null;
+  if(legacyJob&&(!legacyJob.related_doc_id||legacyPlan?.source_type==='field_dynamic'))
+    return json(await finishUnplannedUnload(env,body,legacyJob,{legacy:true,plan:legacyPlan}));
 
   return withIdem(env, body, "v2_unload_job_finish", async () => {
   const t = now();
