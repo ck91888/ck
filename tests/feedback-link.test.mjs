@@ -66,11 +66,11 @@ test('searches are paginated and support customer, plan number and external bill
  const b=payload(f,await preview(f,p));assert.equal((await call('sop_feedback_link_save',b,{method:'GET'})).ok,false);assert.equal((await call('sop_feedback_link_save',b,{headers:{Origin:'https://unrelated.local'}})).ok,false);
  await login('viewer');assert.equal((await call('sop_feedback_link_save',b)).ok,false);await login('service');await ok('sop_feedback_link_save',b);
 });
-test('linked records participate in backup/reset and concurrent cleanup cannot delete their labor',async()=>{
+test('linked records and labor survive disabled reset; concurrent cleanup still cannot delete them',async()=>{
  const {DB,env,plan,unload,preview,payload,ok,call}=await setup();const p=await plan(),f=await unload(),b=payload(f,await preview(f,p));
  const batch=DB.batch;let race=true;DB.batch=async statements=>{if(race&&statements.some(s=>s.sql.startsWith('DELETE FROM v2_ops_job_workers'))){race=false;await ok('sop_feedback_link_save',b);}return batch(statements);};
  assert.equal((await call('v2_feedback_delete',{id:f.feedback_id})).ok,false);DB.batch=batch;assert.equal(DB.raw.prepare('SELECT COUNT(*) n FROM v2_ops_job_workers').get().n,3);assert.equal(DB.raw.prepare('SELECT COUNT(*) n FROM v2_ops_job_results').get().n,1);
  for(const sql of ATTENDANCE_SCHEMA)DB.raw.exec(sql);
- Object.assign(env,{SOP_TEST_RESET_ENABLED:'true',SOP_TEST_RESET_DATABASE:STAGING_DATABASE});const manager={id:'M',role:'manager'};const {run}=await resetAction('start',{requestId:crypto.randomUUID(),confirmation:'CLEAR_TEST_DATA'},env,manager);let done;for(let i=0;i<30;i++){done=await resetAction('step',{runId:run.id},env,manager);if(done.run.completedAt)break;}
- assert.ok(done.run.completedAt);assert.equal(DB.raw.prepare('SELECT COUNT(*) n FROM ck_feedback_plan_links').get().n,0);assert.equal(DB.raw.prepare(`SELECT COUNT(*) n FROM ck_backup_${run.id}_ck_feedback_plan_links`).get().n,1);assert.equal(DB.raw.prepare(`SELECT COUNT(*) n FROM ck_backup_${run.id}_v2_ops_job_workers`).get().n,3);
+ Object.assign(env,{SOP_TEST_RESET_ENABLED:'true',SOP_TEST_RESET_DATABASE:STAGING_DATABASE});const manager={id:'M',role:'manager'},links=DB.raw.prepare('SELECT * FROM ck_feedback_plan_links').all(),workers=DB.raw.prepare('SELECT * FROM v2_ops_job_workers').all();await assert.rejects(resetAction('start',{requestId:crypto.randomUUID(),confirmation:'CLEAR_TEST_DATA'},env,manager),e=>e.status===503);await assert.rejects(resetAction('step',{runId:'a'.repeat(32)},env,manager),e=>e.status===503);
+ assert.deepEqual(DB.raw.prepare('SELECT * FROM ck_feedback_plan_links').all(),links);assert.deepEqual(DB.raw.prepare('SELECT * FROM v2_ops_job_workers').all(),workers);assert.equal(DB.raw.prepare('SELECT COUNT(*) n FROM v2_ops_job_results').get().n,1);
 });

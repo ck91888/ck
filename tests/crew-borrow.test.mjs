@@ -186,10 +186,9 @@ test('picking source closes only borrowed person documents and returns a fresh s
  assert.equal(r.worker_count,2);assert.equal(r.total_minutes,f.DB.raw.prepare('SELECT ROUND(SUM(minutes_worked),1) n FROM v2_ops_job_workers WHERE job_id=?').get(s.job_id).n);assert.equal(f.DB.raw.prepare('SELECT COUNT(*) n FROM v2_ops_job_results WHERE job_id=?').get(s.job_id).n,1);
 });
 
-test('existing staging maintenance archives synthetic loan tables with task tables; no orphaned active loan remains',async()=>{
+test('disabled staging reset preserves synthetic active loan and request records',async()=>{
  const f=await fixture();await f.source();await f.ok('sop_native_start',await f.request());assert.ok(TABLES.includes('ck_crew_borrows'));assert.ok(TABLES.includes('ck_crew_requests'));
- const user={id:'SYNTHETIC-MAINTENANCE',role:'manager'},start=await resetAction('start',{confirmation:'CLEAR_TEST_DATA',requestId:crypto.randomUUID()},f.env,user);let run=start.run;for(let i=0;i<30&&!run.completedAt;i++)run=(await resetAction('step',{runId:run.id},f.env,user)).run;assert.ok(run.completedAt);assert.equal(f.loans().length,0);assert.equal(f.DB.raw.prepare('SELECT COUNT(*) n FROM ck_crew_requests').get().n,0);
- assert.equal(f.DB.raw.prepare('SELECT COUNT(*) n FROM ck_backup_'+run.id+'_ck_crew_borrows').get().n,1);
+ const user={id:'SYNTHETIC-MAINTENANCE',role:'manager'},loans=f.loans(),requests=f.DB.raw.prepare('SELECT * FROM ck_crew_requests').all();await assert.rejects(resetAction('start',{confirmation:'CLEAR_TEST_DATA',requestId:crypto.randomUUID()},f.env,user),e=>e.status===503);await assert.rejects(resetAction('step',{runId:'a'.repeat(32)},f.env,user),e=>e.status===503);assert.deepEqual(f.loans(),loans);assert.deepEqual(f.DB.raw.prepare('SELECT * FROM ck_crew_requests').all(),requests);
 });
 
 test('native paused source retains borrowed assignment; destination completion waits, resume and return count once',async()=>{
