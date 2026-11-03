@@ -51,7 +51,7 @@ test('password administrator can read maintenance preview on both test domains w
   assert.equal((await get(old)).status,403);
   const r=await get(f.cookies.office);assert.equal(r.status,200);assert.equal((await r.json()).ok,true);
  }
- assert.equal(f.DB.raw.prepare('SELECT COUNT(*) n FROM ck_test_resets').get().n,0,'preview must not create a reset');
+ assert.equal(f.DB.raw.prepare("SELECT COUNT(*) n FROM sqlite_master WHERE type='table' AND name='ck_test_resets'").get().n,0,'read-only preview must not create reset schema or a run');
 });
 test('new password exclusively replaces both old administrator code sources, rejecting wrong password and forged old-key bodies',async()=>{
  const f=await setup();f.env.SOP_ADMIN_PASSWORD=password;
