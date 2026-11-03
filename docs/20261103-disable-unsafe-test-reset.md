@@ -34,7 +34,7 @@
 
 扩展测试首轮有测试括号和请求helper遗漏，修正后上述67项通过，失败日志保留。全量首轮发现密码预览测试仍直接查询自动创建的控制表；改为更严格的“控制表本身没有创建”，密码权限断言不变，单独14项通过。首轮全量停止并保留日志；修正后全量另行执行。
 
-## 当前回归状态
+## 初始限制回归记录
 
 staging构建成功。修正后的完整全量 **1838通过/0失败/0跳过**，完整TAP结束，耗时617121.7ms。浏览器 **4组通过/0失败**：1440和390宽度，各含无活动run/已有活动run两种状态。开发自测完成，候选仍须独立QA，不得直接发布。
 
@@ -71,7 +71,7 @@ CODEX_PRIMARY_RUNTIME_NODE_MODULES=<含playwright的目录> node tests/test-rese
 
 认证页面首轮因本地路由履行未暴露自动Sec-Fetch-Site头而失败，原日志保留。最终脚本验证实际受害cookie到达Worker、403、会话集合不变和身份仍有效；未伪造浏览器头部。服务端针对Sec-Fetch-Site的拒绝仍由Node/D1原断言覆盖。未削弱任何原业务/权限断言。
 
-本轮完整全量另行执行，结束后补齐结果。全部复现仅用隔离合成数据，没有在线重置、部署或更改真实记录。新增复现入口：
+增强验证阶段 `74c82fc` 已推送，业务源码与61b2686一致。本轮完整全量已结束，退出码0，**1849通过/0失败/0跳过**，耗时301066.1ms；未改断言或等待条件来通过全量。全部复现仅用隔离合成数据，没有在线重置、部署或更改真实记录。新增复现入口：
 
 ```sh
 node --test --test-reporter=tap tests/test-reset-auth-restriction.test.mjs tests/test-reset-restriction.test.mjs tests/access-control.test.mjs tests/admin-password.test.mjs tests/sop.test.mjs tests/office-operator.test.mjs
