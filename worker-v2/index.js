@@ -39,7 +39,7 @@ import {referenceWriteBatch,ensureReferenceHistory} from './inbound-reference-hi
 import {ensureInboundDocuments,inboundDocumentStates,inboundDocumentStateRead,documentStatesFromRows,confirmInboundIssue} from './inbound-documents.js';
 import {adoptLegacyLoad} from './legacy-load.js';
 import {uploadBatchMaterial} from './batch-work-materials.js';
-import {accessEnabled,accessGuard,accessAdminAction,accessFileAllowed,issueAttachmentAllowed} from './access-control.js';
+import {accessEnabled,accessScope,accessGuard,accessAdminAction,accessFileAllowed,issueAttachmentAllowed} from './access-control.js';
 import {officeOperationContext,confirmOfficeOperator,officeOperationGuard,planAuditStatements,planOperationAudit} from './office-operator.js';
 import {uploadUnloadPhoto,unloadPhotos,inboundAttachmentRead} from './unload-photos.js';
 import {handleFeedbackLink,feedbackLinkDetail,feedbackLinkRead,feedbackLinkActor,feedbackSource,reconcileFeedbackLink} from './feedback-link.js';
@@ -64,6 +64,7 @@ import { workPlanStatements } from './sop-planning.js';
 import { nextOutboundDisplayNo } from './outbound-number.js';
 import { handleSop, guardLegacy, linkedNeeds, linkedCheck, outboundNeedStatements } from './sop.js';
 import { sessionUser, sessionAction } from './sop-session.js';
+import {withResetFence,resetBusy} from './test-reset-fence.js';
 import { handleDispatchShare,isActivePartner,isBulkShareRecord,shareEnabled,noteShareGrant,notedShareGrant,partnerShareGuard,shareConflict } from './dispatch-share.js';
 import { prepareDemo } from './sop-demo.js';
 import { startNative, nativeOwner } from './sop-dispatch.js';
@@ -12872,7 +12873,7 @@ route('v2_003_purchase_order_close', async (body, env) => {
 // =====================================================
 // Worker fetch entry
 // =====================================================
-export default {
+const application = {
   async scheduled(controller,env){await ensureMigrated(env.DB);const DB=await ensureAutoDispatchTime(env);return runSystemCutoff({...env,DB},Math.max(Number(controller.scheduledTime)||0,Date.now()));},
   async fetch(request, env) {
     if (request.method === "OPTIONS") {
@@ -13070,6 +13071,21 @@ export default {
       return json({ ok: false, error: e.message || "internal error" }, 500);
     }
   }
+};
+
+// Maintenance authentication must not run attendance/ledger/bootstrap writes.
+async function resetAuthentication(request,env){
+ try{
+  const url=new URL(request.url),body=request.method==='GET'?Object.fromEntries(url.searchParams):request.headers.get('Content-Type')?.includes('application/json')?await request.clone().json():{};
+  if(!['sop_identity','sop_login','sop_logout','sop_operator_confirm'].includes(body.action))return resetBusy();
+  if(accessEnabled(env)&&accessScope(request)!=='office'&&body.action!=='sop_logout')return resetBusy();
+  const e={...env,SOP_REQUEST_USER:await sessionUser(request,env)};await officeOperationContext(request,e);
+  return body.action==='sop_operator_confirm'?await confirmOfficeOperator(body,e,request):await sessionAction(body,e,request)||resetBusy();
+ }catch{return resetBusy();}
+}
+export default {
+ fetch(request,env,ctx){return withResetFence(env,e=>application.fetch(request,e,ctx),e=>resetAuthentication(request,e));},
+ async scheduled(controller,env,ctx){await withResetFence(env,e=>application.scheduled(controller,e,ctx),()=>undefined);}
 };
 
 // Special multipart handler

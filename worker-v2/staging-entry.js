@@ -36,7 +36,7 @@ const staging={async fetch(request,env,ctx){
    // Keep login available so a manager can resume an interrupted reset.
    const body=request.method==='POST'&&request.headers.get('Content-Type')?.includes('application/json')?await request.clone().json().catch(()=>({})):{};
    const action=body.action||url.searchParams.get('action');
-   if(!['sop_identity','sop_login','sop_logout'].includes(action))return response({ok:false,maintenance:true,error:'测试数据正在清理，请稍后刷新 / 테스트 데이터 삭제 중입니다'},503);
+   if(!['sop_identity','sop_login','sop_logout','sop_operator_confirm'].includes(action))return response({ok:false,maintenance:true,error:'测试数据正在清理，请稍后刷新 / 테스트 데이터 삭제 중입니다'},503);
   }
  }catch(error){return response({ok:false,error:'测试维护状态读取失败，请稍后重试 / 잠시 후 다시 시도하세요'},503);}
  return app.fetch(request,env,ctx);

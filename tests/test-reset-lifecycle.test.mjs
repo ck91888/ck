@@ -14,7 +14,7 @@ test('a real staging reset archives and clears returned attendance, dispatch lab
  assert.ok((await f.okReset('status')).counts.every(row=>row.count===0));t.diagnostic(JSON.stringify({archivedTables:done.run.total,archivedRows:done.run.archived,r2Objects:f.objects.size}));
 });
 test('every declared business table has an explicit reset or retained-control classification',()=>{
- const retained=new Set(['ck_access_attempts','ck_access_sessions','ck_attendance_return_config','ck_attendance_return_migration_guard','ck_dispatch_time_config','ck_office_operation_context','ck_test_reset_items','ck_test_resets','v2_003_locations','v2_schema_meta']),root=new URL('../worker-v2/',import.meta.url),unknown=[];
+ const retained=new Set(['ck_access_attempts','ck_access_sessions','ck_attendance_return_config','ck_attendance_return_migration_guard','ck_dispatch_time_config','ck_office_operation_context','ck_test_reset_items','ck_test_resets','ck_test_reset_epoch','ck_test_reset_phases','ck_test_reset_write_guards','ck_test_reset_objects','v2_003_locations','v2_schema_meta']),root=new URL('../worker-v2/',import.meta.url),unknown=[];
  for(const file of fs.readdirSync(root).filter(name=>name.endsWith('.js')))for(const [,name]of fs.readFileSync(new URL(file,root),'utf8').matchAll(/CREATE TABLE(?: IF NOT EXISTS)?\s+(\w+)/g))if(!TABLES.includes(name)&&!retained.has(name))unknown.push({file,name});
  assert.deepEqual(unknown,[],'new schema additions must be deliberately classified, never wildcard-deleted');assert.equal(new Set(TABLES).size,TABLES.length);
 });

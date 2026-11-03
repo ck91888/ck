@@ -1,4 +1,5 @@
 import {ensureSchema} from './schema-ready.js';
+import {RESET_FENCE_SCHEMA,beginResetClearing} from './test-reset-fence.js';
 // Manager-triggered maintenance for the isolated staging database only.
 // Every table is archived and cleared in one D1 transaction. No scheduled reset.
 export const STAGING_HOST = 'ck-v2-api-sop-staging.ck91888.workers.dev';
@@ -38,11 +39,12 @@ const rows=async(env,sql,...args)=>(await q(env,sql,...args).all()).results;
 const fail=(message,status=400)=>{throw Object.assign(Error(message),{status});};
 export const enabled=(request,env)=>STAGING_HOSTS.includes(new URL(request.url).hostname)&&env.SOP_ENVIRONMENT==='staging'&&env.SOP_UPGRADE_ENABLED==='true'&&env.SOP_TEST_RESET_ENABLED==='true'&&env.SOP_TEST_RESET_DATABASE===STAGING_DATABASE;
 export async function ensureResetSchema(env){
- return ensureSchema(env.DB,'ensureResetSchema-v1',async()=>{
+ return ensureSchema(env.DB,'ensureResetSchema-v2-fenced',async()=>{
  await env.DB.batch([
   env.DB.prepare("CREATE TABLE IF NOT EXISTS ck_test_resets(id TEXT PRIMARY KEY,request_id TEXT NOT NULL UNIQUE,actor TEXT NOT NULL,started_at TEXT NOT NULL,completed_at TEXT NOT NULL DEFAULT '',tables_json TEXT NOT NULL,last_error TEXT NOT NULL DEFAULT '')"),
   env.DB.prepare("CREATE UNIQUE INDEX IF NOT EXISTS ck_test_reset_single_active ON ck_test_resets((1)) WHERE completed_at=''"),
-  env.DB.prepare('CREATE TABLE IF NOT EXISTS ck_test_reset_items(run_id TEXT NOT NULL,table_name TEXT NOT NULL,archive_name TEXT NOT NULL,row_count INTEGER NOT NULL,PRIMARY KEY(run_id,table_name))')
+  env.DB.prepare('CREATE TABLE IF NOT EXISTS ck_test_reset_items(run_id TEXT NOT NULL,table_name TEXT NOT NULL,archive_name TEXT NOT NULL,row_count INTEGER NOT NULL,PRIMARY KEY(run_id,table_name))'),
+  ...RESET_FENCE_SCHEMA.map(sql=>env.DB.prepare(sql))
  ]);
  });
 }
@@ -85,7 +87,7 @@ export async function resetAction(action,body,env,user){
   const tables=await knownTables(env);
   if(!['v2_inbound_plans','v2_ops_jobs','sop_records','ck_attendance_people'].every(x=>tables.includes(x)))fail('测试库尚未就绪，未清空数据 / 테스트 데이터베이스가 준비되지 않았습니다',409);
   const id=crypto.randomUUID().replaceAll('-','');
-  try{await q(env,'INSERT INTO ck_test_resets(id,request_id,actor,started_at,tables_json) VALUES(?,?,?,?,?)',id,body.requestId,user.id,new Date().toISOString(),JSON.stringify(tables)).run();}
+  try{await env.DB.batch([q(env,'UPDATE ck_test_reset_epoch SET generation=generation+1 WHERE id=1'),q(env,'INSERT INTO ck_test_resets(id,request_id,actor,started_at,tables_json) VALUES(?,?,?,?,?)',id,body.requestId,user.id,new Date().toISOString(),JSON.stringify(tables)),q(env,"INSERT INTO ck_test_reset_phases VALUES(?,'draining')",id)]);}
   catch(error){const concurrent=await q(env,'SELECT * FROM ck_test_resets WHERE request_id=?',body.requestId).first()||await activeReset(env);if(concurrent)return {ok:true,run:await view(env,concurrent)};throw error;}
   return {ok:true,run:await view(env,await q(env,'SELECT * FROM ck_test_resets WHERE id=?',id).first())};
  }
@@ -97,6 +99,7 @@ export async function resetAction(action,body,env,user){
  if(run.completed_at)return {ok:true,run:await view(env,run)};
  const tables=JSON.parse(run.tables_json);
  try{
+  await beginResetClearing(env,run.id);
   const done=(await rows(env,'SELECT table_name FROM ck_test_reset_items WHERE run_id=?',run.id)).map(x=>x.table_name);
   for(const name of tables.filter(x=>!done.includes(x)).slice(0,4)){
    const archive=`ck_backup_${run.id}_${name}`;
