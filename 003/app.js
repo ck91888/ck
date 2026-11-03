@@ -451,12 +451,16 @@ function applyManualLocationCode(){applyScannedLocation(val('manualLocationCode'
 function closeLocationScanner(){stopLocationScan();if(E('locationScannerModal'))E('locationScannerModal').classList.add('hidden');if(E('locationPickerModal').classList.contains('hidden'))S003.locationTarget=null;}
 
 async function loadMaterials() {
-  E('materialList').innerHTML = '<div class="empty">'+esc(T('loading'))+'</div>';
+  var host=E('materialList');if(!host)return;
+  var read=CKLatestListRead.begin('003:materials',host,function(){return JSON.stringify([S003.key,S003.role,S003.operatorId,S003.badge,S003.operatorName]);});
+  S003.materialRows=[];
+  host.innerHTML = '<div class="empty">'+esc(T('loading'))+'</div>';
   try {
     var res = await api('v2_003_material_list', { search:val('materialSearch'), category:val('materialCategory'), status:val('materialStatus'), low_stock_only:E('lowStockOnly').checked ? 1 : 0, limit:200 });
+    if(!read.commit())return;
     S003.materialRows = res.items || [];
-    E('materialList').innerHTML = S003.materialRows.length ? S003.materialRows.map(materialCardHtml).join('') : '<div class="empty">'+esc(T('no_data'))+'</div>';
-  } catch(e) { E('materialList').innerHTML = '<div class="empty">'+esc(errorText(e.message))+'</div>'; }
+    host.innerHTML = S003.materialRows.length ? S003.materialRows.map(materialCardHtml).join('') : '<div class="empty">'+esc(T('no_data'))+'</div>';
+  } catch(e) { if(read.current())host.innerHTML = '<div class="empty">'+esc(errorText(e.message))+'</div>'; }
 }
 
 function materialCardHtml(m) {
@@ -901,11 +905,17 @@ async function startReceivingScan(){if(S003.receivingScanner){stopReceivingScan(
 function stopReceivingScan(){if(!S003.receivingScanner)return;var s=S003.receivingScanner;S003.receivingScanner=null;Promise.resolve(s.stop()).catch(function(){}).finally(function(){try{s.clear();}catch(e){}if(E('receivingScanBtn'))E('receivingScanBtn').textContent=T('start_scan');});}
 function lookupShipmentFromScanner(){openReceiptByCode(val('manualTrackingCode'));}
 
-async function loadLedger(){E('ledgerList').innerHTML='<div class="empty">'+esc(T('loading'))+'</div>';try{var payload={kind:val('ledgerKind'),department:isField()?'':val('ledgerDepartment'),search:isField()?'':val('ledgerSearch'),start_date:val('ledgerStart'),end_date:val('ledgerEnd'),limit:200};if(isField())payload.operator_id=S003.operatorId;var res=await api('v2_003_ledger_list',payload);S003.ledgerRows=res.items||[];renderLedger();}catch(e){E('ledgerList').innerHTML='<div class="empty">'+esc(errorText(e.message))+'</div>';}}
+async function loadLedger(){
+ var host=E('ledgerList');if(!host)return;
+ var read=S003.ledgerRead=CKLatestListRead.begin('003:ledger',host,function(){return JSON.stringify([S003.key,S003.role,S003.operatorId,S003.badge,S003.operatorName]);});
+ S003.ledgerRows=[];host.innerHTML='<div class="empty">'+esc(T('loading'))+'</div>';
+ try{var payload={kind:val('ledgerKind'),department:isField()?'':val('ledgerDepartment'),search:isField()?'':val('ledgerSearch'),start_date:val('ledgerStart'),end_date:val('ledgerEnd'),limit:200};if(isField())payload.operator_id=S003.operatorId;var res=await api('v2_003_ledger_list',payload);if(!read.commit())return;S003.ledgerRows=res.items||[];renderLedger();}
+ catch(e){if(read.current())host.innerHTML='<div class="empty">'+esc(errorText(e.message))+'</div>';}
+}
 function renderLedger(){if(!S003.ledgerRows.length){E('ledgerList').innerHTML='<div class="empty">'+esc(T('no_data'))+'</div>';return;}if(isField()){E('ledgerList').className='my-record-list';E('ledgerList').innerHTML=S003.ledgerRows.map(ledgerActivityHtml).join('');return;}E('ledgerList').className='table-wrap';var head='<table><thead><tr><th>'+esc(T('time'))+'</th><th>'+esc(T('category'))+'</th><th>'+esc(T('asset_name'))+'</th><th>'+esc(T('status'))+'</th><th>'+esc(T('qty'))+'</th><th>'+esc(T('operator'))+'</th><th>'+esc(T('recipient'))+'</th><th>'+esc(T('department'))+'</th><th>'+esc(T('storage_location'))+'</th><th>'+esc(T('note'))+'</th></tr></thead><tbody>';var rows=S003.ledgerRows.map(function(r){var action=r.kind==='material'?txnLabel(r.action_type):assetActionLabel(r.action_type);var qty=r.kind==='material'?((Number(r.qty_delta)>0?'+':'')+fmtQty(r.qty_delta)+' '+(r.unit||'')):'--';return '<tr><td>'+esc(fmtTime(r.created_at))+'</td><td>'+esc(r.kind==='material'?T('materials'):T('assets'))+'</td><td><b>'+esc(r.item_name)+'</b><br><small>'+esc(r.item_code)+'</small></td><td>'+esc(action)+'</td><td>'+esc(qty)+'</td><td>'+esc(r.operator_name||'--')+'</td><td>'+esc(r.recipient_name||'--')+'</td><td>'+esc(departmentLabel(r.department))+'</td><td>'+esc(r.location_code||'--')+'</td><td>'+esc([r.purpose,r.related_doc_no,r.note].filter(Boolean).join(' · ')||'--')+'</td></tr>';}).join('');E('ledgerList').innerHTML=head+rows+'</tbody></table>';}
 
 function csvCell(v){v=String(v==null?'':v);return '"'+v.replace(/"/g,'""')+'"';}
-function exportLedgerCsv(){if(!isAdmin())return;if(!S003.ledgerRows.length){toast(T('no_data'),true);return;}var rows=[['时间','类别','编号','名称','操作','数量变化','操作前','操作后','操作人','领用人','部门','存放位置','关联单号','备注']];S003.ledgerRows.forEach(function(r){rows.push([fmtTime(r.created_at),r.kind,r.item_code,r.item_name,r.action_type,r.qty_delta,r.qty_before,r.qty_after,r.operator_name,r.recipient_name,r.department,r.location_code,r.related_doc_no,[r.purpose,r.note].filter(Boolean).join(' · ')]);});var csv='\ufeff'+rows.map(function(row){return row.map(csvCell).join(',');}).join('\r\n');var blob=new Blob([csv],{type:'text/csv;charset=utf-8'});var url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='CK-003-ledger-'+kstToday()+'.csv';a.click();setTimeout(function(){URL.revokeObjectURL(url);},500);}
+function exportLedgerCsv(){if(!isAdmin())return;if(!S003.ledgerRead||!S003.ledgerRead.canUse()){toast(S003.lang==='ko'?'다시 조회한 후 내보내세요':'请先查询并等待完成后导出',true);return;}if(!S003.ledgerRows.length){toast(T('no_data'),true);return;}var rows=[['时间','类别','编号','名称','操作','数量变化','操作前','操作后','操作人','领用人','部门','存放位置','关联单号','备注']];S003.ledgerRows.forEach(function(r){rows.push([fmtTime(r.created_at),r.kind,r.item_code,r.item_name,r.action_type,r.qty_delta,r.qty_before,r.qty_after,r.operator_name,r.recipient_name,r.department,r.location_code,r.related_doc_no,[r.purpose,r.note].filter(Boolean).join(' · ')]);});var csv='\ufeff'+rows.map(function(row){return row.map(csvCell).join(',');}).join('\r\n');var blob=new Blob([csv],{type:'text/csv;charset=utf-8'});var url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='CK-003-ledger-'+kstToday()+'.csv';a.click();setTimeout(function(){URL.revokeObjectURL(url);},500);}
 
 function openLocationModal(){if(!isAdmin())return;E('locId').value='';E('locCode').value='';E('locName').value='';E('locActive').checked=true;E('locationModal').classList.remove('hidden');}
 function editLocation(id){var x=S003.locations.find(function(v){return v.id===id;});if(!x)return;E('locId').value=x.id;E('locCode').value=x.location_code;E('locName').value=x.location_name||'';E('locActive').checked=Number(x.active)!==0;E('locationModal').classList.remove('hidden');}

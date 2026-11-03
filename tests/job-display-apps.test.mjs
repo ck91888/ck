@@ -22,6 +22,7 @@ function fixture(t,app){
  w.addEventListener=function(name,...rest){if(name!=='DOMContentLoaded')return add.call(this,name,...rest);};
  w.alert=x=>alerts.push(String(x));w.confirm=()=>true;w.fetch=()=>{throw Error('Fixture must not use network');};
  w.eval(read('shared/document-labels.js'));
+ if(['002','003','shuju'].includes(app))w.eval(read('shared/latest-list-read.js'));
  if(app!=='sop')w.eval(read(app+'/config.js'));else w.SOP_API='https://fixture.invalid/api';
  w.eval(read(app+'/app.js')+(app==='sop'?"\nObject.assign(window,{load,detail,renderDashboard,__setApi:fn=>{api=fn;},__setSopContext:()=>{user={role:'viewer'};tab='task';}});":''));w.addEventListener=add;
  w.api=async(...args)=>{calls.push(args);return {ok:true};};

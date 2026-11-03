@@ -631,7 +631,7 @@ async function requestCorrection(jobId) {
 // 单子数据 (orders)
 // =====================================================
 var _ordersItems = [];
-var _ordersQuery=null, _ordersResult=null, _ordersOffset=0;
+var _ordersQuery=null, _ordersResult=null, _ordersOffset=0, _ordersRead=null;
 
 function ordersFilterParams() {
   return {
@@ -677,17 +677,22 @@ function ordersReferenceMarkup(j) {
 async function loadOrders(btn, nextPage) {
   if(!nextPage){_ordersOffset=0;_ordersQuery=null;_ordersResult=null;}
   var tbody = document.getElementById("ordersBody");
+  var read=_ordersRead=CKLatestListRead.begin('shuju:orders',tbody,getKey);
+  _ordersItems=[];
   tbody.innerHTML = '<tr><td colspan="10" class="muted" style="text-align:center;">加载中...</td></tr>';
   setBtnLoading(btn, true);
   var params = nextPage?Object.assign({},_ordersQuery):ordersFilterParams();
   params.offset=_ordersOffset;
   params.action = "v2_dashboard_order_list";
-  var res = await api(params);
-  setBtnLoading(btn, false, "查询");
+  var res;
+  try{res=await api(params);}catch(error){res={ok:false,error:error.message||String(error)};}
+  finally{if(read.current())setBtnLoading(btn,false,"查询");}
+  if(!read.current())return;
   if (!res || !res.ok) {
     tbody.innerHTML = '<tr><td colspan="10" class="muted" style="text-align:center;">加载失败: ' + esc(res && (res.message || res.error)) + '</td></tr>';
     return;
   }
+  read.commit();_ordersOffset=params.offset;
   _ordersItems = res.items || [];
   _ordersResult=res;_ordersQuery=Object.assign({},params,{as_of:res.metadata?.as_of,snapshot:res.metadata?.snapshot});
   document.getElementById("ordersReportHint").textContent=reportHint(res,params.date_basis);
@@ -715,14 +720,16 @@ async function loadOrders(btn, nextPage) {
 }
 
 async function exportOrders(btn) {
+  var owns=CKLatestListRead.identity(getKey);
   setBtnLoading(btn, true);
   try {
     var params = ordersFilterParams();
     params.action = "v2_dashboard_order_export";
     params.limit = 200;
     params.offset = 0;
-    if(params.date_basis==='actual_work'){await exportActualReport(params,'tasks');return;}
+    if(params.date_basis==='actual_work'){await exportActualReport(params,'tasks',owns);return;}
     var res = await collectReportPages(params);
+    if(!owns())return;
     if (!res || !res.ok) {
       var msg = res ? String(res.message || res.error || '') : 'unknown';
       if (msg.indexOf('too many SQL variables') >= 0) {
@@ -1102,7 +1109,7 @@ function closeOrderDetail() {
 // =====================================================
 var _whSummary = null;
 var _whOffset=0;
-var _whQuery = null;
+var _whQuery = null, _whRead=null;
 function workhourKstDate(value) { var ms=Date.parse(value||'');return Number.isFinite(ms)?new Date(ms+9*3600000).toISOString().slice(0,10):''; }
 
 function whFilterParams() {
@@ -1118,17 +1125,22 @@ function whFilterParams() {
 }
 
 async function loadWorkhours(btn,nextPage) {
+  var host=document.getElementById('whByWorkerBody');
+  var read=_whRead=CKLatestListRead.begin('shuju:workhours',host,getKey);
   if(!nextPage)_whOffset=0;
   var params=nextPage?Object.assign({},_whQuery):whFilterParams();params.offset=_whOffset;
   _whSummary=null;_whQuery=null;
   setBtnLoading(btn, true);
   params.action = "v2_dashboard_workhour_summary";
-  var res = await api(params);
-  setBtnLoading(btn, false, "查询");
+  var res;
+  try{res=await api(params);}catch(error){res={ok:false,error:error.message||String(error)};}
+  finally{if(read.current())setBtnLoading(btn,false,"查询");}
+  if(!read.current())return;
   if (!res || !res.ok) {
     document.getElementById("whSummaryRow").textContent = res?.error||'加载失败';
     return;
   }
+  read.commit();_whOffset=params.offset;
   _whSummary = res;
   _whQuery = Object.assign({},params,{as_of:res.metadata?.as_of,snapshot:res.metadata?.snapshot});
   document.getElementById("whReportHint").textContent=reportHint(res,'actual_work');
@@ -1209,7 +1221,8 @@ async function loadWorkhours(btn,nextPage) {
 }
 
 function exportWorkhoursSegments() {
-  if(_whQuery?.date_basis==='actual_work')return exportActualReport(Object.assign({},_whQuery),'segments').catch(function(e){alert('导出失败：'+e.message);});
+  if(typeof _whRead!=='undefined'&&_whRead&&!_whRead.canUse()){alert('请重新查询后导出 / 다시 조회한 후 내보내세요');return;}
+  if(_whQuery?.date_basis==='actual_work')return exportActualReport(Object.assign({},_whQuery),'segments',_whRead&&_whRead.canUse).catch(function(e){alert('导出失败：'+e.message);});
   if (!_whSummary) { alert("请先查询"); return; }
   var rows = (_whSummary.segments || []).map(function(s) {
     return {
@@ -1740,11 +1753,13 @@ function reportHint(res,basis){
  return (m.basis_label||'按实际作业日期')+'；区间 '+fmtKstFull(m.start_inclusive)+' ≤ 作业时间 < '+fmtKstFull(m.end_exclusive)+' KST；截止 '+fmtKstFull(m.as_of)+' KST。'+(m.open_policy||'')+'。同人重叠 '+(s.overlap_seconds||0)+' 秒（统计含重复部分），待核任务 '+(s.gap_task_count||0)+' 项，数量未记录 '+(s.missing_quantity_tasks||0)+' 项。'+(m.quantity_policy||'')+' 未归属部门不表示闲置。';
 }
 function workhoursPage(direction){
+ if(_whRead&&!_whRead.owned())return;
  if(!_whQuery||!_whSummary)return;
  var offset=_whOffset+direction*200;if(offset<0||offset>=_whSummary.total)return;
  _whOffset=offset;return loadWorkhours(null,true);
 }
 function ordersPage(direction){
+ if(_ordersRead&&!_ordersRead.owned())return;
  if(!_ordersQuery||!_ordersResult)return;
  var offset=_ordersOffset+direction*200;if(offset<0||offset>=_ordersResult.total)return;
  _ordersOffset=offset;return loadOrders(null,true);
@@ -1765,10 +1780,13 @@ async function collectReportPages(params){
  if(first.total!==rows.length)throw Error('分页数量不一致，请重新查询');
  return Object.assign({},first,{rows:rows,items:rows});
 }
-async function exportActualReport(params,kind){
+async function exportActualReport(params,kind,valid){
+ var owns=CKLatestListRead.identity(getKey);
+ if(!owns()||valid&&!valid())return;
  if(params.date_basis&&params.date_basis!=='actual_work')throw Error('请先选择按实际作业日期，再导出同类数量样本');
  params=Object.assign({},params,{action:'v2_dashboard_order_export',date_basis:'actual_work',report_kind:kind});
  var res=await collectReportPages(params),m=res.metadata;
+ if(!owns()||valid&&!valid())return;
  var rows=res.rows.map(function(r){
   var meta={统计口径:m.basis_label,时区:m.timezone,区间开始含:m.start_inclusive,区间结束不含:m.end_exclusive,截止时间:m.as_of,快照:m.snapshot,未结束政策:m.open_policy,重叠政策:m.overlap_policy,数量政策:m.quantity_policy,数据缺口说明:m.gap_policy};
   if(kind==='segments')return Object.assign(meta,{

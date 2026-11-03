@@ -1515,6 +1515,7 @@ async function cancelIssue(btnEl) {
 async function loadOutboundList() {
   var body = document.getElementById("outboundListBody");
   if (!body) return;
+  var read = CKLatestListRead.begin('002:outbound',body,function(){return getKey()+'|'+getUser();});
   var btn = document.getElementById("obQueryBtn");
   if (btn) btn.disabled = true;
   body.innerHTML = '<div class="card muted">' + L("loading") + '</div>';
@@ -1548,15 +1549,19 @@ async function loadOutboundList() {
       limit: _obPager.limit,
       offset: getOffset('outbound')
     });
+  } catch(error) {
+    res = {ok:false,error:error.message||String(error)};
   } finally {
-    if (btn) btn.disabled = false;
+    if (read.current() && btn) btn.disabled = false;
   }
+  if (!read.current()) return;
   if (!res || !res.ok) {
     var errMsg = (res && (res.message || res.error)) || '网络异常 / 네트워크 오류';
     body.innerHTML = '<div class="card muted" style="color:#c62828;">加载失败 / 로딩 실패: ' + esc(String(errMsg)) + '</div>';
     return;
   }
 
+  read.commit();
   var items = res.items || [];
   var pagerHtml = renderPager('outbound', res, 'loadOutboundList');
   if (items.length === 0) {
@@ -2520,6 +2525,7 @@ function printOutboundOrder() {
 async function loadInboundList() {
   var body = document.getElementById("inboundListBody");
   if (!body) return;
+  var read = CKLatestListRead.begin('002:inbound',body,function(){return getKey()+'|'+getUser();});
   var btn = document.getElementById("ibQueryBtn");
   if (btn) btn.disabled = true;
   body.innerHTML = '<div class="card muted">' + L("loading") + '</div>';
@@ -2551,15 +2557,19 @@ async function loadInboundList() {
       limit: _inPager.limit,
       offset: getOffset('inbound')
     });
+  } catch(error) {
+    res = {ok:false,error:error.message||String(error)};
   } finally {
-    if (btn) btn.disabled = false;
+    if (read.current() && btn) btn.disabled = false;
   }
+  if (!read.current()) return;
   if (!res || !res.ok) {
     var errMsg = (res && (res.message || res.error)) || '网络异常 / 네트워크 오류';
     body.innerHTML = '<div class="card muted" style="color:#c62828;">加载失败 / 로딩 실패: ' + esc(String(errMsg)) + '</div>';
     return;
   }
 
+  read.commit();
   var items = (res.items || []).filter(function(p) { return p.source_type !== 'return_session'; });
   var pagerHtml = renderPager('inbound', res, 'loadInboundList');
   if (items.length === 0) {
