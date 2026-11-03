@@ -98,7 +98,7 @@ export async function activePartnerIds(e,personId){
 const grantedPairs=new WeakMap();
 export function shareGrantFor(e,actorId,ownerId){return grantedPairs.get(e)?.get(JSON.stringify([actorId,ownerId]))||null;}
 export async function isActivePartner(e,actorId,ownerId){
- if(!shareEnabled(e)||!actorId||!ownerId||actorId===ownerId)return false;
+ if(!shareEnabled(e)||typeof actorId!=='string'||typeof ownerId!=='string'||!actorId||!ownerId||actorId===ownerId)return false;
  await ensureDispatchShare(e);await expire(e);
  const [lo,hi]=pairOf(actorId,ownerId),pair=(await q(e,"SELECT id,day FROM ck_dispatch_share_pairs WHERE status='active' AND day=? AND person_lo=? AND person_hi=?",day(),lo,hi).all()).results?.[0];
  if(!pair)return false;

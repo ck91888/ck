@@ -99,3 +99,38 @@ draft access and completion regressions: 44/0/0. Native local D1 replacement-pai
 and active-shared controls: 6/0/0. Existing race injection hooks and assertions
 remain intact. The material content-binding and manual-replay QA blockers are
 still being implemented at this checkpoint; no release is authorized.
+
+## Stage 4: fixed QA receipt-content and manual-replay blockers
+
+Material requests now bind the request key to a canonical fingerprint of the
+normalized business inputs and actual actor. The fingerprint is stored with the
+receipt in the existing stock/ledger transaction and is omitted from API replies.
+Changed material, amount, type, department, recipient, purpose, document, cost,
+supplier, location or note cannot reuse another request's success. Equivalent
+normalized numeric input can replay the original result. Historical unbound
+receipts are read-only: their ledger identity, amount, actor and effective fields
+must verify the request; ambiguous or conflicting history is refused, never
+rewritten or charged again.
+
+Manual finalization now publishes its bound receipt inside the result/job batch.
+If an identical in-flight retry loses the status comparison, it reads the durable
+receipt under a replay guard. Only the original pre-completion status comparison
+is skipped: record revision, original relationship ID, caller and field-state
+checks still apply. Real office sessions and operation contexts must also remain
+active/current, including for authorized legacy jobs with no SOP owner record.
+A new authorized session can replay a matching committed receipt; a revoked
+in-flight session cannot. Changed content still conflicts. Historical unbound
+manual receipts must match their original result and finalization evidence.
+
+Validation at this checkpoint: combined Node material/completion suites 44/0/0.
+Earlier native D1 combined suites 38/0/0; final manual, independent owner/member/
+manager and legacy-session controls 10/0/0 (overlapping coverage, not 48 unique
+cases). The preceding constructed full run passed 1562/0/0 before the final
+session/independent controls were added. Final fixed-SHA full/D1/browser results
+are recorded in the handoff report after this checkpoint.
+
+Fixed QA's prior e59d0b0 full run was 1551/1/0; its loading DOM 70ms timing case
+passed an unchanged isolated rerun. That first failure remains QA evidence and
+is not relabelled as an all-green run. No assertion or timing wait was weakened.
+Procurement and temporary-unload P2s, the reset/report/reference races, and the
+remaining frontend/performance audit list stay in subsequent batches.

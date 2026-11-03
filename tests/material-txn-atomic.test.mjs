@@ -61,3 +61,18 @@ test('a receipt key belonging to another action cannot be replayed as a material
  const f=await fixture(t),body=f.request();await f.env.DB.prepare('INSERT INTO v2_idempotency_keys(idem_key,action,response_json,created_at) VALUES(?,?,?,?)').bind(body.client_req_id,'synthetic_other_action',JSON.stringify({ok:true,id:'SYN-OTHER'}),new Date().toISOString()).run();
  const reply=await f.call('office','v2_003_material_txn',body);assert.equal(reply.ok,false);assert.equal(reply.error,'request_id_conflict');assert.equal((await f.stock()).current_qty,10);assert.equal((await f.count()).n,0);
 });
+test('a material request key rejects changed business content without moving any stock',async t=>{
+ const f=await fixture(t),body=f.request('SYN-BOUND-MATERIAL'),other=await f.ok('office','v2_003_material_save',{name_zh:'合成另一耗材',category:'包材',unit:'卷',opening_qty:10});await f.ok('office','v2_003_material_txn',body);
+ for(const change of [{qty:4},{material_id:other.id},{txn_type:'return'},{department:'代发'},{recipient_name:'合成另一领用人'},{recipient_id:'SYN-OTHER'},{purpose:'合成另一用途'},{related_doc_no:'SYN-OTHER-DOC'},{unit_cost:1},{supplier:'合成另一供应商'},{location_code:'SYN-OTHER-LOC'},{note:'合成另一备注'}]){
+  const reply=await f.call('office','v2_003_material_txn',{...body,...change});assert.equal(reply.ok,false,JSON.stringify({change,reply}));assert.equal(reply.error,'request_id_conflict');
+ }
+ assert.equal((await f.stock()).current_qty,7);assert.equal((await f.count()).n,1);assert.equal((await f.first('SELECT current_qty FROM v2_003_materials WHERE id=?',other.id)).current_qty,10);
+});
+test('concurrent different material quantities sharing a request key cannot return each other as success',async t=>{
+ const f=await fixture(t),body=f.request('SYN-CONTENT-RACE'),hold=await beforeBatch(f),pending=f.call('office','v2_003_material_txn',body);await hold.ready;
+ try{await f.ok('office','v2_003_material_txn',{...body,qty:4});}finally{hold.release();}const reply=await pending;hold.restore();assert.equal(reply.ok,false,JSON.stringify(reply));assert.equal(reply.error,'request_id_conflict');assert.equal((await f.stock()).current_qty,6);assert.equal((await f.count()).n,1);
+});
+test('normalized material quantities replay the same receipt and old unbound receipts are checked against their ledger',async t=>{
+ const f=await fixture(t),body=f.request('SYN-LEGACY-MATERIAL'),saved=await f.ok('office','v2_003_material_txn',body);assert.deepEqual(await f.ok('office','v2_003_material_txn',{...body,qty:'3.0',recipient_name:' '+body.recipient_name+' '}),saved);
+ await f.env.DB.prepare('UPDATE v2_idempotency_keys SET response_json=? WHERE idem_key=?').bind(JSON.stringify(saved),body.client_req_id).run();assert.deepEqual(await f.ok('office','v2_003_material_txn',body),saved);assert.equal((await f.call('office','v2_003_material_txn',{...body,qty:4})).ok,false);assert.equal((await f.stock()).current_qty,7);
+});

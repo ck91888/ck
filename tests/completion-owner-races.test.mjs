@@ -1,6 +1,7 @@
 // Controlled ownership races through authenticated Worker requests, synthetic data only.
 import test from 'node:test';import assert from 'node:assert/strict';
 import {ownedHomeFixture} from './field-owned-home-fixture.mjs';import {localD1} from './d1-local-runtime.mjs';
+import {confirmOperation} from './office-operator-fixture.mjs';
 async function fixture(t){
  t.mock.timers.enable({apis:['Date'],now:Date.parse('2026-11-03T00:00:00Z')});const f=await ownedHomeFixture();let native;
  f.env.SOP_AUTO_DISPATCH_TIME_ENABLED='true';f.env.SOP_ATTENDANCE_RETURNS_ENABLED='true';
@@ -111,4 +112,42 @@ for(const kind of ['external','ordinary','group','multi-order'])test(kind+' shar
  const reply=await pending;gate.restore();assert.equal(reply.ok,false,JSON.stringify(reply));assert.equal((await f.first('SELECT COUNT(*) n FROM v2_ops_job_results WHERE job_id=?',s.job.id)).n,0);
  if(kind==='group'){const n=(await f.ok('office','sop_get',{id:s.body.id})).record;assert.equal((n.cargo_groups.groups[0].outputs||[]).length,0);}
  await f.ok('B',s.action,s.body);
+});
+async function manualScenario(f){const s=await scenario(f,'external');await f.ok('A','v2_bulk_op_job_finish',{job_id:s.job.id,worker_id:s.body.worker_id,leave_only:true});return {...s,action:'v2_ops_job_manual_finalize',body:{job_id:s.job.id,reason:'合成同请求补录',customer:'合成客户',result_json:{box_count:3},client_req_id:'SYN-MANUAL-ONCE'}};}
+test('an in-flight identical manual retry returns the original committed receipt',async t=>{
+ const f=await fixture(t),s=await manualScenario(f),gate=await hold(f,s.action,s.job.id),pending=f.call('office',s.action,s.body);await gate.ready;let saved;
+ try{saved=await f.ok('office',s.action,s.body);}finally{gate.release();}const reply=await pending;gate.restore();assert.deepEqual(reply,saved);assert.equal((await f.first('SELECT COUNT(*) n FROM v2_ops_job_results WHERE job_id=?',s.job.id)).n,1);
+});
+test('manual receipt replay rejects changed content and verifies historical unbound results',async t=>{
+ const f=await fixture(t),s=await manualScenario(f),saved=await f.ok('office',s.action,s.body);
+ for(const change of [{result_json:{box_count:4}},{reason:'合成不同原因'},{customer:'合成不同客户'},{result_summary:'合成不同摘要'},{result_note:'合成不同说明'}]){const reply=await f.call('office',s.action,{...s.body,...change});assert.equal(reply.ok,false,JSON.stringify({change,reply}));assert.equal(reply.error,'request_id_conflict');}
+ await f.env.DB.prepare('UPDATE v2_idempotency_keys SET response_json=? WHERE idem_key=?').bind(JSON.stringify(saved),s.body.client_req_id).run();assert.deepEqual(await f.ok('office',s.action,s.body),saved);assert.equal((await f.call('office',s.action,{...s.body,result_json:{box_count:9}})).ok,false);assert.equal((await f.first('SELECT COUNT(*) n FROM v2_ops_job_results WHERE job_id=?',s.job.id)).n,1);
+});
+test('a matching manual receipt cannot override a changed ownership revision in an older in-flight request',async t=>{
+ const f=await fixture(t),s=await manualScenario(f),gate=await hold(f,s.action,s.job.id),pending=f.call('office',s.action,s.body);await gate.ready;
+ try{const row=await f.first('SELECT revision FROM sop_records WHERE id=?',s.job.id);await f.ok('A','sop_owner_transfer',{id:s.job.id,revision:row.revision,target_badge:f.people.B.badgeId,reason:'合成同请求补录前交接'});await f.ok('office',s.action,s.body);}finally{gate.release();}
+ const reply=await pending;gate.restore();assert.equal(reply.ok,false,JSON.stringify(reply));assert.equal((await f.first('SELECT COUNT(*) n FROM v2_ops_job_results WHERE job_id=?',s.job.id)).n,1);
+});
+test('a conflicting manual retry cannot be substituted for an older request',async t=>{
+ const f=await fixture(t),s=await manualScenario(f),gate=await hold(f,s.action,s.job.id),pending=f.call('office',s.action,s.body);await gate.ready;
+ try{await f.ok('office',s.action,{...s.body,result_json:{box_count:4}});}finally{gate.release();}const reply=await pending;gate.restore();assert.equal(reply.ok,false,JSON.stringify(reply));assert.equal(reply.error,'request_id_conflict');assert.equal((await f.first('SELECT COUNT(*) n FROM v2_ops_job_results WHERE job_id=?',s.job.id)).n,1);assert.equal((await f.first('SELECT box_count FROM v2_ops_job_results WHERE job_id=?',s.job.id)).box_count,4);
+});
+test('a committed manual receipt does not override a revoked session, while a fresh authorized session may replay it',async t=>{
+ const f=await fixture(t),s=await manualScenario(f),gate=await hold(f,s.action,s.job.id),pending=f.call('office',s.action,s.body);await gate.ready;let saved;
+ try{saved=await f.ok('office',s.action,s.body);await f.ok('office','sop_logout');}finally{gate.release();}const reply=await pending;gate.restore();assert.equal(reply.ok,false,JSON.stringify(reply));
+ await f.ok('office','sop_login',{sop_key:'synthetic-owned-home-fixture'});await confirmOperation((a,b)=>f.ok('office',a,b),'合成任务归属验收员');assert.deepEqual(await f.ok('office',s.action,s.body),saved);assert.equal((await f.first('SELECT COUNT(*) n FROM v2_ops_job_results WHERE job_id=?',s.job.id)).n,1);
+});
+for(const role of ['owner','member','manager'])test('replacement pairs do not revoke independent '+role+' completion authority',async t=>{
+ const f=await fixture(t);f.env.SOP_DISPATCH_SHARE_ENABLED='true';
+ for(const key of ['A','B']){const p=(await f.ok('office','sop_attendance_register',{name:'合成独立权限'+key,agency:'가온'})).person;await f.ok('office','sop_attendance_checkin',{badge:p.badgeId,agency:p.agency});await f.ok('office','sop_daily_dispatch_update',{person_id:p.id,badge:p.badgeId,enabled:true,departments:['bulk'],version:0,reason:'合成独立权限授权'});await f.ok(key,'sop_login',{badge:p.badgeId});f.people[key]=p;}
+ const pair=await f.ok('A','sop_dispatch_share_invite',{target_badge:f.people.B.badgeId});await f.ok('B','sop_dispatch_share_accept',{pair_id:pair.pair.id});const s=await scenario(f,'external');
+ if(role==='member'){const row=await f.first('SELECT revision FROM sop_records WHERE id=?',s.job.id);await f.ok('A','sop_native_people',{job_id:s.job.id,revision:row.revision,workers:[{id:f.people.B.badgeId,name:f.people.B.name}],lead_id:f.people.B.badgeId,reason:'合成本人下场'});s.body.worker_id=f.people.B.badgeId;}
+ const actor=role==='manager'?'office':role==='member'?'B':'A',gate=await hold(f,s.action,s.job.id),pending=f.call(actor,s.action,s.body);await gate.ready;
+ try{await f.ok('B','sop_dispatch_share_leave',{pair_id:pair.pair.id});const next=await f.ok('A','sop_dispatch_share_invite',{target_badge:f.people.B.badgeId});await f.ok('B','sop_dispatch_share_accept',{pair_id:next.pair.id});}finally{gate.release();}
+ const reply=await pending;gate.restore();assert.equal(reply.ok,true,JSON.stringify(reply));assert.equal((await f.first('SELECT COUNT(*) n FROM v2_ops_job_results WHERE job_id=?',s.job.id)).n,1);
+});
+test('a legacy manual replay keeps office session revocation checks without requiring a SOP owner',async t=>{
+ const f=await fixture(t),s=await manualScenario(f);await f.env.DB.prepare('DELETE FROM sop_records WHERE id=?').bind(s.job.id).run();const gate=await hold(f,s.action,s.job.id),pending=f.call('office',s.action,s.body);await gate.ready;let saved;
+ try{saved=await f.ok('office',s.action,s.body);await f.ok('office','sop_logout');}finally{gate.release();}const reply=await pending;gate.restore();assert.equal(reply.ok,false,JSON.stringify(reply));
+ await f.ok('office','sop_login',{sop_key:'synthetic-owned-home-fixture'});await confirmOperation((a,b)=>f.ok('office',a,b),'合成任务归属验收员');assert.deepEqual(await f.ok('office',s.action,s.body),saved);assert.equal((await f.first('SELECT COUNT(*) n FROM v2_ops_job_results WHERE job_id=?',s.job.id)).n,1);
 });
