@@ -31,3 +31,15 @@ test('rollout change after preparation is checked inside the committing business
  await assert.rejects(()=>startAtomicInbound(e,{action:'v2_inbound_job_start',plan_id:p.id,external_inbound_no:f.code,job_type:tally,biz_class:'direct_ship',client_req_id:crypto.randomUUID()},staff,()=>{throw Error('unexpected number allocation');}));
  assert.equal(changed,true);assert.deepEqual(await snapshot(f.DB),before,'commit-time refusal rolls back all business writes');
 });
+test('legacy single-worker entry cannot bypass an existing partial-batch plan with rollout on or off',async t=>{
+ const f=await fixture(t,{authenticated:true}),p=await f.create({biz_classes:['bulk','bulk_putaway'],bulk_external_inbound_no:f.code});await f.receive(0);const first=await f.start(p,'inbound_bulk');assert.equal(first.ok,true,JSON.stringify(first));assert.equal((await f.finish(first,1)).ok,true);
+ const business=rows=>rows.filter(x=>x.table!=='v2_idempotency_keys'),before=business(await snapshot(f.DB));
+ for(const enabled of ['true','false']){f.env.SOP_UPGRADE_ENABLED=enabled;const r=await f.call('v2_inbound_job_start',{plan_id:p.id,external_inbound_no:f.code,job_type:'inbound_bulk',biz_class:'bulk',worker_id:'SYNTH-LEGACY-'+enabled,worker_name:'合成旧入口操作员'});assert.equal(r.ok,false,JSON.stringify(r));assert.deepEqual(business(await snapshot(f.DB)),before);}
+});
+test('waiting legacy off request cannot join or insert labor after an enabled request opens a partial batch',async t=>{
+ const f=await fixture(t,{authenticated:true}),p=await f.create({biz_classes:['bulk','bulk_putaway'],bulk_external_inbound_no:f.code,lines:[{unit_type:'courier',tracking_nos:f.codes},{unit_type:'carton',planned_qty:1}]});await f.receive(0);await f.ok('v2_unload_job_start',{plan_id:p.id,worker_id:'SYNTH-VEHICLE-W',worker_name:'合成卸货员'});
+ const off={...f.env,SOP_UPGRADE_ENABLED:'false'},batch=f.DB.batch.bind(f.DB);let injected=false,modern;
+ f.DB.batch=async ss=>{if(!injected&&ss.some(s=>s.sql.includes('INSERT INTO v2_ops_jobs')&&s.args.includes('SYNTH-LEGACY-WAIT'))){injected=true;modern=await f.start(p,'inbound_bulk');assert.equal(modern.ok,true,JSON.stringify(modern));}return batch(ss);};
+ const old=await f.call('v2_inbound_job_start',{plan_id:p.id,external_inbound_no:f.code,job_type:'inbound_bulk',biz_class:'bulk',worker_id:'SYNTH-LEGACY-WAIT',worker_name:'合成在途旧入口'},off);
+ assert.equal(injected,true,JSON.stringify(old));assert.equal(old.ok,false,JSON.stringify(old));assert.equal((await f.DB.prepare('SELECT COUNT(*) n FROM v2_ops_job_workers WHERE worker_id=?').bind('SYNTH-LEGACY-WAIT').first()).n,0);assert.equal((await f.DB.prepare('SELECT COUNT(*) n FROM ck_inbound_arrival_batches WHERE job_id=?').bind(modern.job_id).first()).n,1);
+});

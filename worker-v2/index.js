@@ -5741,6 +5741,7 @@ route("v2_inbound_job_start", async (body, env) => {
     if (plan_id && isStandard) {
       const plan = await env.DB.prepare("SELECT * FROM v2_inbound_plans WHERE id=?").bind(plan_id).first();
       if (!plan) return { ok: false, error: "plan not found" };
+      if(await env.DB.prepare('SELECT 1 FROM ck_inbound_arrival_batches WHERE plan_id=? LIMIT 1').bind(plan_id).first())return {ok:false,error:'partial_inbound_requires_dispatch',message:'本计划已采用分批理货，请从正常派工入口继续原批次 / 분할 검수 배정 메뉴를 이용하세요'};
       const inboundStartAllowed = ['unloading', 'unloading_putting_away', 'arrived_pending_putaway', 'putting_away', 'tallied_pending_putaway', 'direct_putting_away', 'partially_completed'];
       if (inboundStartAllowed.indexOf(plan.status) === -1) {
         return { ok: false, error: "plan_status_invalid", message: "当前状态不可开始理货 / 현재 상태에서 입고 불가, current: " + plan.status };
@@ -5846,8 +5847,8 @@ route("v2_inbound_job_start", async (body, env) => {
     // ===== Find / create job bound to plan_id =====
     let job = null;
     const existing = await env.DB.prepare(
-      "SELECT * FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type=? AND status IN ('pending','working','awaiting_close') AND (?='' OR inbound_external_no=? OR COALESCE(inbound_external_no,'')='') LIMIT 1"
-    ).bind(plan_id, job_type,selectedExternal,selectedExternal).first();
+      "SELECT * FROM v2_inbound_plan_jobs WHERE related_doc_type='inbound_plan' AND plan_id=? AND job_type=? AND status IN ('pending','working','awaiting_close') AND (?='' OR inbound_external_no=? OR COALESCE(inbound_external_no,'')='') AND NOT EXISTS(SELECT 1 FROM ck_inbound_arrival_batches b WHERE b.plan_id=?) LIMIT 1"
+    ).bind(plan_id, job_type,selectedExternal,selectedExternal,plan_id).first();
     if (existing) job = existing;
 
     const busy = await checkWorkerBusy(env, worker_id, job ? job.id : null);
@@ -5865,11 +5866,13 @@ route("v2_inbound_job_start", async (body, env) => {
     } else {
       job_id = "JOB-" + uid();
       is_new_job = true;
-      await env.DB.prepare(`
+      const created=await env.DB.prepare(`
         INSERT INTO v2_ops_jobs(id, flow_stage, biz_class, job_type, related_doc_type, related_doc_id,
           status, created_by, created_at, updated_at, active_worker_count,inbound_external_no)
-        VALUES(?, 'inbound', ?, ?, 'inbound_plan', ?, 'working', ?, ?, ?, 1,?)
-      `).bind(job_id, biz_class, job_type, plan_id, worker_id, t, t,selectedExternal).run();
+        SELECT ?, 'inbound', ?, ?, 'inbound_plan', ?, 'working', ?, ?, ?, 1,?
+        WHERE NOT EXISTS(SELECT 1 FROM ck_inbound_arrival_batches b WHERE b.plan_id=?)
+      `).bind(job_id, biz_class, job_type, plan_id, worker_id, t, t,selectedExternal,plan_id).run();
+      if(!created.meta?.changes)return {ok:false,error:'partial_inbound_requires_dispatch',message:'计划已进入分批理货，请刷新后由派审员正常派工 / 분할 검수 배정 메뉴를 이용하세요'};
       if (isStandard) {
         // Parallel: if unloading → unloading_putting_away; if arrived_pending_putaway → putting_away
         await env.DB.prepare(
