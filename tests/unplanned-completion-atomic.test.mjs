@@ -87,3 +87,31 @@ test('unplanned empty output does not release anyone, and individual leave does 
  assert.equal((await f.first('SELECT status FROM v2_ops_jobs WHERE id=?',s.id)).status,'working');assert.equal((await f.first('SELECT COUNT(*) n FROM v2_ops_job_results WHERE job_id=?',s.id)).n,0);
  await f.ok('A',s.action,s.body);
 });
+test('an assigned dispatcher member keeps independent unplanned completion authority',async t=>{
+ const f=await fixture(t),s=await scenario(f),row=await f.first('SELECT revision FROM sop_records WHERE id=?',s.id);
+ await f.ok('A','sop_native_people',{job_id:s.id,revision:row.revision,workers:[{id:f.people.B.badgeId,name:f.people.B.name}],lead_id:f.people.B.badgeId,reason:'合成有权派审员亲自作业'});
+ await f.ok('B',s.action,{...s.body,worker_id:f.people.B.badgeId});
+ assert.equal((await f.first('SELECT COUNT(*) n FROM v2_ops_job_results WHERE job_id=?',s.id)).n,1);
+ assert.equal(JSON.parse((await f.first('SELECT state FROM sop_records WHERE id=?',s.id)).state).owner_id,f.people.A.id);
+});
+test('unplanned manager completion cannot use a revoked office session after its first read',async t=>{
+ const f=await fixture(t),s=await scenario(f),gate=await holdFirstWrite(f,s.id),pending=f.call('office',s.action,s.body);await gate.ready;const before=await s.snapshot();
+ try{await f.ok('office','sop_logout');}finally{gate.release();}
+ const reply=await pending;gate.restore();assert.equal(reply.ok,false);assert.deepEqual(await s.snapshot(),before);await f.ok('A',s.action,s.body);
+});
+test('historical unmanaged no-document unload releases only the leaving worker while others continue',async t=>{
+ const f=await fixture(t),s=await scenario(f,'no-document'),other=await f.person(),row=await f.first('SELECT revision FROM sop_records WHERE id=?',s.id);
+ const first=await f.first('SELECT worker_name FROM v2_ops_job_workers WHERE job_id=?',s.id);
+ await f.ok('A','sop_native_people',{job_id:s.id,revision:row.revision,workers:[{id:s.body.worker_id,name:first.worker_name},{id:other.badgeId,name:other.name}],lead_id:s.body.worker_id,reason:'合成旧单两人'});
+ await f.env.DB.prepare('DELETE FROM sop_records WHERE id=?').bind(s.id).run();t.mock.timers.tick(3*60000);
+ const reply=await f.call('office',s.action,s.body);assert.equal(reply.ok,false);assert.equal(reply.error,'others_still_working');
+ assert.equal((await f.first("SELECT COUNT(*) n FROM v2_ops_job_workers WHERE job_id=? AND left_at=''",s.id)).n,1);assert.equal((await f.first('SELECT COUNT(*) n FROM v2_ops_job_results WHERE job_id=?',s.id)).n,0);
+ await f.ok('office',s.action,{...s.body,client_req_id:crypto.randomUUID(),worker_id:other.badgeId});
+ assert.equal((await f.first('SELECT SUM(minutes_worked) n FROM v2_ops_job_workers WHERE job_id=?',s.id)).n,6);assert.equal((await f.first("SELECT COUNT(*) n FROM v2_field_feedbacks WHERE related_doc_id=? AND feedback_type='unload_no_doc'",s.id)).n,1);
+});
+test('historical dynamic partial worker finish keeps its old individual release semantics',async t=>{
+ const f=await fixture(t),s=await scenario(f,'dynamic');t.mock.timers.tick(3*60000);
+ await f.ok('A',s.action,{...s.body,complete_job:false,result_lines:[],client_req_id:crypto.randomUUID()});
+ assert.equal((await f.first("SELECT COUNT(*) n FROM v2_ops_job_workers WHERE job_id=? AND left_at=''",s.id)).n,0);assert.equal((await f.first('SELECT status FROM v2_ops_jobs WHERE id=?',s.id)).status,'working');assert.equal((await f.first('SELECT COUNT(*) n FROM v2_ops_job_results WHERE job_id=?',s.id)).n,0);
+ await f.ok('A',s.action,s.body);
+});
