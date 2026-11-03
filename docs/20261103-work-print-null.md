@@ -39,3 +39,26 @@
 - 原 `work-need-groups-print-browser.mjs` 同轮通过：55/7 分组、100 行跨页备注、中韩文文件名、QR、旧单及历史出库来源 PDF、文档指纹和业务记录不变。
 
 未改旧浏览器脚本的断言或等待，也未修其它批次记录的卡片高度问题；本阶段执行上述功能/PDF脚本，不将未执行的完整视觉脚本报告为通过。测试截图及 PDF 仅存本地 `/tmp/ck-work-print-null-browser`、`/tmp/ck-recovery-print`，不上传公开仓库。
+
+## 最终开发验证
+
+固定业务源码：`4a9ea151cb7bb1f31c73faaa8a4cb0a3f132a3c7`；后续 `b84a69cd6a5392fc7189c0b289a566a657084512` 仅增加已验证的实际页面测试及说明，其后仅补本节。生产代码仍仅原历史读取表达式中的两个可选链；共享解析器、文档哈希、原 SQL/排序、打印摘要及全部写入路径与 `840f7aa` 字节一致。
+
+- 构建成功、`git diff --check` 通过；全量 **1644 通过、0 失败、0 跳过、0 取消**，约 298 秒，包含现有部分到仓/权限/事务/草稿/照片/返岗派审单元回归。
+- 本批原生本地 workerd D1 **6/0/0**；此前原生 D1 失败场景已转绿，所有旧 null 审计、正常追加对象、幂等回执、权限和原业务快照断言均保留。
+- 两份实际浏览器脚本成功：新增空快照 PC 1440/手机宽度 390 的列表→详情→打印→真实 PDF；原分组/旧单/历史出库来源完整 PDF。无页面 JS 错误、无原数据覆盖。
+- 本批未执行旧完整密度/缩放视觉脚本，不声称它已通过或其既有高度问题已修复。浏览器为本地 Chromium 视口模拟，不是实体手机或国内网络验收。
+- 未合入待审性能分支，未合测试、未部署；测试分支仍 `840f7aa`、main 仍 `4671f49`。提交候选供固定独立 QA，发布需另行安排。
+
+复现命令：
+
+```sh
+node --test tests/work-print-null.test.mjs tests/work-need-print.test.mjs tests/outbound-work-print.test.mjs tests/work-plan-list.test.mjs
+CK_PRINT_NULL_NATIVE_D1=true CODEX_PRIMARY_RUNTIME_NODE_MODULES=/已安装依赖/node_modules node --test --test-concurrency=1 tests/work-print-null.test.mjs
+node worker-v2/build-sop-staging.mjs
+CK_JSDOM_MODULE=/已安装依赖/node_modules/jsdom/lib/api.js node --test --test-concurrency=2 tests/*.test.mjs
+node tests/work-print-null-browser.mjs
+node tests/work-need-groups-print-browser.mjs
+```
+
+修复前后的 Node/D1 日志、构建、最终全量及浏览器日志均保存在本环境 `/workspace/scratch/ck-p1-test-runtime/print-null-fix-*`。仅提交本批 1 个业务文件、2 个合成测试文件、此说明，不提交凭据、业务数据、数据库、截图或 PDF。
