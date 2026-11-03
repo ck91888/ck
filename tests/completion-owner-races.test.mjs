@@ -151,3 +151,17 @@ test('a legacy manual replay keeps office session revocation checks without requ
  try{saved=await f.ok('office',s.action,s.body);await f.ok('office','sop_logout');}finally{gate.release();}const reply=await pending;gate.restore();assert.equal(reply.ok,false,JSON.stringify(reply));
  await f.ok('office','sop_login',{sop_key:'synthetic-owned-home-fixture'});await confirmOperation((a,b)=>f.ok('office',a,b),'合成任务归属验收员');assert.deepEqual(await f.ok('office',s.action,s.body),saved);assert.equal((await f.first('SELECT COUNT(*) n FROM v2_ops_job_results WHERE job_id=?',s.job.id)).n,1);
 });
+test('partial-arrival completion rejects the former owner without consuming its receipt, then the new owner continues both batches',async t=>{
+ const f=await fixture(t),code='SYN-PARTIAL-OWNER-RACE',tracking=['999001440001','999001440002'];
+ const plan=await f.ok('office','v2_inbound_plan_create',{customer:'合成分批交接客户',biz_classes:['bulk_putaway'],external_inbound_no:code,bulk_external_inbound_no:code,lines:[{unit_type:'courier',tracking_nos:tracking}]});
+ const scanner=await f.person(),batch=(await f.ok('office','sop_courier_receive',{operation:'start',workers:[{id:scanner.badgeId,name:scanner.name}],lead_id:scanner.badgeId})).batch;
+ const receive=tracking_no=>f.ok('office','sop_courier_receive',{tracking_no,owner:'8-1',batch_id:batch.id,scanner_badge:scanner.badgeId});await receive(tracking[0]);
+ const w=await f.person(),start=scope=>f.ok(scope,'sop_native_start',{payload:{action:'v2_inbound_job_start',plan_id:plan.id,external_inbound_no:code,job_type:'inbound_bulk',biz_class:'bulk',client_req_id:crypto.randomUUID()},workers:[{id:w.badgeId,name:w.name}],lead_id:w.badgeId,estimated_minutes:15}),job=await start('A');
+ const action='v2_inbound_job_finish',body={job_id:job.job_id,worker_id:w.badgeId,complete_job:true,result_lines:[{unit_type:'courier',putaway_qty:1}]},gate=await hold(f,action,job.job_id),pending=f.call('A',action,body);await gate.ready;
+ const snapshot=async()=>({plan:await f.first('SELECT * FROM v2_inbound_plans WHERE id=?',plan.id),lines:await f.rows('SELECT * FROM v2_inbound_plan_lines WHERE plan_id=? ORDER BY id',plan.id),job:await f.first('SELECT * FROM v2_ops_jobs WHERE id=?',job.job_id),workers:await f.rows('SELECT * FROM v2_ops_job_workers WHERE job_id=? ORDER BY id',job.job_id),results:await f.rows('SELECT * FROM v2_ops_job_results WHERE job_id=? ORDER BY id',job.job_id),batches:await f.rows('SELECT * FROM ck_inbound_arrival_batches WHERE plan_id=? ORDER BY job_id',plan.id)});let before;
+ try{const row=await f.first('SELECT revision FROM sop_records WHERE id=?',job.job_id);await f.ok('office','sop_owner_transfer',{id:job.job_id,revision:row.revision,target_badge:f.people.B.badgeId,reason:'合成分批在途交接'});before=await snapshot();}finally{gate.release();}
+ assert.equal((await pending).ok,false);gate.restore();assert.deepEqual(await snapshot(),before);await f.ok('B',action,body);
+ let d=await f.ok('office','v2_inbound_plan_detail',{id:plan.id});assert.equal(d.lines[0].putaway_qty,1);assert.notEqual(d.plan.status,'completed');assert.equal(d.plan.courier_progress.received,1);
+ await receive(tracking[1]);const next=await start('B');assert.equal(next.arrival_batch.lines[0].available,1);await f.ok('B',action,{...body,job_id:next.job_id});
+ d=await f.ok('office','v2_inbound_plan_detail',{id:plan.id});assert.equal(d.plan.status,'completed');assert.equal(d.lines[0].putaway_qty,2);assert.equal((await f.first('SELECT COUNT(*) n FROM v2_ops_job_results WHERE job_id IN (?,?)',job.job_id,next.job_id)).n,2);
+});
