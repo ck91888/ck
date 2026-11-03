@@ -103,3 +103,10 @@ CK_FEEDBACK_CREATE_ARTIFACTS=/tmp/ck-feedback-create-qa05 node tests/feedback-cr
 ```
 
 确定性交错测试给两次独立只读请求不同的请求 ID，以保留并验证原有同请求合并功能。自然失败日志、旧 UI 负例日志及最终通过日志分别保存；两个早期受控脚本因正常请求合并而等待，已主动终止并明确记为未完成，不计入通过数量。
+
+## 测试发布标识准备（待增量 QA）
+
+- 固定独立 QA 已放行 `cd7708ce0cba03ed13b8718f5284a770b58ed102`。发布前重新只读核验：测试分支仍为 `bf946b2e6b39ba5027a2838c2533692477fd5e1a`，main 为 `4671f49b9dd74c729e738abbe1440223bdf6af0f`；候选是测试 HEAD 后代，可非强制快进。
+- 发现构建输出仍沿用 `20261103-partial-arrival`。本增量仅将构建脚本的 `release.json.release` 改为 `20261103-audit-p1-transactions`，加本文记录；业务源码、两套 wrangler、权限开关、绑定、定时器和数据库迁移均未改。
+- 构建成功，原有 `tests/staging-load.test.mjs` **2/0/0/0**。核验生成 release 的模块允许列表、精确 Git SHA、目标 Worker `ck-v2-api-sop-staging` 及现有资源内容指纹；prod/staging 两套 wrangler 与已审候选完全一致。本轮没有重复声称已重跑业务全量，沿用已独立审核的 1618/0/0、D1 90 及浏览器证据。
+- 按本轮指令，只提交推送独立分支供发布标识增量 QA；尚未快进测试、触发部署或写线上业务数据。未生成新 Cloudflare build/check/Worker 版本；待增量 QA 通过后再核远端并执行原 staging 发布途径。
