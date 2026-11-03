@@ -35,6 +35,8 @@ import {ensureDailyDispatch,dispatchTransferTarget} from './daily-dispatch-permi
 import {shareEnabled,activePartnerIds,isActivePartner,isBulkShareRecord,partnerShareGuard,shareConflict} from './dispatch-share.js';
 import {sourceActiveWorkers} from './crew-borrow.js';
 import {effectiveResults} from './effective-results.js';
+import {liveSegmentMinutes} from './dashboard-time.js';
+import {cutoffLabel} from './system-cutoff.js';
 /* SOP pilot: explicit opt-in, revision checked atomic mutations, immutable history.
  * No production migration or legacy job conversion on request paths.
  */
@@ -794,7 +796,8 @@ async function dashboard(env,u,b){
  const tasks=records.filter(r=>r.kind==='task');
  const nativeJobs=await all(env,`SELECT j.* FROM v2_ops_jobs j JOIN sop_records s ON s.id=j.id WHERE s.kind='dispatch'${(u.role==='manager'?'':` AND ${executionDepartmentSQL('s')} IN (${args.map(()=>'?').join(',')||"''"})`)}`,...args);
  const segments=await all(env,`SELECT w.* FROM v2_ops_job_workers w JOIN sop_records s ON w.job_id=s.id WHERE w.joined_at<? AND (w.left_at='' OR w.left_at>?)${(u.role==='manager'?'':` AND ${executionDepartmentSQL('s')} IN (${args.map(()=>'?').join(',')||"''"})`)}`,end,start,...args);
- const minutes=segments.reduce((n,s)=>n+Math.max(0,(Math.min(Date.parse(s.left_at||now()),Date.parse(end))-Math.max(Date.parse(s.joined_at),Date.parse(start)))/60000),0);
+ const asOf=Date.now(),range={start:Date.parse(start),end:Date.parse(end)},labor=segments.map(segment=>({segment,...liveSegmentMinutes(segment,range,asOf)}));
+ const minutes=labor.reduce((n,s)=>n+s.minutes,0),pending=labor.filter(s=>s.pending),pendingMinutes=pending.reduce((n,s)=>n+s.pending_minutes,0);
  const alerts=records.filter(r=>(r.kind==='task'&&['awaiting_review','paused','rework'].includes(r.status))||(r.kind==='need'&&['pending','waiting_customer'].includes(r.status))||(r.kind==='issue'&&r.status!=='closed'));
  const completed=tasks.filter(r=>r.status==='completed'&&r.review?.at>=start&&r.review.at<end);
  const outputs={};for(const r of completed){const key=r.department+' / '+r.job_type+' / '+r.result.unit;outputs[key]=(outputs[key]||0)+r.result.quantity;}
@@ -819,12 +822,14 @@ async function dashboard(env,u,b){
  const roster=[...new Map(allSegments.map(s=>[s.worker_id,{worker_id:s.worker_id,worker_name:s.worker_name}])).values()].map(w=>{const active=allSegments.find(s=>s.worker_id===w.worker_id&&!s.left_at);const task=records.find(r=>r.id===active?.job_id);return {...w,current_job_id:active?.job_id||'',current_task:task?.title||'',status:active?'作业中':'无进行中记录（不等于空闲）'};});
  const numberedRoster=await jobNumbers(env,roster,'current_job_id');
  const simultaneousIds=new Set(records.filter(r=>r.kind==='bulk_batch'&&simultaneous(r)).map(r=>r.id)),recordMap=new Map(records.map(r=>[r.id,r]));
+ const quality=new Map(tasks.filter(r=>r.status==='awaiting_review'||(r.status==='working'&&asOf-Date.parse(r.started_at)>12*3600000)).map(r=>[r.id,{id:r.id,title:r.title,reason:r.status==='awaiting_review'?'待审核':'计时超过12小时，请核实'}]));
+ for(const {segment} of pending){const r=recordMap.get(segment.job_id),old=quality.get(segment.job_id);if(!old?.system_cutoff_pending)quality.set(segment.job_id,{id:segment.job_id,title:r?.title||'',reason:[old?.reason,cutoffLabel].filter(Boolean).join('；'),system_cutoff_pending:true});}
  return {ok:true,bulk_batches:await dashboardBatches(env,records,{start,end}),date:days,scope:'整单完成后更新产量；多人按该任务实际参与人数均分（分配产量，不是个人扫描实测）。按业务、作业、指标及单位分别排名。已登记人员无任务不等于空闲；外部系统Excel尚未导入的成果不包含在内。',roster:numberedRoster,rankings:ranked,reported_outputs:[...reported.values()],
   working:tasks.filter(r=>r.status==='working'&&!simultaneousIds.has(r.bulk_batch_id)).length+nativeJobs.filter(x=>x.status==='working'&&!simultaneousIds.has(recordMap.get(x.id)?.bulk_batch_id)).length+records.filter(r=>simultaneousIds.has(r.id)&&r.status==='working').length,
   active_people:new Set(segments.filter(s=>!s.left_at).map(s=>s.worker_id)).size,
-  live:await jobNumbers(env,segments.filter(s=>!s.left_at).map(s=>({worker_id:s.worker_id,worker_name:s.worker_name,job_id:s.job_id,joined_at:s.joined_at})),'job_id'),completed:completed.length,person_hours:Math.round(minutes/6)/10,outputs,
+  live:await jobNumbers(env,segments.filter(s=>!s.left_at).map(s=>({worker_id:s.worker_id,worker_name:s.worker_name,job_id:s.job_id,joined_at:s.joined_at})),'job_id'),completed:completed.length,person_hours:Math.round(minutes/6)/10,pending_person_hours:Math.round(pendingMinutes/6)/10,pending_minutes:Math.round(pendingMinutes*10)/10,pending_segment_count:pending.length,outputs,
   alerts:await recordNumbers(env,alerts.map(r=>({id:r.id,kind:r.kind,title:r.title,status:r.status,department:r.department,owner:r.owner||'',updated_at:r.updated_at,revision:r.revision}))),
-  data_quality:await jobNumbers(env,tasks.filter(r=>r.status==='awaiting_review'||(r.status==='working'&&Date.parse(now())-Date.parse(r.started_at)>12*3600000)).map(r=>({id:r.id,title:r.title,reason:r.status==='awaiting_review'?'待审核':'计时超过12小时，请核实'})))};
+  data_quality:await jobNumbers(env,[...quality.values()])};
 }
 // Defense in depth: legacy clients may finish old tasks but cannot alter SOP-owned tasks.
 export async function linkedCheck(env,id){
