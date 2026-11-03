@@ -17,7 +17,7 @@ function setup(){const DB=database();for(const s of [INBOUND_CREATE_RECEIPT_SQL,
  DB.raw.exec("CREATE TABLE v2_schema_meta(key TEXT PRIMARY KEY,value TEXT); INSERT INTO v2_schema_meta VALUES('version','keep'); INSERT INTO v2_003_locations(id,location_name) VALUES('KEEP','location'); INSERT INTO v2_inbound_plans(id,customer,status) VALUES('TEST','fixture','pending'); INSERT INTO v2_idempotency_keys(idem_key,action,response_json,created_at) VALUES('old','test','{}','');");
  const prepare=DB.prepare;let queries=0;
  DB.prepare=sql=>{queries++;assert.ok(!/UNION/i.test(sql),'avoid D1 compound-select limit');return prepare(sql);};
- return {DB,SOP_ENVIRONMENT:'staging',SOP_UPGRADE_ENABLED:'true',SOP_TEST_RESET_ENABLED:'true',SOP_TEST_RESET_DATABASE:STAGING_DATABASE,SOP_PUBLIC_TEST_ACCESS:'true',measure:()=>{const n=queries;queries=0;return n;}};
+ return {DB,tableCount:DB.raw.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().filter(x=>TABLES.includes(x.name)).length,SOP_ENVIRONMENT:'staging',SOP_UPGRADE_ENABLED:'true',SOP_TEST_RESET_ENABLED:'true',SOP_TEST_RESET_DATABASE:STAGING_DATABASE,SOP_PUBLIC_TEST_ACCESS:'true',measure:()=>{const n=queries;queries=0;return n;}};
 }
 const input=()=>({requestId:crypto.randomUUID(),confirmation:'CLEAR_TEST_DATA'});
 async function act(env,action,body={}){env.measure();const r=await resetAction(action,body,env,manager);assert.ok(env.measure()<50,'under D1 Free query budget');return r;}
@@ -38,7 +38,7 @@ test('manager permission, confirmation, POST and same-origin headers required',a
 test('preview is read-only; all fixtures archived and cleared, settings retained',async()=>{
  const env=setup();const preview=await act(env,'status');assert.equal(preview.counts.find(x=>x.table_name==='v2_inbound_plans').count,1);assert.equal(preview.run,null);
  const {run}=await act(env,'start',input());assert.equal(env.DB.raw.prepare('SELECT COUNT(*) n FROM v2_inbound_plans').get().n,1);
- const done=await complete(env,run.id);assert.equal(done.run.total,TABLES.length);assert.equal(done.run.done,TABLES.length);assert.equal(done.run.archived,2);
+ const done=await complete(env,run.id);assert.equal(done.run.total,env.tableCount);assert.equal(done.run.done,env.tableCount);assert.equal(done.run.archived,2);
  assert.equal(env.DB.raw.prepare(`SELECT customer FROM ck_backup_${run.id}_v2_inbound_plans`).get().customer,'fixture');
  assert.equal(env.DB.raw.prepare('SELECT COUNT(*) n FROM v2_003_locations').get().n,1);assert.equal(env.DB.raw.prepare('SELECT value FROM v2_schema_meta').get().value,'keep');assert.equal((await act(env,'status')).counts.every(x=>x.count===0),true);
 });
@@ -68,11 +68,12 @@ test('reset archives released courier receipt snapshots before clearing their pr
  assert.equal(JSON.parse(history.receipt_json).receipt_id,'CR-RESET');assert.equal(history.replacement_plan_id,'TEST');
  assert.throws(()=>db.prepare('DELETE FROM v2_inbound_plans WHERE id=?').run('OLD'),/不能删除/);
  const preview=await act(env,'status');assert.equal(preview.counts.find(x=>x.table_name==='ck_courier_plan_item_history').count,1);
- const {run}=await act(env,'start',input());await act(env,'step',{runId:run.id});
+ const {run}=await act(env,'start',input());
+ for(let i=0;i<Math.ceil(env.tableCount/4)&&!db.prepare("SELECT 1 FROM ck_test_reset_items WHERE run_id=? AND table_name='ck_courier_plan_item_history'").get(run.id);i++)await act(env,'step',{runId:run.id});
  assert.equal(db.prepare('SELECT COUNT(*) n FROM ck_courier_plan_item_history').get().n,0);
  assert.equal(db.prepare('SELECT COUNT(*) n FROM v2_inbound_plans').get().n,2,'history is archived before protected plans are cleared');
  assert.deepEqual(db.prepare(`SELECT * FROM ck_backup_${run.id}_ck_courier_plan_item_history`).get(),history);
- const done=await complete(env,run.id);assert.equal(done.run.done,TABLES.length);
+ const done=await complete(env,run.id);assert.equal(done.run.done,env.tableCount);
  assert.equal(db.prepare('SELECT row_count FROM ck_test_reset_items WHERE run_id=? AND table_name=?').get(run.id,'ck_courier_plan_item_history').row_count,1);
  assert.equal(db.prepare(`SELECT status FROM ck_backup_${run.id}_v2_inbound_plans WHERE id='OLD'`).get().status,'cancelled');
  assert.equal(db.prepare(`SELECT received_at FROM ck_backup_${run.id}_ck_courier_receipts WHERE id='CR-RESET'`).get().received_at,JSON.parse(history.receipt_json).received_at);
@@ -99,7 +100,7 @@ test('active reset blocks ordinary business mutations and preserves unexpected n
 test('concurrent start and step requests share one run and archive each table once',async()=>{
  const env=setup();const starts=await Promise.all([resetAction('start',input(),env,manager),resetAction('start',input(),env,manager)]);assert.equal(starts[0].run.id,starts[1].run.id);
  const id=starts[0].run.id;await Promise.all([resetAction('step',{runId:id},env,manager),resetAction('step',{runId:id},env,manager)]);await complete(env,id);
- assert.equal(env.DB.raw.prepare('SELECT COUNT(*) n FROM ck_test_resets').get().n,1);assert.equal(env.DB.raw.prepare('SELECT COUNT(*) n FROM ck_test_reset_items').get().n,TABLES.length);
+ assert.equal(env.DB.raw.prepare('SELECT COUNT(*) n FROM ck_test_resets').get().n,1);assert.equal(env.DB.raw.prepare('SELECT COUNT(*) n FROM ck_test_reset_items').get().n,env.tableCount);
 });
 
 const domainRequest=(host,path,method='GET',body={},options={})=>new Request('https://'+host+path,{
@@ -166,7 +167,7 @@ test('custom-domain start and alternating-host steps share one backup and retain
  const env=setup(),body=input();const start=await entry.fetch(domainRequest('sop-test.ck91888.cn','/api/test-data/start','POST',body),env);assert.equal(start.status,200);const first=await start.json();
  const replay=await(await entry.fetch(domainRequest(STAGING_HOST,'/api/test-data/start','POST',body),env)).json();assert.equal(replay.run.id,first.run.id);
  let done=first;for(let i=0;i<20&&!done.run.completedAt;i++){const response=await entry.fetch(domainRequest(STAGING_HOSTS[i%2],'/api/test-data/step','POST',{runId:first.run.id}),env);assert.equal(response.status,200);done=await response.json();}
- assert.ok(done.run.completedAt);assert.equal(done.run.done,TABLES.length);assert.equal(env.DB.raw.prepare('SELECT COUNT(*) n FROM ck_test_resets').get().n,1);
+ assert.ok(done.run.completedAt);assert.equal(done.run.done,env.tableCount);assert.equal(env.DB.raw.prepare('SELECT COUNT(*) n FROM ck_test_resets').get().n,1);
  assert.equal(env.DB.raw.prepare(`SELECT customer FROM ck_backup_${first.run.id}_v2_inbound_plans`).get().customer,'fixture');
  assert.equal(env.DB.raw.prepare('SELECT COUNT(*) n FROM v2_003_locations').get().n,1);assert.equal(env.DB.raw.prepare('SELECT value FROM v2_schema_meta').get().value,'keep');
 });

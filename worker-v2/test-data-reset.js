@@ -5,6 +5,19 @@ export const STAGING_HOST = 'ck-v2-api-sop-staging.ck91888.workers.dev';
 export const STAGING_HOSTS = Object.freeze([STAGING_HOST, 'sop-test.ck91888.cn']);
 export const STAGING_DATABASE = 'ba1eba33-bcdd-4de2-8927-d37dc3788396';
 export const TABLES = [
+ // Archive business children before their people/jobs/plans. Delete document
+ // counters first so delete triggers cannot change their archived values.
+ // Auth, configuration and reset history intentionally remain outside scope.
+ 'ck_inbound_document_versions','ck_inbound_document_issues',
+ 'ck_attendance_span_events','ck_attendance_return_identities','ck_attendance_span_workers','ck_attendance_span_breaks','ck_attendance_span_checks','ck_attendance_spans',
+ 'ck_dispatch_time_ticks','ck_dispatch_time_actions','ck_dispatch_time_links','ck_dispatch_time_spans','ck_dispatch_time_days','ck_dispatch_time_events','ck_dispatch_time_sessions',
+ 'ck_dispatch_share_checks','ck_dispatch_share_events','ck_dispatch_share_pairs',
+ 'ck_daily_dispatch_checks','ck_daily_dispatch_events','ck_daily_dispatch_links','ck_daily_dispatch_grants',
+ 'ck_batch_material_need_set_guards','ck_batch_material_events','ck_batch_material_state',
+ 'ck_inbound_reference_context','ck_inbound_reference_history','ck_inbound_arrival_batches',
+ 'ck_import_daily_scan_events','ck_import_daily_scans',
+ 'ck_completed_clock_repairs','ck_system_cutoff_corrections','ck_system_cutoff_audit','ck_system_cutoff_runs',
+ 'ck_native_completion_checks','ck_unload_exit_checks','ck_purchase_edit_checks','ck_verify_requests','ck_plan_operation_audit',
  'ck_courier_batch_items','ck_courier_batch_requests','ck_courier_batches',
  'ck_courier_plan_item_history',
  'ck_inbound_create_receipts','ck_putaway_links',
@@ -35,6 +48,16 @@ export async function ensureResetSchema(env){
 }
 export const activeReset=env=>q(env,"SELECT * FROM ck_test_resets WHERE completed_at='' LIMIT 1").first();
 const knownTables=async env=>{const names=(await rows(env,"SELECT name FROM sqlite_master WHERE type='table'")).map(x=>x.name);return TABLES.filter(x=>names.includes(x));};
+async function currentScope(env,run){
+ const planned=JSON.parse(run.tables_json);
+ if(!/^[a-f0-9]{32}$/.test(run.id)||!Array.isArray(planned)||!planned.every(name=>TABLES.includes(name)))fail('Invalid maintenance scope',409);
+ const present=await knownTables(env);
+ if(present.every(name=>planned.includes(name)))return run;
+ // Resume an older scope without replacing backups or clearing a done table.
+ const scope=TABLES.filter(name=>planned.includes(name)||present.includes(name));
+ await q(env,"UPDATE ck_test_resets SET tables_json=? WHERE id=? AND completed_at='' AND tables_json=?",JSON.stringify(scope),run.id,run.tables_json).run();
+ return q(env,'SELECT * FROM ck_test_resets WHERE id=?',run.id).first();
+}
 async function counts(env,tables){
  const result=[];
  // Scalar subqueries avoid D1's low compound-SELECT limit.
@@ -67,11 +90,12 @@ export async function resetAction(action,body,env,user){
   return {ok:true,run:await view(env,await q(env,'SELECT * FROM ck_test_resets WHERE id=?',id).first())};
  }
  if(action!=='step')fail('Unknown maintenance action',404);
- const run=await q(env,'SELECT * FROM ck_test_resets WHERE id=?',String(body.runId||'')).first();
+ let run=await q(env,'SELECT * FROM ck_test_resets WHERE id=?',String(body.runId||'')).first();
  if(!run)fail('清理记录不存在 / 삭제 기록이 없습니다',404);
  if(run.completed_at)return {ok:true,run:await view(env,run)};
+ run=await currentScope(env,run);
+ if(run.completed_at)return {ok:true,run:await view(env,run)};
  const tables=JSON.parse(run.tables_json);
- if(!/^[a-f0-9]{32}$/.test(run.id)||!tables.every(name=>TABLES.includes(name)))fail('Invalid maintenance scope',409);
  try{
   const done=(await rows(env,'SELECT table_name FROM ck_test_reset_items WHERE run_id=?',run.id)).map(x=>x.table_name);
   for(const name of tables.filter(x=>!done.includes(x)).slice(0,4)){
