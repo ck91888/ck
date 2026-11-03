@@ -1934,21 +1934,31 @@ async function loadInboundPlanInfo(planId) {
     infoEl.innerHTML = html;
   }
   // Build result lines form
-  var unloadNotDone = (p.status === 'unloading' || p.status === 'unloading_putting_away');
+  var arrivalJob = (res.jobs || []).find(function(j) { return j.id === context.jobId; });
+  var arrivalBatch = arrivalJob && arrivalJob.arrival_batch;
+  var batchUnits = arrivalBatch && arrivalBatch.lines.reduce(function(items, ln) {
+    var item = items.find(function(x) { return x.unit_type === ln.unit_type; });
+    if (!item) { item = { unit_type: ln.unit_type, actual_qty: 0, available: 0 }; items.push(item); }
+    item.actual_qty += ln.arrived; item.available += ln.available; return items;
+  }, []);
+  var unloadNotDone = !arrivalBatch && (p.status === 'unloading' || p.status === 'unloading_putting_away');
   if (linesEl) {
     if (lines.length > 0) {
       var html = '<table style="width:100%;font-size:13px;border-collapse:collapse;margin-bottom:8px;">';
-      html += '<thead><tr style="background:#f5f5f5;"><th style="padding:4px 6px;text-align:left;">类型</th><th style="padding:4px 6px;">卸货实到</th><th style="padding:4px 6px;">本次入库</th></tr></thead><tbody>';
-      lines.forEach(function(ln) {
+      html += '<thead><tr style="background:#f5f5f5;"><th style="padding:4px 6px;text-align:left;">类型</th><th style="padding:4px 6px;">'+(arrivalBatch?'本批可理货 / 검수 가능':'卸货实到')+'</th><th style="padding:4px 6px;">本次入库</th></tr></thead><tbody>';
+      (batchUnits || lines).forEach(function(ln) {
+        if (arrivalBatch && !ln.available) return;
         var actualQty = ln.actual_qty || 0;
+        if (arrivalBatch) actualQty = ln.available;
         var actualDisplay = unloadNotDone ? '<span style="color:#e67e22;font-weight:700;">卸货中/하차중</span>' : String(actualQty);
         html += '<tr>';
         html += '<td style="padding:4px 6px;">' + esc(unitLabel(ln.unit_type) || '--') + '</td>';
         html += '<td style="padding:4px 6px;text-align:center;">' + actualDisplay + '</td>';
-        html += '<td style="padding:4px 6px;"><input type="number" class="input ib-putaway-input" data-unit="' + esc(ln.unit_type || '') + '" value="' + (unloadNotDone ? '' : actualQty) + '" min="0" style="width:80px;text-align:center;" placeholder="' + (unloadNotDone ? '待卸货完成' : '') + '"></td>';
+        html += '<td style="padding:4px 6px;"><input type="number" class="input ib-putaway-input" data-unit="' + esc(ln.unit_type || '') + '" value="' + (unloadNotDone ? '' : actualQty) + '" min="0" '+(arrivalBatch?'max="'+actualQty+'" ':'')+'style="width:80px;text-align:center;" placeholder="' + (unloadNotDone ? '待卸货完成' : '') + '"></td>';
         html += '</tr>';
       });
       html += '</tbody></table>';
+      if (arrivalBatch) html += '<p class="muted">本次仅记录这批已到仓未理货数量；后续到货另开一批，整单不会提前完成。 / 도착한 미검수 수량만 기록합니다. 추가 입고는 다음 차수로 검수합니다.</p>';
       if (unloadNotDone) {
         html += '<div style="font-size:12px;color:#e67e22;margin-bottom:6px;">⚠ 卸货尚未完成，实到数量待更新。卸货完成后方可完成理货。<br>⚠ 하차 미완료, 실수량 미확정. 하차 완료 후 입고 완료 가능.</div>';
       }
@@ -1990,7 +2000,8 @@ async function finishInbound(btnEl) {
   // Front-end pre-check: block finish if unload not done
   if (_inboundPlanData && _inboundPlanData.plan) {
     var pStatus = _inboundPlanData.plan.status;
-    if (pStatus === 'unloading' || pStatus === 'unloading_putting_away') {
+    var batchJob = (_inboundPlanData.jobs || []).find(function(j) { return j.id === _activeJobId; });
+    if ((pStatus === 'unloading' || pStatus === 'unloading_putting_away') && !(batchJob && batchJob.arrival_batch)) {
       alert("卸货未完成，无法完成理货。请等待卸货结束后再完成。\n하차가 아직 완료되지 않아 입고 완료 처리할 수 없습니다. 하차 완료 후 다시 시도하세요.");
       return;
     }
