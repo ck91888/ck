@@ -11,7 +11,10 @@ export async function workNeedDocumentKey(x){
 export async function workNeedPrintFacts(env,items){
  const needs=items.filter(x=>x.kind==='need');if(!needs.length)return items;
  const events=(await q(env,"SELECT record_id,actor_name,created_at,after_json FROM sop_events WHERE action='sop_need_print_request' AND record_id IN (SELECT value FROM json_each(?)) ORDER BY created_at DESC,request_id DESC",JSON.stringify(needs.map(x=>x.id))).all()).results||[];
- for(const x of needs){const document_key=await workNeedDocumentKey(x),own=events.filter(p=>p.record_id===x.id),last=own[0],current=own.filter(p=>parse(p.after_json).document_key===document_key);x.print_status={state:!last?'unknown':current.length?'requested':'reprint',document_key,request_count:own.length,current_count:current.length,last_at:last?.created_at||'',last_by:last?.actor_name||'',last_requirement_version:last?parse(last.after_json).requirement_version:null};}
+ // Preserve the SQL order within each record, without rescanning all histories
+ // for every need. NaN cannot match the previous strict-equality predicate.
+ const byRecord=new Map();for(const p of events){if(Number.isNaN(p.record_id))continue;if(!byRecord.has(p.record_id))byRecord.set(p.record_id,[]);byRecord.get(p.record_id).push(p);}
+ for(const x of needs){const document_key=await workNeedDocumentKey(x),own=byRecord.get(x.id)||[],last=own[0],current=own.filter(p=>parse(p.after_json).document_key===document_key);x.print_status={state:!last?'unknown':current.length?'requested':'reprint',document_key,request_count:own.length,current_count:current.length,last_at:last?.created_at||'',last_by:last?.actor_name||'',last_requirement_version:last?parse(last.after_json).requirement_version:null};}
  return items;
 }
 export function workNeedPrintSummary(items){
