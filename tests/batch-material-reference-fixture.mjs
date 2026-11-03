@@ -16,15 +16,15 @@ export async function materialReferenceFixture(t){
  const query=(sql,...args)=>env.DB.prepare(sql).bind(...args),first=(sql,...args)=>query(sql,...args).first();
  await ok('sop_login',{sop_key:'synthetic-material-reference'});await confirmOperation(ok,user.name);
  const plan=await ok('v2_inbound_plan_create',{customer:'合成资料客户',biz_classes:['bulk']});
- const need=async()=>ok('sop_need_create',{customer:'合成资料客户',title:'合成资料作业',instructions:'仅测试资料引用并发',source_type:'inbound',source_id:plan.id,planned_quantity:10,planned_unit:'箱',department:'bulk',reason:'合成追加作业'});
+ const need=async(extra={})=>ok('sop_need_create',{customer:'合成资料客户',title:'合成资料作业',instructions:'仅测试资料引用并发',source_type:'inbound',source_id:plan.id,planned_quantity:10,planned_unit:'箱',department:'bulk',reason:'合成追加作业',...extra});
  const a=await need(),form=new FormData();
  for(const[k,v]of Object.entries({action:'v2_attachment_upload',related_doc_type:'inbound_plan',related_doc_id:plan.id,need_id:a.id,attachment_category:'batch_work_material',client_req_id:crypto.randomUUID()}))form.set(k,v);
  form.set('file',new File(['synthetic material row'],'合成资料.csv',{type:'text/csv'}));const file=await raw(form);assert.equal(file.ok,true,file.error);
  const current=async id=>{const row=await first('SELECT * FROM sop_records WHERE id=?',id);return {...row,data:JSON.parse(row.state)};};
  const group=async(id,extra={})=>({action:'sop_cargo_groups_save',id,revision:(await current(id)).revision,groups:[{name:'合成组',range:'SYN001',box_count:1,attachment_ids:[file.id]}],client_req_id:crypto.randomUUID(),...extra});
  const remove=(extra={})=>({action:'sop_batch_work_material_remove',id:a.id,attachment_id:file.id,material_revision:0,client_req_id:crypto.randomUUID(),...extra});
- const snapshot=async()=>{const tables=['sop_records','sop_events','v2_attachments','ck_batch_material_state','ck_batch_material_events','ck_inbound_document_versions','v2_outbound_orders','v2_outbound_order_change_logs','v2_ops_jobs','v2_ops_job_workers','v2_ops_job_results'];const result={};for(const table of tables)result[table]=(await query('SELECT * FROM '+table+' ORDER BY rowid').all()).results;return JSON.stringify(result);};
- return {DB,env,user,objects,raw,call,ok,query,first,plan,a,file,need,current,group,remove,snapshot};
+ const snapshot=async()=>{const tables=['sop_records','sop_events','v2_inbound_plans','v2_inbound_plan_lines','v2_attachments','ck_batch_material_state','ck_batch_material_events','ck_inbound_document_versions','v2_outbound_orders','v2_outbound_order_change_logs','v2_ops_jobs','v2_ops_job_workers','v2_ops_job_results'];const result={};for(const table of tables)result[table]=(await query('SELECT * FROM '+table+' ORDER BY rowid').all()).results;return JSON.stringify(result);};
+ return {DB,env,user,objects,raw,call,ok,query,first,plan,a,file,need,current,group,remove,snapshot,get cookie(){return cookie;}};
 }
 export function holdMaterialBatch(f,predicate){
  const db=f.env.DB;let reached,release,held=false;

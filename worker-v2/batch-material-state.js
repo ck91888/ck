@@ -2,17 +2,6 @@ import {ensureSchema} from './schema-ready.js';
 import {ensureInboundDocuments} from './inbound-documents.js';
 export const batchStateEnabled=env=>env.SOP_ENVIRONMENT==='staging'&&env.SOP_UPGRADE_ENABLED==='true'&&env.SOP_WORK_CHAIN_ENABLED==='true';
 export const batchVisibleSql=(env,alias='a')=>batchStateEnabled(env)?` AND NOT EXISTS(SELECT 1 FROM ck_batch_material_state bs WHERE bs.attachment_id=${alias}.id AND bs.removed=1)`:'';
-// Match cargoReferencesFile's document arrays in groups/history and frozen links.
-// Only string attachment IDs count; unrelated metadata and old invalid JSON do not.
-const referenceIds=state=>{
- const json=`CASE WHEN json_valid(${state}) THEN ${state} ELSE '{}' END`;
- const file="CASE WHEN f.type='object' THEN f.value ELSE '{}' END";
- return `SELECT json_extract(${file},'$.id') FROM (
-  SELECT type,key,value FROM json_tree(${json},'$.cargo_groups')
-  UNION ALL SELECT type,key,value FROM json_tree(${json},'$.links')
- ) c JOIN json_each(CASE WHEN c.type='array' AND c.key IN ('documents','public_documents') THEN c.value ELSE '[]' END) f
- WHERE json_type(${file},'$.id')='text'`;
-};
 export async function ensureBatchMaterialState(env){
  if(!batchStateEnabled(env))return;
  await ensureInboundDocuments(env);
@@ -30,20 +19,8 @@ export async function ensureBatchMaterialState(env){
   ];
   await env.DB.batch(sql.map(s=>env.DB.prepare(s)));
  });
- // Separate additive upgrade: an already-initialized v1 database must also get
- // these commit-time guards. No historical states/events or objects are changed.
- await ensureSchema(env.DB,'batch-material-reference-guards-v1',()=>env.DB.batch([
-  `CREATE TRIGGER IF NOT EXISTS ck_batch_material_reference_remove_v1 BEFORE INSERT ON ck_batch_material_events
-   WHEN NEW.removed=1 AND EXISTS(SELECT 1 FROM sop_records n WHERE n.kind='need'
-    AND json_extract(n.state,'$.source_type')='inbound' AND json_extract(n.state,'$.source_id')=NEW.plan_id
-    AND NEW.attachment_id IN (${referenceIds('n.state')}))
-   BEGIN SELECT RAISE(ABORT,'batch_material_in_use'); END`,
-  `CREATE TRIGGER IF NOT EXISTS ck_batch_material_reference_insert_v1 BEFORE INSERT ON sop_records
-   WHEN NEW.kind='need' AND EXISTS(SELECT 1 FROM ck_batch_material_state b WHERE b.removed=1 AND b.attachment_id IN (${referenceIds('NEW.state')}))
-   BEGIN SELECT RAISE(ABORT,'batch_material_reference_removed'); END`,
-  `CREATE TRIGGER IF NOT EXISTS ck_batch_material_reference_update_v1 BEFORE UPDATE OF state ON sop_records
-   WHEN NEW.kind='need' AND EXISTS(SELECT 1 FROM ck_batch_material_state b WHERE b.removed=1
-    AND b.attachment_id IN (${referenceIds('NEW.state')}) AND b.attachment_id NOT IN (${referenceIds('OLD.state')}))
-   BEGIN SELECT RAISE(ABORT,'batch_material_reference_removed'); END`
- ].map(sql=>env.DB.prepare(sql))));
+ // Additive upgrade for existing v1 databases. Claims are inserted and removed
+ // in the material transaction; this table retains no business or history rows.
+ await ensureSchema(env.DB,'batch-material-need-set-guard-v1',()=>env.DB.prepare(`CREATE TABLE IF NOT EXISTS ck_batch_material_need_set_guards(
+  request_id TEXT PRIMARY KEY,allowed INTEGER NOT NULL CONSTRAINT batch_material_need_set CHECK(allowed=1))`).run());
 }

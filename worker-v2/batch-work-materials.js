@@ -35,7 +35,14 @@ export async function changeBatchMaterial(body,env,user){
  const t=new Date().toISOString(),result={ok:true,id:attachment,removed:!!removed,material_revision:expected+1};
  const rows=(await q(env,"SELECT * FROM sop_records WHERE kind='need' AND json_extract(state,'$.source_type')='inbound' AND json_extract(state,'$.source_id')=?",plan.id).all()).results;
  if(removed&&rows.some(row=>cargoReferencesFile(JSON.parse(row.state),attachment)))throw Error('资料仍被资料组或已确认成果引用，请保留历史文件版本');
- const statements=[q(env,'INSERT INTO ck_batch_material_events VALUES(?,?,?,?,?,?,?,?,?,?,?)',request,attachment,plan.id,body.id,expected,expected+1,removed,user.id,user.name,t,JSON.stringify(result)),
+ // The old per-need revision guards cannot see a new child inserted after the
+ // initial read. Claim the exact child set before any material/event write.
+ const children="kind='need' AND json_extract(state,'$.source_type')='inbound' AND json_extract(state,'$.source_id')=?";
+ const statements=[q(env,`INSERT INTO ck_batch_material_need_set_guards(request_id,allowed)
+  SELECT ?,CASE WHEN (SELECT COUNT(*) FROM sop_records WHERE ${children})=?
+   AND NOT EXISTS(SELECT 1 FROM sop_records WHERE ${children} AND id NOT IN (SELECT value FROM json_each(?))) THEN 1 ELSE 0 END`,request,plan.id,rows.length,plan.id,JSON.stringify(rows.map(row=>row.id))),
+  q(env,'DELETE FROM ck_batch_material_need_set_guards WHERE request_id=?',request),
+  q(env,'INSERT INTO ck_batch_material_events VALUES(?,?,?,?,?,?,?,?,?,?,?)',request,attachment,plan.id,body.id,expected,expected+1,removed,user.id,user.name,t,JSON.stringify(result)),
   q(env,`INSERT INTO ck_batch_material_state VALUES(?,?,?,?,?,?,?) ON CONFLICT(attachment_id) DO UPDATE SET removed=excluded.removed,revision=excluded.revision,actor_id=excluded.actor_id,actor_name=excluded.actor_name,changed_at=excluded.changed_at`,attachment,plan.id,removed,expected+1,user.id,user.name,t)];
  const notified=new Set();
  for(const row of rows){const d=JSON.parse(row.state);if(['closed','cancelled'].includes(d.status))continue;row.data=d;
@@ -44,7 +51,7 @@ export async function changeBatchMaterial(body,env,user){
   const links=(d.links||[]).filter(l=>{if(notified.has(l.outbound_id))return false;notified.add(l.outbound_id);return true;});
   statements.push(...notifyMaterialChange(env,{...row,data:{...d,links}},user,t,(removed?'本批总作业明细已移除：':'本批总作业明细已恢复：')+file.file_name));
  }
- try{await env.DB.batch(statements);}catch(error){const committed=await previous();if(committed)return committed;if(/batch_material_in_use/.test(error.message))throw Error('资料仍被资料组或已确认成果引用，请保留历史文件版本');if(/batch_material_stale|sop_revision|revision_conflict/.test(error.message))throw Error('资料或关联作业已更新，请刷新后重试');throw error;}
+ try{await env.DB.batch(statements);}catch(error){const committed=await previous();if(committed)return committed;if(/batch_material_need_set|batch_material_stale|sop_revision|revision_conflict/.test(error.message))throw Error('资料或关联作业已更新，请刷新后重试');throw error;}
  return result;
 }
 export async function uploadBatchMaterial(form,env){
