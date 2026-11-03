@@ -1,5 +1,5 @@
 import test from 'node:test';import assert from 'node:assert/strict';
-import {materialReferenceFixture} from './batch-material-reference-fixture.mjs';
+import {materialReferenceFixture,holdMaterialBatch} from './batch-material-reference-fixture.mjs';
 import {ensureBatchMaterialNeedLookup} from '../worker-v2/batch-material-state.js';
 import {seedMaterialHistory,lookupIndex,inboundChildren} from './batch-material-lookup-fixture.mjs';
 const index=async f=>f.first("SELECT sql FROM sqlite_master WHERE type='index' AND name=?",lookupIndex);
@@ -58,4 +58,17 @@ test('an old malformed need remains visible as an error without rewriting or sil
  for(const row of triggers)await f.query(row.sql).run();
  const before=await f.snapshot(),result=await f.raw(f.remove());assert.equal(result.ok,false);assert.match(result.error,/malformed JSON/);assert.equal(await index(f),null);assert.equal(await f.snapshot(),before);
  assert.equal((await f.call('sop_batch_work_materials',{id:f.a.id})).ok,true,'a read-only material listing must not start the index build');
+});
+test('indexed membership guard rejects a changed child set even when its size stays identical',async t=>{
+ const f=await materialReferenceFixture(t),old=await f.need(),hold=holdMaterialBatch(f,ss=>ss.some(s=>s.sql.startsWith('INSERT INTO ck_batch_material_events'))),pending=f.raw(f.remove());await hold.ready;
+ let before;try{
+  await f.need();const row=await f.current(old.id);await f.query('UPDATE sop_records SET state=? WHERE id=?',JSON.stringify({...row.data,source_id:'SYN-MOVED-PLAN'}),old.id).run();
+  assert.equal((await f.query('SELECT * FROM sop_records WHERE '+inboundChildren,f.plan.id).all()).results.length,2);before=await f.snapshot();
+ }finally{hold.release();}
+ const result=await pending;hold.restore();assert.equal(result.ok,false);assert.match(result.error,/更新/);assert.equal(await f.snapshot(),before);assert.equal((await f.first('SELECT COUNT(*) n FROM ck_batch_material_need_set_guards')).n,0);
+});
+for(const change of ['delete','source-type'])test('index maintenance preserves the guard when a child leaves via '+change,async t=>{
+ const f=await materialReferenceFixture(t),child=await f.need(),hold=holdMaterialBatch(f,ss=>ss.some(s=>s.sql.startsWith('INSERT INTO ck_batch_material_events'))),pending=f.raw(f.remove());await hold.ready;
+ let before;try{if(change==='delete')await f.query('DELETE FROM sop_records WHERE id=?',child.id).run();else {const row=await f.current(child.id);await f.query('UPDATE sop_records SET state=? WHERE id=?',JSON.stringify({...row.data,source_type:'outbound'}),child.id).run();}before=await f.snapshot();}finally{hold.release();}
+ const result=await pending;hold.restore();assert.equal(result.ok,false);assert.match(result.error,/更新/);assert.equal(await f.snapshot(),before);assert.equal(f.objects.size,1);
 });
