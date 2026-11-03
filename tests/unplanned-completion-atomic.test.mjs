@@ -125,3 +125,15 @@ for(const kind of ['feedback','dynamic'])test(kind+' exit retry does not close a
  await f.ok('A','sop_native_people',{job_id:s.id,revision:row.revision,workers:[{id:w.worker_id,name:w.worker_name}],lead_id:w.worker_id,reason:'合成退出后重新加入'});
  const before=await s.snapshot();assert.deepEqual(await f.ok('A',s.action,request),saved);assert.deepEqual(await s.snapshot(),before);
 });
+for(const kind of ['feedback','no-document','dynamic'])test(kind+' in-flight old exit cannot close a replacement work segment',async t=>{
+ const f=await fixture(t),s=await scenario(f,kind),request={...s.body,leave_only:true,result_lines:[],client_req_id:'SYN-OLD-EXIT-'+s.id};
+ t.mock.timers.tick(3*60000);const gate=await holdFirstWrite(f,s.id),pending=f.call('A',s.action,request);await gate.ready;let before;
+ try{
+  await f.ok('A',s.action,{...request,client_req_id:'SYN-NEW-EXIT-'+s.id});
+  t.mock.timers.tick(60000);const row=await f.first('SELECT revision FROM sop_records WHERE id=?',s.id),w=await f.first('SELECT worker_id,worker_name FROM v2_ops_job_workers WHERE job_id=?',s.id);
+  await f.ok('A','sop_native_people',{job_id:s.id,revision:row.revision,workers:[{id:w.worker_id,name:w.worker_name}],lead_id:w.worker_id,reason:'合成另一请求退出后重新加入'});
+  before=await s.snapshot();assert.equal(before.job.active_worker_count,1);
+ }finally{gate.release();}
+ const reply=await pending;gate.restore();assert.equal(reply.ok,false,JSON.stringify(reply));assert.deepEqual(await s.snapshot(),before);
+ const rows=await f.rows('SELECT joined_at,left_at FROM v2_ops_job_workers WHERE job_id=? ORDER BY joined_at',s.id);assert.equal(rows.filter(r=>r.left_at==='').length,1);assert.ok(rows.every(r=>!r.left_at||Date.parse(r.left_at)>=Date.parse(r.joined_at)));
+});

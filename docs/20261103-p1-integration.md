@@ -68,3 +68,11 @@ CK_P1_NATIVE_D1=true CK_PARTIAL_NATIVE_D1=true CODEX_PRIMARY_RUNTIME_NODE_MODULE
 ```
 
 上面依赖路径属于开发隔离环境，可替换为审核环境已安装的同类依赖路径。浏览器沿用仓库原脚本，顺序执行 `partial-arrival-browser.mjs`、`partial-arrival-documents-browser.mjs`、`dispatch-time-browser.mjs`、`bulk-output-draft-browser.mjs`、`attendance-return-browser.mjs`、`photo-compression-browser.mjs`、`feedback-create-browser.mjs`；启用 `CK_ATTENDANCE_RETURNS=true CK_AUTO_DISPATCH_TIME=true`，使用合成数据库和本地服务器。没有执行国内网络或实体手机验收。
+
+## QA 增量：P1-QA-05（P2）在途退出跨段
+
+- 独立 QA 指出 `82cd559` 的按工牌集合更新回归：早到的 X 请求挂起，Y 先退出并重新加入，X 会误关新劳动段。三类卸货在本地 Node 和原生 workerd D1 均 **0/3/0**，确认复现，未放宽快照断言。
+- 修复先读取本次实际退出的开放段，保留 ID 和原始时钟字段；原表没有版本列，使用这组证据对整个开放集合做事务内比较。比较守卫在首次业务写入前执行；退出 UPDATE 也限定原段 ID，不再仅按工牌匹配。发现段被关闭、替换或修改时回滚；不会写出结束早于开始的时钟。相同请求已提交的合法回执仍按原签名核验后返回。
+- 新增三入口竞态回归：X 第 3 分钟挂起，Y 先退出，第 4 分钟重新加入，释放 X 必须拒绝，新段与在岗人数完全不变。专项 Node **21/0/0**；原生 D1 扩展仍在执行。
+- 反馈创建浏览器：本开发环境原脚本再次完整通过一轮，但独立 QA 两轮未完整通过，问题尚未定位；两边结果分别记录，本轮不能据本地结果宣称七组独立验收全绿。正在以保留原断言的隔离慢 CPU 场景继续定位，未增加等待时长或削弱断言。
+- 此阶段仍未放行，不合测试、不部署、不修改线上数据；两项延期 P2 仍留后续批次。

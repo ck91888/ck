@@ -1,6 +1,7 @@
 import {nativeCompletionGuard,completionConflict,completionChanged} from './native-completion-guard.js';
 import {workerBadgeMatch,canonicalWorkerSQL} from './daily-badge-identity.js';
 import {intentSignature,canonicalIntent,boundReceiptJSON,readBoundReceipt} from './transaction-receipt.js';
+import {ensureSchema} from './schema-ready.js';
 const q=(e,s,...a)=>e.DB.prepare(s).bind(...a);
 const active="('pending','working','awaiting_close')";
 
@@ -14,6 +15,15 @@ export async function finishUnplannedUnload(env,body,job,{legacy=false,plan=null
  const modernFeedback=!legacy&&job.related_doc_type==='field_feedback'?job.related_doc_id:'';
  const badge=(a,b)=>env.SOP_ENVIRONMENT==='staging'&&env.SOP_ATTENDANCE_ENABLED==='true'?workerBadgeMatch(a,b):`${a}=${b}`;
  const column=env.SOP_ENVIRONMENT==='staging'&&env.SOP_ATTENDANCE_ENABLED==='true'?canonicalWorkerSQL('worker_id'):'worker_id';
+ const ownExit=leave||!finish||!env.SOP_GROUP_FINISH;
+ // Capture before receipt/network awaits. A later request can exit and rejoin
+ // this badge with a different segment while this request is still in flight.
+ // This schema has no row revision; the ID plus original clock fields provide
+ // the compare-and-swap evidence without rewriting historical rows.
+ const exitSQL=`SELECT json_group_array(json_object('id',id,'worker_id',worker_id,'joined_at',joined_at,'minutes_worked',minutes_worked,'leave_reason',leave_reason)) AS evidence
+  FROM (SELECT id,worker_id,joined_at,minutes_worked,leave_reason FROM v2_ops_job_workers WHERE job_id=? AND ${badge('worker_id','?')} AND left_at='' ORDER BY id)`;
+ const exitState=ownExit?(await q(env,exitSQL,id,by).first()).evidence:'[]';
+ const exitIds=JSON.stringify(JSON.parse(exitState).map(row=>row.id));
  const signature=await intentSignature({action,job_id:id,worker_id:by,leave,finish,lines,note,remark,box_count:Number(body.box_count||0),pallet_count:Number(body.pallet_count||0),actor:env.SOP_REQUEST_USER?.id||''});
  const receipt=async()=>{
   if(!key)return null;
@@ -65,9 +75,14 @@ export async function finishUnplannedUnload(env,body,job,{legacy=false,plan=null
    sql.push(q(env,`INSERT OR IGNORE INTO v2_ops_job_results(id,job_id,box_count,pallet_count,remark,result_json,result_lines_json,diff_note,created_by,created_at)
     SELECT ?,?,?,?,?,?,?,?,?,? FROM v2_ops_jobs WHERE id=? AND status IN ${active} AND ${canFinish}${link}`,resultId,id,Number(body.box_count||0),Number(body.pallet_count||0),remark,JSON.stringify({...data,_completion_request:token}),JSON.stringify(lines),note,by,t,id,...(env.SOP_GROUP_FINISH?[]:[by]),...linkArgs));
   }
-  const ownExit=leave||!finish||!env.SOP_GROUP_FINISH;
+  let exitCheck=null;
+  if(ownExit){
+   await ensureSchema(env.DB,'unload-exit-checks-v1',()=>q(env,`CREATE TABLE IF NOT EXISTS ck_unload_exit_checks(id TEXT PRIMARY KEY,allowed INTEGER NOT NULL CONSTRAINT ck_unload_exit_checks CHECK(allowed=1))`).run());
+   exitCheck=crypto.randomUUID();
+  }
+  const checks=exitCheck?[q(env,`INSERT INTO ck_unload_exit_checks(id,allowed) SELECT ?,CASE WHEN (${exitSQL})=? AND NOT EXISTS(SELECT 1 FROM v2_ops_job_workers WHERE job_id=? AND ${badge('worker_id','?')} AND left_at='' AND (julianday(joined_at) IS NULL OR julianday(joined_at)>julianday(?))) THEN 1 ELSE 0 END`,exitCheck,id,by,exitState,id,by,t)]:[];
   sql.push(q(env,`UPDATE v2_ops_job_workers SET left_at=?,minutes_worked=MAX(0,ROUND((julianday(?)-julianday(joined_at))*14400)/10.0),leave_reason=CASE WHEN ${badge('worker_id','?')} THEN ? ELSE 'job_completed' END
-   WHERE job_id=? AND left_at='' AND (${finish?gate:'0'}${ownExit?` OR (${badge('worker_id','?')} AND EXISTS(SELECT 1 FROM v2_ops_jobs WHERE id=? AND status IN ${active}${link}))`:''})`,t,t,by,leave?'leave':'finished',id,...(finish?g:[]),...(ownExit?[by,id,...linkArgs]:[])));
+   WHERE job_id=? AND left_at='' AND (${finish?gate:'0'}${ownExit?` OR (id IN (SELECT value FROM json_each(?)) AND ${badge('worker_id','?')} AND EXISTS(SELECT 1 FROM v2_ops_jobs WHERE id=? AND status IN ${active}${link}))`:''})`,t,t,by,leave?'leave':'finished',id,...(finish?g:[]),...(ownExit?[exitIds,by,id,...linkArgs]:[])));
   sql.push(q(env,`UPDATE v2_ops_jobs SET active_worker_count=(SELECT COUNT(DISTINCT ${column}) FROM v2_ops_job_workers WHERE job_id=? AND left_at='') WHERE id=? AND status IN ${active}`,id,id));
   if(finish){
    sql.push(q(env,`UPDATE v2_ops_jobs SET status='completed',shared_result_json=?,active_worker_count=0,updated_at=? WHERE id=? AND ${gate}`,JSON.stringify(data),t,id,...g));
@@ -87,7 +102,7 @@ export async function finishUnplannedUnload(env,body,job,{legacy=false,plan=null
   }else if(key){
    sql.push(q(env,`INSERT INTO v2_idempotency_keys(idem_key,action,response_json,created_at) SELECT ?,?,?,? FROM v2_ops_jobs WHERE id=? AND status IN ${active}${link}`,key,action,boundReceiptJSON(result,signature),t,id,...linkArgs));
   }
-  const rs=await env.DB.batch([...await nativeCompletionGuard(env,body),...sql,q(env,'SELECT status,active_worker_count FROM v2_ops_jobs WHERE id=?',id),q(env,'SELECT result_json FROM v2_ops_job_results WHERE id=?',resultId)]);
+  const rs=await env.DB.batch([...await nativeCompletionGuard(env,body),...checks,...sql,...(exitCheck?[q(env,'DELETE FROM ck_unload_exit_checks WHERE id=?',exitCheck)]:[]),q(env,'SELECT status,active_worker_count FROM v2_ops_jobs WHERE id=?',id),q(env,'SELECT result_json FROM v2_ops_job_results WHERE id=?',resultId)]);
   const current=rs.at(-2)?.results?.[0],savedResult=rs.at(-1)?.results?.[0];
   if(!finish){if(current&&['pending','working','awaiting_close'].includes(current.status))return result;throw Error('任务状态已变化，请刷新后核对');}
   if(savedResult&&JSON.parse(savedResult.result_json)._completion_request===token)return result;
@@ -99,6 +114,7 @@ export async function finishUnplannedUnload(env,body,job,{legacy=false,plan=null
   // A competing identical request may have committed the receipt while this
   // transaction waited. Verify its original grant before returning that result.
   const saved=await receipt();if(saved)return saved;
+  if(/ck_unload_exit_checks/.test(error.message||''))throw Error('作业计时段已变化，请刷新后重新确认退出 / 작업 시간이 변경되었습니다');
   throw error;
  }
 }
