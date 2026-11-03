@@ -28,6 +28,12 @@ test('material filters, disabled work-chain and load-trip candidates keep their 
   modify();const r=await f.callTarget('office','v2_outbound_order_list',body);assert.equal(outboundHash(r),published.modes[name].sha256,name);
  }
  const {queries}=await f.read({has_material:'1'});assert.ok(!queries[0][1].sql.includes('outbound_page AS MATERIALIZED'));assert.ok(queries[0][0].sql.includes(workMaterialCountFor(f.env)));assert.equal(await f.snapshot(),before);
+ f.env.SOP_ATTENDANCE_RETURNS_ENABLED='true';f.env.SOP_AUTO_DISPATCH_TIME_ENABLED='true';
+ await f.read({customer_keyword:'SYN-NONEXISTENT'});const config=await f.rows('SELECT * FROM ck_dispatch_time_config ORDER BY id');
+ if(f.env.DB.metrics)f.env.DB.metrics.length=0;
+ const active=await f.read();assert.equal(outboundHash(active.r),published.cases.default.sha256);assert.equal(active.queries.length,1);assert.equal(active.queries[0].length,2);assert.ok(active.queries[0].every(s=>s.sql.startsWith('SELECT')));
+ if(f.env.DB.metrics)assert.ok(f.env.DB.metrics.every(m=>m.rows_written===0),'active attendance/duty wrappers must keep the list read-only');
+ assert.deepEqual(await f.rows('SELECT * FROM ck_dispatch_time_config ORDER BY id'),config);assert.equal(await f.snapshot(),before);
 });
 test('office, verified field and limited badge retain baseline list access while guest access remains rejected',async t=>{
  const f=await outboundFixture(t),before=await f.snapshot();
