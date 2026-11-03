@@ -40,3 +40,18 @@
 - 新增实际构建 `/003` 的 `purchase-shipment-replay-browser.mjs` 首轮通过1440/390两宽、各并发及丢响应2场景，共4组。真实表单输入8、请求在数量查询前暂停、另一相同key请求提交后，原表单成功且只有1条发货；丢弃已提交的HTTP响应后保留表单及请求key，重试关闭表单且仍1条发货。每场景另验证改内容请求HTTP409及中韩文提示，库存始终0、无浏览器/服务器异常。桌面Chromium视口，不宣称实体手机或国内网络。
 
 此阶段只追加合成浏览器脚本及本记录，业务源码不再改动；其余六份既有页面脚本串行回归继续。证据均在本地 `/workspace/scratch/ck-p1-test-runtime/shipment-replay-*`，不提交日志、PDF、数据库、凭据或图片。
+
+## 最终交审
+
+浏览器与整合证据提交 `8e22374` 已推送。七份脚本串行均首次 exit 0：`purchase-shipment-replay-browser.mjs`、`purchase-edit-browser.mjs`、`material-count-null-browser.mjs`、`outbound-list-browser.mjs`、`work-print-null-browser.mjs`、`photo-compression-browser.mjs`、`work-plan-list-browser.mjs`。覆盖新增发货表单4组，采购编辑与资料null的PC/手机表单，原出库筛选，打印真实PDF，照片压缩/条码/QR及取消失败重试，以及作业计划2功能流程、9视觉矩阵（含320/390）。没有改旧脚本等待或断言，未宣称实体手机、国内网络或线上数据验收。
+
+最终固定整合源码9a38f1a的全量 **1715/0/0/0（通过/失败/跳过/取消）**，原生D1四类合集 **62/0/0**。其后只新增已通过的新浏览器脚本与说明，业务逻辑没有再改动。修复前、阶段失败、旧版确定性复现和不计入最终证明的在途1701日志均保留，不把旧问题或运行中的版本切换隐藏为通过。当前无未关闭的开发自测失败，仍待固定独立QA核验精确最终SHA后才能考虑发布。
+
+```sh
+CK_JSDOM_MODULE=/已安装依赖/node_modules/jsdom/lib/api.js node --test --test-concurrency=2 tests/*.test.mjs
+CK_SHIPMENT_REPLAY_NATIVE_D1=true CK_PURCHASE_EDIT_NATIVE_D1=true CK_MATERIAL_NULL_NATIVE_D1=true CK_OUTBOUND_PAGE_NATIVE_D1=true CODEX_PRIMARY_RUNTIME_NODE_MODULES=/已安装依赖/node_modules node --test --test-concurrency=1 tests/purchase-shipment-replay.test.mjs tests/purchase-edit-atomic.test.mjs tests/material-count-null.test.mjs tests/outbound-page-material.test.mjs
+node worker-v2/build-sop-staging.mjs
+CODEX_PRIMARY_RUNTIME_NODE_MODULES=/已安装依赖/node_modules node tests/purchase-shipment-replay-browser.mjs
+```
+
+完整证据：`shipment-replay-integrated-full.log`、`shipment-replay-integrated-d1.log`、`shipment-replay-integrated-api-diff.log`、`shipment-replay-final-*-browser.log`、`shipment-replay-final-browser-results.json`，均在本地上述证据目录，不纳入公开源码。当前候选包含已审资料修复及本发货修复，不改部署配置、schema、main或真实历史数据，尚未合测试、部署。
