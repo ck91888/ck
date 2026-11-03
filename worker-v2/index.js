@@ -13084,7 +13084,7 @@ async function resetAuthentication(request,env){
  }catch{return resetBusy();}
 }
 export default {
- fetch(request,env,ctx){return withResetFence(env,e=>application.fetch(request,e,ctx),e=>resetAuthentication(request,e));},
+ fetch(request,env,ctx){return request.method==='OPTIONS'?application.fetch(request,env,ctx):withResetFence(env,e=>application.fetch(request,e,ctx),e=>resetAuthentication(request,e));},
  async scheduled(controller,env,ctx){await withResetFence(env,e=>application.scheduled(controller,e,ctx),()=>undefined);}
 };
 

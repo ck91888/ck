@@ -18,7 +18,7 @@ const q=(db,sql,...args)=>db.prepare(sql).bind(...args);
 // clearing cannot begin until those requests have finished and acknowledged.
 const guard=(db,c)=>q(db,`INSERT INTO ck_test_reset_write_guards(id,allowed) SELECT 'write',CASE WHEN
  (EXISTS(SELECT 1 FROM ck_test_reset_epoch WHERE id=1 AND generation=?) AND NOT EXISTS(SELECT 1 FROM ck_test_resets WHERE completed_at=''))
- OR (EXISTS(SELECT 1 FROM ck_test_reset_objects WHERE request_id=? AND generation=?) AND EXISTS(SELECT 1 FROM ck_test_resets r JOIN ck_test_reset_phases p ON p.run_id=r.id WHERE r.completed_at='' AND p.phase='draining'))
+ OR (EXISTS(SELECT 1 FROM ck_test_reset_objects WHERE request_id=? AND generation=? AND uncertain=0) AND EXISTS(SELECT 1 FROM ck_test_resets r JOIN ck_test_reset_phases p ON p.run_id=r.id WHERE r.completed_at='' AND p.phase='draining'))
  THEN 1 ELSE 0 END WHERE 1 ON CONFLICT(id) DO UPDATE SET allowed=excluded.allowed`,c.generation,c.id,c.generation);
 const readonly=sql=>/^\s*(SELECT|EXPLAIN)\b/i.test(sql||'')||/^\s*PRAGMA\s+(?:table_info|table_xinfo|index_list|index_info|index_xinfo|foreign_key_list)\s*\(/i.test(sql||'');
 const contexts=new WeakMap();
@@ -38,15 +38,16 @@ async function externalAdmission(db,c){
  try{await db.batch([guard(db,c),q(db,'INSERT OR IGNORE INTO ck_test_reset_objects(request_id,generation,started_at) VALUES(?,?,?)',c.id,c.generation,new Date().toISOString())]);c.external=true;}
  catch(e){if(/ck_test_reset_epoch_guard/.test(e.message||'')){c.denied=true;throw fenced();}throw e;}
 }
-function objectFence(bucket,db,c){return new Proxy(bucket,{get(target,key){const v=target[key];if(typeof v!=='function')return v;if(['get','head','list'].includes(key))return v.bind(target);if(!['put','delete'].includes(key))return()=>{throw Error('Unsupported object mutation during reset fencing');};return async(...args)=>{await externalAdmission(db,c);try{return await v.apply(target,args);}catch(e){c.uncertain=true;await q(db,'UPDATE ck_test_reset_objects SET uncertain=1 WHERE request_id=?',c.id).run();throw e;}};}});}
+async function uncertain(db,c){c.uncertain=true;await q(db,'UPDATE ck_test_reset_objects SET uncertain=1 WHERE request_id=?',c.id).run();}
+function objectFence(bucket,db,c){return new Proxy(bucket,{get(target,key){const v=target[key];if(typeof v!=='function')return v;if(['get','head','list'].includes(key))return v.bind(target);if(!['put','delete'].includes(key))return()=>{throw Error('Unsupported object mutation during reset fencing');};return async(...args)=>{await externalAdmission(db,c);try{return await v.apply(target,args);}catch(e){await uncertain(db,c);throw e;}};}});}
 export async function withResetFence(env,run,onBusy){
  if(!resetFenceEnabled(env)||contexts.has(env.DB))return run(env);
  await ensureResetSchema(env);const db=env.DB,state=await q(db,"SELECT generation,EXISTS(SELECT 1 FROM ck_test_resets WHERE completed_at='') AS active FROM ck_test_reset_epoch WHERE id=1").first();
  if(!state||!Number.isSafeInteger(state.generation)||state.generation<0)throw Error('Reset fence state unavailable');if(state.active)return onBusy?onBusy(env):resetBusy();
  const c={id:crypto.randomUUID(),generation:state.generation,external:false,uncertain:false,denied:false},e={...env,DB:databaseFence(db,c)};
  if(env.R2_BUCKET)e.R2_BUCKET=objectFence(env.R2_BUCKET,db,c);
- try{const result=await run(e);return c.denied?resetBusy():result;}
- catch(error){if(error.code==='test_reset_fenced')return resetBusy();throw error;}
+ try{const result=await run(e);if(c.external&&!c.uncertain){let saved=false;try{saved=result instanceof Response&&result.ok&&(await result.clone().json()).ok===true;}catch{}if(!saved)await uncertain(db,c);}return c.denied?resetBusy():result;}
+ catch(error){if(c.external&&!c.uncertain)await uncertain(db,c);if(error.code==='test_reset_fenced')return resetBusy();throw error;}
  finally{if(c.external&&!c.uncertain)await q(db,'DELETE FROM ck_test_reset_objects WHERE request_id=? AND generation=? AND uncertain=0',c.id,c.generation).run();}
 }
 export async function beginResetClearing(env,runId){
