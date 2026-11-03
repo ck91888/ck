@@ -106,6 +106,9 @@ test('historical unmanaged no-document unload releases only the leaving worker w
  await f.env.DB.prepare('DELETE FROM sop_records WHERE id=?').bind(s.id).run();t.mock.timers.tick(3*60000);
  const reply=await f.call('office',s.action,s.body);assert.equal(reply.ok,false);assert.equal(reply.error,'others_still_working');
  assert.equal((await f.first("SELECT COUNT(*) n FROM v2_ops_job_workers WHERE job_id=? AND left_at=''",s.id)).n,1);assert.equal((await f.first('SELECT COUNT(*) n FROM v2_ops_job_results WHERE job_id=?',s.id)).n,0);
+ await f.ok('office','v2_ops_job_resume',{parent_job_id:s.id,worker_id:s.body.worker_id,worker_name:first.worker_name});
+ const rejoined=await s.snapshot();assert.deepEqual(await f.call('office',s.action,s.body),reply);assert.deepEqual(await s.snapshot(),rejoined);
+ await f.ok('office',s.action,{...s.body,client_req_id:crypto.randomUUID(),leave_only:true,result_lines:[]});
  await f.ok('office',s.action,{...s.body,client_req_id:crypto.randomUUID(),worker_id:other.badgeId});
  assert.equal((await f.first('SELECT SUM(minutes_worked) n FROM v2_ops_job_workers WHERE job_id=?',s.id)).n,6);assert.equal((await f.first("SELECT COUNT(*) n FROM v2_field_feedbacks WHERE related_doc_id=? AND feedback_type='unload_no_doc'",s.id)).n,1);
 });
@@ -114,4 +117,11 @@ test('historical dynamic partial worker finish keeps its old individual release 
  await f.ok('A',s.action,{...s.body,complete_job:false,result_lines:[],client_req_id:crypto.randomUUID()});
  assert.equal((await f.first("SELECT COUNT(*) n FROM v2_ops_job_workers WHERE job_id=? AND left_at=''",s.id)).n,0);assert.equal((await f.first('SELECT status FROM v2_ops_jobs WHERE id=?',s.id)).status,'working');assert.equal((await f.first('SELECT COUNT(*) n FROM v2_ops_job_results WHERE job_id=?',s.id)).n,0);
  await f.ok('A',s.action,s.body);
+});
+for(const kind of ['feedback','dynamic'])test(kind+' exit retry does not close a later rejoined segment',async t=>{
+ const f=await fixture(t),s=await scenario(f,kind),request={...s.body,...(kind==='feedback'?{leave_only:true}:{complete_job:false}),result_lines:[],client_req_id:'SYN-EXIT-'+s.id};
+ const saved=await f.ok('A',s.action,request),row=await f.first('SELECT revision FROM sop_records WHERE id=?',s.id);
+ const w=await f.first('SELECT worker_id,worker_name FROM v2_ops_job_workers WHERE job_id=?',s.id);t.mock.timers.tick(60000);
+ await f.ok('A','sop_native_people',{job_id:s.id,revision:row.revision,workers:[{id:w.worker_id,name:w.worker_name}],lead_id:w.worker_id,reason:'合成退出后重新加入'});
+ const before=await s.snapshot();assert.deepEqual(await f.ok('A',s.action,request),saved);assert.deepEqual(await s.snapshot(),before);
 });

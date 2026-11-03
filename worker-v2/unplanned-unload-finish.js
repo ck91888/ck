@@ -15,15 +15,22 @@ export async function finishUnplannedUnload(env,body,job,{legacy=false,plan=null
  const badge=(a,b)=>env.SOP_ENVIRONMENT==='staging'&&env.SOP_ATTENDANCE_ENABLED==='true'?workerBadgeMatch(a,b):`${a}=${b}`;
  const column=env.SOP_ENVIRONMENT==='staging'&&env.SOP_ATTENDANCE_ENABLED==='true'?canonicalWorkerSQL('worker_id'):'worker_id';
  const signature=await intentSignature({action,job_id:id,worker_id:by,leave,finish,lines,note,remark,box_count:Number(body.box_count||0),pallet_count:Number(body.pallet_count||0),actor:env.SOP_REQUEST_USER?.id||''});
- const receipt=()=>readBoundReceipt(env,{key,action,signature,load:async()=>{
+ const receipt=async()=>{
+  if(!key)return null;
   const rs=await env.DB.batch([...await nativeCompletionGuard(env,body,{replay:true}),q(env,'SELECT action,response_json FROM v2_idempotency_keys WHERE idem_key=?',key)]);
-  return rs.at(-1)?.results?.[0]||null;
- },legacyMatch:async saved=>{
+  const row=rs.at(-1)?.results?.[0]||null;
+  // Legacy individual finish releases this worker while reporting that others
+  // continue. That mutating response also needs a bound, durable receipt.
+  if(row?.action===action){
+   let saved;try{saved=JSON.parse(row.response_json);}catch{}
+   if(saved?.ok===false&&saved.error==='others_still_working'&&saved._request_signature===signature){const {_request_signature,...reply}=saved;return reply;}
+  }
+  return readBoundReceipt(env,{key,action,signature,load:async()=>row,legacyMatch:async saved=>{
   if(!saved.result_id||!finish)return false;
   const result=await q(env,'SELECT * FROM v2_ops_job_results WHERE id=? AND job_id=?',saved.result_id,id).first();
   if(!result||result.created_by!==by||result.remark!==remark||result.diff_note!==note)return false;
   try{return canonicalIntent(JSON.parse(result.result_lines_json))===canonicalIntent(lines)&&(!legacy||Number(result.box_count)===Number(body.box_count||0)&&Number(result.pallet_count)===Number(body.pallet_count||0));}catch{return false;}
- }});
+ }});};
  try{
   const saved=await receipt();if(saved)return saved;
   if(job.status==='completed'){
@@ -41,10 +48,10 @@ export async function finishUnplannedUnload(env,body,job,{legacy=false,plan=null
   const gate="EXISTS(SELECT 1 FROM v2_ops_job_results WHERE id=? AND json_extract(result_json,'$._completion_request')=?)",g=[resultId,token];
   const data={...(legacy?{box_count:Number(body.box_count||0),pallet_count:Number(body.pallet_count||0)}:{}),result_lines:lines,diff_note:note,remark};
   const sql=[];let hadPlanLines=false;
-  let result={ok:true,result_id:resultId,...(!legacy?{feedback_id:modernFeedback}:plan?{dynamic_plan:true,plan_id:plan.id}:{no_doc:true})};
+  let result=finish?{ok:true,result_id:resultId,...(!legacy?{feedback_id:modernFeedback}:plan?{dynamic_plan:true,plan_id:plan.id}:{no_doc:true})}:leave?{ok:true,left:true}:{ok:true};
   const link=modernFeedback?" AND related_doc_type='field_feedback' AND related_doc_id=? AND EXISTS(SELECT 1 FROM v2_field_feedbacks f WHERE f.id=? AND f.status='field_working')":plan?" AND related_doc_type='inbound_plan' AND related_doc_id=? AND EXISTS(SELECT 1 FROM v2_inbound_plans p WHERE p.id=? AND p.source_type='field_dynamic' AND p.status=? AND p.updated_at=?)":'';
   const linkArgs=modernFeedback?[modernFeedback,modernFeedback]:plan?[plan.id,plan.id,plan.status,plan.updated_at]:[];
-  if(legacy&&!plan){
+  if(finish&&legacy&&!plan){
    const old=await q(env,"SELECT id FROM v2_field_feedbacks WHERE related_doc_type='ops_job' AND related_doc_id=? AND feedback_type='unload_no_doc' ORDER BY created_at,id LIMIT 1",id).first();
    result.feedback_id=old?.id||'FB-UNLOAD-'+id;if(old)result.fb_reused=true;
   }
@@ -74,11 +81,15 @@ export async function finishUnplannedUnload(env,body,job,{legacy=false,plan=null
    }else if(legacy)sql.push(q(env,`INSERT INTO v2_field_feedbacks(id,feedback_type,related_doc_type,related_doc_id,title,content,submitted_by,status,created_at,updated_at)
     SELECT ?,'unload_no_doc','ops_job',?,'无单卸货结果待转正',?,?,'open',?,? WHERE ${gate} AND NOT EXISTS(SELECT 1 FROM v2_field_feedbacks WHERE id=?)`,result.feedback_id,id,'卸货数量: '+JSON.stringify(lines)+(note?' | 备注: '+note:''),by,t,t,...g,result.feedback_id));
    if(key)sql.push(q(env,`INSERT INTO v2_idempotency_keys(idem_key,action,response_json,created_at) SELECT ?,?,?,? WHERE ${gate}`,key,action,boundReceiptJSON(result,signature),t,...g));
+   if(key&&!env.SOP_GROUP_FINISH)sql.push(q(env,`INSERT INTO v2_idempotency_keys(idem_key,action,response_json,created_at)
+    SELECT ?,?,json_object('ok',json('false'),'error','others_still_working','message','您已退出此任务，还有 '||active_worker_count||' 人继续作业','active_worker_count',active_worker_count,'_request_signature',?),?
+    FROM v2_ops_jobs WHERE id=? AND status IN ${active} AND active_worker_count>0 AND NOT ${gate}${link}`,key,action,signature,t,id,...g,...linkArgs));
+  }else if(key){
+   sql.push(q(env,`INSERT INTO v2_idempotency_keys(idem_key,action,response_json,created_at) SELECT ?,?,?,? FROM v2_ops_jobs WHERE id=? AND status IN ${active}${link}`,key,action,boundReceiptJSON(result,signature),t,id,...linkArgs));
   }
   const rs=await env.DB.batch([...await nativeCompletionGuard(env,body),...sql,q(env,'SELECT status,active_worker_count FROM v2_ops_jobs WHERE id=?',id),q(env,'SELECT result_json FROM v2_ops_job_results WHERE id=?',resultId)]);
   const current=rs.at(-2)?.results?.[0],savedResult=rs.at(-1)?.results?.[0];
-  if(leave)return {ok:true,left:true};
-  if(!finish)return {ok:true};
+  if(!finish){if(current&&['pending','working','awaiting_close'].includes(current.status))return result;throw Error('任务状态已变化，请刷新后核对');}
   if(savedResult&&JSON.parse(savedResult.result_json)._completion_request===token)return result;
   if(current?.status==='completed'){const replay=await receipt();if(replay)return replay;return {ok:true,already_completed:true,result_id:resultId};}
   if(!env.SOP_GROUP_FINISH&&current?.active_worker_count>0)return {ok:false,error:'others_still_working',message:'您已退出此任务，还有 '+current.active_worker_count+' 人继续作业',active_worker_count:current.active_worker_count};
