@@ -12,9 +12,15 @@ export function workPlanDay(value){
 const positive=(lines,key)=>Array.isArray(lines)&&lines.some(x=>Number(x[key])>0);
 const days=values=>[...new Set(values.filter(Boolean))].sort();
 const add=(list,event)=>{if(event.day&&!list.some(x=>x.key===event.key))list.push(event);};
+const append=(map,key,value)=>{if(!map.has(key))map.set(key,[]);map.get(key).push(value);};
+// Map uses SameValueZero; these former equality joins used strict equality.
+const strictRows=(map,key)=>key===key?map.get(key)||[]:[];
 export async function workPlanFacts(e,groups,knownPlans,orders){
+ const byOrder=new Map(),byOrigin=new Map();
+ orders.forEach((order,position)=>{const entry={order,position};append(byOrder,order.id,entry);append(byOrigin,order.source_inbound_plan_id,entry);});
  const plans=[...knownPlans],ids=new Set(plans.map(p=>p.id));
- const missing=[...new Set(groups.filter(g=>g.source_type==='outbound').flatMap(g=>orders.filter(o=>o.id===g.source_id).map(o=>o.source_inbound_plan_id)).filter(id=>id&&!ids.has(id)))];
+ const missingIds=new Set();for(const g of groups)if(g.source_type==='outbound')for(const {order} of strictRows(byOrder,g.source_id)){const id=order.source_inbound_plan_id;if(id&&!ids.has(id))missingIds.add(id);}
+ const missing=[...missingIds];
  if(missing.length)plans.push(...(await q(e,'SELECT * FROM v2_inbound_plans WHERE id IN (SELECT value FROM json_each(?))',JSON.stringify(missing)).all()).results);
  const planIds=JSON.stringify(plans.map(p=>p.id));
  const [results,tasks]=await e.DB.batch([
@@ -25,8 +31,11 @@ export async function workPlanFacts(e,groups,knownPlans,orders){
     WHERE j.plan_id IN (SELECT value FROM json_each(?)) AND j.status='completed' AND j.job_type IN ('unload','inbound_direct','inbound_bulk','inbound_direct_putaway')`,planIds),
   q(e,'SELECT plan_id,biz_class,status,completed_at,completion_source,completed_by,job_id FROM v2_inbound_plan_biz_tasks WHERE plan_id IN (SELECT value FROM json_each(?))',planIds)
  ]);
+ const byPlan=new Map(),legacyPlans=new Set();
+ for(const r of results.results)append(byPlan,r.plan_id,r);
+ for(const t of tasks.results)if(t.status==='completed'&&(t.completion_source==='manual_force'||t.completed_by==='(legacy)'))legacyPlans.add(t.plan_id);
  const facts=new Map();for(const p of plans){
-  const receipt=[],putaway=[],rows=results.results.filter(r=>r.plan_id===p.id);
+  const receipt=[],putaway=[],rows=strictRows(byPlan,p.id);
   for(const r of rows){
    if(r.source==='manual_correction')continue; // A later correction is not a new arrival.
    const own=parse(r.linked_result,{}),lines=r.linked_plan_id?(own.result_lines||[]):parse(r.result_lines_json);
@@ -37,13 +46,18 @@ export async function workPlanFacts(e,groups,knownPlans,orders){
   }
   if(!receipt.length&&workPlanDay(p.unload_completed_at))add(receipt,{key:'plan:'+p.id,plan_id:p.id,plan_no:p.display_no||p.id,at:p.unload_completed_at,day:workPlanDay(p.unload_completed_at),kind:'plan_unload',reference:''});
   const parsedClasses=parse(p.biz_classes_json),classes=Array.isArray(parsedClasses)&&parsedClasses.length?parsedClasses:p.biz_class?[p.biz_class]:[],requires=classes.some(c=>['direct_ship','bulk_putaway'].includes(c))||putaway.length>0;
-  const legacy=tasks.results.some(t=>t.plan_id===p.id&&t.status==='completed'&&(t.completion_source==='manual_force'||t.completed_by==='(legacy)'))||!!p.manual_completed_at||!!p.force_completed_at;
+  const legacy=p.id===p.id&&legacyPlans.has(p.id)||!!p.manual_completed_at||!!p.force_completed_at;
   facts.set(p.id,{id:p.id,display_no:p.display_no||p.id,external_no:p.external_inbound_no||'',status:p.status,is_deleted:!!p.is_deleted,expected:workPlanDay(p.expected_arrival),receipt:receipt.sort((a,b)=>a.at.localeCompare(b.at)),putaway:putaway.sort((a,b)=>a.at.localeCompare(b.at)),requires_putaway:requires,legacy_completion:legacy,completion_recorded:p.status==='completed'});
  }
  for(const g of groups){
   const linked=new Set(g.items.flatMap(n=>(n.links||[]).map(l=>l.outbound_id)));if(g.source_type==='outbound')linked.add(g.source_id);
-  const shipmentOrders=orders.filter(o=>linked.has(o.id)||g.source_type==='inbound'&&o.source_inbound_plan_id===g.source_id);
-  const origins=g.source_type==='inbound'?[g.source_id]:g.source_type==='outbound'?shipmentOrders.filter(o=>o.id===g.source_id).map(o=>o.source_inbound_plan_id):[];
+  // Deduplicate matches by their original array position, never by order ID:
+  // repeated input rows remain visible and union matches retain filter order.
+  const selected=new Map();
+  for(const id of linked)for(const entry of byOrder.get(id)||[])selected.set(entry.position,entry.order);
+  if(g.source_type==='inbound')for(const entry of strictRows(byOrigin,g.source_id))selected.set(entry.position,entry.order);
+  const shipmentOrders=[...selected].sort((a,b)=>a[0]-b[0]).map(([,order])=>order);
+  const origins=g.source_type==='inbound'?[g.source_id]:g.source_type==='outbound'?strictRows(byOrder,g.source_id).map(({order})=>order.source_inbound_plan_id):[];
   const originFacts=[...new Set(origins.filter(Boolean))].map(id=>facts.get(id)).filter(Boolean);
   const shipments=shipmentOrders.map(o=>({id:o.id,display_no:o.display_no||o.id,status:o.status,day:workPlanDay(o.expected_ship_at),source_inbound_plan_id:o.source_inbound_plan_id||'',deleted:!!o.is_deleted}));
   const pending=shipments.filter(o=>!o.deleted&&!['shipped','completed','cancelled'].includes(o.status));
