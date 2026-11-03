@@ -1643,6 +1643,7 @@ async function loadOutboundList() {
 
 // ===== Outbound Export =====
 async function exportOutboundOrders(btnEl) {
+  var owns=CKLatestListRead.identity(function(){return getKey()+'|'+getUser();});
   var start = (document.getElementById('obFilterStart') || {}).value || '';
   var end = (document.getElementById('obFilterEnd') || {}).value || '';
   var status = (document.getElementById('obFilterStatus') || {}).value || '';
@@ -1668,6 +1669,7 @@ async function exportOutboundOrders(btnEl) {
       uses_stock_operation: uses_stock_operation, has_material: has_material,
       limit: 10000
     });
+    if(!owns())return;
     if (!res || !res.ok) {
       alert('导出失败 / 내보내기 실패: ' + (res ? (res.message || res.error) : 'unknown'));
       return;
@@ -1677,8 +1679,10 @@ async function exportOutboundOrders(btnEl) {
     var fname = 'outbound_orders_' + _csvStamp(start) + '_' + _csvStamp(end) + '.csv';
     exportCsv(fname, rows);
     if (res.truncated) alert('已达单次导出上限 10000 行，可能被截断，请缩小日期/筛选范围。');
+  } catch(error) {
+    if(owns())alert('导出失败 / 내보내기 실패: '+(error.message||String(error)));
   } finally {
-    if (btnEl) { btnEl.disabled = false; btnEl.textContent = origText; }
+    if (owns() && btnEl) { btnEl.disabled = false; btnEl.textContent = origText; }
   }
 }
 
@@ -2653,6 +2657,7 @@ async function loadInboundList() {
 
 // ===== Inbound Export =====
 async function exportInboundPlans(btnEl) {
+  var owns=CKLatestListRead.identity(function(){return getKey()+'|'+getUser();});
   var start = (document.getElementById('ibFilterStart') || {}).value || '';
   var end = (document.getElementById('ibFilterEnd') || {}).value || '';
   var status = (document.getElementById('ibFilterStatus') || {}).value || '';
@@ -2677,6 +2682,7 @@ async function exportInboundPlans(btnEl) {
       unload_done_date_to: unload_done_date_to,
       limit: 10000
     });
+    if(!owns())return;
     if (!res || !res.ok) {
       alert('导出失败 / 내보내기 실패: ' + (res ? (res.message || res.error) : 'unknown'));
       return;
@@ -2686,8 +2692,10 @@ async function exportInboundPlans(btnEl) {
     var fname = 'inbound_plans_' + _csvStamp(start) + '_' + _csvStamp(end) + '.csv';
     exportCsv(fname, rows);
     if (res.truncated) alert('已达单次导出上限 10000 行，可能被截断，请缩小日期/筛选范围。');
+  } catch(error) {
+    if(owns())alert('导出失败 / 내보내기 실패: '+(error.message||String(error)));
   } finally {
-    if (btnEl) { btnEl.disabled = false; btnEl.textContent = origText; }
+    if (owns() && btnEl) { btnEl.disabled = false; btnEl.textContent = origText; }
   }
 }
 

@@ -57,8 +57,38 @@ try{
      assert.ok(row.text.includes(mode==='aba'?'SYN-LATEST-OLD':'SYN-NEW'),JSON.stringify(row));assert.ok(!row.text.includes('SYN-OLD-ERROR'),JSON.stringify(row));if(kind==='workhours')assert.ok(!row.error_text.includes('SYN-OLD-ERROR'));if(mode==='aba')assert.equal(row.snapshot,'SYN-LATEST-OLD');if(kind==='orders')assert.equal(row.cached_id,mode==='aba'?'SYN-LATEST-OLD':'SYN-NEW');if(kind==='ledger'&&mode==='late-success'){assert.match(row.csv,/SYN-NEW/);assert.doesNotMatch(row.csv,/SYN-OLD/);}if(kind==='workhours')assert.equal(row.export_filter,'NEW');
      results.push(row);
     }
+    if(section==='shuju')for(const kind of ['orders','workhours']){
+     const row=await page.evaluate(async kind=>{
+      const original=api,pending=[],offset=()=>kind==='orders'?_ordersOffset:_whOffset,load=()=>kind==='orders'?loadOrders():loadWorkhours(),next=()=>kind==='orders'?ordersPage(1):workhoursPage(1),good=tag=>kind==='orders'?{ok:true,total:601,items:[{id:tag,job_type:'bulk_op',status:'working',result_summary:tag}],metadata:{snapshot:tag}}:{ok:true,total:601,summary:{},by_worker:[{worker_name:tag,total_minutes:1}],segments:[],metadata:{snapshot:tag}};
+      api=p=>new Promise(resolve=>pending.push({p,resolve}));
+      try{const first=load();pending[0].resolve(good('SYN-START'));await first;const failed=next(),during=offset();pending[1].resolve({ok:false,error:'SYN-PAGE-FAIL'});await failed;const afterFailure=offset(),retry=next();if(pending.length!==3)throw Error('Page retry did not issue a request');pending[2].resolve(good('SYN-PAGE-200'));await retry;const afterRetry=offset(),last=next();pending[3].resolve(good('SYN-PAGE-400'));await last;return {kind:kind+'-page-retry',during,afterFailure,afterRetry,final:offset(),requests:pending.map(x=>x.p.offset)};}
+      finally{api=original;}
+     },kind);assert.equal(row.during,0);assert.equal(row.afterFailure,0);assert.equal(row.afterRetry,200);assert.equal(row.final,400);assert.deepEqual(row.requests,[0,200,200,400]);results.push({...row,width});
+    }
    }
    await page.goto(origin+'/002/');await page.locator('#mainTabs').waitFor();
+   for(const kind of ['outbound','inbound'])for(const mode of ['normal','identity-success','identity-error','identity-reject']){
+    const row=await page.evaluate(async({kind,mode})=>{
+     const original=api,session=window.CKSession,csv=exportCsv,notice=window.alert,downloads=[],alerts=[],button=document.createElement('button');let release,fail,params;
+     api=p=>{params=p;return new Promise((r,j)=>{release=r;fail=j;});};exportCsv=(name,rows)=>downloads.push({name,rows});window.alert=x=>alerts.push(x);
+     try{document.getElementById(kind==='outbound'?'obFilterCustomer':'ibFilterCustomer').value='SYN-CURRENT';const pending=kind==='outbound'?exportOutboundOrders(button):exportInboundPlans(button);if(mode!=='normal')window.CKSession={scope:session.scope,user:{...session.user,id:'SYN-NEW'}};if(mode==='identity-reject')fail(Error('SYN-OLD-EXPORT'));else release(mode==='identity-error'?{ok:false,error:'SYN-OLD-EXPORT'}:{ok:true,rows:[{id:'SYN-CSV'}]});await pending;return {kind:kind+'-export',mode,downloads:downloads.length,alerts,disabled:button.disabled,filter:params.customer_keyword,limit:params.limit};}
+     finally{api=original;window.CKSession=session;exportCsv=csv;window.alert=notice;}
+    },{kind,mode});
+    assert.equal(row.downloads,mode==='normal'?1:0);assert.equal(row.disabled,mode!=='normal');assert.deepEqual(row.alerts,[]);assert.equal(row.filter,'SYN-CURRENT');assert.equal(row.limit,10000);results.push({...row,width});
+   }
+   // Trigger the real shared-session 401 lock, including its read-only user getter and gate.
+   for(const kind of ['outbound','inbound']){
+    const locked=await ctx.newPage();locked.on('pageerror',e=>errors.push(e.message));await locked.route('**/*',r=>new URL(r.request().url()).origin===origin?r.continue():r.abort());
+    try{
+     await locked.route('**/api',r=>{let body;try{body=r.request().postDataJSON();}catch{}return body?.synthetic_lock_probe?r.fulfill({status:401,contentType:'application/json',body:JSON.stringify({ok:false,error:'Synthetic session ended'})}):r.fallback();});
+     await locked.goto(origin+'/002/');await locked.waitForFunction(()=>!!window.CKSession?.user&&typeof exportOutboundOrders==='function');
+     const row=await locked.evaluate(async kind=>{
+      const original=api,csv=exportCsv,notice=alert,button=document.getElementById(kind==='outbound'?'obExportBtn':'ibExportBtn'),downloads=[],alerts=[];let release;api=()=>new Promise(resolve=>release=resolve);exportCsv=(...args)=>downloads.push(args);window.alert=x=>alerts.push(x);
+      try{const pending=kind==='outbound'?exportOutboundOrders(button):exportInboundPlans(button);await CKSession.request('sop_identity',{synthetic_lock_probe:true}).catch(()=>{});const userNull=CKSession.user===null,gate=!!document.getElementById('ck-auth-gate');release({ok:true,rows:[{id:'SYN-PRIVATE'}]});await pending;return {kind:kind+'-real-lock',userNull,gate,disabled:button.disabled,downloads:downloads.length,alerts};}
+      finally{api=original;exportCsv=csv;window.alert=notice;}
+     },kind);assert.equal(row.userNull,true);assert.equal(row.gate,true);assert.equal(row.disabled,true);assert.equal(row.downloads,0);assert.deepEqual(row.alerts,[]);results.push({...row,width});
+    }finally{await locked.close();}
+   }
    for(const kind of ['check','issue']){
     const row=await page.evaluate(async kind=>{
      const original=kind==='check'?api:readIssue,pending=[];let load,host;

@@ -674,7 +674,7 @@ function ordersReferenceMarkup(j) {
   return '<details class="orders-reference"><summary>' + preview + '<span class="orders-reference-toggle">展开单号 / 派审员</span></summary><div>' + esc(label) + '<br>派审员：' + esc(dispatcher) + '</div></details>';
 }
 
-async function loadOrders(btn, nextPage) {
+async function loadOrders(btn, nextPage, pageOffset) {
   if(!nextPage){_ordersOffset=0;_ordersQuery=null;_ordersResult=null;}
   var tbody = document.getElementById("ordersBody");
   var read=_ordersRead=CKLatestListRead.begin('shuju:orders',tbody,getKey);
@@ -682,7 +682,7 @@ async function loadOrders(btn, nextPage) {
   tbody.innerHTML = '<tr><td colspan="10" class="muted" style="text-align:center;">加载中...</td></tr>';
   setBtnLoading(btn, true);
   var params = nextPage?Object.assign({},_ordersQuery):ordersFilterParams();
-  params.offset=_ordersOffset;
+  params.offset=nextPage&&pageOffset!=null?pageOffset:_ordersOffset;
   params.action = "v2_dashboard_order_list";
   var res;
   try{res=await api(params);}catch(error){res={ok:false,error:error.message||String(error)};}
@@ -1124,12 +1124,13 @@ function whFilterParams() {
   };
 }
 
-async function loadWorkhours(btn,nextPage) {
+async function loadWorkhours(btn,nextPage,pageOffset) {
   var host=document.getElementById('whByWorkerBody');
   var read=_whRead=CKLatestListRead.begin('shuju:workhours',host,getKey);
   if(!nextPage)_whOffset=0;
-  var params=nextPage?Object.assign({},_whQuery):whFilterParams();params.offset=_whOffset;
-  _whSummary=null;_whQuery=null;
+  var params=nextPage?Object.assign({},_whQuery):whFilterParams();params.offset=nextPage&&pageOffset!=null?pageOffset:_whOffset;
+  // A page retry keeps the last successful snapshot; its new read still blocks export.
+  if(!nextPage){_whSummary=null;_whQuery=null;}
   setBtnLoading(btn, true);
   params.action = "v2_dashboard_workhour_summary";
   var res;
@@ -1757,13 +1758,13 @@ function workhoursPage(direction){
  if(_whRead&&!_whRead.owned())return;
  if(!_whQuery||!_whSummary)return;
  var offset=_whOffset+direction*200;if(offset<0||offset>=_whSummary.total)return;
- _whOffset=offset;return loadWorkhours(null,true);
+ return loadWorkhours(null,true,offset);
 }
 function ordersPage(direction){
  if(_ordersRead&&!_ordersRead.owned())return;
  if(!_ordersQuery||!_ordersResult)return;
  var offset=_ordersOffset+direction*200;if(offset<0||offset>=_ordersResult.total)return;
- _ordersOffset=offset;return loadOrders(null,true);
+ return loadOrders(null,true,offset);
 }
 async function collectReportPages(params){
  var rows=[],first=null,bytes=0,p=Object.assign({},params,{offset:0,limit:200});
