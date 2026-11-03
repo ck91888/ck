@@ -56,3 +56,31 @@ CK_OUTBOUND_PAGE_BASELINE_METRICS=/tmp/outbound-old.json CK_OUTBOUND_PAGE_METRIC
 ```
 
 `CK_OUTBOUND_PAGE_NATIVE_D1=true` 使用实际本地 workerd D1；`CK_OUTBOUND_PAGE_CONFIGS=1000:100,10000:100` 选择出库数:无关历史需求数。需要将 `CODEX_PRIMARY_RUNTIME_NODE_MODULES` 指向本地 Miniflare 依赖。测试不访问站点、不读线上数据。
+
+## 最终开发验证
+
+固定业务/测试源码：`30e760b711392733469a405494dd5101e55b840c`，业务 SQL 与首阶段 `9dc1372` 一致。之后只更新本说明。
+
+- 构建成功、`git diff --check` 通过；全量 **1659 通过、0 失败、0 跳过、0 取消**，约353秒，包含既有返岗、自动派审、部分到仓、产出草稿、打印历史容错、事务权限与照片压缩单元回归。
+- 最终原生本地 workerd D1 专项 **6/0/0**，包括新增开启返岗/自动派审后的只读分类、整个列表请求写入数0、配置内容不变。原始计数与 list 仍同一个 batch 的两条 SELECT，未以改动共享运行时掩盖初稿问题。
+- 四份实际 Chromium 脚本串行均 exit 0：`outbound-list-browser.mjs`（1440/390 出库数量/资料筛选/反馈导航）、`work-print-null-browser.mjs`（PC/手机的空快照列表、详情、真实PDF与审计不变）、`photo-compression-browser.mjs`（条码/QR、取消/失败重试、格式/旋转及PC/手机矩阵）、`work-plan-list-browser.mjs`（2功能流程、9组宽度/缩放，含320/390）。旧脚本断言和等待没有修改。
+- 照片回归保持合成图3462248字节压到403880字节、2048×1536，条码及QR可识别，上传/预览仍使用压缩后的文件。没有上传真实照片或提交图片/PDF。
+- 完整 API 对照：Node 12种请求、本地原生D1 4种请求，全文/字节/顺序/分页/资料数量及规范化SQL/参数均与已发布版相同，原资料、审计、出库、工时/成果快照不变。耗时只是本地合成实测，不代表现场网络或实体手机验收。
+
+本批相对 `3cb5b02` 仅1个业务文件的列表SQL、3个新合成测试/测速模块、冻结基线JSON及此说明。不修改资料表达式、权限、count/WHERE/排序参数、写入路径、schema/索引、部署配置或其它业务模块。不优化 `has_material=0/1` 的全量资料筛选成本，页内复杂关联仍可能较慢。
+
+最终命令（先构建）：
+
+```sh
+node worker-v2/build-sop-staging.mjs
+CK_JSDOM_MODULE=/已安装依赖/node_modules/jsdom/lib/api.js node --test --test-concurrency=2 tests/*.test.mjs
+CK_OUTBOUND_PAGE_NATIVE_D1=true CODEX_PRIMARY_RUNTIME_NODE_MODULES=/已安装依赖/node_modules node --test --test-concurrency=1 tests/outbound-page-material.test.mjs
+node tests/outbound-list-browser.mjs
+node tests/work-print-null-browser.mjs
+node tests/photo-compression-browser.mjs
+node tests/work-plan-list-browser.mjs
+```
+
+原始失败/通过日志、Node与原生完整API指标、最终全量/原生/浏览器结果均在本环境 `/workspace/scratch/ck-p1-test-runtime/outbound-page-*`：`red.log` 为旧查询1000次投影复现失败，`stage-node.log` 为初稿只读分类失败，`stage-node-v2.log` 为修正后的14/0/0；最终为 `final-full.log`、`final-d1.log`、四份 `final-*-browser.log` 和 `final-browser-results.json`。原证据未删，不把失败改标通过。
+
+分阶段源码及证据已推送独立分支，工作待固定独立QA，不合测试、不部署；测试基线仍 `3cb5b02`、main仍 `4671f49`。没有查询/压测线上数据库，没有写真实业务数据或上传凭据、图片、数据库与无关文件。
