@@ -10,6 +10,7 @@ import {internalEnabled,protectInternalMutation} from './internal-operations.js'
 import {handleDailyScan} from './import-daily-scan.js';
 import {resolveInboundEntry,independentInbound} from './independent-inbound.js';
 import {stagedInbound,putawayType,putawayMetrics,stagedPlanStatement} from './inbound-stages.js';
+import {arrivalBatchRead,receivedCourierSQL} from './inbound-arrival-batches.js';
 import {executionDepartment} from './work-execution.js';
 import {withInboundCreateReceipt,inboundCreateStatus,inboundReceiptStatements} from './inbound-create-receipt.js';
 import {handleBulkBatch,guardBulkBatchMutation} from './bulk-work-batch.js';
@@ -1079,8 +1080,8 @@ const MIGRATIONS = [
   `ALTER TABLE v2_inbound_plans ADD COLUMN bulk_external_inbound_no TEXT DEFAULT ''`,
   `CREATE INDEX IF NOT EXISTS idx_v2_inbound_external_no ON v2_inbound_plans(external_inbound_no) WHERE external_inbound_no != ''`,
   `ALTER TABLE v2_ops_jobs ADD COLUMN inbound_external_no TEXT DEFAULT ''`,
-  `CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_inbound_job_reference ON v2_ops_jobs(related_doc_id,inbound_external_no)
-    WHERE related_doc_type='inbound_plan' AND inbound_external_no!='' AND job_type IN ('inbound_direct','inbound_bulk') AND status IN ('pending','working','awaiting_close','completed')`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_inbound_job_active_reference ON v2_ops_jobs(related_doc_id,inbound_external_no)
+    WHERE related_doc_type='inbound_plan' AND inbound_external_no!='' AND job_type IN ('inbound_direct','inbound_bulk') AND status NOT IN ('completed','cancelled')`,
   `CREATE TRIGGER IF NOT EXISTS trg_v2_inbound_job_reference BEFORE INSERT ON v2_ops_jobs
     WHEN NEW.inbound_external_no!='' AND NEW.related_doc_type='inbound_plan' AND NEW.job_type IN ('inbound_direct','inbound_bulk')
     AND NOT EXISTS(SELECT 1 FROM v2_inbound_plans p WHERE p.id=NEW.related_doc_id AND p.status NOT IN ('completed','cancelled') AND COALESCE(p.is_deleted,0)=0
@@ -1102,14 +1103,21 @@ const MIGRATIONS = [
   `CREATE TABLE IF NOT EXISTS ck_inbound_arrival_batches(job_id TEXT PRIMARY KEY,plan_id TEXT NOT NULL,external_no TEXT NOT NULL,scope_json TEXT NOT NULL CHECK(json_valid(scope_json)),created_at TEXT NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS ck_inbound_arrival_plan ON ck_inbound_arrival_batches(plan_id,job_id)`,
   `CREATE TRIGGER IF NOT EXISTS ck_inbound_arrival_immutable BEFORE UPDATE ON ck_inbound_arrival_batches BEGIN SELECT RAISE(ABORT,'arrival batch is immutable'); END`,
+  `CREATE TRIGGER IF NOT EXISTS ck_inbound_combined_completed BEFORE INSERT ON v2_ops_jobs
+   WHEN NEW.related_doc_type='inbound_plan' AND NEW.job_type IN ('inbound_direct','inbound_bulk') AND COALESCE(NEW.inbound_external_no,'')!=''
+   AND EXISTS(SELECT 1 FROM v2_ops_jobs j WHERE j.related_doc_id=NEW.related_doc_id AND j.inbound_external_no=NEW.inbound_external_no AND j.job_type IN ('inbound_direct','inbound_bulk') AND j.status='completed')
+   AND (NEW.job_type!='inbound_bulk' OR EXISTS(SELECT 1 FROM v2_ops_jobs j WHERE j.related_doc_id=NEW.related_doc_id AND j.inbound_external_no=NEW.inbound_external_no AND j.job_type IN ('inbound_direct','inbound_bulk') AND j.status='completed' AND NOT EXISTS(SELECT 1 FROM ck_inbound_arrival_batches b WHERE b.job_id=j.id)) OR NOT EXISTS(SELECT 1 FROM v2_inbound_plan_lines al WHERE al.plan_id=NEW.related_doc_id AND COALESCE(al.putaway_qty,0)<(CASE WHEN al.unit_type='courier' THEN (SELECT COUNT(*) FROM ck_courier_plan_items ai JOIN ck_courier_receipts ar ON ar.tracking_no=ai.tracking_no WHERE ai.plan_id=al.plan_id AND ai.line_id=al.id)
+ ELSE CASE WHEN EXISTS(SELECT 1 FROM v2_inbound_plans ap WHERE ap.id=al.plan_id AND COALESCE(ap.unload_completed_at,'')!='') THEN COALESCE(al.actual_qty,0) ELSE 0 END END)))
+   BEGIN SELECT RAISE(ABORT,'arrived portion already completed'); END`,
   // Staged jobs have separate uniqueness; historical combined jobs remain intact.
-  `CREATE UNIQUE INDEX IF NOT EXISTS ck_inbound_stage_unique ON v2_ops_jobs(related_doc_id,inbound_external_no,job_type)
-    WHERE related_doc_type='inbound_plan' AND job_type IN ('inbound_direct_tally','inbound_direct_putaway') AND status!='cancelled'`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS ck_inbound_stage_active ON v2_ops_jobs(related_doc_id,inbound_external_no,job_type)
+    WHERE related_doc_type='inbound_plan' AND job_type IN ('inbound_direct_tally','inbound_direct_putaway') AND status NOT IN ('cancelled','completed')`,
+  `DROP TRIGGER IF EXISTS ck_inbound_stage_start`,
   `CREATE TRIGGER IF NOT EXISTS ck_inbound_stage_start BEFORE INSERT ON v2_ops_jobs
     WHEN NEW.job_type IN ('inbound_direct_tally','inbound_direct_putaway') BEGIN
     SELECT CASE WHEN NEW.related_doc_type!='inbound_plan' OR COALESCE(NEW.inbound_external_no,'')='' OR NOT EXISTS(
       SELECT 1 FROM v2_inbound_plans p WHERE p.id=NEW.related_doc_id AND COALESCE(p.is_deleted,0)=0
-      AND p.status IN ('unloading','unloading_putting_away','arrived_pending_putaway','putting_away','tallied_pending_putaway','direct_putting_away','partially_completed')
+      AND (p.status IN ('unloading','unloading_putting_away','arrived_pending_putaway','putting_away','tallied_pending_putaway','direct_putting_away','partially_completed') OR (NEW.job_type='inbound_direct_tally' AND p.status='pending' AND EXISTS(SELECT 1 FROM ck_courier_plan_items ai JOIN ck_courier_receipts ar ON ar.tracking_no=ai.tracking_no WHERE ai.plan_id=p.id)))
       AND instr(char(10)||COALESCE(p.external_inbound_no,'')||char(10),char(10)||NEW.inbound_external_no||char(10))>0
       AND instr(char(10)||COALESCE(p.bulk_external_inbound_no,'')||char(10),char(10)||NEW.inbound_external_no||char(10))=0
       AND (p.biz_class='direct_ship' OR EXISTS(SELECT 1 FROM json_each(p.biz_classes_json) WHERE value='direct_ship'))
@@ -1120,7 +1128,28 @@ const MIGRATIONS = [
       THEN RAISE(ABORT,'continue legacy combined inbound task') END;
     SELECT CASE WHEN NEW.job_type='inbound_direct_putaway' AND NOT EXISTS(SELECT 1 FROM v2_ops_jobs j WHERE j.related_doc_type='inbound_plan' AND j.related_doc_id=NEW.related_doc_id AND j.inbound_external_no=NEW.inbound_external_no AND j.job_type='inbound_direct_tally' AND j.status='completed')
       THEN RAISE(ABORT,'tally must finish before putaway') END;
+    SELECT CASE WHEN NEW.job_type='inbound_direct_putaway' AND EXISTS(SELECT 1 FROM v2_inbound_references j WHERE j.plan_id=NEW.related_doc_id AND j.inbound_external_no=NEW.inbound_external_no AND j.job_type='inbound_direct_putaway' AND j.status='completed') THEN RAISE(ABORT,'putaway already complete') END;
+    SELECT CASE WHEN NEW.job_type='inbound_direct_tally' AND EXISTS(SELECT 1 FROM v2_ops_jobs j WHERE j.related_doc_type='inbound_plan' AND j.related_doc_id=NEW.related_doc_id AND j.inbound_external_no=NEW.inbound_external_no AND j.job_type='inbound_direct_tally' AND j.status='completed') AND
+      (EXISTS(SELECT 1 FROM v2_ops_jobs j WHERE j.related_doc_id=NEW.related_doc_id AND j.inbound_external_no=NEW.inbound_external_no AND j.job_type='inbound_direct_tally' AND j.status='completed' AND NOT EXISTS(SELECT 1 FROM ck_inbound_arrival_batches b WHERE b.job_id=j.id)) OR NOT EXISTS(SELECT 1 FROM v2_inbound_plan_lines al WHERE al.plan_id=NEW.related_doc_id AND COALESCE(al.putaway_qty,0)<(CASE WHEN al.unit_type='courier' THEN (SELECT COUNT(*) FROM ck_courier_plan_items ai JOIN ck_courier_receipts ar ON ar.tracking_no=ai.tracking_no WHERE ai.plan_id=al.plan_id AND ai.line_id=al.id)
+ ELSE CASE WHEN EXISTS(SELECT 1 FROM v2_inbound_plans ap WHERE ap.id=al.plan_id AND COALESCE(ap.unload_completed_at,'')!='') THEN COALESCE(al.actual_qty,0) ELSE 0 END END))) THEN RAISE(ABORT,'arrived portion already tallied') END;
+    SELECT CASE WHEN NEW.job_type='inbound_direct_putaway' AND NOT (NOT EXISTS(SELECT 1 FROM ck_inbound_arrival_batches ab WHERE ab.plan_id=NEW.related_doc_id) OR (
+  NOT EXISTS(SELECT 1 FROM ck_courier_plan_items ci WHERE ci.plan_id=NEW.related_doc_id AND NOT EXISTS(SELECT 1 FROM ck_courier_receipts cr WHERE cr.tracking_no=ci.tracking_no))
+  AND NOT EXISTS(SELECT 1 FROM v2_inbound_plan_lines al JOIN v2_inbound_plans ap ON ap.id=al.plan_id WHERE al.plan_id=NEW.related_doc_id AND ((al.unit_type!='courier' AND al.planned_qty>0 AND COALESCE(ap.unload_completed_at,'')='') OR COALESCE(al.putaway_qty,0)<(CASE WHEN al.unit_type='courier' THEN (SELECT COUNT(*) FROM ck_courier_plan_items ai JOIN ck_courier_receipts ar ON ar.tracking_no=ai.tracking_no WHERE ai.plan_id=al.plan_id AND ai.line_id=al.id)
+ ELSE CASE WHEN EXISTS(SELECT 1 FROM v2_inbound_plans ap WHERE ap.id=al.plan_id AND COALESCE(ap.unload_completed_at,'')!='') THEN COALESCE(al.actual_qty,0) ELSE 0 END END)))
+ )) THEN RAISE(ABORT,'await remaining arrival and tally') END;
     END`,
+  `CREATE TRIGGER IF NOT EXISTS ck_inbound_arrival_scope_guard BEFORE INSERT ON ck_inbound_arrival_batches BEGIN
+    SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM v2_ops_jobs j JOIN v2_inbound_plans p ON p.id=j.related_doc_id WHERE j.id=NEW.job_id AND j.related_doc_id=NEW.plan_id AND j.inbound_external_no=NEW.external_no AND j.job_type IN ('inbound_direct_tally','inbound_bulk') AND j.status='working' AND p.status NOT IN ('completed','cancelled','deleted') AND COALESCE(p.is_deleted,0)=0 AND instr(char(10)||p.external_inbound_no||char(10),char(10)||NEW.external_no||char(10))>0) OR NOT EXISTS(SELECT 1 FROM ck_courier_plan_items ai JOIN ck_courier_receipts ar ON ar.tracking_no=ai.tracking_no WHERE ai.plan_id=NEW.plan_id) THEN RAISE(ABORT,'arrival batch changed') END;
+    SELECT CASE WHEN EXISTS(SELECT 1 FROM json_each(NEW.scope_json,'$.lines') s LEFT JOIN v2_inbound_plan_lines al ON al.id=json_extract(s.value,'$.line_id') AND al.plan_id=NEW.plan_id WHERE al.id IS NULL OR al.unit_type IS NOT json_extract(s.value,'$.unit_type') OR json_extract(s.value,'$.available')<0 OR json_extract(s.value,'$.available')>(CASE WHEN al.unit_type='courier' THEN (SELECT COUNT(*) FROM ck_courier_plan_items ai JOIN ck_courier_receipts ar ON ar.tracking_no=ai.tracking_no WHERE ai.plan_id=al.plan_id AND ai.line_id=al.id)
+ ELSE CASE WHEN EXISTS(SELECT 1 FROM v2_inbound_plans ap WHERE ap.id=al.plan_id AND COALESCE(ap.unload_completed_at,'')!='') THEN COALESCE(al.actual_qty,0) ELSE 0 END END)-COALESCE(al.putaway_qty,0)) THEN RAISE(ABORT,'arrival allowance changed') END;
+  END`,
+  `CREATE TRIGGER IF NOT EXISTS ck_inbound_arrival_completion_guard BEFORE UPDATE OF status ON v2_inbound_plans WHEN NEW.status='completed' AND NOT (NOT EXISTS(SELECT 1 FROM ck_inbound_arrival_batches ab WHERE ab.plan_id=NEW.id) OR (
+  NOT EXISTS(SELECT 1 FROM ck_courier_plan_items ci WHERE ci.plan_id=NEW.id AND NOT EXISTS(SELECT 1 FROM ck_courier_receipts cr WHERE cr.tracking_no=ci.tracking_no))
+  AND NOT EXISTS(SELECT 1 FROM v2_inbound_plan_lines al JOIN v2_inbound_plans ap ON ap.id=al.plan_id WHERE al.plan_id=NEW.id AND ((al.unit_type!='courier' AND al.planned_qty>0 AND COALESCE(ap.unload_completed_at,'')='') OR COALESCE(al.putaway_qty,0)<(CASE WHEN al.unit_type='courier' THEN (SELECT COUNT(*) FROM ck_courier_plan_items ai JOIN ck_courier_receipts ar ON ar.tracking_no=ai.tracking_no WHERE ai.plan_id=al.plan_id AND ai.line_id=al.id)
+ ELSE CASE WHEN EXISTS(SELECT 1 FROM v2_inbound_plans ap WHERE ap.id=al.plan_id AND COALESCE(ap.unload_completed_at,'')!='') THEN COALESCE(al.actual_qty,0) ELSE 0 END END)))
+ )) BEGIN SELECT RAISE(ABORT,'remaining arrival or tally is not complete'); END`,
+  `DROP INDEX IF EXISTS ck_inbound_stage_unique`,
+  `DROP INDEX IF EXISTS idx_v2_inbound_job_reference`,
   `DROP TRIGGER IF EXISTS ck_inbound_legacy_after_stage`,
   `CREATE TRIGGER IF NOT EXISTS ck_inbound_legacy_after_stage BEFORE INSERT ON v2_ops_jobs
     WHEN NEW.job_type='inbound_direct' AND EXISTS(SELECT 1 FROM v2_inbound_references j WHERE j.related_doc_type='inbound_plan' AND j.plan_id=NEW.related_doc_id
@@ -1892,7 +1921,7 @@ const MIGRATIONS = [
 ];
 
 // 每次发布迁移变化时手动 +1（patch 段），冷启动只比对一次字符串即可跳过整段 MIGRATIONS
-const CURRENT_SCHEMA_VERSION = 'v2.20261103-partial-arrival-foundation';
+const CURRENT_SCHEMA_VERSION = 'v2.20261103-partial-arrival-v2';
 
 const migratedDatabases = new WeakSet(), migratingDatabases = new WeakMap();
 async function ensureMigrated(db){
@@ -4184,11 +4213,13 @@ route("v2_inbound_plan_detail", async (body, env) => {
       inboundFlowEnabled(env)?courierProgressRead(env,id):env.DB.prepare('SELECT 1 WHERE 0'),
       inboundFlowEnabled(env)?feedbackLinkRead(env,id):env.DB.prepare('SELECT 1 WHERE 0'),
       env.SOP_UPGRADE_ENABLED==='true'?env.DB.prepare(jobNumberSQL(env)+' WHERE j.id IN ('+inPlan+')').bind(id):env.DB.prepare('SELECT 1 WHERE 0'),
-      env.DB.prepare('SELECT l.*,p.display_no,p.customer FROM ck_putaway_links l JOIN v2_inbound_plans p ON p.id=l.plan_id WHERE l.job_id IN ('+inPlan+') ORDER BY l.position').bind(id)
+      env.DB.prepare('SELECT l.*,p.display_no,p.customer FROM ck_putaway_links l JOIN v2_inbound_plans p ON p.id=l.plan_id WHERE l.job_id IN ('+inPlan+') ORDER BY l.position').bind(id),
+      env.DB.prepare('SELECT job_id,scope_json FROM ck_inbound_arrival_batches WHERE plan_id=?').bind(id)
     ]),
     linkedNeeds(env,id)
   ]);
-  const [taskRows, planLines, jobs, atts, workers, results, unloadLinks, linkedObRs,courierRows,feedbackRows,jobNumberRows,putawayRows] = reads;
+  const [taskRows, planLines, jobs, atts, workers, results, unloadLinks, linkedObRs,courierRows,feedbackRows,jobNumberRows,putawayRows,arrivalRows] = reads;
+  const arrivalBatches=new Map((arrivalRows.results||[]).map(x=>[x.job_id,JSON.parse(x.scope_json)]));
   const putawayLinks=putawayRows.results||[];
   const courier_progress=inboundFlowEnabled(env)?courierProgressRows(courierRows.results||[]):null,existing_feedback_link=feedbackRows.results?.[0]||null;
   let biz_tasks = taskRows.results || [];
@@ -4236,6 +4267,7 @@ route("v2_inbound_plan_detail", async (body, env) => {
 
     enrichedJobs.push({
       ...job,
+      ...(arrivalBatches.has(job.id)?{arrival_batch:arrivalBatches.get(job.id)}:{}),
       worker_names: names,
       worker_names_text: names.join(", "),
       total_minutes_worked: Math.round(totalMin),
@@ -4359,7 +4391,7 @@ route("v2_inbound_plan_ops_candidates", async (body, env) => {
   let statusFilter;
   if (scene === 'putaway') {
     // partially_completed 也属于"还能继续入库"的状态
-    statusFilter = "('unloading','unloading_putting_away','arrived_pending_putaway','putting_away','tallied_pending_putaway','direct_putting_away','partially_completed')";
+    statusFilter = inboundFlowEnabled(env)?"('pending','unloading','unloading_putting_away','arrived_pending_putaway','putting_away','tallied_pending_putaway','direct_putting_away','partially_completed')":"('unloading','unloading_putting_away','arrived_pending_putaway','putting_away','tallied_pending_putaway','direct_putting_away','partially_completed')";
   } else if (scene === 'unload') {
     statusFilter = "('pending','unloading','unloading_putting_away')";
   } else {
@@ -4369,6 +4401,7 @@ route("v2_inbound_plan_ops_candidates", async (body, env) => {
   let sql = `SELECT id, display_no, external_inbound_no, bulk_external_inbound_no, customer, cargo_summary, status, biz_class, biz_classes_json, plan_date, source_type, manual_completed_at, manual_completed_by, updated_at
     FROM v2_inbound_plans WHERE status IN ${statusFilter} AND source_type != 'return_session' AND COALESCE(is_deleted,0)=0`;
   const binds = [];
+  if(scene==='putaway'&&inboundFlowEnabled(env))sql+=` AND (status!='pending' OR ${receivedCourierSQL('v2_inbound_plans.id')})`;
   if(scene==='putaway'&&inboundFlowEnabled(env)){
     const task=(required_biz_class||'direct_ship')==='bulk'?'bulk_putaway':(required_biz_class||'direct_ship');
     sql += " AND (biz_class=? OR EXISTS(SELECT 1 FROM json_each(CASE WHEN json_valid(biz_classes_json) THEN biz_classes_json ELSE '[]' END) WHERE value=?)) AND NOT EXISTS(SELECT 1 FROM v2_inbound_plan_biz_tasks t WHERE t.plan_id=v2_inbound_plans.id AND t.biz_class=? AND t.status='completed')";
@@ -5892,7 +5925,8 @@ route("v2_inbound_job_finish", async (body, env) => {
     if(stagedInbound(jobRow.job_type)&&!leave_only&&!complete_job)return {ok:false,error:'请通过完成按钮提交本阶段实际产出'};
     if(jobRow.job_type===putawayType&&!leave_only)putawayMetrics(body);
 
-    if (complete_job && !leave_only && !isReturnJob) {
+    const arrivalBatch=inboundFlowEnabled(env)?await arrivalBatchRead(env,job_id):null;
+    if (complete_job && !leave_only && !isReturnJob && !arrivalBatch) {
       if(jobRow.related_doc_id&&!await courierReady(env,jobRow.related_doc_id))return {ok:false,error:"courier_not_received",message:"关联快递尚未收齐，不能完成理货 / 택배 수령이 완료되지 않았습니다"};
       if (jobRow.related_doc_id) {
         const planCheck = await env.DB.prepare("SELECT status FROM v2_inbound_plans WHERE id=?").bind(jobRow.related_doc_id).first();

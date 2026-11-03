@@ -12,7 +12,7 @@ function fixture(t){
 }
 test('partial allowance uses immutable receipt evidence even when cached actual quantity is stale',async t=>{
  const {e,receive}=fixture(t);let s=await inboundArrivalState(e,'SYNTH-P');assert.equal(s.received,0);assert.equal(s.remaining,0);
- await assert.rejects(()=>inboundArrivalScope(e,{id:'SYNTH-P'},'SYNTH-EXT','inbound_direct_tally'),/尚无/);
+ assert.equal(await inboundArrivalScope(e,{id:'SYNTH-P'},'SYNTH-EXT','inbound_direct_tally'),null);
  await receive(1);s=await inboundArrivalState(e,'SYNTH-P');assert.equal(s.received,1);assert.equal(s.fully_arrived,false);assert.equal(s.remaining,1);
  const scope=await inboundArrivalScope(e,{id:'SYNTH-P'},'SYNTH-EXT','inbound_direct_tally');await receive(2);
  assert.equal(scope.received,1);assert.equal(scope.lines[0].available,1);
@@ -34,7 +34,9 @@ test('same-unit lines receive each unit of output once and reject negative, unkn
 });
 test('additive batch metadata is immutable and does not change old stock, labor or receipt facts',async t=>{
  const {DB,e,receive}=fixture(t);await receive(1);const scope=await inboundArrivalScope(e,{id:'SYNTH-P'},'SYNTH-EXT','inbound_direct_tally');
- const before=DB.raw.prepare('SELECT * FROM ck_courier_receipts').all();await arrivalBatchStatement(e,'SYNTH-J',scope,'2026-11-03T01:00:00Z').run();
+ const before=DB.raw.prepare('SELECT * FROM ck_courier_receipts').all();
+ DB.raw.exec(`INSERT INTO v2_ops_jobs(id,job_type,related_doc_type,related_doc_id,inbound_external_no,status) VALUES('SYNTH-J','inbound_direct_tally','inbound_plan','SYNTH-P','SYNTH-EXT','working')`);
+ await arrivalBatchStatement(e,'SYNTH-J',scope,'2026-11-03T01:00:00Z').run();
  assert.throws(()=>DB.raw.exec(`UPDATE ck_inbound_arrival_batches SET external_no='OTHER'`),/immutable/);
  assert.deepEqual(DB.raw.prepare('SELECT * FROM ck_courier_receipts').all(),before);assert.equal(DB.raw.prepare('SELECT count(*) n FROM v2_ops_job_workers').get().n,0);
  const sql=arrivalSettlementSQL("'SYNTH-P'");assert.equal((await DB.prepare('SELECT '+sql+' AS settled').first()).settled,0);

@@ -1,4 +1,5 @@
 import {tallyType,putawayType} from './inbound-stages.js';
+import {inboundArrivalState} from './inbound-arrival-batches.js';
 // Inbound dispositions use the existing storage keys for compatibility.
 // Cross-dock retains `bulk`; only `bulk_putaway` denotes bulk putaway.
 import {referenceWriteBatch} from './inbound-reference-history.js';
@@ -32,19 +33,21 @@ export async function inboundReferenceData(env,classes,body,plan={}){
 export async function inboundCodeProgress(env,plan,knownJobs,biz){
  if(!inboundFlowEnabled(env)||!plan||!needsPutaway(plan))return null;
  const codes=departmentCodes(plan,biz),allCodes=inboundCodes(plan.external_inbound_no);
+ const arrival=await inboundArrivalState(env,plan),batched=arrival?.batched,settled=!batched||arrival.fully_arrived&&!arrival.remaining;
  const jobs=knownJobs?knownJobs.filter(j=>['inbound_direct','inbound_bulk',tallyType,putawayType].includes(j.job_type)&&j.status!=='cancelled'):(await env.DB.prepare("SELECT * FROM v2_inbound_references WHERE plan_id=? AND job_type IN ('inbound_direct','inbound_bulk','inbound_direct_tally','inbound_direct_putaway') AND status!='cancelled' ORDER BY created_at DESC").bind(plan.id).all()).results||[];
  const items=codes.map(code=>{
   const matches=jobs.filter(j=>j.inbound_external_no===code||(!j.inbound_external_no&&allCodes.length===1));
-  const final=matches.find(j=>j.job_type!==tallyType&&j.status==='completed');
+  const final=settled?matches.find(j=>j.job_type!==tallyType&&j.status==='completed'):null;
   const putaway=matches.find(j=>j.job_type===putawayType&&['pending','working','awaiting_close','paused','system_closed'].includes(j.status));
   const tally=matches.find(j=>j.job_type===tallyType&&j.status==='completed');
-  const job=final||putaway||matches.find(j=>['pending','working','awaiting_close','paused','system_closed'].includes(j.status))||tally;
+  const completed=matches.find(j=>j.status==='completed'),active=matches.find(j=>['pending','working','awaiting_close','paused','system_closed'].includes(j.status));
+  const job=final||putaway||active||tally||completed;
   const historicalComplete=codes.length===1&&plan.status==='completed';
-  const status=final||historicalComplete?'completed':job?.status==='system_closed'?'system_closed':putaway?'putting_away':tally?'tallied_pending_putaway':job?'working':'pending';
-  return {external_no:code,biz_class:inboundCodes(plan.bulk_external_inbound_no).includes(code)?'bulk_putaway':'direct_ship',status,job_id:job?.id||'',job_type:job?.job_type||'',tally_job_id:tally?.id||'',completed_at:final?.updated_at||(historicalComplete?(plan.manual_completed_at||plan.updated_at||''):'')};
+  const status=final||historicalComplete?'completed':job?.status==='system_closed'?'system_closed':putaway?'putting_away':active?'working':batched&&!settled&&completed?'partial_tallied':tally?'tallied_pending_putaway':job?'working':'pending';
+  return {external_no:code,biz_class:inboundCodes(plan.bulk_external_inbound_no).includes(code)?'bulk_putaway':'direct_ship',status,job_id:job?.id||'',job_type:job?.job_type||'',tally_job_id:tally?.id||'',...(batched?{can_tally:!active&&!final&&(arrival.remaining>0||arrival.fully_arrived&&!completed),can_putaway:!!tally&&settled&&!active&&!final}:{}),completed_at:final?.updated_at||(historicalComplete?(plan.manual_completed_at||plan.updated_at||''):'')};
  });
  const missing_departments=planClasses(plan).filter(x=>putawayClasses.includes(x)&&(!biz||x===biz)&&!departmentCodes(plan,x).length);
- return {total:items.length,completed:items.filter(x=>x.status==='completed').length,items,missing_departments};
+ return {total:items.length,completed:items.filter(x=>x.status==='completed').length,items,missing_departments,...(arrival?{arrival}: {})};
 }
 export async function selectInboundReference(env,plan,value,biz){
  const progress=await inboundCodeProgress(env,plan,undefined,biz);const codes=departmentCodes(plan,biz);let code=inboundCode(value);
@@ -82,7 +85,7 @@ export async function resolveInboundPlan(env,value,biz){
  if(plan.status==='completed'||tasks.some(x=>x.biz_class===taskBiz&&x.status==='completed'))return {ok:true,kind:'biz_already_completed',plan,message:'该计划已完成入库，请勿重复开工 / 이미 입고 완료된 계획입니다'};
  const progress=await inboundCodeProgress(env,plan,undefined,taskBiz);let selected;
  try{selected=await selectInboundReference(env,plan,code,taskBiz);}catch(error){return progress?.items.some(x=>x.external_no===code&&x.status==='completed')?{ok:true,kind:'biz_already_completed',plan,message:error.message}:blocked(error.message);}
- if(!['unloading','unloading_putting_away','arrived_pending_putaway','putting_away','tallied_pending_putaway','direct_putting_away','partially_completed'].includes(plan.status))return blocked('该计划尚未开始卸货，暂不能理货 / 하차 시작 후 입고 작업이 가능합니다');
+ if(!['unloading','unloading_putting_away','arrived_pending_putaway','putting_away','tallied_pending_putaway','direct_putting_away','partially_completed'].includes(plan.status)&&!(plan.status==='pending'&&progress?.arrival?.received>0))return blocked('该计划尚未开始卸货且没有已到仓快递，暂不能理货 / 하차 시작 또는 택배 도착 후 작업하세요');
  return {ok:true,kind:'system',plan:{...plan,biz_classes:planClasses(plan),external_inbound_nos:departmentCodes(plan,taskBiz),selected_external_inbound_no:selected,inbound_progress:progress},biz_classes:planClasses(plan),pending_biz_classes:tasks.filter(x=>x.status!=='completed').map(x=>x.biz_class),completed_biz_classes:tasks.filter(x=>x.status==='completed').map(x=>x.biz_class)};
 }
 export async function completeUnloadedDispositions(env,planId,t){

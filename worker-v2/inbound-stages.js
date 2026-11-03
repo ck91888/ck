@@ -1,5 +1,6 @@
 // New direct-ship jobs are separate stages. Historical inbound_direct jobs keep
 // their combined completion contract; no existing results or clocks are rewritten.
+import {inboundArrivalState,arrivalSettlementSQL} from './inbound-arrival-batches.js';
 export const tallyType='inbound_direct_tally';
 export const putawayType='inbound_direct_putaway';
 export const stagedInbound=type=>[tallyType,putawayType].includes(type);
@@ -15,7 +16,7 @@ export function stagedPlanStatement(env,id,t,gate='1',args=[]){
  return env.DB.prepare(`UPDATE v2_inbound_plans SET status=CASE
   WHEN EXISTS(SELECT 1 FROM v2_inbound_references j WHERE j.plan_id=v2_inbound_plans.id AND j.job_type='inbound_direct_putaway' AND j.status IN ('pending','working','awaiting_close','paused')) THEN 'direct_putting_away'
   WHEN EXISTS(SELECT 1 FROM v2_inbound_references j WHERE j.plan_id=v2_inbound_plans.id AND j.job_type='inbound_direct_tally' AND j.status IN ('pending','working','awaiting_close','paused')) THEN 'putting_away'
-  WHEN EXISTS(SELECT 1 FROM v2_inbound_references j WHERE j.plan_id=v2_inbound_plans.id AND j.job_type='inbound_direct_tally' AND j.status='completed' AND NOT EXISTS(SELECT 1 FROM v2_inbound_references p WHERE p.plan_id=j.plan_id AND p.inbound_external_no=j.inbound_external_no AND p.job_type='inbound_direct_putaway' AND p.status='completed')) THEN 'tallied_pending_putaway'
+  WHEN ${arrivalSettlementSQL('v2_inbound_plans.id')} AND EXISTS(SELECT 1 FROM v2_inbound_references j WHERE j.plan_id=v2_inbound_plans.id AND j.job_type='inbound_direct_tally' AND j.status='completed' AND NOT EXISTS(SELECT 1 FROM v2_inbound_references p WHERE p.plan_id=j.plan_id AND p.inbound_external_no=j.inbound_external_no AND p.job_type='inbound_direct_putaway' AND p.status='completed')) THEN 'tallied_pending_putaway'
   ELSE status END,updated_at=? WHERE id=? AND status IN ('arrived_pending_putaway','putting_away','tallied_pending_putaway','direct_putting_away','partially_completed') AND ${gate}`).bind(t,id,...args);
 }
 export async function validateInboundStage(env,plan,code,type){
@@ -25,7 +26,9 @@ export async function validateInboundStage(env,plan,code,type){
  const closed=jobs.find(j=>j.status==='system_closed');
  if(closed)throw Error('已有系统04:00结束的原任务，请从现场首页打开原任务，核对人员后恢复 / 04:00 종료된 기존 작업을 열어 인원 확인 후 재개하세요');
  const tally=jobs.find(j=>j.job_type===tallyType&&j.status==='completed');
- if(type===tallyType&&tally)throw Error('本单理货已完成，请从上架入口派工 / 검수 완료, 적치를 시작하세요');
+ const arrival=await inboundArrivalState(env,plan);
+ if(type===tallyType&&tally&&(!arrival?.batched||!arrival.remaining))throw Error('本单已到仓部分已理货，请等待后续到货或从上架入口派工 / 도착분 검수 완료');
+ if(type===putawayType&&arrival?.batched&&(!arrival.fully_arrived||arrival.remaining))throw Error('请等待齐货并完成各批理货后再上架 / 전체 도착·검수 완료 후 적치하세요');
  if(type===putawayType&&!tally)throw Error('本单理货尚未完成，不能开始上架 / 검수 완료 후 적치를 시작하세요');
- if(jobs.some(j=>j.job_type===type))throw Error('此单已有原任务，请打开原任务核对状态与人员 / 기존 작업의 상태와 인원을 확인하세요');
+ if(jobs.some(j=>j.job_type===type&&!(type===tallyType&&arrival?.batched&&j.status==='completed')))throw Error('此单已有原任务，请打开原任务核对状态与人员 / 기존 작업의 상태와 인원을 확인하세요');
 }
