@@ -30,6 +30,7 @@ import {atomicNativeFinish} from './atomic-native-finish.js';
 import {atomicBulkFinish} from './atomic-bulk-finish.js';
 import {nativeCompletionGuard,completionConflict,completionChanged} from './native-completion-guard.js';
 import {finishUnplannedUnload} from './unplanned-unload-finish.js';
+import {ensureAttachmentKeyIndex} from './attachment-key-index.js';
 import {intentSignature,canonicalIntent,boundReceiptJSON,readBoundReceipt} from './transaction-receipt.js';
 import {ensureInboundReferenceGuard} from './inbound-reference-guard.js';
 import {referenceWriteBatch,ensureReferenceHistory} from './inbound-reference-history.js';
@@ -12854,6 +12855,7 @@ export default {
 
     try {
       await ensureMigrated(env.DB);
+      await ensureAttachmentKeyIndex(env.DB);
       await ensureInboundReferenceGuard(env);
       await ensureCourierClaims(env);
       await ensureInboundDocuments(env);

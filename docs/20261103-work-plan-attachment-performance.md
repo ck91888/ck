@@ -50,3 +50,20 @@ node tests/work-plan-performance.mjs
 最初夹具误填了实际 schema 不存在的字段，准备阶段中止；已按实际表结构修正测试脚本，未更改业务表，失败日志保留。正式数值来自修正后完整成功的 v4 对照。
 
 可通过 `CK_WORK_PLAN_API_MODULE=/绝对路径/已发布工作区/worker-v2/index.js` 选择旧版，`CK_WORK_PLAN_METRICS=/tmp/old.json` 保存结果；不设置模块参数则测当前版本。默认依次测试 100/1000/10000 组及末尾条件筛选。数据全部在 `:memory:`，仅访问 Worker 的本地 `fetch` 方法。
+
+## 阶段二：附件键非唯一索引
+
+阶段一完整 API 证据已提交 `12cbcf8`。本阶段仅新增 `idx_v2_attachments_file_key ON v2_attachments(file_key)`，在原基础迁移之后以幂等原子 DDL 初始化。无需提高基础 schema 版本或重放历史业务触发器；失败不缓存成功状态，下次可重试。没有修改下载授权 SQL、元数据选择 SQL、重复 key 规则、记录或 rowid，也没有引入唯一限制。
+
+旧库 10000 条合成附件，在真实本地 workerd D1 上，同一元数据 SQL 从 **10000 行读取降至 1 行读取**，达到 ≤3 目标；查询计划由扫描改用新索引。创建前后所有附件（含 rowid）和旧 schema 元数据快照相同。
+
+相关 Node **25/0/0**；专项原生 D1 **7/0/0**，覆盖：重复/空/NULL 键和重复插入、两个冷绑定同时初始化、运行时 CHECK 失败使索引及业务一起保持原状、同绑定重试、真实 Worker 升级失败/恢复、私有 GET 与原文件元数据、真实限定大货权限日当对重复 key 的允许/拒绝行为。
+
+权限补测初轮为 Node 24/1、D1 6/1：夹具使用默认具备全部现场部门权限的 EMP，却错误期待其访问直发资料被拒。已改为通过实际签到与当日授权生成仅 `bulk` 权限的日当，先断言真实 scope/权限，再保留原 401 拒绝及原文件 200 断言；业务权限代码未改。原失败日志与后续通过日志分别保留。
+
+```sh
+node --test tests/attachment-key-index.test.mjs tests/work-plan-indexed.test.mjs tests/work-plan-list.test.mjs tests/issue-read.test.mjs
+CK_PERF_NATIVE_D1=true CODEX_PRIMARY_RUNTIME_NODE_MODULES=/已安装依赖/node_modules node --test --test-concurrency=1 tests/attachment-key-index.test.mjs
+```
+
+正在固定源码上执行全量、包含前批竞态的原生 D1 合集，以及作业计划/原业务浏览器回归。此阶段未发布、未合测试，不能将阶段验证当作独立 QA 放行；其它 P2 保持后续批次。
