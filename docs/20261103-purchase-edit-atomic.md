@@ -33,3 +33,16 @@ node worker-v2/build-sop-staging.mjs
 CODEX_PRIMARY_RUNTIME_NODE_MODULES=/已安装依赖/node_modules node tests/purchase-edit-browser.mjs
 CK_JSDOM_MODULE=/已安装依赖/node_modules/jsdom/lib/api.js node --test --test-reporter=tap --test-concurrency=2 tests/*.test.mjs
 ```
+
+## 最终开发自测候选
+
+第二阶段 `c9eb30943479d6e188da85ac74e571da9b1c28a1` 已推送并核验远端。其后的业务/测试源码没有改动，仅追加本节验证记录。
+
+- 全量 **1674 passed / 0 failed / 0 skipped / 0 cancelled**，约374秒。包含采购21项及原有产出草稿、照片、派审/返岗、部分到仓等回归；未调整既有断言或等待。
+- 本批专项 Node **21/0/0**，原生本地 workerd D1 **21/0/0**；既有采购/耗材相关合集 **38/0/0**。
+- 真实构建采购表单 Chromium 两宽共8组结果全部通过，构建成功；`git diff --check` 通过。浏览器只使用本地合成数据，不代表国内网络或真实手机验收。
+- 相对测试基线3cb5b02共6文件：采购更新路由、独立事务断言模块、双语错误文字、API合成专项、采购表单脚本、本说明。没有修改部署配置、正式版或其它待审性能分支，没有自动处理真实历史数据。
+
+修复前 Node/D1 的1通过5失败，以及首轮扩展夹具18通过3失败均完整保留于本地日志；修复/夹具校正后的最终通过结果分别保存在 `purchase-edit-final-node.log`、`purchase-edit-final-d1.log`、`purchase-edit-browser.log`、`purchase-edit-full.log`。没有提交运行日志、数据库或截图。
+
+仅完成开发自测并提交独立分支，尚待固定独立审核，未合入测试分支或部署。
