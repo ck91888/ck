@@ -1,6 +1,6 @@
 import {cargoReferencesFile} from './cargo-allocation.js';
 import {chainNeed,chainEvent,notifyMaterialChange,workChainEnabled} from './work-chain.js';
-import {batchStateEnabled,ensureBatchMaterialState} from './batch-material-state.js';
+import {batchStateEnabled,ensureBatchMaterialState,ensureBatchMaterialNeedLookup} from './batch-material-state.js';
 const q=(env,sql,...args)=>env.DB.prepare(sql).bind(...args);
 const category='batch_work_material';
 async function batchContext(env,id,user,write=false){
@@ -32,6 +32,7 @@ export async function changeBatchMaterial(body,env,user){
  if(!file)throw Error('资料不属于本入库计划');
  if(file.material_revision!==expected)throw Error('资料状态已更新，请刷新后重试');
  if(file.removed===removed)return {ok:true,id:attachment,removed:!!removed,material_revision:expected,already_applied:true};
+ await ensureBatchMaterialNeedLookup(env);
  const t=new Date().toISOString(),result={ok:true,id:attachment,removed:!!removed,material_revision:expected+1};
  const rows=(await q(env,"SELECT * FROM sop_records WHERE kind='need' AND json_extract(state,'$.source_type')='inbound' AND json_extract(state,'$.source_id')=?",plan.id).all()).results;
  if(removed&&rows.some(row=>cargoReferencesFile(JSON.parse(row.state),attachment)))throw Error('资料仍被资料组或已确认成果引用，请保留历史文件版本');

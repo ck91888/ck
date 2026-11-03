@@ -2,6 +2,14 @@ import {ensureSchema} from './schema-ready.js';
 import {ensureInboundDocuments} from './inbound-documents.js';
 export const batchStateEnabled=env=>env.SOP_ENVIRONMENT==='staging'&&env.SOP_UPGRADE_ENABLED==='true'&&env.SOP_WORK_CHAIN_ENABLED==='true';
 export const batchVisibleSql=(env,alias='a')=>batchStateEnabled(env)?` AND NOT EXISTS(SELECT 1 FROM ck_batch_material_state bs WHERE bs.attachment_id=${alias}.id AND bs.removed=1)`:'';
+// Only material mutations need this lookup. Keep read-only initialization free
+// of a historical JSON index build; cache successful DDL on this DB binding.
+export async function ensureBatchMaterialNeedLookup(env){
+ if(!batchStateEnabled(env))return;
+ await ensureSchema(env.DB,'batch-material-inbound-needs-index-v1',()=>env.DB.prepare(`CREATE INDEX IF NOT EXISTS ck_batch_material_inbound_needs_v1
+  ON sop_records(json_extract(state,'$.source_id'),department,updated_at)
+  WHERE kind='need' AND json_extract(state,'$.source_type')='inbound'`).run());
+}
 export async function ensureBatchMaterialState(env){
  if(!batchStateEnabled(env))return;
  await ensureInboundDocuments(env);
