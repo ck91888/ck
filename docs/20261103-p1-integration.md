@@ -47,3 +47,24 @@
 - 再补 4 项权限及旧版语义验证，新增专项 Node 合计 **16/0/0**：在单内实际作业的派审员可以结束，撤销办公室会话使旧请求回滚，历史无管理单仅关闭当前操作员且不提前出成果，历史动态单的非整单完成仍仅退出本人。业务源码自 `d959cea` 未变，继续执行最终验证。
 - `3504813` 阶段构建、全量 **1605/0/0**、原生 D1 合集 **77/0/0**、七组 Chromium（原六组加计划外反馈创建/转计划）均通过。随后复核发现本次重构遗漏了个人退出的成功回执：退出后重新加入，原退出请求重试会误关新段。新增两例先得到 **0/2/0**，未放宽快照断言；现将退出/非整单结束回执也与退出事务一起保存，并给“本人退出、其他人继续”这一有业务写入的失败响应保存严格绑定的原回执。
 - 最新专项 Node **18/0/0**，还覆盖历史无管理单在重新加入后重放原“其他人继续”响应，不再操作新段。正在最终源码上重跑全量、原生 D1 合集和七组浏览器；以上旧阶段结果不冒充最新最终验证。
+
+## P1-QA-04 最终开发验证
+
+固定业务源码/测试提交：`c440309772581f211a84d655cbe02dc25a1d7b5a`；此后仅补本文证据。
+
+- 构建成功；最终全量 **1607 通过、0 失败、0 跳过、0 取消**。新专项 18 项已包括在总数中。
+- 最终原生 workerd D1 合集 **79 通过、0 失败、0 跳过、0 取消**：原 61 项耗材/完成竞态/部分到仓回归，加新专项 18 项；全部在同一固定业务源码上执行。
+- 七组真实 Chromium 串行全部 exit 0：部分到仓（1440/390/320）、打印 CSV、自动派审、产出草稿、返岗、照片压缩、计划外反馈创建及转计划。照片 3462248→403880 字节，2048×1536，合成条码和 QR 均识别。没有修改任何浏览器等待条件或业务断言。
+- 覆盖复核：当前计划外反馈卸货和历史无单/动态计划三形态均在首次业务写入前执行原授权守卫；原整车卸货继续沿用已有守卫事务；通用结束入口对已纳管卸货仍由原类型校验拒绝；原手动补录守卫及共享配对 ABA 回归未改。
+- 分批理货模块/开关、原子派工、前端表单、构建和两套 wrangler 共 8 个保护文件仍与 `bf946b2` 字节一致。本轮相对 `2795b12` 仅 2 个业务源码文件、1 个合成测试文件和本文。
+- 未合测试、未部署、未操作真实数据，main 与测试分支仍分别为 `4671f49` / `bf946b2`。两项延期 P2 仍待后续批次；本轮没有把全量通过当作全部审计 BUG 已解决。交固定独立 QA 复审，尚未获发布放行。
+
+复现最终验证（执行前构建）：
+
+```sh
+node worker-v2/build-sop-staging.mjs
+CK_JSDOM_MODULE=/workspace/scratch/ck-p1-test-runtime/node_modules/jsdom/lib/api.js node --test --test-concurrency=2 tests/*.test.mjs
+CK_P1_NATIVE_D1=true CK_PARTIAL_NATIVE_D1=true CODEX_PRIMARY_RUNTIME_NODE_MODULES=/workspace/scratch/ck-p1-test-runtime/node_modules node --test --test-concurrency=1 tests/material-txn-atomic.test.mjs tests/completion-owner-races.test.mjs tests/partial-arrival-api.test.mjs tests/partial-arrival-rollout.test.mjs tests/unplanned-completion-atomic.test.mjs
+```
+
+上面依赖路径属于开发隔离环境，可替换为审核环境已安装的同类依赖路径。浏览器沿用仓库原脚本，顺序执行 `partial-arrival-browser.mjs`、`partial-arrival-documents-browser.mjs`、`dispatch-time-browser.mjs`、`bulk-output-draft-browser.mjs`、`attendance-return-browser.mjs`、`photo-compression-browser.mjs`、`feedback-create-browser.mjs`；启用 `CK_ATTENDANCE_RETURNS=true CK_AUTO_DISPATCH_TIME=true`，使用合成数据库和本地服务器。没有执行国内网络或实体手机验收。
