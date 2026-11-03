@@ -1097,6 +1097,11 @@ const MIGRATIONS = [
   `CREATE VIEW IF NOT EXISTS v2_inbound_references AS
     SELECT j.id,j.related_doc_type,COALESCE(l.plan_id,j.related_doc_id) AS plan_id,COALESCE(l.external_no,j.inbound_external_no) AS inbound_external_no,j.job_type,j.status,j.created_at,j.updated_at
     FROM v2_ops_jobs j LEFT JOIN ck_putaway_links l ON l.job_id=j.id WHERE j.related_doc_type='inbound_plan'`,
+  // Immutable dispatch allowance for a partial-arrival tally. No existing job,
+  // receipt, inventory or labor row is backfilled by this additive migration.
+  `CREATE TABLE IF NOT EXISTS ck_inbound_arrival_batches(job_id TEXT PRIMARY KEY,plan_id TEXT NOT NULL,external_no TEXT NOT NULL,scope_json TEXT NOT NULL CHECK(json_valid(scope_json)),created_at TEXT NOT NULL)`,
+  `CREATE INDEX IF NOT EXISTS ck_inbound_arrival_plan ON ck_inbound_arrival_batches(plan_id,job_id)`,
+  `CREATE TRIGGER IF NOT EXISTS ck_inbound_arrival_immutable BEFORE UPDATE ON ck_inbound_arrival_batches BEGIN SELECT RAISE(ABORT,'arrival batch is immutable'); END`,
   // Staged jobs have separate uniqueness; historical combined jobs remain intact.
   `CREATE UNIQUE INDEX IF NOT EXISTS ck_inbound_stage_unique ON v2_ops_jobs(related_doc_id,inbound_external_no,job_type)
     WHERE related_doc_type='inbound_plan' AND job_type IN ('inbound_direct_tally','inbound_direct_putaway') AND status!='cancelled'`,
@@ -1887,7 +1892,7 @@ const MIGRATIONS = [
 ];
 
 // 每次发布迁移变化时手动 +1（patch 段），冷启动只比对一次字符串即可跳过整段 MIGRATIONS
-const CURRENT_SCHEMA_VERSION = 'v2.20261021-inbound-owner';
+const CURRENT_SCHEMA_VERSION = 'v2.20261103-partial-arrival-foundation';
 
 const migratedDatabases = new WeakSet(), migratingDatabases = new WeakMap();
 async function ensureMigrated(db){
