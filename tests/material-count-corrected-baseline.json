@@ -1,0 +1,63 @@
+{
+  "source": "62bcf79f8e1be7417e7d6a9f9774779ecf6982c3",
+  "intent": "Only SYN-JSON-NULL changes from material_count 0 to 1; material filtering and paging follow this correction.",
+  "cases": {
+    "default": {
+      "sha256": "23738ed21977502b0b1e661e019aa5cfee8d7438b4fd7bcbae0b35671d1d16e7",
+      "total": 60,
+      "returned": 50
+    },
+    "max": {
+      "sha256": "68550f53c9164616fefe3f91c372dd357e07512c299363fc354959a4165ce986",
+      "total": 60,
+      "returned": 60
+    },
+    "unknown-date-basis": {
+      "sha256": "23738ed21977502b0b1e661e019aa5cfee8d7438b4fd7bcbae0b35671d1d16e7",
+      "total": 60,
+      "returned": 50
+    },
+    "accounted-0": {
+      "sha256": "96b98d849c9ec2613dcd97da573afe7c8ba2bf42a27ee423538ab74f7312aeb8",
+      "total": 40,
+      "returned": 40
+    },
+    "stock-0": {
+      "sha256": "96b98d849c9ec2613dcd97da573afe7c8ba2bf42a27ee423538ab74f7312aeb8",
+      "total": 40,
+      "returned": 40
+    },
+    "bulk": {
+      "sha256": "2292a2672d571caedeab76b2ea8d5c776101b0c366d25734be6b98d1fca70d89",
+      "total": 20,
+      "returned": 20
+    },
+    "has-1": {
+      "sha256": "b31e62d3c71f6828682465ffafd2431ae875418268e83e1cf357122cf4cd07fc",
+      "total": 15,
+      "returned": 15
+    },
+    "has-0": {
+      "sha256": "b0480aa3d6471b8ec17c94955af228dcfc01978f49f989cb1267b59f0b0c72e7",
+      "total": 45,
+      "returned": 45
+    },
+    "has-unrecognized": {
+      "sha256": "23738ed21977502b0b1e661e019aa5cfee8d7438b4fd7bcbae0b35671d1d16e7",
+      "total": 60,
+      "returned": 50
+    }
+  },
+  "modes": {
+    "A": {
+      "sha256": "23738ed21977502b0b1e661e019aa5cfee8d7438b4fd7bcbae0b35671d1d16e7",
+      "total": 60,
+      "returned": 50
+    },
+    "limited-field": {
+      "sha256": "23738ed21977502b0b1e661e019aa5cfee8d7438b4fd7bcbae0b35671d1d16e7",
+      "total": 60,
+      "returned": 50
+    }
+  }
+}

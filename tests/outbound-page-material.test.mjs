@@ -1,8 +1,12 @@
 import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';
 import {workMaterialCountFor} from '../worker-v2/work-chain.js';
 import {outboundFixture,outboundHash,outboundCases,publishedOutboundSql} from './outbound-page-material-fixture.mjs';
-const published=JSON.parse(fs.readFileSync(new URL('./outbound-page-material-baseline.json',import.meta.url)));
-test('outbound API matches every published field, date/filter, tie order, summary and page across 22 cases',async t=>{
+const original=JSON.parse(fs.readFileSync(new URL('./outbound-page-material-baseline.json',import.meta.url)));
+// Derived from the fixed published Worker, permitting only the explicit null
+// count correction and its filter/page consequences. Keep the old hashes intact.
+const corrected=JSON.parse(fs.readFileSync(new URL('./material-count-corrected-baseline.json',import.meta.url)));
+const published={...original,cases:{...original.cases,...corrected.cases},modes:{...original.modes,...corrected.modes}};
+test('outbound API preserves all 22 published cases with only the explicit null count/filter correction',async t=>{
  const f=await outboundFixture(t),before=await f.snapshot();
  for(const [name,body]of outboundCases){
   const {r,queries}=await f.read(body);assert.equal(outboundHash(r),published.cases[name].sha256,name);assert.equal(r.total,published.cases[name].total,name);assert.equal(r.items.length,published.cases[name].returned,name);assert.equal(queries.length,1);assert.equal(queries[0].length,2,'count and list stay in the same batch');
