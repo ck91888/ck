@@ -12,3 +12,29 @@
 字面 JSON `null` 在发布版原逻辑会抛 TypeError；本轮保留该既有行为和抛错前的逐单赋值顺序，不在性能批静默更改旧数据策略。语法损坏的 JSON 与空字符串仍按原 fallback 计算。
 
 所有输入为隔离合成数据。100/1000/10000 的 helper 与真实登录完整 API 对照、全量和浏览器回归正在后续阶段执行；本阶段不作为发布放行。未合测试、未部署，不接触正式版或真实业务数据。
+
+## 阶段二：规模与完整 API 对照
+
+第一阶段源码已推送 `8403b5427fd5cc35394e8b5a2ca37727dbf94c26`。本环境串行 helper 对照，计时不含输入生成/复制、输出和 SQL 哈希计算：
+
+| 作业单 | 打印事件 | 发布算法 | 分桶算法 | 完整输出及查询参数 |
+| --- | ---: | ---: | ---: | --- |
+| 100 | 900 | 16.291ms | 26.404ms | 相同 |
+| 1000 | 9090 | 612.799ms | 450.702ms | 相同 |
+| 10000 | 90900 | 36666.468ms | 1139.690ms | 相同 |
+
+万单历史计算减少约 96.89%；100 单本轮稍慢，小规模不承诺加速。没有 CI 墙钟阈值断言；增加万单完整输出/查询冻结哈希作为回归。
+
+完整 API 夹具通过实际办公室登录、操作人确认与 Worker `fetch` 执行 `sop_need_groups`，数据均在 `:memory:`，可选复制至本地 workerd D1。包含旧字段缺失、多版本、无历史、损坏 JSON、空/数组 JSON；请求前后检查原需求、单号、审计、工时、成果、出入库与附件快照。实际 API 小规模专项 **1/0/0**。
+
+完整 API 计时包含授权、查询、全量历史归集、组装、筛选、分页与序列化；不含准备数据及原记录快照。当前发布基线首屏已完成 100/1000/10000：113.841ms / 1742.958ms / 170508.479ms。万单末尾筛选及新实现串行对照尚未完成，不能仅用 helper 降幅代替完整 API 收益。
+
+可复现命令（均不访问站点）：
+
+```sh
+node tests/work-print-history-performance.mjs
+CK_PRINT_HISTORY_API_MODULE=/已发布deb5f249工作区/worker-v2/index.js CK_PRINT_HISTORY_METRICS=/tmp/print-old.json node tests/work-print-history-api-performance.mjs
+CK_PRINT_HISTORY_BASELINE_METRICS=/tmp/print-old.json CK_PRINT_HISTORY_METRICS=/tmp/print-new.json node tests/work-print-history-api-performance.mjs
+```
+
+默认 100/1000/10000 单及万单末尾筛选；`CK_PRINT_HISTORY_SIZES` 可选规模。新实现可直接加载旧版指标文件，自动断言完整响应哈希/字节、SQL/参数哈希、总数、顺序所体现的全文与分页一致，仅耗时除外。小规模原生 D1 由 `CK_PRINT_HISTORY_NATIVE_D1=true` 启用。

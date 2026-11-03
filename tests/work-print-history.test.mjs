@@ -1,4 +1,5 @@
 import test from 'node:test';import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
 import {workNeedPrintFacts,workNeedPrintSummary} from '../worker-v2/work-need-print.js';
 import {historyFixture,historyEnvironment,publishedPrintFacts,PRINT_HISTORY_SQL} from './work-print-history-fixture.mjs';
 async function compare(items,events,options){
@@ -9,8 +10,12 @@ async function compare(items,events,options){
  assert.deepEqual(workNeedPrintSummary(next),workNeedPrintSummary(old));return next;
 }
 for(const size of [100,1000])test('print history indexing matches published full output and exact query at '+size+' needs',async()=>{const f=await historyFixture(size);await compare(f.items,f.events);});
+test('ten thousand needs retain the frozen published complete output and query hashes',async()=>{
+ const f=await historyFixture(10000),{env,reads}=historyEnvironment(f.events);await workNeedPrintFacts(env,f.items);const hash=x=>createHash('sha256').update(JSON.stringify(x)).digest('hex');
+ assert.equal(hash(f.items),'9c1e61cfb16050a8031afbaf002795f2f47770bc2016176bbd1cf528dd6e2c8a');assert.equal(hash(reads),'1d650d64521e941112a9d930af9f8a84f9b48eaa3ed8aba27795fb3023d6fb09');
+});
 test('equal timestamps keep request ordering, oldest matching version still counts, and mixed kinds are untouched',async()=>{
- const f=await historyFixture(3,12);f.items.push({id:f.items[1].id,kind:'task',print_status:{state:'synthetic-existing'}});
+ const f=await historyFixture(3,12);f.events=f.events.map(e=>({...e,created_at:'2026-11-03T00:00:00.000Z'})).sort((a,b)=>b.request_id.localeCompare(a.request_id));f.items.push({id:f.items[1].id,kind:'task',print_status:{state:'synthetic-existing'}});
  const result=await compare(f.items,f.events),own=f.events.filter(x=>x.record_id===f.items[1].id);
  assert.equal(result[1].print_status.last_by,own[0].actor_name);assert.equal(result[1].print_status.last_at,own[0].created_at);assert.equal(result[1].print_status.request_count,12);assert.equal(result[1].print_status.state,'requested');assert.equal(result[0].print_status.state,'unknown');assert.equal(result[3].print_status.state,'synthetic-existing');
 });
