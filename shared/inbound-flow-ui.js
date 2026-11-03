@@ -136,7 +136,7 @@ window.CKInstallInboundFlow=function(app){
     document.getElementById('inboundResultLines').hidden=isPutaway;
     document.getElementById('inboundExtraSort').parentElement.parentElement.parentElement.hidden=isPutaway;
     for(const id of ['inboundResultNote','inboundRemark']){const el=document.getElementById(id);el.hidden=isPutaway;el.previousElementSibling.hidden=isPutaway;}
-    const finish=document.querySelector('button[onclick="finishInbound(this)"]');if(finish)finish.textContent=isPutaway?'完成上架 / 적치 완료':job?.job_type==='inbound_direct_tally'?'完成理货 / 검수 완료':'完成入库 / 입고 완료';updateInboundFinish(job);
+    const finish=document.querySelector('button[onclick="finishInbound(this)"]');if(finish)finish.textContent=isPutaway?'完成上架 / 적치 완료':job?.arrival_batch?'完成本批理货 / 이번 차수 검수 완료':job?.job_type==='inbound_direct_tally'?'完成理货 / 검수 완료':'完成入库 / 입고 완료';updateInboundFinish(job);
   };
   const originalApi=window.api;window.api=async function(body){
    if(body.action==='v2_inbound_job_finish'&&body.complete_job&&window._inboundPlanData?.plan?.source_type==='direct_tally_session'&&stageType()==='inbound_direct_tally'){

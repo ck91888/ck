@@ -27,7 +27,7 @@ export async function validateInboundStage(env,plan,code,type){
  if(closed)throw Error('已有系统04:00结束的原任务，请从现场首页打开原任务，核对人员后恢复 / 04:00 종료된 기존 작업을 열어 인원 확인 후 재개하세요');
  const tally=jobs.find(j=>j.job_type===tallyType&&j.status==='completed');
  const arrival=await inboundArrivalState(env,plan);
- if(type===tallyType&&tally&&(!arrival?.batched||!arrival.remaining))throw Error('本单已到仓部分已理货，请等待后续到货或从上架入口派工 / 도착분 검수 완료');
+ if(type===tallyType&&tally&&(!arrival?.batched||!arrival.remaining))throw Error('本单已到仓部分理货已完成，请等待后续到货或从上架入口派工 / 도착분 검수 완료');
  if(type===putawayType&&arrival?.batched&&(!arrival.fully_arrived||arrival.remaining))throw Error('请等待齐货并完成各批理货后再上架 / 전체 도착·검수 완료 후 적치하세요');
  if(type===putawayType&&!tally)throw Error('本单理货尚未完成，不能开始上架 / 검수 완료 후 적치를 시작하세요');
  if(jobs.some(j=>j.job_type===type&&!(type===tallyType&&arrival?.batched&&j.status==='completed')))throw Error('此单已有原任务，请打开原任务核对状态与人员 / 기존 작업의 상태와 인원을 확인하세요');

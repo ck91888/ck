@@ -30,10 +30,10 @@ export async function inboundReferenceData(env,classes,body,plan={}){
  }
  return {externalNo:await validateInboundCode(env,classes,combined,plan.id||''),bulkExternalNo:bulk.join('\n')};
 }
-export async function inboundCodeProgress(env,plan,knownJobs,biz){
+export async function inboundCodeProgress(env,plan,knownJobs,biz,knownArrival){
  if(!inboundFlowEnabled(env)||!plan||!needsPutaway(plan))return null;
  const codes=departmentCodes(plan,biz),allCodes=inboundCodes(plan.external_inbound_no);
- const arrival=await inboundArrivalState(env,plan),batched=arrival?.batched,settled=!batched||arrival.fully_arrived&&!arrival.remaining;
+ const arrival=knownArrival===undefined?await inboundArrivalState(env,plan):knownArrival,batched=arrival?.batched,settled=!batched||arrival.fully_arrived&&!arrival.remaining;
  const jobs=knownJobs?knownJobs.filter(j=>['inbound_direct','inbound_bulk',tallyType,putawayType].includes(j.job_type)&&j.status!=='cancelled'):(await env.DB.prepare("SELECT * FROM v2_inbound_references WHERE plan_id=? AND job_type IN ('inbound_direct','inbound_bulk','inbound_direct_tally','inbound_direct_putaway') AND status!='cancelled' ORDER BY created_at DESC").bind(plan.id).all()).results||[];
  const items=codes.map(code=>{
   const matches=jobs.filter(j=>j.inbound_external_no===code||(!j.inbound_external_no&&allCodes.length===1));
@@ -44,7 +44,7 @@ export async function inboundCodeProgress(env,plan,knownJobs,biz){
   const job=final||putaway||active||tally||completed;
   const historicalComplete=codes.length===1&&plan.status==='completed';
   const status=final||historicalComplete?'completed':job?.status==='system_closed'?'system_closed':putaway?'putting_away':active?'working':batched&&!settled&&completed?'partial_tallied':tally?'tallied_pending_putaway':job?'working':'pending';
-  return {external_no:code,biz_class:inboundCodes(plan.bulk_external_inbound_no).includes(code)?'bulk_putaway':'direct_ship',status,job_id:job?.id||'',job_type:job?.job_type||'',tally_job_id:tally?.id||'',...(batched?{can_tally:!active&&!final&&(arrival.remaining>0||arrival.fully_arrived&&!completed),can_putaway:!!tally&&settled&&!active&&!final}:{}),completed_at:final?.updated_at||(historicalComplete?(plan.manual_completed_at||plan.updated_at||''):'')};
+  return {external_no:code,biz_class:inboundCodes(plan.bulk_external_inbound_no).includes(code)?'bulk_putaway':'direct_ship',status,job_id:job?.id||'',job_type:job?.job_type||'',tally_job_id:tally?.id||'',...(batched?{can_tally:!arrival.active_batch&&!active&&!final&&(arrival.remaining>0||arrival.fully_arrived&&!completed),can_putaway:!!tally&&settled&&!active&&!final}:{}),completed_at:final?.updated_at||(historicalComplete?(plan.manual_completed_at||plan.updated_at||''):'')};
  });
  const missing_departments=planClasses(plan).filter(x=>putawayClasses.includes(x)&&(!biz||x===biz)&&!departmentCodes(plan,x).length);
  return {total:items.length,completed:items.filter(x=>x.status==='completed').length,items,missing_departments,...(arrival?{arrival}: {})};

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import worker from '../worker-v2/index.js';
 import {database} from './d1-adapter.mjs';
 import {localD1} from './d1-local-runtime.mjs';
+import {ownedHomeFixture} from './field-owned-home-fixture.mjs';
 const tally='inbound_direct_tally',putaway='inbound_direct_putaway';
 async function fixture(t){
  const seed=database();let DB=seed;if(process.env.CK_PARTIAL_NATIVE_D1==='true'){DB=await localD1(seed.raw);seed.raw.close();t.after(()=>DB.close());}else t.after(()=>DB.raw.close());
@@ -73,10 +74,13 @@ test('first courier tally preserves pending truck eligibility, then truck quanti
 });
 test('competing batch starts and different-reference finishes cannot consume the same arrived unit twice',async t=>{
  const f=await fixture(t),p=await f.create({external_inbound_no:f.code+'\nSYNTH-PARTIAL-B'});await f.receive(0);
- const started=await Promise.all([f.start(p),f.start(p)]);assert.equal(started.filter(x=>x.ok).length,1);
- const a=started.find(x=>x.ok),b=await f.start(p,tally,'SYNTH-PARTIAL-B');assert.equal(b.ok,true,JSON.stringify(b));
- const replies=await Promise.all([f.finish(a,1),f.finish(b,1)]);assert.equal(replies.filter(x=>x.ok).length,1,JSON.stringify(replies));
- const d=await f.detail(p);assert.equal(d.lines[0].putaway_qty,1);assert.notEqual(d.plan.status,'completed');
+ const started=await Promise.all([f.start(p),f.start(p,tally,'SYNTH-PARTIAL-B')]);assert.equal(started.filter(x=>x.ok).length,1,JSON.stringify(started));
+ const a=started.find(x=>x.ok),other=a.external_inbound_no===f.code?'SYNTH-PARTIAL-B':f.code;
+ assert.equal((await f.start(p,tally,other)).ok,false);assert.equal((await f.finish(a,1)).ok,true);
+ let d=await f.detail(p);assert.equal(d.lines[0].putaway_qty,1);assert.notEqual(d.plan.status,'completed');assert.equal(d.jobs.filter(j=>j.job_type===tally).length,1);
+ await f.receive(1);const b=await f.start(p,tally,other);assert.equal(b.ok,true,JSON.stringify(b));assert.equal((await f.finish(b,1)).ok,true);
+ for(const code of [f.code,'SYNTH-PARTIAL-B']){const c=await f.start(p,putaway,code);assert.equal(c.ok,true,JSON.stringify(c));assert.equal((await f.finish(c,undefined,{location_count:1,used_forklift:false})).ok,true);}
+ d=await f.detail(p);assert.equal(d.lines[0].putaway_qty,2);assert.equal(d.plan.inbound_progress.completed,2);assert.equal(d.plan.status,'completed');
 });
 test('bulk putaway also tallies received portions without completing the external reference or business task early',async t=>{
  const f=await fixture(t),p=await f.create({biz_classes:['bulk_putaway'],bulk_external_inbound_no:f.code});await f.receive(0);
@@ -109,4 +113,17 @@ test('old plan-wide unique index and start trigger upgrade safely without rewrit
  assert.deepEqual((await f.DB.prepare(`SELECT * FROM v2_ops_job_workers WHERE job_id='SYNTH-OLD-J'`).all()).results,before);assert.equal((await f.DB.prepare(`SELECT shared_result_json FROM v2_ops_jobs WHERE id='SYNTH-OLD-J'`).first()).shared_result_json,'{"preserved":true}');
  assert.equal(await f.DB.prepare(`SELECT 1 FROM sqlite_master WHERE name='ck_inbound_stage_unique'`).first(),null);
  assert.ok(await f.DB.prepare(`SELECT 1 FROM sqlite_master WHERE name='ck_inbound_stage_active'`).first());
+});
+test('strict badge login keeps partial-batch ownership permissions and rejects an unrelated dispatcher without output or clock changes',async t=>{
+ const f=await ownedHomeFixture();let DB=f.DB;
+ if(process.env.CK_PARTIAL_NATIVE_D1==='true'){DB=await localD1(f.DB.raw);f.DB.raw.close();f.env.DB=DB;t.after(()=>DB.close());}else t.after(()=>DB.raw.close());
+ const p=await f.ok('office','v2_inbound_plan_create',{customer:'合成权限客户',biz_classes:['bulk_putaway'],external_inbound_no:'SYNTH-PRIVATE-PARTIAL',bulk_external_inbound_no:'SYNTH-PRIVATE-PARTIAL',lines:[{unit_type:'courier',tracking_nos:['999001660001','999001660002']}]});
+ const scanner=await f.person(),batch=(await f.ok('office','sop_courier_receive',{operation:'start',workers:[{id:scanner.badgeId,name:scanner.name}],lead_id:scanner.badgeId})).batch;
+ await f.ok('office','sop_courier_receive',{tracking_no:'999001660001',owner:'8-1',batch_id:batch.id,scanner_badge:scanner.badgeId});
+ const w=await f.person(),j=await f.ok('A','sop_native_start',{payload:{action:'v2_inbound_job_start',plan_id:p.id,external_inbound_no:'SYNTH-PRIVATE-PARTIAL',job_type:'inbound_bulk',biz_class:'bulk',client_req_id:crypto.randomUUID()},workers:[{id:w.badgeId,name:w.name}],lead_id:w.badgeId,estimated_minutes:15});
+ const body={job_id:j.job_id,worker_id:w.badgeId,complete_job:true,result_lines:[{unit_type:'courier',putaway_qty:1}]};
+ const clocks=(await DB.prepare('SELECT * FROM v2_ops_job_workers WHERE job_id=? ORDER BY id').bind(j.job_id).all()).results;
+ assert.equal((await f.call('B','v2_inbound_job_finish',body)).ok,false);assert.equal((await DB.prepare('SELECT COUNT(*) AS n FROM v2_ops_job_results WHERE job_id=?').bind(j.job_id).first()).n,0);assert.deepEqual((await DB.prepare('SELECT * FROM v2_ops_job_workers WHERE job_id=? ORDER BY id').bind(j.job_id).all()).results,clocks);
+ assert.equal((await f.call('A','v2_inbound_job_finish',{...body,result_lines:[{unit_type:'courier',putaway_qty:2}]})).ok,false);
+ assert.equal((await f.call('A','v2_inbound_job_finish',body)).ok,true);const d=await f.ok('office','v2_inbound_plan_detail',{id:p.id});assert.equal(d.lines[0].putaway_qty,1);assert.notEqual(d.plan.status,'completed');
 });

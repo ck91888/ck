@@ -12,14 +12,18 @@ export async function inboundArrivalState(e,plan){
   (SELECT COUNT(*) FROM ck_courier_plan_items i WHERE i.plan_id=p.id) AS total,
   (SELECT COUNT(*) FROM ck_courier_plan_items i JOIN ck_courier_receipts r ON r.tracking_no=i.tracking_no WHERE i.plan_id=p.id) AS received,
   EXISTS(SELECT 1 FROM ck_inbound_arrival_batches b WHERE b.plan_id=p.id) AS batched,
+  (SELECT j.id FROM v2_inbound_plan_jobs j WHERE j.plan_id=p.id AND j.job_type IN ('inbound_direct_tally','inbound_bulk','inbound_direct') AND j.status NOT IN ('completed','cancelled') LIMIT 1) AS active_batch,
   (SELECT json_group_array(json_object('id',l.id,'unit_type',l.unit_type,'planned_qty',l.planned_qty,'tallied',COALESCE(l.putaway_qty,0),'arrived',${arrivedLineSQL('l')})) FROM (SELECT * FROM v2_inbound_plan_lines WHERE plan_id=p.id ORDER BY line_no,id) l) AS lines_json
   FROM v2_inbound_plans p WHERE p.id=?`,id).first();
  if(!receipt?.total)return null;
- const lines=JSON.parse(receipt.lines_json||'[]'),batched=!!receipt.batched;
+ return arrivalStateFromRows(receipt,receipt,JSON.parse(receipt.lines_json||'[]'),!!receipt.batched,receipt.active_batch);
+}
+export function arrivalStateFromRows(plan,receipt,lines,batched,activeBatch=''){
+ if(!receipt?.total)return null;
  const truck=lines.some(l=>l.unit_type!=='courier'&&l.planned_qty>0);
- const fully_arrived=receipt.received===receipt.total&&(!truck||!!receipt.unload_completed_at);
+ const fully_arrived=receipt.received===receipt.total&&(!truck||!!plan.unload_completed_at);
  const caps=lines.map(l=>({line_id:l.id,unit_type:l.unit_type,arrived:Number(l.arrived),tallied:Number(l.tallied),available:Math.max(0,Number(l.arrived)-Number(l.tallied))}));
- return {total:receipt.total,received:receipt.received,batched,fully_arrived,lines:caps,remaining:caps.reduce((s,l)=>s+l.available,0)};
+ return {total:receipt.total,received:receipt.received,batched:!!batched,active_batch:activeBatch||'',fully_arrived,lines:caps,remaining:caps.reduce((s,l)=>s+l.available,0)};
 }
 export async function inboundArrivalScope(e,plan,code,type){
  if(!arrivalBatchTypes.includes(type))return null;
@@ -28,6 +32,7 @@ export async function inboundArrivalScope(e,plan,code,type){
  // Existing truck-first work keeps its original finish gate until a courier
  // receipt actually starts this partial-courier workflow.
  if(!state.received)return null;
+ if(state.active_batch)throw Error('本计划已有一批正在理货，请先继续或完成原批次，避免重复理货 / 기존 차수를 먼저 완료하세요');
  const previous=await q(e,`SELECT 1 FROM v2_ops_jobs WHERE related_doc_type='inbound_plan' AND related_doc_id=? AND inbound_external_no=? AND job_type=? AND status='completed' LIMIT 1`,plan.id,code,type).first();
  if(!state.remaining&&(!state.fully_arrived||previous))throw Error('已到仓部分已理货，请等待后续到货 / 도착분 검수 완료·추가 입고 대기');
  return {plan_id:plan.id,external_no:code,fully_arrived:state.fully_arrived,received:state.received,total:state.total,lines:state.lines};
