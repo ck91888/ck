@@ -190,10 +190,13 @@ async function verifyTakeover(env,u,b){
  ) THEN RAISE(ABORT,'verify_takeover_changed') END; END`)]));
  return save(env,b,u,row,next);
 }
-export async function handleSop(b,env) {
+export async function handleSop(b,env,{authenticationOnly=false}={}) {
  if(env.SOP_UPGRADE_ENABLED!=='true') return {ok:false,error:'新版尚未启用，原系统继续使用',disabled:true};
  const auth=env.SOP_REQUEST_USER ? {ok:true,user:env.SOP_REQUEST_USER} : authorization(b,env); if(!auth.ok) return auth;
  const u=auth.user;
+ // Maintenance login must use the same credential checks without restoring
+ // document numbers or touching business initialization after a partial reset.
+ if(authenticationOnly&&b.action==='sop_session')return {ok:true,user:{id:u.id,name:u.name,role:u.role,departments:u.departments||[]},mode:env.SOP_ENVIRONMENT||'pilot'};
  try {
   const receipt=await needCreateStatus(b,env,u)||await needCreateReplay(b,env,u);if(receipt)return receipt;
   await ensureDocumentNumbers(env);

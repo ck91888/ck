@@ -9,9 +9,13 @@ async function maintenanceSession(request,env){
  try{
   const url=new URL(request.url),body=request.method==='GET'?Object.fromEntries(url.searchParams):request.headers.get('Content-Type')?.includes('application/json')?await request.clone().json():{};
   if(!['sop_identity','sop_login','sop_logout','sop_operator_confirm'].includes(body.action))return null;
+  // Match the normal authentication request boundary before reading or mutating
+  // sessions/operator contexts, including same-site requests from another origin.
+  if(request.method!=='POST'||request.headers.get('Origin')&&request.headers.get('Origin')!==url.origin||request.headers.get('Sec-Fetch-Site')==='cross-site')return response({ok:false,error:'请从本系统页面操作 / 시스템 화면에서 조작하세요'},403);
+  if(!request.headers.get('Content-Type')?.includes('application/json'))return response({ok:false,error:'Invalid content type'},415);
   if(accessEnabled(env)&&accessScope(request)!=='office'&&body.action!=='sop_logout')return null;
   const e={...env,SOP_REQUEST_USER:await sessionUser(request,env)};await officeOperationContext(request,e);
-  return body.action==='sop_operator_confirm'?confirmOfficeOperator(body,e,request):sessionAction(body,e,request);
+  return body.action==='sop_operator_confirm'?confirmOfficeOperator(body,e,request):sessionAction(body,e,request,{authenticationOnly:true});
  }catch{return null;}
 }
 const staging={async fetch(request,env,ctx){

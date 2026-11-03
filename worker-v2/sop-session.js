@@ -24,7 +24,7 @@ export async function sessionUser(request,env){
   const users=JSON.parse(env.SOP_USERS_JSON);return users.find(x=>x.id===p.id)||null;
  }catch{return null;}
 }
-export async function sessionAction(body,env,request){
+export async function sessionAction(body,env,request,{authenticationOnly=false}={}){
  if(accessEnabled(env))return accessSessionAction(body,env,request);
  if(env.SOP_ENVIRONMENT!=='staging'||env.SOP_UPGRADE_ENABLED!=='true')return null;
  const headers={'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'};
@@ -35,7 +35,7 @@ export async function sessionAction(body,env,request){
   return response(u?{ok:true,user:{id:u.id,name:u.name,role:u.role,departments:u.departments||[],public_test:!!u.public_test}}:{ok:false,unauthorized:true,error:'请登录测试系统'});
  }
  if(body.action!=='sop_login')return null;
- const result=await handleSop({...body,action:'sop_session'},{...env,SOP_REQUEST_USER:null});
+ const result=await handleSop({...body,action:'sop_session'},{...env,SOP_REQUEST_USER:null},{authenticationOnly});
  if(!result.ok)return response(result);
  const u=principal(body,env);
  const data=b64(enc.encode(encodeURIComponent(JSON.stringify({id:u.id,exp:Date.now()+lifetime*1000}))));
