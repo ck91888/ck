@@ -137,3 +137,33 @@ for(const kind of ['feedback','no-document','dynamic'])test(kind+' in-flight old
  const reply=await pending;gate.restore();assert.equal(reply.ok,false,JSON.stringify(reply));assert.deepEqual(await s.snapshot(),before);
  const rows=await f.rows('SELECT joined_at,left_at FROM v2_ops_job_workers WHERE job_id=? ORDER BY joined_at',s.id);assert.equal(rows.filter(r=>r.left_at==='').length,1);assert.ok(rows.every(r=>!r.left_at||Date.parse(r.left_at)>=Date.parse(r.joined_at)));
 });
+for(const kind of ['feedback','no-document','dynamic'])test(kind+' held same-request exit replays its receipt without closing a replacement segment',async t=>{
+ const f=await fixture(t),s=await scenario(f,kind),request={...s.body,leave_only:true,result_lines:[],client_req_id:'SYN-SAME-EXIT-'+s.id};
+ t.mock.timers.tick(3*60000);const gate=await holdFirstWrite(f,s.id),pending=f.call('A',s.action,request);await gate.ready;let before,saved;
+ try{
+  saved=await f.ok('A',s.action,request);t.mock.timers.tick(60000);
+  const row=await f.first('SELECT revision FROM sop_records WHERE id=?',s.id),w=await f.first('SELECT worker_id,worker_name FROM v2_ops_job_workers WHERE job_id=?',s.id);
+  await f.ok('A','sop_native_people',{job_id:s.id,revision:row.revision,workers:[{id:w.worker_id,name:w.worker_name}],lead_id:w.worker_id,reason:'合成同请求退出后重入'});before=await s.snapshot();
+ }finally{gate.release();}
+ const reply=await pending;gate.restore();assert.deepEqual(reply,saved);assert.deepEqual(await s.snapshot(),before);assert.equal((await f.first('SELECT COUNT(*) n FROM ck_unload_exit_checks')).n,0);
+});
+for(const kind of ['feedback','no-document','dynamic'])test(kind+' empty exit snapshot cannot acquire a newly joined segment',async t=>{
+ const f=await fixture(t),s=await scenario(f,kind),request={...s.body,leave_only:true,result_lines:[],client_req_id:'SYN-EMPTY-EXIT-'+s.id};
+ t.mock.timers.tick(3*60000);await f.ok('A',s.action,{...request,client_req_id:crypto.randomUUID()});
+ const gate=await holdFirstWrite(f,s.id),pending=f.call('A',s.action,request);await gate.ready;let before;
+ try{
+  t.mock.timers.tick(60000);const row=await f.first('SELECT revision FROM sop_records WHERE id=?',s.id),w=await f.first('SELECT worker_id,worker_name FROM v2_ops_job_workers WHERE job_id=?',s.id);
+  await f.ok('A','sop_native_people',{job_id:s.id,revision:row.revision,workers:[{id:w.worker_id,name:w.worker_name}],lead_id:w.worker_id,reason:'合成空退出请求等待期间加入'});before=await s.snapshot();
+ }finally{gate.release();}
+ const reply=await pending;gate.restore();assert.equal(reply.ok,false);assert.deepEqual(await s.snapshot(),before);assert.equal((await f.first('SELECT COUNT(*) n FROM ck_unload_exit_checks')).n,0);
+});
+test('an edited original clock also invalidates its in-flight exit without rewriting the correction',async t=>{
+ const f=await fixture(t),s=await scenario(f),request={...s.body,leave_only:true,result_lines:[],client_req_id:crypto.randomUUID()};
+ t.mock.timers.tick(3*60000);const gate=await holdFirstWrite(f,s.id),pending=f.call('A',s.action,request);await gate.ready;let before;
+ try{await f.env.DB.prepare("UPDATE v2_ops_job_workers SET joined_at='2026-11-03T00:01:00.000Z' WHERE job_id=? AND left_at=''").bind(s.id).run();before=await s.snapshot();}finally{gate.release();}
+ const reply=await pending;gate.restore();assert.equal(reply.ok,false);assert.deepEqual(await s.snapshot(),before);
+});
+test('an exit cannot create an end earlier than an already future-dated open segment',async t=>{
+ const f=await fixture(t),s=await scenario(f);await f.env.DB.prepare("UPDATE v2_ops_job_workers SET joined_at='2026-11-03T00:04:00.000Z' WHERE job_id=? AND left_at=''").bind(s.id).run();
+ t.mock.timers.tick(3*60000);const before=await s.snapshot();assert.equal((await f.call('A',s.action,{...s.body,leave_only:true,result_lines:[]})).ok,false);assert.deepEqual(await s.snapshot(),before);
+});

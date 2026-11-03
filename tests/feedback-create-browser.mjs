@@ -12,7 +12,7 @@ import {operationHeaders,rememberOperation,confirmOperation} from './office-oper
 
 const require=createRequire(import.meta.url);
 const {chromium}=require(require.resolve('playwright',{paths:[process.env.CODEX_PRIMARY_RUNTIME_NODE_MODULES]}));
-const DB=database(),objects=new Map(),artifacts=path.join(tmpdir(),'ck-feedback-create');
+const DB=database(),objects=new Map(),artifacts=process.env.CK_FEEDBACK_CREATE_ARTIFACTS||path.join(tmpdir(),'ck-feedback-create');
 fs.mkdirSync(artifacts,{recursive:true});
 const env={DB,SOP_ENVIRONMENT:'staging',SOP_UPGRADE_ENABLED:'true',SOP_WORK_CHAIN_ENABLED:'true',SOP_ATTENDANCE_ENABLED:'true',SOP_ACCESS_CONTROL:'true',SOP_ADMIN_CODE_SHA256:await digest('feedback-create-fixture'),R2_BUCKET:{
  async put(key,body,meta){objects.set(key,{body:new Uint8Array(await new Response(body).arrayBuffer()),...meta});},
@@ -72,7 +72,11 @@ const server=http.createServer(async(req,res)=>{try{
 }catch(error){res.writeHead(500);res.end(error.message);}});
 await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));const origin='http://127.0.0.1:'+server.address().port;
 const browser=await chromium.launch({executablePath:process.env.CK_BROWSER_EXECUTABLE||'/usr/bin/chromium',headless:true,args:['--no-sandbox']});
-const context=await browser.newContext({viewport:{width:1440,height:1000}}),page=await context.newPage(),errors=[],dialogs=[],requests=[],scenarios=[];
+const context=await browser.newContext({viewport:{width:1440,height:1000}}),page=await context.newPage(),errors=[],dialogs=[],requests=[],scenarios=[],network=[];
+const actionOf=request=>{try{return request.headers()['content-type']?.includes('application/json')?request.postDataJSON()?.action||'':'';}catch{return '';}};
+const trace=entry=>{network.push(entry);if(network.length>80)network.shift();};
+page.on('requestfailed',request=>trace({event:'requestfailed',path:new URL(request.url()).pathname,action:actionOf(request),error:request.failure()?.errorText}));
+page.on('response',response=>{const action=actionOf(response.request());if(action)trace({event:'response',action,status:response.status()});});
 page.setDefaultTimeout(15000);page.on('pageerror',error=>errors.push(error.message));
 page.on('dialog',async dialog=>{dialogs.push(dialog.message());await dialog.accept(dialog.type()==='prompt'?'Synthetic confirmation':undefined);});
 page.on('request',request=>{if(request.method()==='POST'&&request.headers()['content-type']?.includes('application/json')){try{requests.push(request.postDataJSON());}catch{}}});
@@ -150,6 +154,15 @@ try{
  const bulkDetail=await call('v2_inbound_plan_detail',{id:bulk.id});assert.equal(bulkDetail.jobs[0].id,sources.bulk.job_id);assert.equal(bulkDetail.unload_summary.completed,true);assert.equal(bulkDetail.unload_summary.result_lines[0].actual_qty,1);assert.equal(bulkDetail.arrival_photos[0].id,sources.bulk.photo.id);
  assert.equal(bulkDetail.lines[0].unit_type,'pallet');assert.equal(bulkDetail.lines[0].planned_qty,1);assert.equal(bulkDetail.lines[0].actual_qty,1);immutable(sources.bulk);
  await detail(bulk.id);await page.screenshot({path:path.join(artifacts,'linked-bulk-detail.png'),fullPage:true});
+ // Distinct read request IDs exercise two independent responses; otherwise the
+ // session layer intentionally coalesces identical in-flight reads.
+ await page.evaluate(()=>{window.__detailApiBeforeRace=window.api;window.api=body=>window.__detailApiBeforeRace(body.action==='v2_inbound_plan_detail'?{...body,client_req_id:crypto.randomUUID()}:body);});
+ const oldDetail=await heldResponse(b=>b?.action==='v2_inbound_plan_detail'&&b.id===bulk.id);
+ await page.evaluate(()=>{window.__heldInboundDetail=window.loadInboundDetail();});await oldDetail.entered;
+ await page.evaluate(()=>window.loadInboundDetail());await oldDetail.finish();await page.evaluate(()=>window.__heldInboundDetail);
+ assert.equal(await page.locator('#inboundDetailBody .ck-feedback-origin').count(),1,'obsolete detail continuation must not append another origin panel');
+ assert.equal(await page.locator('#inboundDetailBody .ck-inbound-reference').count(),1,'obsolete detail continuation must not append another references panel');
+ await page.evaluate(()=>{window.api=window.__detailApiBeforeRace;delete window.__detailApiBeforeRace;});
  const downloaded=await page.evaluate(async key=>{const r=await fetch('/002/api?action=v2_attachment_get&file_key='+encodeURIComponent(key));return {status:r.status,bytes:[...new Uint8Array(await r.arrayBuffer())]};},sources.bulk.photo.file_key);assert.equal(downloaded.status,200);assert.deepEqual(Buffer.from(downloaded.bytes),png);
  await page.locator('#inboundDetailBody .ck-feedback-origin button').click();await page.locator('#feedbackDetailBody [data-feedback-create-open]').waitFor();assert.equal(await page.locator('[data-feedback-create]').count(),0);await page.locator('#feedbackDetailBody [data-feedback-create-open]').click();await page.locator('#view-inbound_detail').waitFor({state:'visible'});await page.waitForFunction(id=>window._currentInboundId===id,bulk.id);
  record('double click creates one bulk plan; original job, crew, labor, quantities and exact photo bytes remain; already linked opens existing plan');
@@ -157,6 +170,12 @@ try{
  await fromFeedback(sources.direct);await valid('Synthetic source direct','direct_ship');assert.equal(await page.locator('#ck-ibc-external').inputValue(),'');
  const direct=await save();assert.equal(direct.ok,true,JSON.stringify(direct));assert.equal(state(direct.id).status,'arrived_pending_putaway');
  const directDetail=await call('v2_inbound_plan_detail',{id:direct.id});assert.equal(directDetail.unload_summary.completed,true);assert.equal(directDetail.jobs.filter(j=>j.job_type==='unload').length,1);assert.equal(DB.raw.prepare('SELECT status FROM v2_inbound_plan_biz_tasks WHERE plan_id=? AND biz_class=?').get(direct.id,'direct_ship').status,'pending');immutable(sources.direct);
+ const oldOtherDetail=await heldResponse(b=>b?.action==='v2_inbound_plan_detail'&&b.id===bulk.id);
+ await page.evaluate(id=>{window._currentInboundId=id;window.__heldInboundDetail=window.loadInboundDetail();},bulk.id);await oldOtherDetail.entered;
+ await page.evaluate(async id=>{window._currentInboundId=id;await window.loadInboundDetail();},direct.id);
+ await oldOtherDetail.finish();await page.evaluate(()=>window.__heldInboundDetail);
+ assert.equal(await page.locator('#inboundDetailBody .ck-feedback-origin').count(),1);assert.equal(await page.locator('#inboundDetailBody .ck-inbound-reference').count(),1);
+ assert.match(await page.locator('#inboundDetailBody .ck-feedback-origin').innerText(),new RegExp(sourceState(sources.direct).display_no));
  const blockedPutaway=await raw({action:'sop_native_start',payload:{action:'v2_inbound_job_start',plan_id:direct.id,job_type:'inbound_direct',biz_class:'direct_ship',external_inbound_no:'',client_req_id:crypto.randomUUID()},workers:[{id:crew[0].badgeId,name:crew[0].name}],lead_id:crew[0].badgeId,estimated_minutes:10,client_req_id:crypto.randomUUID()});assert.equal(blockedPutaway.ok,false);assert.match(blockedPutaway.error||blockedPutaway.message,/外部|单号|번호/);
  record('direct_ship can be registered without invented references; putaway stays pending and cannot start without a reference');
 
@@ -199,5 +218,6 @@ try{
  fs.writeFileSync(path.join(artifacts,'acceptance.json'),JSON.stringify({ok:true,pageErrors:errors,dialogs,scenarios,counts:{plans:count('v2_inbound_plans'),originalUnloads:count('v2_ops_jobs'),originalWorkerSegments:count('v2_ops_job_workers'),originalResults:count('v2_ops_job_results'),originalPhotos:DB.raw.prepare("SELECT count(*) n FROM v2_attachments WHERE attachment_category='unload_photo'").get().n,newInboundMaterials:retryDetail.inbound_materials.length+plainLateDetail.inbound_materials.length,totalStoredObjects:objects.size},screenshots:['source-standard-form-desktop.png','source-standard-form-mobile-ko.png','linked-bulk-detail.png']},null,2));
  console.log('PASS actual /002 source-aware standard create, real atomic Worker links, immutable unload evidence, retry and asynchronous form isolation. Artifacts: '+artifacts);
 }catch(error){
- fs.writeFileSync(path.join(artifacts,'acceptance.json'),JSON.stringify({ok:false,error:error.stack,pageErrors:errors,dialogs,scenarios},null,2));console.error('JS errors',errors);console.error('PAGE',await page.locator('body').innerText());await page.screenshot({path:path.join(artifacts,'failure.png'),fullPage:true}).catch(()=>{});throw error;
+ const state=await page.evaluate(()=>{const p=window.CKInboundSave?.getState?.();return {path:location.pathname,visibleViews:[...document.querySelectorAll('[id^="view-"]')].filter(el=>el.offsetParent!==null).map(el=>el.id),actionLocks:window._actionLocks,draft:p?{id:p.id,busy:p.busy,done:p.done,sent:p.sent,result:p.result?{ok:p.result.ok,id:p.result.id,error:p.result.error}:null}:null};}).catch(()=>null);
+ fs.writeFileSync(path.join(artifacts,'acceptance.json'),JSON.stringify({ok:false,error:error.stack,pageErrors:errors,dialogs,scenarios,state,network},null,2));console.error('BROWSER DIAGNOSTICS',JSON.stringify({state,network}));console.error('JS errors',errors);console.error('PAGE',await page.locator('body').innerText());await page.screenshot({path:path.join(artifacts,'failure.png'),fullPage:true}).catch(()=>{});throw error;
 }finally{await browser.close();await new Promise(resolve=>server.close(resolve));DB.raw.close();}
