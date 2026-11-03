@@ -844,9 +844,9 @@ async function exportOrders(btn) {
     exportCsv(fname, csvRows);
 
   } catch (e) {
-    alert('导出失败: ' + (e && e.message || e));
+    if(owns())alert('导出失败: ' + (e && e.message || e));
   } finally {
-    setBtnLoading(btn, false, "导出明细 CSV");
+    if(owns())setBtnLoading(btn, false, "导出明细 CSV");
   }
 }
 
@@ -1221,8 +1221,9 @@ async function loadWorkhours(btn,nextPage) {
 }
 
 function exportWorkhoursSegments() {
-  if(typeof _whRead!=='undefined'&&_whRead&&!_whRead.canUse()){alert('请重新查询后导出 / 다시 조회한 후 내보내세요');return;}
-  if(_whQuery?.date_basis==='actual_work')return exportActualReport(Object.assign({},_whQuery),'segments',_whRead&&_whRead.canUse).catch(function(e){alert('导出失败：'+e.message);});
+  var read=typeof _whRead!=='undefined'?_whRead:null;
+  if(read&&!read.canUse()){alert('请重新查询后导出 / 다시 조회한 후 내보내세요');return;}
+  if(_whQuery?.date_basis==='actual_work')return exportActualReport(Object.assign({},_whQuery),'segments',read&&read.canUse).catch(function(e){if(!read||read.canUse())alert('导出失败：'+e.message);});
   if (!_whSummary) { alert("请先查询"); return; }
   var rows = (_whSummary.segments || []).map(function(s) {
     return {

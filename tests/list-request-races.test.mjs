@@ -54,3 +54,30 @@ test('workhour export uses latest snapshot and a changing query cancels delayed 
  const actual=f.w.exportActualReport;let captured;f.w.exportActualReport=async p=>{captured=p;};await f.w.exportWorkhoursSegments();assert.equal(captured.worker_name,'NEW');f.w.exportActualReport=actual;
  let release;f.w.collectReportPages=()=>new Promise(r=>release=r);let exports=0;f.w.exportCsv=()=>exports++;const pending=f.w.exportWorkhoursSegments(),c=f.query('CHANGED');release({ok:true,metadata:{},rows:[]});await pending;assert.equal(exports,0);f.pending[2].resolve(good('workhours','SYN-CHANGED'));await c;
 });
+for(const reject of [false,true])test('task export discards delayed '+(reject?'failure':'success')+' after identity changes without unlocking a new export',options,async t=>{
+ const f=fixture(t,'orders');f.w.document.getElementById('ordersDateBasis').value='created_at';let release,fail;f.w.collectReportPages=()=>new Promise((r,j)=>{release=r;fail=j;});let exports=0;f.w.exportCsv=()=>exports++;const btn=f.w.document.createElement('button'),old=f.w.exportOrders(btn);assert.equal(btn.disabled,true);
+ f.w.CKSession.user={...f.w.CKSession.user,id:'SYN-B'};btn.textContent='SYN-NEW-PENDING';if(reject)fail(Error('SYN-OLD-EXPORT'));else release({ok:true,rows:[{id:'SYN-OLD'}],metadata:{}});await old;assert.equal(exports,0);assert.deepEqual(f.alerts,[]);assert.equal(btn.disabled,true);assert.equal(btn.textContent,'SYN-NEW-PENDING');
+});
+test('task export retains current filter policy and normal CSV output',options,async t=>{
+ const f=fixture(t,'orders');f.w.document.getElementById('ordersDateBasis').value='created_at';f.w.document.getElementById(f.field).value='CURRENT-CONTROLS';f.w._ordersQuery={doc_no:'OLD-LOADED'};let p,rows;f.w.collectReportPages=async x=>{p=x;return {ok:true,rows:[{id:'SYN-CSV',display_no:'SYN-CSV'}],metadata:{}};};f.w.exportCsv=(name,value)=>rows=value;const btn=f.w.document.createElement('button');await f.w.exportOrders(btn);assert.equal(p.doc_no,'CURRENT-CONTROLS');assert.equal(rows.length,1);assert.equal(btn.disabled,false);assert.deepEqual(f.alerts,[]);
+});
+test('workhour actual export keeps its loaded query and emits latest valid CSV rows',options,async t=>{
+ const f=fixture(t,'workhours'),a=f.query('SAVED');f.pending[0].resolve(good('workhours','SYN-SAVED'));await a;f.w.document.getElementById(f.field).value='NOT-LOADED';let p,csv;f.w.collectReportPages=async x=>{p=x;return {ok:true,metadata:{snapshot:'SYN-SAVED'},rows:[{id:'SYN-SEGMENT',worker_name:'SYN-WORKER',job_type:'bulk_op'}]};};f.w.exportCsv=(name,rows)=>csv={name,rows};await f.w.exportWorkhoursSegments();assert.equal(p.worker_name,'SAVED');assert.equal(p.report_kind,'segments');assert.equal(csv.rows[0]['人员段ID'],'SYN-SEGMENT');assert.equal(csv.rows[0]['人员'],'SYN-WORKER');
+});
+for(const change of ['query','identity'])test('workhour stale export errors are ignored after '+change+' changes',options,async t=>{
+ const f=fixture(t,'workhours'),a=f.query('SAVED');f.pending[0].resolve(good('workhours','SYN-SAVED'));await a;let fail;f.w.collectReportPages=()=>new Promise((r,j)=>fail=j);const old=f.w.exportWorkhoursSegments();let b;if(change==='identity')f.w.CKSession.user={...f.w.CKSession.user};else b=f.query('CHANGED');fail(Error('SYN-OLD-EXPORT'));await old;assert.deepEqual(f.alerts,[]);if(b){f.pending[1].resolve(good('workhours','SYN-CHANGED'));await b;}
+});
+for(const kind of ['orders','workhours'])test(kind+': latest query failure clears the previous snapshot and rows',options,async t=>{
+ const f=fixture(t,kind),a=f.query('SUCCESS');f.pending[0].resolve(good(kind,'SYN-SUCCESS'));await a;const b=f.query('FAIL');f.pending[1].resolve({ok:false,error:'SYN-FAIL'});await b;if(kind==='orders'){assert.equal(f.w._ordersItems.length,0);assert.equal(f.w._ordersQuery,null);}else{assert.equal(f.w._whSummary,null);assert.equal(f.w._whQuery,null);f.w.exportWorkhoursSegments();assert.equal(f.blobs.length,0);}
+});
+for(const kind of Object.keys(specs))test(kind+': latest failure is retained when an older success arrives later',options,async t=>{
+ const f=fixture(t,kind),a=f.query('OLD'),b=f.query('FAILED-NEW');if(['materials','ledger'].includes(kind))f.pending[1].reject(Error('SYN-NEW-FAIL'));else f.pending[1].resolve({ok:false,error:'SYN-NEW-FAIL'});await b;f.pending[0].resolve(good(kind,'SYN-OLD'));await a;assert.doesNotMatch(f.text(),/SYN-OLD/);assert.match(kind==='workhours'?f.w.document.getElementById('whSummaryRow').textContent:f.text(),/SYN-NEW-FAIL/);
+});
+for(const kind of ['orders','workhours']){
+ test(kind+': in-flight old page cannot overwrite a fresh filter or snapshot',options,async t=>{
+  const f=fixture(t,kind),a=f.query('ORIGINAL');f.pending[0].resolve(good(kind,'SYN-ORIGINAL',{total:401}));await a;const paging=f.w[kind==='orders'?'ordersPage':'workhoursPage'](1);assert.equal(f.pending[1].p.offset,200);assert.equal(f.pending[1].p.snapshot,'SYN-ORIGINAL');const fresh=f.query('FRESH');assert.equal(f.pending[2].p.offset,0);f.pending[2].resolve(good(kind,'SYN-FRESH'));await fresh;f.pending[1].resolve(good(kind,'SYN-OLD-PAGE',{total:401}));await paging;assert.match(f.text(),/SYN-FRESH/);assert.doesNotMatch(f.text(),/SYN-OLD-PAGE/);assert.equal(f.w[kind==='orders'?'_ordersOffset':'_whOffset'],0);assert.equal(f.w[kind==='orders'?'_ordersQuery':'_whQuery'].snapshot,'SYN-FRESH');
+ });
+ test(kind+': cached pagination cannot reuse another identity snapshot',options,async t=>{
+  const f=fixture(t,kind),a=f.query('ORIGINAL');f.pending[0].resolve(good(kind,'SYN-ORIGINAL',{total:401}));await a;f.w.CKSession.user={...f.w.CKSession.user,id:'SYN-B'};await f.w[kind==='orders'?'ordersPage':'workhoursPage'](1);assert.equal(f.pending.length,1);
+ });
+}
