@@ -26,6 +26,7 @@ test('04:00 ends batch labor and child execution without results; explicit batch
  f.DB.raw.exec('DROP TRIGGER ck_daily_badge_join_update');try{f.DB.raw.prepare('UPDATE v2_ops_job_workers SET joined_at=?').run(old);}finally{f.DB.raw.exec(guard);}
  f.DB.raw.prepare('UPDATE v2_ops_jobs SET created_at=?').run(old);f.env.SOP_DAILY_CUTOFF_ENABLED='true';
  let d=await detail(f,created.batch_id);assert.equal(d.batch.status,'system_closed');assert.equal(d.facts.minutes,0);assert.equal(live(f).length,0);assert.ok(d.items.every(x=>x.status==='system_closed'));const before=clocks(f);
+ const dashboard=await f.ok('sop_dashboard',{date:new Date(Date.parse(old)+9*3600000).toISOString().slice(0,10)});assert.equal(dashboard.person_hours,0);assert.equal(dashboard.pending_person_hours,1);assert.equal(dashboard.pending_segment_count,1);
  const result=await f.call('sop_bulk_batch_resume',{id:d.batch.id,revision:d.batch.revision,job_id:d.items[0].id});must(result);d=await detail(f,created.batch_id);assert.equal(d.batch.status,'working');assert.equal(live(f).length,1);assert.ok(d.items.every(x=>x.status==='working'));for(const s of before)assert.deepEqual(clocks(f).find(x=>x.id===s.id),s);assert.equal(f.DB.raw.prepare('SELECT count(*) n FROM v2_ops_job_results').get().n,0);
 });
 const detail=(f,id)=>f.ok('sop_bulk_batch_get',{id});
