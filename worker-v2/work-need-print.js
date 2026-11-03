@@ -40,7 +40,10 @@ export async function recordWorkNeedPrint(b,env,u,numbered){
   if(u.role!=='manager'&&!(u.departments||[]).includes(executionDepartment(row)))throw Error('无此部门打印权限');
   if(x.status==='cancelled'||x.source_cancelled)throw Error('已取消的作业单不能打印');
   if(['inbound','outbound'].includes(x.source_type)){
-   const table=x.source_type==='inbound'?'v2_inbound_plans':'v2_outbound_orders',source=await q(env,'SELECT status,is_deleted FROM '+table+' WHERE id=?',x.source_id).first();
+   // Inbound plans have a soft-delete flag; outbound orders are cancelled and
+   // physically deleted. Query only columns present in each existing schema.
+   const [table,columns]=x.source_type==='inbound'?['v2_inbound_plans','status,is_deleted']:['v2_outbound_orders','status'];
+   const source=await q(env,'SELECT '+columns+' FROM '+table+' WHERE id=?',x.source_id).first();
    if(!source||source.is_deleted||source.status==='cancelled')throw Error('来源单据已取消、删除或缺失，不能记录打印');
   }
   if(row.revision!==want.revision||await workNeedDocumentKey(x)!==want.document_key)throw Error('作业单内容已更新，请重新打印最新版本');
