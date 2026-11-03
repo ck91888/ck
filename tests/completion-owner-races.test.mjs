@@ -103,3 +103,12 @@ for(const kind of ['inbound','outbound-load','unload'])test(kind+' ownership tra
  try{const row=await f.first('SELECT revision FROM sop_records WHERE id=?',s.id);await f.ok('office','sop_owner_transfer',{id:s.id,revision:row.revision,target_badge:f.people.B.badgeId,reason:'合成物流在途交接'});assert.equal((await f.call('A',s.action,s.body)).ok,false);before=await s.snapshot();}finally{gate.release();}
  const reply=await pending;gate.restore();assert.equal(reply.ok,false,JSON.stringify(reply));assert.deepEqual(await s.snapshot(),before);await f.ok('B',s.action,s.body);assert.equal((await f.first('SELECT status FROM v2_ops_jobs WHERE id=?',s.id)).status,'completed');assert.equal((await f.first('SELECT COUNT(*) n FROM v2_ops_job_results WHERE job_id=?',s.id)).n,1);
 });
+for(const kind of ['external','ordinary','group','multi-order'])test(kind+' shared completion cannot reuse a replacement collaboration pair',async t=>{
+ const f=await fixture(t);f.env.SOP_DISPATCH_SHARE_ENABLED='true';
+ for(const key of ['A','B']){const p=(await f.ok('office','sop_attendance_register',{name:'合成配对轮换'+key,agency:'가온'})).person;await f.ok('office','sop_attendance_checkin',{badge:p.badgeId,agency:p.agency});await f.ok('office','sop_daily_dispatch_update',{person_id:p.id,badge:p.badgeId,enabled:true,departments:['bulk'],version:0,reason:'合成配对轮换授权'});await f.ok(key,'sop_login',{badge:p.badgeId});f.people[key]=p;}
+ const pair=await f.ok('A','sop_dispatch_share_invite',{target_badge:f.people.B.badgeId});await f.ok('B','sop_dispatch_share_accept',{pair_id:pair.pair.id});const s=await scenario(f,kind),gate=await hold(f,s.action,s.job.id),pending=f.call('B',s.action,s.body);await gate.ready;
+ try{await f.ok('B','sop_dispatch_share_leave',{pair_id:pair.pair.id});const next=await f.ok('A','sop_dispatch_share_invite',{target_badge:f.people.B.badgeId});assert.notEqual(next.pair.id,pair.pair.id);await f.ok('B','sop_dispatch_share_accept',{pair_id:next.pair.id});}finally{gate.release();}
+ const reply=await pending;gate.restore();assert.equal(reply.ok,false,JSON.stringify(reply));assert.equal((await f.first('SELECT COUNT(*) n FROM v2_ops_job_results WHERE job_id=?',s.job.id)).n,0);
+ if(kind==='group'){const n=(await f.ok('office','sop_get',{id:s.body.id})).record;assert.equal((n.cargo_groups.groups[0].outputs||[]).length,0);}
+ await f.ok('B',s.action,s.body);
+});

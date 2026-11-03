@@ -82,3 +82,20 @@ state, 04:00 pending-review report discrepancy, and material deletion versus new
 reference races. No implementation of those issues is included here. No photo,
 frontend, attendance accounting policy, deployment configuration or real
 attendance correction is changed in this batch.
+
+## Stage 3: fixed QA shared-authorization ABA blocker
+
+Fixed QA found that leaving a collaboration and accepting a new pair ID could
+reauthorize an old in-flight completion. The first successful share lookup now
+retains its relationship ID in server-owned request evidence. Both the native
+completion guard and the existing shared transaction guard require that exact
+pair to remain active. Ordinary/grouped/multi-order paths use the same bound
+evidence. Original owner/manager/member/delegate/reviewer permissions remain
+independent; no client fields supply grant evidence. No schema changes.
+
+Before: four external/ordinary/group/multi-order ABA scenarios failed. After:
+these four pass; fresh actions under the new pair still succeed. Node sharing,
+draft access and completion regressions: 44/0/0. Native local D1 replacement-pair
+and active-shared controls: 6/0/0. Existing race injection hooks and assertions
+remain intact. The material content-binding and manual-replay QA blockers are
+still being implemented at this checkpoint; no release is authorized.
