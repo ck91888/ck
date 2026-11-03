@@ -13,3 +13,23 @@
 新增真实登录 Worker API 合成专项 `tests/purchase-edit-atomic.test.mjs`。修复前 Node 与原生本地 workerd D1 均为 **1 passed / 5 failed / 0 skipped**。失败分别为旧编辑遇发货、取消、完成、收货领用及末行冲突；反向竞争发货保护原来就通过。修复后同组在两引擎均为 **6 passed / 0 failed / 0 skipped**。覆盖整批业务表快照不变和库存流水 +8/-8 守恒，未削弱原断言。
 
 本阶段尚待完整边界/故障/旧库初始化回归及全量测试，不能据此发布。修复前后日志仅本地保留于 `/workspace/scratch/ck-p1-test-runtime/purchase-edit-*`，不提交数据库、日志、凭据或任何真实个人/业务数据。
+
+第一阶段业务与专项提交 `9fdbba12504212b1edd3e8201b6e88e2f061e838` 已推送并核验远端。既有采购流程/重试、耗材原子事务合集也为 **38/0/0**。
+
+## 第二阶段：边界及页面
+
+扩展 API 专项在 Node、原生本地 workerd D1 各 **21 passed / 0 failed / 0 skipped**。新增明细增删、移至另一订单、同数量换明细；两笔独立发货的实时累计；同一发货请求的并发重试；返岗及派审旗标开启；最后订单头写入故障回滚与再次保存；相等/更大数量及严格小数边界；取消发货排除；短收2/超收12仍按登记发货8为下限；现场及匿名权限拒绝；两个冷绑定同时初始化旧库。成功/失败后断言表均无遗留行，库存及审计事实快照不变。
+
+首轮扩展为两引擎各 **18/3/0**：三个新合成夹具错误地给同订单插入重复物料，或向已含同物料的另一订单移行，被原有 `(order_id,material_id)` 唯一约束阻止，尚未进入目标竞争窗口。修正夹具使用独立合成物料后，保持原事务错误及全表快照断言，21项原样复测通过。首轮失败日志保留，不将其算作业务修复。
+
+新增 `tests/purchase-edit-browser.mjs` 使用实际构建的 `/003`、登录 Worker 和 Chromium，通过 **1440、390** 两宽。每宽验证：在途编辑与发货/取消/明细删除竞争时拒绝，输入5留在表单、busy恢复、业务快照不变、中韩错误可读；重新打开已发货表单后最小值8，合法保存8成功。共8组页面结果、无浏览器/服务器异常。仅本地桌面 Chromium 手机视口，未声称实体设备或国内网络验收。
+
+staging 静态构建成功，未部署。此阶段仅补充合成测试及说明，业务源码仍与第一阶段完全相同。全量回归运行中，最终以末节记录为准。
+
+```sh
+node --test --test-reporter=tap tests/purchase-edit-atomic.test.mjs
+CK_PURCHASE_EDIT_NATIVE_D1=true CODEX_PRIMARY_RUNTIME_NODE_MODULES=/已安装依赖/node_modules node --test --test-reporter=tap tests/purchase-edit-atomic.test.mjs
+node worker-v2/build-sop-staging.mjs
+CODEX_PRIMARY_RUNTIME_NODE_MODULES=/已安装依赖/node_modules node tests/purchase-edit-browser.mjs
+CK_JSDOM_MODULE=/已安装依赖/node_modules/jsdom/lib/api.js node --test --test-reporter=tap --test-concurrency=2 tests/*.test.mjs
+```
