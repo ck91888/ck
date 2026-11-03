@@ -108,6 +108,6 @@ export async function cargoGroups(b,env,u){
  normalized.version=(current?.version||0)+1;normalized.by=u.name;normalized.actor_id=u.id;normalized.at=t;data.cargo_groups=normalized;
  extra.push(...await syncGroupReservations(env,data,t,u,{needId:row.id}));
  const result={cargo_version:normalized.version,fingerprint};
- try{await env.DB.batch([...chainEvent(env,row,data,u,request,b.action,t,result),...extra]);}catch(error){const prior=await q(env,'SELECT * FROM sop_events WHERE request_id=?',request).first();if(prior&&prior.actor_id===u.id&&prior.action===b.action&&JSON.parse(prior.result_json).fingerprint===fingerprint)return JSON.parse(prior.result_json);throw error;}
+ try{await env.DB.batch([...chainEvent(env,row,data,u,request,b.action,t,result),...extra]);}catch(error){const prior=await q(env,'SELECT * FROM sop_events WHERE request_id=?',request).first();if(prior&&prior.actor_id===u.id&&prior.action===b.action&&JSON.parse(prior.result_json).fingerprint===fingerprint)return JSON.parse(prior.result_json);if(/batch_material_reference_removed/.test(error.message))throw Error('资料已移除，请刷新后重新选择');throw error;}
  return {ok:true,id:row.id,revision:row.revision+1,...result};
 }

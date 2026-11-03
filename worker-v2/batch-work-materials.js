@@ -44,7 +44,7 @@ export async function changeBatchMaterial(body,env,user){
   const links=(d.links||[]).filter(l=>{if(notified.has(l.outbound_id))return false;notified.add(l.outbound_id);return true;});
   statements.push(...notifyMaterialChange(env,{...row,data:{...d,links}},user,t,(removed?'本批总作业明细已移除：':'本批总作业明细已恢复：')+file.file_name));
  }
- try{await env.DB.batch(statements);}catch(error){const committed=await previous();if(committed)return committed;if(/batch_material_stale|sop_revision|revision_conflict/.test(error.message))throw Error('资料或关联作业已更新，请刷新后重试');throw error;}
+ try{await env.DB.batch(statements);}catch(error){const committed=await previous();if(committed)return committed;if(/batch_material_in_use/.test(error.message))throw Error('资料仍被资料组或已确认成果引用，请保留历史文件版本');if(/batch_material_stale|sop_revision|revision_conflict/.test(error.message))throw Error('资料或关联作业已更新，请刷新后重试');throw error;}
  return result;
 }
 export async function uploadBatchMaterial(form,env){
