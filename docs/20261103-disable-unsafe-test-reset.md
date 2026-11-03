@@ -4,7 +4,7 @@
 
 ## 方案和影响
 
-运行时代码仅修改 `worker-v2/test-data-reset.js` 和 `worker-v2/staging-entry.js`：
+初始限制修改 `worker-v2/test-data-reset.js` 和 `worker-v2/staging-entry.js`；维护认证复审后另修改 `worker-v2/sop-session.js` 和 `worker-v2/sop.js` 的内部认证选项：
 
 - 移除服务端start/step的建运行、备份、删除、推进和标完成代码。已验证的负责人调用也一律503；开关、合法确认值、旧请求、已完成run和直接函数调用都不能重新开启执行。HTTP方法、来源、测试环境/域名和负责人权限限制保留，未经授权仍403，不合环境仍404。
 - 状态接口只读，返回disabled和暂停原因；控制表不存在时不新建表或运行。已有进度、未完成标记、错误和备份保持原样。没有自动恢复、再次清空或手动数据修正逻辑。
@@ -55,3 +55,26 @@ CODEX_PRIMARY_RUNTIME_NODE_MODULES=<含playwright的目录> node tests/test-rese
 全部数据、账号和对象为隔离合成夹具；数据库ID仅用于门禁匹配，实际绑定是内存SQLite或本地workerd D1。浏览器拦截并在本地履行所有请求，批准域名仅作为虚拟同源地址，不访问线上站点，不绕过代理403。
 
 未覆盖远端容量/锁等待、实体设备、国内网络及旧版本已在途操作排空；没有在线重置、改活动标志或业务数据、发布、合测试/main。后续完整隔离与恢复协议仍属独立未关闭工作。
+
+## 维护认证复审修复
+
+独立QA拒绝595bb05后，本地Node/原生workerd D1均重现 **0通过/4失败/0跳过**：GET登录会签发会话，GET退出会删除会话，同站其它来源POST退出会删除管理员会话，关闭访问控制后的兼容登录会回填已归档业务单号。旧版在途操作未排空这一限制保持未关闭。
+
+阶段 `61b2686` 仅修上述认证回归并推送：原四例在Node/D1均 **4/0/0**。
+
+- 维护认证先检查POST、原有可选Origin同源规则、Sec-Fetch-Site跨站标记和JSON类型，再读取/修改会话及操作人上下文。GET登录、退出、身份及操作人确认均403；跨来源（包括同站其它子域）、null来源和跨站标记均拒绝。未提供Origin的原程序化POST语义保留，不能用跨站标记绕过。
+- 访问控制模式仍沿用原office凭据、限流、会话范围、Strict/HttpOnly/Secure cookie、操作人确认和版本校验；现场/签到点不会获得新增维护登录、身份或确认权限。
+- 兼容模式仍沿用同一授权配置校验、用户角色和签名cookie。内部 `authenticationOnly` 选项仅允许认证会话在校验后直接返回，跳过会恢复业务单号的通用业务初始化；请求JSON中的同名字段不能控制它。无活动run时的原初始化路径不变，没有改变普通业务行为。
+- 错误凭据、不合法配置和伪造角色不签发新会话；viewer仍无维护状态权限。有效维护登录、冷身份读取和退出保留业务、归档编号、备份及已清空出勤子段，不重新初始化。
+
+扩展Node相关 **76/0/0**，包含权限、密码、SOP及操作人原有验证；原生D1认证与原限制组合 **23/0/0**。staging构建通过。认证页面 **4组通过**（1440/390 × 访问控制/兼容），使用现有构建认证脚本和真实本地Worker：错误密码拒绝、有效登录、原操作人确认、带实际Strict受害cookie的另一子域GET退出被拒且会话不变、GET登录被拒、冷刷新不回填、正常退出均通过。页面均无异常；认证页是隔离夹具，不能声称实际兼容首页所有导航已覆盖。原真实构建重置页面另 **4组通过**。
+
+认证页面首轮因本地路由履行未暴露自动Sec-Fetch-Site头而失败，原日志保留。最终脚本验证实际受害cookie到达Worker、403、会话集合不变和身份仍有效；未伪造浏览器头部。服务端针对Sec-Fetch-Site的拒绝仍由Node/D1原断言覆盖。未削弱任何原业务/权限断言。
+
+本轮完整全量另行执行，结束后补齐结果。全部复现仅用隔离合成数据，没有在线重置、部署或更改真实记录。新增复现入口：
+
+```sh
+node --test --test-reporter=tap tests/test-reset-auth-restriction.test.mjs tests/test-reset-restriction.test.mjs tests/access-control.test.mjs tests/admin-password.test.mjs tests/sop.test.mjs tests/office-operator.test.mjs
+CK_P1_NATIVE_D1=true CODEX_PRIMARY_RUNTIME_NODE_MODULES=<含miniflare的目录> node --test --test-reporter=tap tests/test-reset-auth-restriction.test.mjs tests/test-reset-restriction.test.mjs
+CODEX_PRIMARY_RUNTIME_NODE_MODULES=<含playwright的目录> node tests/test-reset-auth-browser.mjs
+```
