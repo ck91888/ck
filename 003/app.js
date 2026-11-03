@@ -424,7 +424,16 @@ function openLocationPicker(trigger){
 function renderLocationPicker(){
   var q=val('locationPickerSearch').toLocaleLowerCase(),selected=S003.locationTarget&&S003.locationTarget.querySelector('.location-value');selected=selected?selected.value:'';
   var rows=activeLocations().filter(function(x){return !q||[x.location_code,x.location_name].some(function(v){return String(v||'').toLocaleLowerCase().includes(q);});});
-  E('locationPickerList').innerHTML=rows.length?rows.map(function(x){return '<button type="button" class="material-picker-item '+(x.location_code===selected?'selected':'')+'" onclick="selectLocation(\''+jsq(x.location_code)+'\')"><span><b>'+esc(x.location_code)+'</b><small>'+esc(x.location_name||'--')+'</small></span><i>✓</i></button>';}).join(''):'<div class="empty">'+esc(T('location_no_match'))+'</div>';
+  var list=E('locationPickerList'),fragment=document.createDocumentFragment();
+  rows.forEach(function(x){
+    var button=document.createElement('button'),label=document.createElement('span'),code=document.createElement('b'),name=document.createElement('small'),check=document.createElement('i');
+    button.type='button';button.className='material-picker-item '+(x.location_code===selected?'selected':'');
+    code.textContent=x.location_code;name.textContent=x.location_name||'--';check.textContent='✓';
+    label.appendChild(code);label.appendChild(name);button.appendChild(label);button.appendChild(check);
+    button.addEventListener('click',function(){selectLocation(x.location_code);});fragment.appendChild(button);
+  });
+  if(!rows.length){var empty=document.createElement('div');empty.className='empty';empty.textContent=T('location_no_match');fragment.appendChild(empty);}
+  list.textContent='';list.appendChild(fragment);
 }
 
 function selectLocation(code){var x=findActiveLocation(code);if(!x){toast(errorText('location_not_registered'),true);return;}setLocationControlValue(S003.locationTarget,x.location_code);closeLocationScanner();closeLocationPicker();}
