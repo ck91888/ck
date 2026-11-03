@@ -28,6 +28,8 @@ import {effectiveResults} from './effective-results.js';
 import {dashboardRange,segmentMinutes,reportWorkerId} from './dashboard-time.js';
 import {atomicNativeFinish} from './atomic-native-finish.js';
 import {atomicBulkFinish} from './atomic-bulk-finish.js';
+import {nativeCompletionGuard,completionConflict,completionChanged} from './native-completion-guard.js';
+import {intentSignature,canonicalIntent,boundReceiptJSON,readBoundReceipt} from './transaction-receipt.js';
 import {ensureInboundReferenceGuard} from './inbound-reference-guard.js';
 import {referenceWriteBatch,ensureReferenceHistory} from './inbound-reference-history.js';
 import {ensureInboundDocuments,inboundDocumentStates,inboundDocumentStateRead,documentStatesFromRows,confirmInboundIssue} from './inbound-documents.js';
@@ -9795,56 +9797,55 @@ route("v2_ops_job_manual_finalize", async (body, env) => {
   const operator = String(body.by || body.operator || "ADMIN").trim();
   const customer = String(body.customer || "").trim();
   const result_note = String(body.result_note || "").trim();
-  const result_json_in = body.result_json || {};
   if (!job_id) return err("missing job_id");
   if (!reason) return err("missing reason", 400);
-
-  return withIdem(env, body, "v2_ops_job_manual_finalize", async () => {
-    const job = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
-    if (!job) return { ok: false, error: "not_found" };
-    if (job.status === 'completed') return { ok: false, error: "already_completed", message: "任务已完成，请走『修改产出』" };
-    if (job.status === 'cancelled') return { ok: false, error: "cancelled" };
-
-    const openCnt = await env.DB.prepare(
-      "SELECT COUNT(*) AS c FROM v2_ops_job_workers WHERE job_id=? AND left_at=''"
-    ).bind(job_id).first();
-    if (Number((openCnt && openCnt.c) || 0) > 0) {
-      return { ok: false, error: "active_worker_exists_cannot_finalize",
-        message: "仍有人员在岗，请先让所有人退出再补录产出" };
+  const resultObj = body.result_json && typeof body.result_json === 'object' ? structuredClone(body.result_json) : {};
+  if (customer) resultObj.customer = customer;
+  if (result_note) resultObj.result_note = result_note;
+  const summary = String(body.result_summary || _summarizeResultObj(resultObj) || '手动补录').slice(0, 200);
+  const requestKey = String(body.client_req_id || '').trim(), action = 'v2_ops_job_manual_finalize';
+  const signature = await intentSignature({action,job_id,reason,operator,customer,result_note,summary,result:resultObj,
+    actor:{id:env.SOP_REQUEST_USER?.id||operator,scope:env.SOP_REQUEST_USER?.scope||'',name:env.SOP_REQUEST_USER?.name||operator}});
+  const receipt = () => readBoundReceipt(env, {key:requestKey,action,signature,
+    load:async()=>{
+      // Replays skip only the pre-completion status comparison. The original
+      // ownership, relationship, field-session and attendance versions still apply.
+      const checks=await nativeCompletionGuard(env,body,{replay:true});
+      const rows=await env.DB.batch([...checks,env.DB.prepare('SELECT action,response_json FROM v2_idempotency_keys WHERE idem_key=?').bind(requestKey)]);
+      return rows.at(-1)?.results?.[0]||null;
+    },
+    legacyMatch:async saved=>{
+      if(saved.job_id!==job_id||saved.summary!==summary)return false;
+      const result=await env.DB.prepare("SELECT * FROM v2_ops_job_results WHERE id=? AND job_id=? AND source='manual_finalize'").bind(String(saved.result_id||''),job_id).first();
+      const job=await env.DB.prepare('SELECT manual_finalize_reason,manual_finalized_by,manual_finalized_at FROM v2_ops_jobs WHERE id=?').bind(job_id).first();
+      if(!result||!job||result.created_by!==operator||job.manual_finalize_reason!==reason||job.manual_finalized_by!==operator||job.manual_finalized_at!==saved.finished_at)return false;
+      if(Number(result.box_count)!==Number(resultObj.box_count||0)||Number(result.pallet_count)!==Number(resultObj.pallet_count||0)||String(result.remark||'')!==String(resultObj.remark||result_note||''))return false;
+      try{return canonicalIntent(JSON.parse(result.result_json))===canonicalIntent(resultObj);}catch{return false;}
     }
-
-    const t = now();
-    const result_id = "RES-" + uid();
-    const resultObj = (typeof result_json_in === 'object' && result_json_in) ? result_json_in : {};
-    if (customer) resultObj.customer = customer;
-    if (result_note) resultObj.result_note = result_note;
-    const summary = String(body.result_summary || _summarizeResultObj(resultObj) || '手动补录').slice(0, 200);
-
-    await env.DB.prepare(`
-      INSERT INTO v2_ops_job_results(id, job_id, box_count, pallet_count, remark, result_json, created_by, created_at, source)
-      VALUES(?,?,?,?,?,?,?,?,'manual_finalize')
-    `).bind(
-      result_id, job_id,
-      Number(resultObj.box_count || 0), Number(resultObj.pallet_count || 0),
-      String(resultObj.remark || result_note || ''),
-      JSON.stringify(resultObj),
-      operator, t
-    ).run();
-
-    const sets = [
-      "status='completed'", "finished_at=?", "updated_at=?", "active_worker_count=0",
-      "result_summary=?", "manual_finalized=1", "manual_finalized_by=?",
-      "manual_finalized_at=?", "manual_finalize_reason=?"
-    ];
-    const binds = [t, t, summary, operator, t, reason];
-    if (customer) { sets.push("customer=?"); binds.push(customer); }
-    binds.push(job_id);
-    await env.DB.prepare(
-      "UPDATE v2_ops_jobs SET " + sets.join(', ') + " WHERE id=?"
-    ).bind(...binds).run();
-
-    return { ok: true, job_id, result_id, status: 'completed', summary, finished_at: t };
   });
+  try {
+    const saved=await receipt();if(saved)return json(saved);
+    const job = await env.DB.prepare("SELECT * FROM v2_ops_jobs WHERE id=?").bind(job_id).first();
+    if (!job) return json({ ok: false, error: "not_found" });
+    if (job.status === 'completed') return json({ ok: false, error: "already_completed", message: "任务已完成，请走『修改产出』" });
+    if (job.status === 'cancelled') return json({ ok: false, error: "cancelled" });
+    const openCnt = await env.DB.prepare("SELECT COUNT(*) AS c FROM v2_ops_job_workers WHERE job_id=? AND left_at=''").bind(job_id).first();
+    if (Number(openCnt?.c || 0) > 0) return json({ ok:false,error:'active_worker_exists_cannot_finalize',message:'仍有人员在岗，请先让所有人退出再补录产出' });
+    const t = now(), result_id = "RES-" + uid();
+    const result = { ok:true,job_id,result_id,status:'completed',summary,finished_at:t };
+    const resultStatement=env.DB.prepare(`INSERT INTO v2_ops_job_results(id,job_id,box_count,pallet_count,remark,result_json,created_by,created_at,source)
+      VALUES(?,?,?,?,?,?,?,?,'manual_finalize')`).bind(result_id,job_id,Number(resultObj.box_count||0),Number(resultObj.pallet_count||0),String(resultObj.remark||result_note||''),JSON.stringify(resultObj),operator,t);
+    const sets=["status='completed'","finished_at=?","updated_at=?","active_worker_count=0","result_summary=?","manual_finalized=1","manual_finalized_by=?","manual_finalized_at=?","manual_finalize_reason=?"];
+    const binds=[t,t,summary,operator,t,reason];if(customer){sets.push('customer=?');binds.push(customer);}binds.push(job_id);
+    const statements=[...await nativeCompletionGuard(env,body),resultStatement,env.DB.prepare('UPDATE v2_ops_jobs SET '+sets.join(', ')+' WHERE id=?').bind(...binds)];
+    if(requestKey)statements.push(env.DB.prepare('INSERT INTO v2_idempotency_keys(idem_key,action,response_json,created_at) VALUES(?,?,?,?)').bind(requestKey,action,boundReceiptJSON(result,signature),t));
+    try{await env.DB.batch(statements);}
+    catch(error){const committed=await receipt();if(committed)return json(committed);throw error;}
+    return json(result);
+  } catch(error) {
+    const changed=completionConflict.test(error.message||'');
+    return json({ok:false,error:changed?completionChanged:error.message||'internal error'},changed||error.message==='request_id_conflict'?409:500);
+  }
 });
 
 // 简单摘要：取常见数量字段累加
@@ -11984,8 +11985,34 @@ route('v2_003_material_txn', async (body, env) => {
   if (!['adjust', 'stocktake'].includes(txnType) && (!Number.isFinite(rawQty) || rawQty <= 0)) {
     return err('positive_qty_required');
   }
-  return withIdem(env, body, 'v2_003_material_txn', async () => {
+  const requestKey = String(body.client_req_id || '').trim();
+  const input = {
+    actor: { id: env.SOP_REQUEST_USER?.id || op.id, scope: env.SOP_REQUEST_USER?.scope || '', name: op.name },
+    material_id: id, txn_type: txnType, amount: txnType === 'adjust' ? v003Number(body.delta, NaN) : txnType === 'stocktake' ? v003Number(body.counted_qty, NaN) : rawQty,
+    department, recipient_id: v003Text(body.recipient_id, 80), recipient_name: recipientName,
+    purpose: v003Text(body.purpose, 240), related_doc_no: v003Text(body.related_doc_no, 120), note: v003Text(body.note, 1000),
+    location_code: body.location_code ? v003Text(body.location_code, 80) : null,
+    supplier: body.supplier ? v003Text(body.supplier, 160) : null,
+    unit_cost: Number.isFinite(v003Number(body.unit_cost, NaN)) ? Math.max(0, v003Number(body.unit_cost)) : null,
+    operator: op
+  };
+  const signature = await intentSignature(input);
+  const receipt = () => readBoundReceipt(env, { key: requestKey, action: 'v2_003_material_txn', signature, legacyMatch: async saved => {
+    // Old receipts have no fingerprint. Only replay a provable match with their
+    // immutable ledger; unresolved defaults/conflicts must never deduct again.
+    const tx = await env.DB.prepare('SELECT * FROM v2_003_material_txns WHERE id=?').bind(String(saved.id || '')).first();
+    if (!tx || tx.material_id !== id || tx.txn_type !== txnType || tx.operator_id !== op.id || tx.operator_name !== op.name) return false;
+    const amount = txnType === 'stocktake' ? Number(tx.qty_after) : ['issue','use'].includes(txnType) ? -Number(tx.qty_delta) : Number(tx.qty_delta);
+    if (amount !== input.amount) return false;
+    for (const field of ['department','recipient_id','recipient_name','purpose','related_doc_no','note']) if (String(tx[field] || '') !== input[field]) return false;
+    const item = await env.DB.prepare('SELECT location_code,unit_cost,supplier FROM v2_003_materials WHERE id=?').bind(id).first();
+    return !!item && tx.location_code === (input.location_code ?? v003Text(item.location_code, 80)) &&
+      tx.supplier === (input.supplier ?? v003Text(item.supplier, 160)) && Number(tx.unit_cost) === (input.unit_cost ?? Math.max(0, v003Number(item.unit_cost)));
+  }});
+  try {
     for (let attempt = 0; attempt < 4; attempt++) {
+      const saved = await receipt();
+      if (saved) return json(saved);
       const item = await env.DB.prepare('SELECT * FROM v2_003_materials WHERE id=?').bind(id).first();
       if (!item) throw new Error('not_found');
       if (item.status !== 'active' && !isAdmin(body, env)) throw new Error('material_inactive');
@@ -12004,11 +12031,12 @@ route('v2_003_material_txn', async (body, env) => {
       if (after < 0) throw new Error('insufficient_stock');
       const version = Number(item.stock_version) || 0;
       const t = now();
-      const location = v003Text(body.location_code || item.location_code, 80);
-      const cost = Math.max(0, v003Number(body.unit_cost, item.unit_cost));
-      const supplier = v003Text(body.supplier || item.supplier, 160);
+      const location = input.location_code ?? v003Text(item.location_code, 80);
+      const cost = input.unit_cost ?? Math.max(0, v003Number(item.unit_cost));
+      const supplier = input.supplier ?? v003Text(item.supplier, 160);
       const txId = v003Id('MTX');
-      const results = await env.DB.batch([
+      const result = { ok: true, id: txId, qty_before: before, qty_delta: delta, qty_after: after };
+      const statements = [
         // Insert only against the version actually read; the paired update is in this same transaction.
         env.DB.prepare(`INSERT INTO v2_003_material_txns
           (id, material_id, txn_type, qty_delta, qty_before, qty_after, warehouse_name, location_code,
@@ -12017,20 +12045,34 @@ route('v2_003_material_txn', async (body, env) => {
           SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? FROM v2_003_materials
           WHERE id=? AND stock_version=?`)
           .bind(txId, id, txnType, delta, before, after, '', location,
-            v003Text(body.recipient_id, 80), recipientName,
-            v003Text(body.purpose, 240), v003Text(body.related_doc_no, 120), cost, supplier,
-            v003Text(body.note, 1000), op.id, op.name, department, t, id, version),
+            input.recipient_id, recipientName,
+            input.purpose, input.related_doc_no, cost, supplier,
+            input.note, op.id, op.name, department, t, id, version),
         env.DB.prepare(`UPDATE v2_003_materials SET current_qty=?, location_code=?,
           unit_cost=?, supplier=?, stock_version=stock_version+1, updated_by=?, updated_at=?
-          WHERE id=? AND stock_version=?`)
-          .bind(after, location, cost, supplier, op.name, t, id, version)
-      ]);
+          WHERE id=? AND stock_version=? AND EXISTS(SELECT 1 FROM v2_003_material_txns WHERE id=?)`)
+          .bind(after, location, cost, supplier, op.name, t, id, version, txId)
+      ];
+      // A duplicate key aborts this entire batch, including its stock and ledger
+      // writes. Never publish the receipt after the business transaction commits.
+      if (requestKey) statements.push(env.DB.prepare(`INSERT INTO v2_idempotency_keys(idem_key,action,response_json,created_at)
+        SELECT ?,'v2_003_material_txn',?,? WHERE EXISTS(SELECT 1 FROM v2_003_material_txns WHERE id=?)`)
+        .bind(requestKey, boundReceiptJSON(result, signature), t, txId));
+      let results;
+      try { results = await env.DB.batch(statements); }
+      catch (error) {
+        const saved = await receipt();
+        if (saved) return json(saved);
+        throw error;
+      }
       if (v003Changes(results[0]) === 1 && v003Changes(results[1]) === 1) {
-        return { ok: true, id: txId, qty_before: before, qty_delta: delta, qty_after: after };
+        return json(result);
       }
     }
     throw new Error('stock_changed_retry');
-  });
+  } catch (error) {
+    return json({ ok: false, error: error.message || 'internal error' }, error.message === 'request_id_conflict' ? 409 : 500);
+  }
 });
 
 route('v2_003_department_usage', async (body, env) => {

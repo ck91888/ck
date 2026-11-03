@@ -2,6 +2,8 @@ import {canonicalDailyBadge,sameWorkerBadge} from '../shared/badge-identity.js';
 import {workerBadgeMatch,canonicalWorkerSQL} from './daily-badge-identity.js';
 import {sameBadgeSignature} from './badge-request-signature.js';
 import {ensureSchema} from './schema-ready.js';
+import {guardAttendanceState} from './attendance-context.js';
+import {noteCompletionAuthorization,nativeCompletionGuard,completionConflict,completionChanged} from './native-completion-guard.js';
 // Staging dispatch ownership and validation shared by the original operation routes.
 import {nativeOwner} from './sop-dispatch.js';
 import {partnerShareGuard,shareConflict,notedShareGrant} from './dispatch-share.js';
@@ -14,11 +16,13 @@ const quantityKeys=['box_count','pallet_count','packed_sku_count','packed_box_co
 export async function validateNativeMutation(body,env){
  if(env.SOP_ENVIRONMENT!=='staging'||env.SOP_UPGRADE_ENABLED!=='true')return;
  if(!body.job_id||!(/_(finish|finalize|leave|resume)$/.test(body.action)||body.action==='v2_ops_job_result_update'))return;
- const record=await q(env,"SELECT state FROM sop_records WHERE id=? AND kind='dispatch'",body.job_id).first();if(!record)return;
+ const record=await q(env,"SELECT * FROM sop_records WHERE id=? AND kind='dispatch'",body.job_id).first();if(!record)return;
+ if(!body.leave_only&&/_(finish|finalize)$/.test(body.action)&&env.SOP_REQUEST_USER?.scope==='field')await guardAttendanceState(env,{personIds:[env.SOP_REQUEST_USER.id]});
  // Bulk finish already recorded a pair grant. Do not turn a later lookup into a
  // denial here; atomicBulkFinish repeats that check inside the write transaction.
  if(!await nativeOwner(body,env)&&!(notedShareGrant(body)&&body.action==='v2_bulk_op_job_finish'&&!body.leave_only))fail(notedShareGrant(body)?'记录已更新或协作已结束，请刷新后再操作':'请由本任务派审员操作 / 이 작업의 배정 담당자가 처리하세요');
  const job=await q(env,'SELECT * FROM v2_ops_jobs WHERE id=?',body.job_id).first();if(!job||job.status==='cancelled')fail('任务已取消或不存在 / 작업이 없거나 취소되었습니다');
+ noteCompletionAuthorization(env,body,record,job);
  if(types[body.action]&&!types[body.action].includes(job.job_type))fail('作业类型与操作入口不符，请重新打开原任务 / 작업 종류가 일치하지 않습니다');
  if(body.action==='v2_ops_job_finish'&&Object.values(types).flat().includes(job.job_type))fail('请从原任务填写产出并结束 / 원래 작업에서 산출을 입력하고 종료하세요');
  if(body.action==='v2_unplanned_unload_finish'&&job.related_doc_type!=='field_feedback')fail('请从原卸货任务完成 / 원래 하차 작업에서 완료하세요');
@@ -106,7 +110,7 @@ export async function finishNativePick(body,env,{legacy=false}={}){
  SELECT ?,?,?,json_object('kind','trip_finalize','pick_doc_nos',json((SELECT json_group_array(pick_doc_no) FROM v2_ops_job_pick_docs WHERE job_id=?)),
   'worker_count',COUNT(DISTINCT ${canonicalWorkerSQL('worker_id')}),'total_pwd',(SELECT COUNT(*) FROM v2_pick_worker_docs WHERE job_id=?),'total_minutes',ROUND(COALESCE(SUM(minutes_worked),0),1),'result_note',?,'finalized_by',?), '[]',?,? FROM v2_ops_job_workers WHERE job_id=? HAVING ${gate}`,resultId,id,String(body.remark||''),id,id,String(body.result_note||''),actor,actor,t,id,...g),
   q(env,`UPDATE v2_ops_jobs SET status='completed',active_worker_count=0,finished_at=?,updated_at=? WHERE id=? AND ${gate}`,t,t,id,...g)];
- try{await env.DB.batch(sql);}catch(e){const j=await q(env,'SELECT status FROM v2_ops_jobs WHERE id=?',id).first();if(j?.status==='completed')return {ok:true,already_completed:true};throw e;}
+ try{await env.DB.batch([...await nativeCompletionGuard(env,body),...sql]);}catch(e){if(completionConflict.test(e.message||''))throw Error(completionChanged);const j=await q(env,'SELECT status FROM v2_ops_jobs WHERE id=?',id).first();if(j?.status==='completed')return {ok:true,already_completed:true};throw e;}
   const saved=await q(env,'SELECT result_json FROM v2_ops_job_results WHERE id=?',resultId).first();if(!saved)throw Error('人员或任务状态已变化，请先核实人员完成状态');const r=JSON.parse(saved.result_json);
  return {ok:true,job_id:id,finalized_at:t,pick_doc_count:r.pick_doc_nos.length,worker_count:r.worker_count,total_minutes:r.total_minutes};
 }
@@ -131,7 +135,7 @@ export async function finishNativeOutbound(body,env,{legacy=false}={}){
     if(env.SOP_ENVIRONMENT==='staging'&&env.SOP_UPGRADE_ENABLED==='true')sql.splice(3,0,ship);else sql.push(ship);
   }
  }
- try{await env.DB.batch(sql);}catch(e){if((await q(env,'SELECT status FROM v2_ops_jobs WHERE id=?',id).first())?.status==='completed')return {ok:true,already_completed:true};throw e;}
+ try{await env.DB.batch([...await nativeCompletionGuard(env,body),...sql]);}catch(e){if(completionConflict.test(e.message||''))throw Error(completionChanged);if((await q(env,'SELECT status FROM v2_ops_jobs WHERE id=?',id).first())?.status==='completed')return {ok:true,already_completed:true};throw e;}
   if(!await q(env,'SELECT id FROM v2_ops_job_results WHERE id=?',resultId).first())throw Error('人员或任务状态已变化，请先核实人员完成状态');return {ok:true,result_id:resultId,status:'completed'};
 }
 

@@ -4,6 +4,7 @@ import {putawayType,putawayMetrics,stagedPlanStatement} from './inbound-stages.j
 import {departmentCodes,inboundCodes,needsPutaway} from './inbound-flow.js';
 import {independentInbound,inboundOwner} from './independent-inbound.js';
 import {arrivalBatchRead,arrivalBatchOutput,arrivalSettlementSQL,arrivedLineSQL} from './inbound-arrival-batches.js';
+import {nativeCompletionGuard,completionConflict,completionChanged} from './native-completion-guard.js';
 const q=(e,s,...a)=>e.DB.prepare(s).bind(...a);
 const active="('pending','working','awaiting_close')";
 const unfinished="('pending','working','awaiting_close','paused')";
@@ -79,7 +80,7 @@ export async function atomicNativeFinish(env,body,job,{inbound=false,biz='',deli
   }
  }
  if(body.client_req_id)sql.push(q(env,`INSERT OR IGNORE INTO v2_idempotency_keys(idem_key,action,response_json,created_at) SELECT ?,?,?,? WHERE ${gate}`,body.client_req_id,body.action|| (inbound?'v2_inbound_job_finish':'v2_ops_job_finish'),JSON.stringify(result),t,...g));
- try{await env.DB.batch(sql);}catch(error){if((await q(env,'SELECT status FROM v2_ops_jobs WHERE id=?',id).first())?.status==='completed')return {ok:true,already_completed:true,result_id:resultId};throw error;}
+ try{await env.DB.batch([...await nativeCompletionGuard(env,body),...sql]);}catch(error){if(completionConflict.test(error.message||''))throw Error(completionChanged);if((await q(env,'SELECT status FROM v2_ops_jobs WHERE id=?',id).first())?.status==='completed')return {ok:true,already_completed:true,result_id:resultId};throw error;}
  const saved=inbound?await q(env,'SELECT result_json FROM v2_ops_job_results WHERE id=?',resultId).first():await q(env,'SELECT response_json AS result_json FROM v2_idempotency_keys WHERE idem_key=?',claimKey).first();
  if(!saved)throw Error('任务状态已变化，请刷新后核对');
  return JSON.parse(saved.result_json)._completion_request===token?result:{ok:true,already_completed:true,result_id:resultId};

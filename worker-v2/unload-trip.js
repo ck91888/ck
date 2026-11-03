@@ -1,6 +1,7 @@
 // One vehicle is one labor job. Links carry each plan's receipt, never extra jobs.
 import {inboundFlowEnabled, inboundCode} from './inbound-flow.js';
 import {staffedDispatchStatements} from './crew-borrow.js';
+import {nativeCompletionGuard,completionConflict,completionChanged} from './native-completion-guard.js';
 const q=(env,sql,...args)=>env.DB.prepare(sql).bind(...args);
 const rows=async(env,sql,...args)=>(await q(env,sql,...args).all()).results||[];
 const fail=message=>{throw Error(message);};
@@ -108,7 +109,7 @@ export async function finishUnloadTrip(env,body,{ensureTasks,recalc,syncCourier}
    statements.push(q(env,'UPDATE ck_unload_plan_links SET result_json=? WHERE job_id=? AND plan_id=?',JSON.stringify(own),trip.job_id,plan.id));
    statements.push(q(env,"UPDATE v2_inbound_plans SET status='arrived_pending_putaway',unload_completed_at=?,unload_completed_by=?,updated_at=? WHERE id=?",t,names,t,plan.id));
   }
-  try{await env.DB.batch(statements);}catch(e){if(!(await q(env,'SELECT finished_at FROM ck_unload_trips WHERE job_id=?',trip.job_id).first())?.finished_at)throw e;}
+  try{await env.DB.batch([...await nativeCompletionGuard(env,body),...statements]);}catch(e){if(completionConflict.test(e.message||''))throw Error(completionChanged);if(!(await q(env,'SELECT finished_at FROM ck_unload_trips WHERE job_id=?',trip.job_id).first())?.finished_at)throw e;}
  }
  // Also reconcile on retries after a network interruption. Receipt and labor are already atomic.
  const finished=(await q(env,'SELECT finished_at FROM ck_unload_trips WHERE job_id=?',trip.job_id).first()).finished_at;

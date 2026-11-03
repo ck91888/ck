@@ -93,9 +93,18 @@ export async function activePartnerIds(e,personId){
  const list=await rows(e,"SELECT person_lo,person_hi FROM ck_dispatch_share_pairs WHERE status='active' AND day=? AND (person_lo=? OR person_hi=?)",day(),personId,personId);
  return list.map(p=>p.person_lo===personId?p.person_hi:p.person_lo);
 }
+// Each Worker request owns its environment object. Retain the first relationship
+// that actually admitted this actor; a later lookup cannot replace it after ABA.
+const grantedPairs=new WeakMap();
+export function shareGrantFor(e,actorId,ownerId){return grantedPairs.get(e)?.get(JSON.stringify([actorId,ownerId]))||null;}
 export async function isActivePartner(e,actorId,ownerId){
- if(!shareEnabled(e)||!actorId||!ownerId||actorId===ownerId)return false;
- return (await activePartnerIds(e,actorId)).includes(ownerId);
+ if(!shareEnabled(e)||typeof actorId!=='string'||typeof ownerId!=='string'||!actorId||!ownerId||actorId===ownerId)return false;
+ await ensureDispatchShare(e);await expire(e);
+ const [lo,hi]=pairOf(actorId,ownerId),pair=(await q(e,"SELECT id,day FROM ck_dispatch_share_pairs WHERE status='active' AND day=? AND person_lo=? AND person_hi=?",day(),lo,hi).all()).results?.[0];
+ if(!pair)return false;
+ let grants=grantedPairs.get(e);if(!grants){grants=new Map();grantedPairs.set(e,grants);}
+ const key=JSON.stringify([actorId,ownerId]);if(!grants.has(key))grants.set(key,Object.freeze({...pair}));
+ return true;
 }
 // The first authorization records why it passed. A later lookup must not drop
 // the in-transaction check just because the pair ended in between.
@@ -116,14 +125,14 @@ export function isBulkShareRecord(row,data=row?.data){
 // ended. Owner, manager, reviewer, delegate and off-duty claim pass false and
 // keep their own rules. The check row is deleted in the same transaction.
 export const shareConflict=/ck_dispatch_share_checks/;
-export function shareGuardStatements(e,actor,recordId,revision){
+export function shareGuardStatements(e,actor,recordId,revision,pairId){
  const id=crypto.randomUUID();
  return [q(e,`INSERT INTO ck_dispatch_share_checks(id,allowed)
   SELECT ?, CASE WHEN (SELECT revision FROM sop_records WHERE id=?)=?
-   AND EXISTS(SELECT 1 FROM ck_dispatch_share_pairs WHERE status='active' AND day=? AND (
+   AND EXISTS(SELECT 1 FROM ck_dispatch_share_pairs WHERE id=? AND status='active' AND day=? AND (
      (person_lo=? AND person_hi=json_extract((SELECT state FROM sop_records WHERE id=?),'$.owner_id'))
      OR (person_hi=? AND person_lo=json_extract((SELECT state FROM sop_records WHERE id=?),'$.owner_id'))
-   )) THEN 1 ELSE 0 END`,id,recordId,revision,day(),actor.id,recordId,actor.id,recordId),
+   )) THEN 1 ELSE 0 END`,id,recordId,revision,pairId||'',day(),actor.id,recordId,actor.id,recordId),
   q(e,'DELETE FROM ck_dispatch_share_checks WHERE id=?',id)];
 }
 export async function partnerShareGuard(e,record,actor=e.SOP_REQUEST_USER,viaShare=false){
@@ -135,7 +144,7 @@ export async function partnerShareGuard(e,record,actor=e.SOP_REQUEST_USER,viaSha
  if(u.role==='manager'||u.role==='reviewer'||data.owner_id===u.id)return [];
  if((data.delegates||[]).includes(u.id)&&!(data.owner_transfers||[]).some(x=>x.from_id===u.id))return [];
  await ensureDispatchShare(e);
- return shareGuardStatements(e,u,record.id,record.revision);
+ return shareGuardStatements(e,u,record.id,record.revision,shareGrantFor(e,u.id,data.owner_id)?.id);
 }
 export async function handleDispatchShare(b,e){
  if(!shareEnabled(e))return b.action==='sop_dispatch_share_status'?empty:{ok:false,enabled:false,error:'派审协作未开启'};
