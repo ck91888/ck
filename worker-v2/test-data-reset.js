@@ -1,9 +1,10 @@
 import {ensureSchema} from './schema-ready.js';
-// Manager-triggered maintenance for the isolated staging database only.
-// Every table is archived and cleared in one D1 transaction. No scheduled reset.
+// Execution is intentionally unavailable. Existing runs and backups stay intact
+// pending an independently reviewed recovery/isolation design.
 export const STAGING_HOST = 'ck-v2-api-sop-staging.ck91888.workers.dev';
 export const STAGING_HOSTS = Object.freeze([STAGING_HOST, 'sop-test.ck91888.cn']);
 export const STAGING_DATABASE = 'ba1eba33-bcdd-4de2-8927-d37dc3788396';
+export const RESET_DISABLED_REASON='重置功能已暂停，现有记录和备份保留；活动清理请联系维护人员核实 / 초기화가 중지되었습니다. 기존 기록과 백업은 유지됩니다.';
 export const TABLES = [
  'ck_courier_batch_items','ck_courier_batch_requests','ck_courier_batches',
  'ck_courier_plan_item_history',
@@ -34,6 +35,13 @@ export async function ensureResetSchema(env){
  });
 }
 export const activeReset=env=>q(env,"SELECT * FROM ck_test_resets WHERE completed_at='' LIMIT 1").first();
+const hasResetTable=env=>q(env,"SELECT 1 AS present FROM sqlite_master WHERE type='table' AND name='ck_test_resets'").first();
+// Safety is independent of the old feature/upgrade switches and request host.
+// Never cache a negative result: another binding may have an existing run.
+export async function safetyActiveReset(env){
+ if(env.SOP_ENVIRONMENT!=='staging'||env.SOP_TEST_RESET_DATABASE!==STAGING_DATABASE)return null;
+ return await hasResetTable(env)?activeReset(env):null;
+}
 const knownTables=async env=>{const names=(await rows(env,"SELECT name FROM sqlite_master WHERE type='table'")).map(x=>x.name);return TABLES.filter(x=>names.includes(x));};
 async function counts(env,tables){
  const result=[];
@@ -48,45 +56,11 @@ async function view(env,run){
 }
 export async function resetAction(action,body,env,user){
  if(user?.role!=='manager')fail('仅负责人可清空测试数据 / 관리자만 삭제할 수 있습니다',403);
- await ensureResetSchema(env);
+ if(action==='start'||action==='step')throw Object.assign(Error(RESET_DISABLED_REASON),{status:503,reset_disabled:true});
  if(action==='status'){
-  const active=await activeReset(env);
-  const latest=active||await q(env,'SELECT * FROM ck_test_resets ORDER BY started_at DESC LIMIT 1').first();
-  return {ok:true,run:await view(env,latest),counts:active?[]:await counts(env,await knownTables(env))};
+  const exists=await hasResetTable(env),active=exists?await activeReset(env):null;
+  const latest=active||(exists?await q(env,'SELECT * FROM ck_test_resets ORDER BY started_at DESC LIMIT 1').first():null);
+  return {ok:true,disabled:true,reason:RESET_DISABLED_REASON,run:await view(env,latest),counts:active?[]:await counts(env,await knownTables(env))};
  }
- if(action==='start'){
-  if(body.confirmation!=='CLEAR_TEST_DATA'||!/^[-a-zA-Z0-9]{16,80}$/.test(body.requestId||''))fail('请先确认清空范围 / 삭제 범위를 확인하세요');
-  const previous=await q(env,'SELECT * FROM ck_test_resets WHERE request_id=?',body.requestId).first();
-  if(previous)return {ok:true,run:await view(env,previous)};
-  const active=await activeReset(env);if(active)return {ok:true,run:await view(env,active)};
-  const tables=await knownTables(env);
-  if(!['v2_inbound_plans','v2_ops_jobs','sop_records','ck_attendance_people'].every(x=>tables.includes(x)))fail('测试库尚未就绪，未清空数据 / 테스트 데이터베이스가 준비되지 않았습니다',409);
-  const id=crypto.randomUUID().replaceAll('-','');
-  try{await q(env,'INSERT INTO ck_test_resets(id,request_id,actor,started_at,tables_json) VALUES(?,?,?,?,?)',id,body.requestId,user.id,new Date().toISOString(),JSON.stringify(tables)).run();}
-  catch(error){const concurrent=await q(env,'SELECT * FROM ck_test_resets WHERE request_id=?',body.requestId).first()||await activeReset(env);if(concurrent)return {ok:true,run:await view(env,concurrent)};throw error;}
-  return {ok:true,run:await view(env,await q(env,'SELECT * FROM ck_test_resets WHERE id=?',id).first())};
- }
- if(action!=='step')fail('Unknown maintenance action',404);
- const run=await q(env,'SELECT * FROM ck_test_resets WHERE id=?',String(body.runId||'')).first();
- if(!run)fail('清理记录不存在 / 삭제 기록이 없습니다',404);
- if(run.completed_at)return {ok:true,run:await view(env,run)};
- const tables=JSON.parse(run.tables_json);
- if(!/^[a-f0-9]{32}$/.test(run.id)||!tables.every(name=>TABLES.includes(name)))fail('Invalid maintenance scope',409);
- try{
-  const done=(await rows(env,'SELECT table_name FROM ck_test_reset_items WHERE run_id=?',run.id)).map(x=>x.table_name);
-  for(const name of tables.filter(x=>!done.includes(x)).slice(0,4)){
-   const archive=`ck_backup_${run.id}_${name}`;
-   try{await env.DB.batch([
-    q(env,`INSERT INTO ck_test_reset_items SELECT ?,?,?,COUNT(*) FROM "${name}"`,run.id,name,archive),
-    env.DB.prepare(`CREATE TABLE "${archive}" AS SELECT * FROM "${name}"`),
-    env.DB.prepare(`DELETE FROM "${name}"`)
-   ]);}catch(error){if(!await q(env,'SELECT table_name FROM ck_test_reset_items WHERE run_id=? AND table_name=?',run.id,name).first())throw error;}
-  }
-  const progress=await view(env,run);
-  if(progress.done===tables.length){
-   if((await counts(env,tables)).some(x=>x.count!==0))fail('清理期间出现新增记录，已保留，请联系维护人员核实 / 새 기록이 있어 보존했습니다',409);
-   await q(env,"UPDATE ck_test_resets SET completed_at=?,last_error='' WHERE id=? AND completed_at=''",new Date().toISOString(),run.id).run();
-  }else await q(env,"UPDATE ck_test_resets SET last_error='' WHERE id=?",run.id).run();
-  return {ok:true,run:await view(env,await q(env,'SELECT * FROM ck_test_resets WHERE id=?',run.id).first())};
- }catch(error){await q(env,'UPDATE ck_test_resets SET last_error=? WHERE id=?',String(error.message).slice(0,400),run.id).run();throw error;}
+ fail('Unknown maintenance action',404);
 }

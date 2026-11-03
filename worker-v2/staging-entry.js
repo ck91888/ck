@@ -1,9 +1,19 @@
 import {accessEnabled,accessScope} from './access-control.js';
 import app from './index.js';
-import {sessionUser} from './sop-session.js';
-import {enabled,ensureResetSchema,activeReset,resetAction} from './test-data-reset.js';
+import {sessionUser,sessionAction} from './sop-session.js';
+import {officeOperationContext,confirmOfficeOperator} from './office-operator.js';
+import {enabled,safetyActiveReset,resetAction} from './test-data-reset.js';
 const response=(body,status=200)=>Response.json(body,{status,headers:{'Cache-Control':'no-store'}});
 const isApiPath=path=>['/api','/file','/api/file','/001/api','/001/api/file','/001/file','/attendance/api'].includes(path)||path.startsWith('/api/test-data/');
+async function maintenanceSession(request,env){
+ try{
+  const url=new URL(request.url),body=request.method==='GET'?Object.fromEntries(url.searchParams):request.headers.get('Content-Type')?.includes('application/json')?await request.clone().json():{};
+  if(!['sop_identity','sop_login','sop_logout','sop_operator_confirm'].includes(body.action))return null;
+  if(accessEnabled(env)&&accessScope(request)!=='office'&&body.action!=='sop_logout')return null;
+  const e={...env,SOP_REQUEST_USER:await sessionUser(request,env)};await officeOperationContext(request,e);
+  return body.action==='sop_operator_confirm'?confirmOfficeOperator(body,e,request):sessionAction(body,e,request);
+ }catch{return null;}
+}
 const staging={async fetch(request,env,ctx){
  const url=new URL(request.url),maintenance=url.pathname.startsWith('/api/test-data/');
  if(accessEnabled(env)){
@@ -17,8 +27,8 @@ const staging={async fetch(request,env,ctx){
   }
  }
 
- if(!enabled(request,env))return maintenance?response({ok:false,error:'Not available'},404):app.fetch(request,env,ctx);
  if(maintenance){
+  if(!enabled(request,env))return response({ok:false,error:'Not available'},404);
   try{
    const action=url.pathname.slice('/api/test-data/'.length);
    if(action==='status'&&request.method!=='GET')return response({ok:false,error:'Method not allowed'},405);
@@ -28,20 +38,18 @@ const staging={async fetch(request,env,ctx){
    }
    const user=await sessionUser(request,env);
    return response(await resetAction(action,action==='status'?{}:await request.json(),env,user));
-  }catch(error){return response({ok:false,error:error.message},error.status||500);}
+  }catch(error){return response({ok:false,error:error.message,...(error.reset_disabled?{reset_disabled:true}:{})},error.status||500);}
  }
  try{
-  await ensureResetSchema(env);
-  if(await activeReset(env)){
-   // Keep login available so a manager can resume an interrupted reset.
-   const body=request.method==='POST'&&request.headers.get('Content-Type')?.includes('application/json')?await request.clone().json().catch(()=>({})):{};
-   const action=body.action||url.searchParams.get('action');
-   if(!['sop_identity','sop_login','sop_logout'].includes(action))return response({ok:false,maintenance:true,error:'测试数据正在清理，请稍后刷新 / 테스트 데이터 삭제 중입니다'},503);
+  if(await safetyActiveReset(env)){
+   // Authentication uses only its own path, never business bootstrap/backfill.
+   const auth=await maintenanceSession(request,env);if(auth)return auth;
+   return response({ok:false,maintenance:true,error:'已有清理记录尚未核实，业务暂不可操作；请联系维护人员 / 기존 초기화 상태를 확인해야 합니다.'},503);
   }
  }catch(error){return response({ok:false,error:'测试维护状态读取失败，请稍后重试 / 잠시 후 다시 시도하세요'},503);}
  return app.fetch(request,env,ctx);
 }};
-export default {async scheduled(controller,env,ctx){return app.scheduled(controller,env,ctx);},async fetch(request,env,ctx){
+export default {async scheduled(controller,env,ctx){if(await safetyActiveReset(env))return;return app.scheduled(controller,env,ctx);},async fetch(request,env,ctx){
  if(!isApiPath(new URL(request.url).pathname))return staging.fetch(request,env,ctx);
  const started=performance.now(),result=await staging.fetch(request,env,ctx);
  const headers=new Headers(result.headers);
