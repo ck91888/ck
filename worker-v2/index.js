@@ -32,6 +32,7 @@ import {nativeCompletionGuard,completionConflict,completionChanged} from './nati
 import {finishUnplannedUnload} from './unplanned-unload-finish.js';
 import {ensureAttachmentKeyIndex} from './attachment-key-index.js';
 import {intentSignature,canonicalIntent,boundReceiptJSON,readBoundReceipt} from './transaction-receipt.js';
+import {purchaseEditGuard,purchaseEditError} from './purchase-edit-guard.js';
 import {ensureInboundReferenceGuard} from './inbound-reference-guard.js';
 import {referenceWriteBatch,ensureReferenceHistory} from './inbound-reference-history.js';
 import {ensureInboundDocuments,inboundDocumentStates,inboundDocumentStateRead,documentStatesFromRows,confirmInboundIssue} from './inbound-documents.js';
@@ -12519,6 +12520,7 @@ route('v2_003_purchase_order_update', async (body, env) => {
   let orderedCount = 0;
   const t = now();
   const statements = [];
+  const intendedLines = [];
   for (const line of existing) {
     const raw = changes.get(line.id);
     if (!raw || raw.ordered_qty == null || String(raw.ordered_qty).trim() === '') {
@@ -12531,6 +12533,7 @@ route('v2_003_purchase_order_update', async (body, env) => {
     }
     if (orderedQty > 0) orderedCount++;
     total += orderedQty * unitCost;
+    intendedLines.push({id:line.id,orderedQty});
     statements.push(env.DB.prepare(`UPDATE v2_003_purchase_order_lines
       SET ordered_qty=?, unit_cost=?, note=?, updated_at=? WHERE id=? AND order_id=?`)
       .bind(orderedQty, unitCost, v003Text(raw.note != null ? raw.note : line.note, 500), t, line.id, id));
@@ -12543,7 +12546,14 @@ route('v2_003_purchase_order_update', async (body, env) => {
       v003Text(body.platform_order_no, 160), normalizeDateOnly(body.expected_date),
       v003Text(body.currency || 'KRW', 12) || 'KRW', Math.round(total * 100) / 100,
       v003Text(body.note != null ? body.note : order.note, 1000), t, id));
-  await env.DB.batch(statements);
+  const guard = await purchaseEditGuard(env,id,intendedLines);
+  try {
+    await env.DB.batch([...guard.before,...statements,...guard.after]);
+  } catch (error) {
+    const code = purchaseEditError(error);
+    if (code) return err(code);
+    throw error;
+  }
   return json({ ok: true, id, status: 'purchasing', total_amount: Math.round(total * 100) / 100 });
 });
 
