@@ -31,3 +31,54 @@ Validation:
 
 Stage 2, ownership transfer versus completion, is still in progress. This stage
 is not a release candidate. Full regression and independent fixed QA remain due.
+
+## Stage 2: completion ownership and permission races
+
+Confirmed baseline races through authenticated Worker APIs, also reproduced on
+local native workerd D1: an inbound tally, outbound loading trip or unloading
+trip can wait before its result batch, transfer to B, reject a fresh request from
+A, yet still let A's older request publish the result and close the crew. Native
+external bulk and multi-order external bulk have the same gap. Ordinary SOP
+completion and grouped execution already reject the stale revision and remain
+regression controls.
+
+The native validation now retains server-owned record revision and identity
+evidence. The completion batch checks that revision and live original
+owner/member/share rules before publishing results, closing workers or changing
+linked plans/orders. The existing collaborator guard keeps its specific error
+and valid collaborators, managers and independently authorized paths keep their
+original rules. Field attendance/grant evidence uses the existing versioned
+transaction guard. No grant is accepted from request fields.
+
+The guard covers atomic inbound/generic native completion, bulk completion,
+pick/outbound completion, truck loading and unloading. Manual finalization now
+puts its result and job closure in one guarded batch as well. A stable native
+result claim still reconciles duplicate successful completions; manual
+finalization additionally compares the validated job status. The only additive
+schema is an empty transient CHECK table; checks insert/delete within the same
+transaction, without changing historical records or labor.
+
+Stage checks at this checkpoint:
+
+- Material concurrent request suite, expanded with both first transactions held
+  and released together: Node SQLite 12/0/0; local native D1 12/0/0.
+- Completion ownership suite: Node SQLite 16/0/0; local native D1 16/0/0. Includes
+  ordinary/external/group/multi-order, owner ABA, manager, manual, shared rights
+  and exit, lost-response duplicate completion, concurrent pause, field rest ABA,
+  injected rollback, and all three logistics paths with complete business
+  snapshots and a successful completion by B after rejection of A.
+- Related initial regressions: 76 passed, 0 failed, 1 optional DOM test skipped
+  without the jsdom runtime setting. Full runs below enable that runtime.
+- First full run: 1510 passed / 34 failed / 0 skipped. 32 failures were missing
+  generated assets; 2 exposed an overly broad status comparison on already
+  committed completion retries. Both causes were corrected without weakening
+  assertions. The constructed build then passed 1551/0/0.
+- A final full run including the last added field-state regression is due after
+  this checkpoint; the final development report supplies its exact result and
+  reviewed candidate SHA. This checkpoint is not deployment authorization.
+
+Deferred to the next batches: audit P2 reset cleanup of orphan return/dispatch
+state, 04:00 pending-review report discrepancy, and material deletion versus new
+reference races. No implementation of those issues is included here. No photo,
+frontend, attendance accounting policy, deployment configuration or real
+attendance correction is changed in this batch.

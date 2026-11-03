@@ -27,6 +27,7 @@ import {effectiveResults} from './effective-results.js';
 import {dashboardRange,segmentMinutes,reportWorkerId} from './dashboard-time.js';
 import {atomicNativeFinish} from './atomic-native-finish.js';
 import {atomicBulkFinish} from './atomic-bulk-finish.js';
+import {nativeCompletionGuard,completionConflict,completionChanged} from './native-completion-guard.js';
 import {ensureInboundReferenceGuard} from './inbound-reference-guard.js';
 import {referenceWriteBatch,ensureReferenceHistory} from './inbound-reference-history.js';
 import {ensureInboundDocuments,inboundDocumentStates,inboundDocumentStateRead,documentStatesFromRows,confirmInboundIssue} from './inbound-documents.js';
@@ -9775,7 +9776,7 @@ route("v2_ops_job_manual_finalize", async (body, env) => {
     if (result_note) resultObj.result_note = result_note;
     const summary = String(body.result_summary || _summarizeResultObj(resultObj) || '手动补录').slice(0, 200);
 
-    await env.DB.prepare(`
+    const resultStatement = env.DB.prepare(`
       INSERT INTO v2_ops_job_results(id, job_id, box_count, pallet_count, remark, result_json, created_by, created_at, source)
       VALUES(?,?,?,?,?,?,?,?,'manual_finalize')
     `).bind(
@@ -9784,7 +9785,7 @@ route("v2_ops_job_manual_finalize", async (body, env) => {
       String(resultObj.remark || result_note || ''),
       JSON.stringify(resultObj),
       operator, t
-    ).run();
+    );
 
     const sets = [
       "status='completed'", "finished_at=?", "updated_at=?", "active_worker_count=0",
@@ -9794,9 +9795,11 @@ route("v2_ops_job_manual_finalize", async (body, env) => {
     const binds = [t, t, summary, operator, t, reason];
     if (customer) { sets.push("customer=?"); binds.push(customer); }
     binds.push(job_id);
-    await env.DB.prepare(
+    const jobStatement = env.DB.prepare(
       "UPDATE v2_ops_jobs SET " + sets.join(', ') + " WHERE id=?"
-    ).bind(...binds).run();
+    ).bind(...binds);
+    try { await env.DB.batch([...await nativeCompletionGuard(env,body),resultStatement,jobStatement]); }
+    catch (error) { if(completionConflict.test(error.message||''))throw Error(completionChanged);throw error; }
 
     return { ok: true, job_id, result_id, status: 'completed', summary, finished_at: t };
   });

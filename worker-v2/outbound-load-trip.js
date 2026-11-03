@@ -8,6 +8,7 @@ import {workChainEnabled} from './work-chain.js';
 import {documentCodeError} from '../shared/document-code.js';
 import {crewBorrowStatements} from './crew-borrow.js';
 import {legacyLoadClaim} from './legacy-load.js';
+import {nativeCompletionGuard,completionConflict,completionChanged} from './native-completion-guard.js';
 const q=(e,s,...a)=>e.DB.prepare(s).bind(...a),rows=async(e,s,...a)=>(await q(e,s,...a).all()).results||[];
 const parse=s=>JSON.parse(s||'{}'),active="('pending','working','awaiting_close','paused')",loadable=['issued','working','ready_to_ship','preparing_outbound'];
 const fail=m=>{throw Error(m);},no=o=>o.display_no||o.id;
@@ -141,6 +142,6 @@ export async function finishLoadTrip(e,b){
  sql.push(q(e,"UPDATE v2_ops_job_workers SET left_at=?,minutes_worked=MAX(0,ROUND((julianday(?)-julianday(joined_at))*14400)/10.0),leave_reason='dispatcher_finish' WHERE job_id=? AND left_at=''",t,t,job.id),
   q(e,"UPDATE v2_ops_jobs SET status='completed',active_worker_count=0,shared_result_json=?,updated_at=? WHERE id=?",JSON.stringify(output),t,job.id),
   q(e,'UPDATE ck_load_trips SET finished_at=? WHERE job_id=? AND finished_at=\'\'',t,job.id),q(e,'DELETE FROM ck_load_order_claims WHERE job_id=?',job.id));
- try{await e.DB.batch(sql);}catch(error){if((await q(e,'SELECT finished_at FROM ck_load_trips WHERE job_id=?',job.id).first())?.finished_at)return {ok:true,already_completed:true,job_id:job.id};if(/load_order_changed/.test(error.message))fail((await conflictMessage(e,items,job.id))+'；本车结果未保存');throw error;}
+ try{await e.DB.batch([...await nativeCompletionGuard(e,b),...sql]);}catch(error){if(completionConflict.test(error.message||''))throw Error(completionChanged);if((await q(e,'SELECT finished_at FROM ck_load_trips WHERE job_id=?',job.id).first())?.finished_at)return {ok:true,already_completed:true,job_id:job.id};if(/load_order_changed/.test(error.message))fail((await conflictMessage(e,items,job.id))+'；本车结果未保存');throw error;}
  return {ok:true,job_id:job.id,order_count:prepared.length,status:'completed'};
 }

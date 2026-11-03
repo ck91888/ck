@@ -23,6 +23,12 @@ test('the same concurrent material request deducts once and returns one transact
  const f=await fixture(t),body=f.request();const replies=await Promise.all([f.call('office','v2_003_material_txn',body),f.call('office','v2_003_material_txn',body)]);
  assert.ok(replies.every(x=>x.ok),JSON.stringify(replies));assert.equal((await f.stock()).current_qty,7);assert.equal((await f.count()).n,1);assert.equal(replies[0].id,replies[1].id);
 });
+test('two first-attempt stock transactions released together claim the request only once',async t=>{
+ const f=await fixture(t),body=f.request(),db=f.env.DB;let reached,release,count=0;const ready=new Promise(r=>reached=r),gate=new Promise(r=>release=r);
+ f.env.DB={prepare:db.prepare.bind(db),async batch(ss){if(count<2&&ss.some(s=>s.sql.includes('INSERT INTO v2_003_material_txns'))){count++;if(count===2)reached();await gate;}return db.batch(ss);}};
+ const pending=Promise.all([f.call('office','v2_003_material_txn',body),f.call('office','v2_003_material_txn',body)]);await ready;release();const replies=await pending;f.env.DB=db;
+ assert.ok(replies.every(x=>x.ok),JSON.stringify(replies));assert.equal((await f.stock()).current_qty,7);assert.equal((await f.count()).n,1);assert.equal(replies[0].id,replies[1].id);
+});
 test('an earlier material request held before commit cannot deduct again after the same request commits elsewhere',async t=>{
  const f=await fixture(t),body=f.request(),hold=await beforeBatch(f),pending=f.call('office','v2_003_material_txn',body);await hold.ready;
  let saved;try{saved=await f.ok('office','v2_003_material_txn',body);}finally{hold.release();}
