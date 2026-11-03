@@ -78,7 +78,7 @@ function errorText(code) {
   var zh = {
     unauthorized:'身份验证失败或登录已失效', unauthorized_admin_only:'此操作仅限管理员', network_error:'网络连接失败，请稍后重试',
     invalid_response:'服务器返回异常', not_found:'没有找到对应记录', duplicate_item_code:'编号已被使用', duplicate_barcode:'条码已被使用', duplicate_serial_no:'序列号已被使用',
-    insufficient_stock:'库存不足，不能提交', material_inactive:'该耗材已停用', stock_changed_retry:'库存刚被其他人修改，请刷新后重试',
+    insufficient_stock:'库存不足，不能提交', material_inactive:'该耗材已停用', stock_changed_retry:'库存刚被其他人修改，请刷新后重试', request_id_conflict:'请求编号对应的内容不同，请核对已保存记录后重新确认',
     asset_changed_retry:'物品状态刚被修改，请刷新后重试', asset_not_available:'该物品当前不可领用', asset_not_assigned:'该物品当前没有被领用',
     not_current_keeper:'只有当前领用人或管理员可以归还', asset_unavailable:'该物品已报废或遗失', asset_not_in_repair:'该物品不在维修中',
     operator_required:'缺少操作人信息', positive_qty_required:'数量必须大于 0', valid_counted_qty_required:'请输入正确的实盘数量',
@@ -99,7 +99,7 @@ function errorText(code) {
   var ko = {
     unauthorized:'본인 확인에 실패했거나 로그인이 만료되었습니다', unauthorized_admin_only:'관리자만 가능한 작업입니다', network_error:'네트워크 연결 실패',
     invalid_response:'서버 응답 오류', not_found:'해당 기록을 찾을 수 없습니다', duplicate_item_code:'이미 사용 중인 번호입니다', duplicate_barcode:'이미 사용 중인 바코드입니다', duplicate_serial_no:'이미 사용 중인 시리얼 번호입니다',
-    insufficient_stock:'재고가 부족합니다', material_inactive:'사용 중지된 소모품입니다', stock_changed_retry:'재고가 변경되었습니다. 새로고침 후 다시 시도하세요',
+    insufficient_stock:'재고가 부족합니다', material_inactive:'사용 중지된 소모품입니다', stock_changed_retry:'재고가 변경되었습니다. 새로고침 후 다시 시도하세요', request_id_conflict:'요청 번호의 내용이 다릅니다. 저장된 내역을 확인한 후 다시 확인하세요',
     asset_changed_retry:'비품 상태가 변경되었습니다. 다시 시도하세요', asset_not_available:'현재 수령할 수 없는 비품입니다', asset_not_assigned:'현재 사용 중인 비품이 아닙니다',
     not_current_keeper:'현재 사용자 또는 관리자만 반납할 수 있습니다', asset_unavailable:'폐기 또는 분실 처리된 비품입니다', asset_not_in_repair:'수리 중인 비품이 아닙니다',
     operator_required:'작업자 정보가 없습니다', positive_qty_required:'수량은 0보다 커야 합니다', valid_counted_qty_required:'올바른 실사 수량을 입력하세요',

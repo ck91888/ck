@@ -33,6 +33,7 @@ import {finishUnplannedUnload} from './unplanned-unload-finish.js';
 import {ensureAttachmentKeyIndex} from './attachment-key-index.js';
 import {intentSignature,canonicalIntent,boundReceiptJSON,readBoundReceipt} from './transaction-receipt.js';
 import {purchaseEditGuard,purchaseEditError} from './purchase-edit-guard.js';
+import {purchaseShipmentReceipt} from './purchase-shipment-receipt.js';
 import {ensureInboundReferenceGuard} from './inbound-reference-guard.js';
 import {referenceWriteBatch,ensureReferenceHistory} from './inbound-reference-history.js';
 import {ensureInboundDocuments,inboundDocumentStates,inboundDocumentStateRead,documentStatesFromRows,confirmInboundIssue} from './inbound-documents.js';
@@ -12567,27 +12568,30 @@ route('v2_003_purchase_order_update', async (body, env) => {
 
 route('v2_003_purchase_shipment_create', async (body, env) => {
   if (!isAdmin(body, env)) return err('unauthorized_admin_only', 401);
+  try {
   const requestKey = String(body.client_req_id || '').trim();
-  const replay = async () => {
-    if (!requestKey) return null;
-    const cached = await env.DB.prepare("SELECT response_json FROM v2_idempotency_keys WHERE idem_key=? AND action='v2_003_purchase_shipment_create'").bind(requestKey).first();
-    if (!cached || !cached.response_json) return null;
-    try { return JSON.parse(cached.response_json); } catch { return null; }
-  };
-  const cached = await replay();
-  if (cached) return json(cached);
   const orderId = v003Text(body.order_id, 100);
   const method = ['express', 'supplier'].includes(String(body.delivery_method)) ? String(body.delivery_method) : '';
   const tracking = v003Text(body.tracking_no, 180);
-  if (!method) return err('delivery_method_required');
-  if (method === 'express' && !tracking) return err('tracking_no_required');
+  const op = v003RequireOperator(body) || { id: 'ADMIN', name: '管理员' };
+  const rawItems = v003Lines(body.items);
+  const input={order_id:orderId,delivery_method:method,tracking_no:tracking,
+    supplier:body.supplier?v003Text(body.supplier,160):null,expected_date:normalizeDateOnly(body.expected_date),note:v003Text(body.note,1000),operator:op,
+    items:rawItems.map(x=>({order_line_id:v003Text(x&&x.order_line_id,100),expected_qty:v003Number(x&&x.expected_qty,NaN)})).sort((a,b)=>a.order_line_id<b.order_line_id?-1:a.order_line_id>b.order_line_id?1:0)};
+  const receipt = await purchaseShipmentReceipt(env,requestKey,input);
+  const replay = receipt.read;
+  const reject = async (code,status) => {const committed=await replay();return committed?json(committed):err(code,status);};
+  const cached = await replay();
+  if (cached) return json(cached);
+  if (!method) return await reject('delivery_method_required');
+  if (method === 'express' && !tracking) return await reject('tracking_no_required');
   const order = await env.DB.prepare('SELECT * FROM v2_003_purchase_orders WHERE id=?').bind(orderId).first();
-  if (!order) return err('not_found', 404);
-  if (['completed', 'cancelled'].includes(order.status)) return err('purchase_order_closed');
+  if (!order) return await reject('not_found', 404);
+  if (['completed', 'cancelled'].includes(order.status)) return await reject('purchase_order_closed');
   if (tracking) {
     const duplicate = await env.DB.prepare('SELECT id FROM v2_003_purchase_shipments WHERE tracking_no=? LIMIT 1')
       .bind(tracking).first();
-    if (duplicate) return err('duplicate_tracking_no');
+    if (duplicate) return await reject('duplicate_tracking_no');
   }
   const lineRs = await env.DB.prepare(`SELECT l.*,
       COALESCE((SELECT SUM(si.expected_qty) FROM v2_003_purchase_shipment_items si
@@ -12595,22 +12599,20 @@ route('v2_003_purchase_shipment_create', async (body, env) => {
         WHERE si.order_line_id=l.id AND s.status!='cancelled'),0) AS scheduled_qty
     FROM v2_003_purchase_order_lines l WHERE l.order_id=?`).bind(orderId).all();
   const lineMap = new Map((lineRs.results || []).map(x => [x.id, x]));
-  const rawItems = v003Lines(body.items);
   const items = [];
   const seen = new Set();
   for (const raw of rawItems) {
     const lineId = v003Text(raw && raw.order_line_id, 100);
     const qty = v003Number(raw && raw.expected_qty, NaN);
     const line = lineMap.get(lineId);
-    if (!line || seen.has(lineId) || !Number.isFinite(qty) || qty <= 0) return err('invalid_shipment_line');
-    if (v003Number(line.scheduled_qty) + qty > v003Number(line.ordered_qty) + 0.0001) return err('shipment_qty_exceeds_ordered');
+    if (!line || seen.has(lineId) || !Number.isFinite(qty) || qty <= 0) return await reject('invalid_shipment_line');
+    if (v003Number(line.scheduled_qty) + qty > v003Number(line.ordered_qty) + 0.0001) return await reject('shipment_qty_exceeds_ordered');
     seen.add(lineId);
     items.push({ line_id: lineId, material_id: line.material_id, qty });
   }
-  if (!items.length) return err('shipment_lines_required');
+  if (!items.length) return await reject('shipment_lines_required');
     const shipmentId = v003Id('SHP');
     const shipmentNo = v003HumanNo(method === 'express' ? 'KD' : 'SC');
-    const op = v003RequireOperator(body) || { id: 'ADMIN', name: '管理员' };
     const t = now();
     const guards = [], guardArgs = [];
     for (const item of items) {
@@ -12623,7 +12625,7 @@ route('v2_003_purchase_shipment_create', async (body, env) => {
     // The reservation, its items and the replay response commit together.
     // Recheck live quantities inside the batch instead of trusting the earlier form snapshot.
     const response = { ok: true, id: shipmentId, shipment_no: shipmentNo };
-    const responseJson = JSON.stringify(response);
+    const responseJson = receipt.encode(response);
     const statements = [env.DB.prepare(`INSERT INTO v2_003_purchase_shipments
       (id, shipment_no, order_id, delivery_method, tracking_no, supplier, expected_date, status,
        received_at, received_by, note, created_by, created_at, updated_at)
@@ -12645,20 +12647,26 @@ route('v2_003_purchase_shipment_create', async (body, env) => {
       SET status=CASE WHEN status='partial_received' THEN status ELSE 'shipped' END, updated_at=? WHERE id=?
         AND EXISTS (SELECT 1 FROM v2_003_purchase_shipments WHERE id=?)`)
       .bind(t, orderId, shipmentId));
-    if (requestKey) statements.push(env.DB.prepare(`INSERT OR IGNORE INTO v2_idempotency_keys
+    if (requestKey) statements.push(env.DB.prepare(`INSERT INTO v2_idempotency_keys
       (idem_key, action, response_json, created_at)
       SELECT ?,'v2_003_purchase_shipment_create',?,? WHERE EXISTS (SELECT 1 FROM v2_003_purchase_shipments WHERE id=?)`)
       .bind(requestKey, responseJson, t, shipmentId));
-    const results = await env.DB.batch(statements);
+    let results;
+    try {results = await env.DB.batch(statements);}
+    catch (error) {const committed=await replay();if(committed)return json(committed);throw error;}
     if (!v003Changes(results[0])) {
       const committed = await replay();
       if (committed) return json(committed);
       const latestOrder = await env.DB.prepare('SELECT status FROM v2_003_purchase_orders WHERE id=?').bind(orderId).first();
-      if (!latestOrder || ['completed', 'cancelled'].includes(latestOrder.status)) return err('purchase_order_closed');
-      if (tracking && await env.DB.prepare('SELECT id FROM v2_003_purchase_shipments WHERE tracking_no=? LIMIT 1').bind(tracking).first()) return err('duplicate_tracking_no');
-      return err('shipment_qty_exceeds_ordered');
+      if (!latestOrder || ['completed', 'cancelled'].includes(latestOrder.status)) return await reject('purchase_order_closed');
+      if (tracking && await env.DB.prepare('SELECT id FROM v2_003_purchase_shipments WHERE tracking_no=? LIMIT 1').bind(tracking).first()) return await reject('duplicate_tracking_no');
+      return await reject('shipment_qty_exceeds_ordered');
     }
     return json(response);
+  } catch (error) {
+    if(error.message==='request_id_conflict')return err(error.message,409);
+    throw error;
+  }
 });
 
 async function v003ReceivingDetail(env, shipment) {
