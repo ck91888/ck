@@ -67,3 +67,24 @@ CK_PERF_NATIVE_D1=true CODEX_PRIMARY_RUNTIME_NODE_MODULES=/已安装依赖/node_
 ```
 
 正在固定源码上执行全量、包含前批竞态的原生 D1 合集，以及作业计划/原业务浏览器回归。此阶段未发布、未合测试，不能将阶段验证当作独立 QA 放行；其它 P2 保持后续批次。
+
+## 最终开发验证
+
+固定业务源码与测试：`160412121a1180f069e6ac3b48422d5fc0ea8a09`；其后仅补本文记录。
+
+- 构建成功；全量 **1630 通过、0 失败、0 跳过、0 取消**。
+- 真实本地 workerd D1 合集 **97/0/0/0**：附件索引 7 项，加前批耗材幂等/共享权限/完成事务/退出竞态、部分到仓与开关/旧库升级 90 项。没有使用线上数据库。
+- 八组真实 Chromium 脚本串行全部 exit 0：作业计划（1440/390/320 业务流程及九组宽度/缩放视觉）、部分到仓、打印 CSV、自动派审、产出草稿、返岗、照片压缩、反馈创建。原断言、按钮定位和等待时长均未放宽。
+- 加入索引后的最终源码另做 100/1000 组真实办公室登录 API 验证，完整响应、总数与字节再次匹配发布基线。万组性能数字来自前述隔离分阶段实测；最终的 `work-plan-list.js` 与测速阶段 `438c321` 字节一致，没有再次引入重复关联扫描。
+- 本批业务源码只有三个文件：作业关联模块、新索引初始化模块、Worker 两行引入/调用。UI、业务完成/工时/出入库、权限实现、基础迁移版本、部署配置和发布标识未改。没有提前分页、唯一键、历史数据重写或真实数据压测。
+- 分阶段远端保存：`438c321` Map、`12cbcf8` 完整 API 证据、`1604121` 附件索引。工作区干净；测试基线仍 `f640c4f`、main 仍 `4671f49`。未合测试或部署，交固定独立 QA；其他 P2 不属于本候选。
+
+最终合集命令（先执行构建）：
+
+```sh
+node worker-v2/build-sop-staging.mjs
+CK_JSDOM_MODULE=/已安装依赖/node_modules/jsdom/lib/api.js node --test --test-concurrency=2 tests/*.test.mjs
+CK_PERF_NATIVE_D1=true CK_P1_NATIVE_D1=true CK_PARTIAL_NATIVE_D1=true CODEX_PRIMARY_RUNTIME_NODE_MODULES=/已安装依赖/node_modules node --test --test-concurrency=1 tests/attachment-key-index.test.mjs tests/material-txn-atomic.test.mjs tests/completion-owner-races.test.mjs tests/partial-arrival-api.test.mjs tests/partial-arrival-rollout.test.mjs tests/unplanned-completion-atomic.test.mjs
+```
+
+浏览器沿用仓库脚本：`work-plan-list-browser.mjs`、`partial-arrival-browser.mjs`、`partial-arrival-documents-browser.mjs`、`dispatch-time-browser.mjs`、`bulk-output-draft-browser.mjs`、`attendance-return-browser.mjs`、`photo-compression-browser.mjs`、`feedback-create-browser.mjs`。启用 `CK_ATTENDANCE_RETURNS=true CK_AUTO_DISPATCH_TIME=true`，使用隔离合成数据。上述不代表国内网络或实体手机验收，也不表示已修完全部历史 BUG。
