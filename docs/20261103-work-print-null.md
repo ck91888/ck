@@ -40,7 +40,7 @@
 
 未改旧浏览器脚本的断言或等待，也未修其它批次记录的卡片高度问题；本阶段执行上述功能/PDF脚本，不将未执行的完整视觉脚本报告为通过。测试截图及 PDF 仅存本地 `/tmp/ck-work-print-null-browser`、`/tmp/ck-recovery-print`，不上传公开仓库。
 
-## 最终开发验证
+## 首次候选完整验证（840f7aa 基线）
 
 固定业务源码：`4a9ea151cb7bb1f31c73faaa8a4cb0a3f132a3c7`；后续 `b84a69cd6a5392fc7189c0b289a566a657084512` 仅增加已验证的实际页面测试及说明，其后仅补本节。生产代码仍仅原历史读取表达式中的两个可选链；共享解析器、文档哈希、原 SQL/排序、打印摘要及全部写入路径与 `840f7aa` 字节一致。
 
@@ -71,4 +71,31 @@ node tests/work-need-groups-print-browser.mjs
 
 原性能测试唯一刻意要求新算法也抛 null 异常的案例，改为检查最新/旧 null 被容错后：原有效匹配数、摘要和此前逐单赋值保留，请求总数加 1，最新空快照人/时间保留且不造要求版本。冻结的旧算法仍断言抛 TypeError，其余完整输出/SQL 冻结哈希和非 null 差分全部保留，并非删除失败用例。
 
-整合后相关 Node **37/0/0**。接下来对该整合候选重新执行万单 API 输出/查询对照、全量、原生 D1 与实际页面；null 整合候选尚未放行、未合测试、未部署。
+整合阶段先通过相关 Node **37/0/0**，再对该整合候选执行下述万单 API 输出/查询对照、全量、原生 D1 与实际页面。null 整合候选尚未获独立 QA 放行、未合测试、未部署。
+
+## 整合后验证（当前 0b69e34 基线）
+
+整合源码 `09ea5b89dc8b4c8c2e8386d46a7fcac9868f2a83` 已推送；它同时包含原 null 候选 `78bf0a4` 和当前已发布性能基线 `0b69e34`。相对后者的业务差异仍严格只有两个 `?.`，保留完整 Map、原 SQL/排序、所有查询/写入与权限实现。
+
+- 相关 Node **37/0/0**，包括 100/1000 的旧算法逐字段对照、万单完整输出与 SQL 冻结哈希、最新/旧 null 的精确状态/计数/元数据断言。
+- 再跑真实登录完整 API 100/1000/10000 及万单末尾筛选。正常（非 null）合成历史的四份响应全文、载荷字节、SQL 文本顺序、查询参数、计数及分页与已发布性能版指标完全一致，原业务表快照不变。原单轮整合样本万单首屏 1904.491ms、末尾筛选 2933.471ms；仅作本地样本记录，不据此承诺现场延迟。新增 null 语义单独由专项/API/D1 覆盖。
+- 原生本地 workerd D1 合集 **15/0/0**：本批 null 6 项、历史出库来源打印 8 项、原打印历史 API 1 项，保留所有审计/权限/幂等/数据不变断言。
+- 构建成功；三份实际 Chromium 脚本全部 exit 0：`work-print-null-browser.mjs`（PC 1440/手机视口 390、真实 PDF）、`work-need-groups-print-browser.mjs`（分组/旧单/历史出库来源 PDF）、`work-plan-list-browser.mjs`（2 功能流程、9 组宽度/缩放，含 320/390）。未改旧等待或断言；未执行其它完整打印密度脚本，未声称修复其旧高度问题。
+
+整合源码上的最终全量 **1653 通过、0 失败、0 跳过、0 取消**，约 371 秒。其后仅更新此说明，没有改业务或测试源码。`git diff --check` 通过，null 候选未发布，提交固定独立 QA 重新审核。所有测试为本地隔离合成夹具，未访问线上数据库或改写真实记录。
+
+相对当前已发布 `0b69e34` 只有 5 文件差异：两处空值保护的业务文件、此前旧 null 异常断言的专项更新、两个新增合成测试、此说明。部署配置、schema、SQL、共享解析器、文档哈希、打印摘要和全部写入路径未变。
+
+整合最终命令：
+
+```sh
+CK_PRINT_HISTORY_BASELINE_METRICS=/本地已审版本指标.json CK_PRINT_HISTORY_METRICS=/tmp/null-integrated-api.json node tests/work-print-history-api-performance.mjs
+node worker-v2/build-sop-staging.mjs
+CK_JSDOM_MODULE=/已安装依赖/node_modules/jsdom/lib/api.js node --test --test-concurrency=2 tests/*.test.mjs
+CK_PRINT_NULL_NATIVE_D1=true CK_PRINT_HISTORY_NATIVE_D1=true CK_OUTBOUND_PRINT_NATIVE_D1=true CODEX_PRIMARY_RUNTIME_NODE_MODULES=/已安装依赖/node_modules node --test --test-concurrency=1 tests/work-print-null.test.mjs tests/work-print-history-api.test.mjs tests/outbound-work-print.test.mjs
+node tests/work-print-null-browser.mjs
+node tests/work-need-groups-print-browser.mjs
+node tests/work-plan-list-browser.mjs
+```
+
+整合日志/指标保留在本环境 `/workspace/scratch/ck-p1-test-runtime/print-null-integrated-*`，包括 `full.log`、`d1.log`、`api-metrics.json`、`api-performance.log`、三份 `*-browser.log` 和 `browser-results.json`。首阶段的失败和通过日志仍在 `print-null-fix-*`；未删除原证据。
