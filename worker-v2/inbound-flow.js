@@ -1,10 +1,11 @@
 import {tallyType,putawayType} from './inbound-stages.js';
 import {inboundArrivalState} from './inbound-arrival-batches.js';
+import {inboundFlowEnabled} from './inbound-policy.js';
+export {inboundFlowEnabled} from './inbound-policy.js';
 // Inbound dispositions use the existing storage keys for compatibility.
 // Cross-dock retains `bulk`; only `bulk_putaway` denotes bulk putaway.
 import {referenceWriteBatch} from './inbound-reference-history.js';
 export const inboundLabels={direct_ship:'代发理货上架',bulk_putaway:'大货理货上架',bulk:'直进直出',return:'整托退回',change_order:'换单'};
-export const inboundFlowEnabled=env=>env.SOP_ENVIRONMENT==='staging'&&env.SOP_UPGRADE_ENABLED==='true';
 export const inboundCode=value=>String(value??'').normalize('NFKC').trim();
 export const inboundReferenceValue=(body,fallback='')=>body.external_inbound_nos??body.external_inbound_no??fallback;
 export function inboundCodes(value){return [...new Set((Array.isArray(value)?value:[value]).flatMap(x=>inboundCode(x).split(/[\n\r,;，；\t]+/)).map(inboundCode).filter(Boolean))];}

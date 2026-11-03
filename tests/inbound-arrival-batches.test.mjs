@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {database} from './d1-adapter.mjs';
 import {inboundArrivalState,inboundArrivalScope,arrivalBatchOutput,arrivalBatchStatement,arrivalSettlementSQL} from '../worker-v2/inbound-arrival-batches.js';
 function fixture(t){
- const DB=database();t.after(()=>DB.raw.close());const e={DB};
+ const DB=database();t.after(()=>DB.raw.close());const e={DB,SOP_ENVIRONMENT:'staging',SOP_UPGRADE_ENABLED:'true'};
  DB.raw.exec(`INSERT INTO v2_inbound_plans(id,status,biz_class,biz_classes_json,external_inbound_no) VALUES('SYNTH-P','pending','direct_ship','["direct_ship"]','SYNTH-EXT');
  INSERT INTO v2_inbound_plan_lines(id,plan_id,line_no,unit_type,planned_qty) VALUES('SYNTH-L','SYNTH-P',1,'courier',2);
  INSERT INTO ck_courier_plan_items VALUES('999001880001','SYNTH-P','SYNTH-L'),('999001880002','SYNTH-P','SYNTH-L');`);

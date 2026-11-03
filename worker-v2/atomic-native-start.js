@@ -1,12 +1,12 @@
 import {preparePutaway} from './multi-putaway.js';
 import {validateOperationStart} from '../shared/internal-operations.js';
 import {validateInboundStage,stagedPlanStatement} from './inbound-stages.js';
-import {inboundArrivalState,inboundArrivalScope,arrivalBatchStatement} from './inbound-arrival-batches.js';
+import {inboundArrivalState,inboundArrivalScope,arrivalBatchStatement,arrivalAdmissionStatement} from './inbound-arrival-batches.js';
 import {resolveInboundEntry,independentInbound,inboundOwner} from './independent-inbound.js';
 import {pickWorkloadContext,pickWorkloadSnapshot} from './pick-workload.js';
 import {staffedDispatchStatements} from './crew-borrow.js';
 import {ensureSchema} from './schema-ready.js';
-import {resolveInboundPlan,putawayTaskBiz,selectInboundReference,planClasses} from './inbound-flow.js';
+import {resolveInboundPlan,putawayTaskBiz,selectInboundReference,planClasses,inboundFlowEnabled} from './inbound-flow.js';
 import {documentCodeError} from '../shared/document-code.js';
 import {pickTeamStatements} from './native-lifecycle.js';
 const q=(e,s,...a)=>e.DB.prepare(s).bind(...a);
@@ -19,10 +19,10 @@ export async function ensureDispatchStartGuard(e){
   q(e,`CREATE TRIGGER IF NOT EXISTS ck_dispatch_pick_doc_exclusive_pause_v2 BEFORE INSERT ON v2_ops_job_pick_docs BEGIN SELECT CASE WHEN EXISTS(SELECT 1 FROM v2_ops_job_pick_docs d JOIN v2_ops_jobs j ON j.id=d.job_id WHERE d.pick_doc_no=NEW.pick_doc_no AND d.job_id!=NEW.job_id AND j.status IN ('pending','working','awaiting_close','paused')) THEN RAISE(ABORT,'pick_document_has_active_trip') END; END`)
  ]));
 }
-async function commitPrepared(e,p,staff,{id,t,sql,after=[],sourceType,sourceId,jobType,extra={}}){
+async function commitPrepared(e,p,staff,{id,t,sql,after=[],admission,sourceType,sourceId,jobType,extra={}}){
  const lead=staff.workers.find(w=>w.id===staff.lead_id),signature=dispatchSignature(e,p,staff),result={ok:true,job_id:id,worker_seg_id:'WS-'+crypto.randomUUID(),is_new_job:true,lead,assigned_workers:staff.workers,...extra,_dispatch_signature:signature};
  const statements=[q(e,'INSERT INTO v2_idempotency_keys(idem_key,action,response_json,created_at) VALUES(?,?,?,?)',p.client_req_id,p.action,JSON.stringify(result),t),...sql,...staffedDispatchStatements(e,{...p,job_type:jobType,source_type:sourceType,source_id:sourceId},staff,id,t,result),...after];
- await ensureDispatchStartGuard(e);try{await e.DB.batch(statements);}catch(error){const prior=await q(e,'SELECT response_json FROM v2_idempotency_keys WHERE idem_key=?',p.client_req_id).first();if(prior){const saved=JSON.parse(prior.response_json);if(saved._dispatch_signature===signature)return saved;throw Error('同一请求的人员或作业要求已变化，请重新提交');}throw error;}return result;
+ await ensureDispatchStartGuard(e);try{await e.DB.batch([...(admission?[admission()]:[]),...statements]);}catch(error){const prior=await q(e,'SELECT response_json FROM v2_idempotency_keys WHERE idem_key=?',p.client_req_id).first();if(prior){const saved=JSON.parse(prior.response_json);if(saved._dispatch_signature===signature)return saved;throw Error('同一请求的人员或作业要求已变化，请重新提交');}throw error;}return result;
 }
 export async function startAtomicDocument(e,p,staff,pickNumber){
  const t=new Date().toISOString(),lead=staff.workers.find(w=>w.id===staff.lead_id),sql=[],after=[],extra={};let id='JOB-'+crypto.randomUUID(),type,flow,biz='',doc,source;
@@ -64,7 +64,7 @@ export async function startAtomicInbound(e,p,staff,number){
  const id='JOB-'+crypto.randomUUID(),t=new Date().toISOString(),lead=staff.workers.find(w=>w.id===staff.lead_id),type=p.job_type||'inbound_direct',returned=type==='inbound_return',biz=String(p.biz_class||''),sql=[];let planId=String(p.plan_id||''),code='';
  if(type==='inbound_change_order')return {ok:false,error:'换单计划卸货后自动入库，无需再次理货'};
  if(!['inbound_direct_tally','inbound_direct_putaway','inbound_direct','inbound_bulk','inbound_return'].includes(type)||(!returned&&biz!==(type==='inbound_bulk'?'bulk':'direct_ship'))||(returned&&biz&&biz!=='return'))return {ok:false,error:'入库业务类型不匹配'};
- let recognized,arrivalScope=null;
+ let recognized,arrivalScope=null,admissionPlanId='';
  if(!returned&&!planId){
   recognized=await resolveInboundEntry(e,p.external_inbound_no,biz,type);
   if(!['system','independent'].includes(recognized.kind))return {ok:false,error:recognized.message};
@@ -85,10 +85,11 @@ export async function startAtomicInbound(e,p,staff,number){
   if(returned){if(plan.source_type!=='return_session'||plan.biz_class!=='return'||plan.status!=='putting_away')return {ok:false,error:'退件会话状态不允许开工'};}
   else{
    const arrival=await inboundArrivalState(e,plan);
-   if(!['unloading','unloading_putting_away','arrived_pending_putaway','putting_away','tallied_pending_putaway','direct_putting_away','partially_completed'].includes(plan.status)&&!(plan.status==='pending'&&arrival?.received>0&&['inbound_direct_tally','inbound_bulk'].includes(type)))return {ok:false,error:'当前计划状态不可开始理货'};
+   if(!['unloading','unloading_putting_away','arrived_pending_putaway','putting_away','tallied_pending_putaway','direct_putting_away','partially_completed'].includes(plan.status)&&!(inboundFlowEnabled(e)&&plan.status==='pending'&&arrival?.received>0&&['inbound_direct_tally','inbound_bulk'].includes(type)))return {ok:false,error:'当前计划状态不可开始理货'};
    const taskBiz=putawayTaskBiz(e,plan,biz);if(!taskBiz||!planClasses(plan).includes(taskBiz))return {ok:false,error:'此计划没有本部门的理货上架'};
    code=await selectInboundReference(e,plan,p.external_inbound_no,taskBiz);await validateInboundStage(e,plan,code,type);const task=await q(e,'SELECT status FROM v2_inbound_plan_biz_tasks WHERE plan_id=? AND biz_class=?',planId,taskBiz).first();if(task?.status==='completed')return {ok:false,error:'本部门理货已完成'};
    arrivalScope=await inboundArrivalScope(e,plan,code,type);
+   admissionPlanId=plan.id;
    sql.push(q(e,`INSERT OR IGNORE INTO v2_inbound_plan_biz_tasks(id,plan_id,biz_class,job_type,status,created_at,updated_at) VALUES(?,?,?,?,'pending',?,?)`,'IBT-'+crypto.randomUUID(),planId,taskBiz,type,t,t));
    sql.push(q(e,"UPDATE v2_inbound_plans SET status=CASE WHEN status='unloading' THEN 'unloading_putting_away' WHEN status='arrived_pending_putaway' THEN 'putting_away' ELSE status END,updated_at=? WHERE id=?",t,planId));
   }
@@ -98,8 +99,9 @@ export async function startAtomicInbound(e,p,staff,number){
  sql.push(q(e,`INSERT INTO v2_ops_jobs(id,flow_stage,biz_class,job_type,related_doc_type,related_doc_id,status,created_by,created_at,updated_at,active_worker_count,inbound_external_no) VALUES(?,'inbound',?,?,'inbound_plan',?,'working',?,?,?,?,?)`,id,biz,type,planId,lead.id,t,t,staff.workers.length,code));
  if(arrivalScope)sql.push(arrivalBatchStatement(e,id,arrivalScope,t));
  if(returned){const data=validateOperationStart(type,p);sql.push(q(e,'UPDATE v2_ops_jobs SET shared_result_json=? WHERE id=?',JSON.stringify({internal_operation:{...data,start:{...data.start,recorded_at:t,recorded_by:e.SOP_REQUEST_USER.id}}}),id));}
- try{return await commitPrepared(e,p,staff,{id,t,sql,jobType:type,sourceType:'inbound_plan',sourceId:planId,after:[stagedPlanStatement(e,planId,t)],extra:{plan_id:planId,external_inbound_no:code,...(arrivalScope?{arrival_batch:arrivalScope}:{})}});}
+ try{return await commitPrepared(e,p,staff,{id,t,sql,jobType:type,sourceType:'inbound_plan',sourceId:planId,...(admissionPlanId?{admission:()=>arrivalAdmissionStatement(e,admissionPlanId,type,!!arrivalScope)}:{}),after:[stagedPlanStatement(e,planId,t)],extra:{plan_id:planId,external_inbound_no:code,...(arrivalScope?{arrival_batch:arrivalScope}:{})}});}
  catch(error){
+  if(String(error.message).includes('malformed JSON'))throw Error('计划、到仓或功能开关已变化，请刷新核对 / 계획·입고·기능 설정을 다시 확인하세요');
   // The unique stage claim remains authoritative if another start wins after preflight.
   if(String(error.message).includes('UNIQUE constraint failed: v2_ops_jobs.related_doc_id, v2_ops_jobs.inbound_external_no, v2_ops_jobs.job_type'))await validateInboundStage(e,{id:planId},code,type);
   throw error;
