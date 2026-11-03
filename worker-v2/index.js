@@ -2791,7 +2791,15 @@ route("v2_outbound_order_list", async (body, env) => {
   } else if (hasMaterialRaw === "0") {
     where += " AND NOT EXISTS (SELECT 1 FROM v2_attachments a WHERE a.related_doc_type='outbound_order' AND a.related_doc_id=v2_outbound_orders.id AND a.attachment_category='outbound_material')";
   }
-  const listSql = "SELECT *"+(workChainEnabled(env)?", "+workMaterialCountFor(env)+" AS material_count":"")+" FROM v2_outbound_orders" + where + " ORDER BY " + _dateExpr + " DESC, created_at DESC LIMIT ? OFFSET ?";
+  const materialCount = workChainEnabled(env) ? workMaterialCountFor(env) : '';
+  const orderBy = _dateExpr + " DESC, created_at DESC";
+  const pageSql = "SELECT * FROM v2_outbound_orders" + where + " ORDER BY " + orderBy + " LIMIT ? OFFSET ?";
+  // Freeze the page before evaluating display-only material counts. A material
+  // filter must still run before pagination and keeps its original query path.
+  // Keep SELECT at the root for the existing runtime's read-only classification.
+  const listSql = materialCount && !['0','1'].includes(hasMaterialRaw)
+    ? "SELECT * FROM (WITH outbound_page AS MATERIALIZED (" + pageSql + ") SELECT v2_outbound_orders.*, " + materialCount + " AS material_count FROM outbound_page AS v2_outbound_orders) ORDER BY " + orderBy
+    : "SELECT *" + (materialCount ? ", " + materialCount + " AS material_count" : "") + pageSql.slice("SELECT *".length);
   const [countRs,rs]=await env.DB.batch([env.DB.prepare('SELECT COUNT(*) AS c FROM v2_outbound_orders'+where).bind(...binds),env.DB.prepare(listSql).bind(...binds,limit,offset)]);
   const total=Number(countRs.results?.[0]?.c||0);
   const items = rs.results || [];
