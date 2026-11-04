@@ -17,7 +17,7 @@ test('narrow dashboard header grows for wrapped identity controls instead of cov
 });
 function fixture(t,app){
  const errors=[],virtualConsole=new runtime.VirtualConsole();virtualConsole.on('jsdomError',e=>errors.push(e.message));
- const dom=new runtime.JSDOM(read(app+'/index.html'),{url:'https://fixture.invalid/'+app+'/',runScripts:'outside-only',virtualConsole});
+ const dom=new runtime.JSDOM(read(app+'/index.html'),{url:'https://fixture.invalid/'+app+'/',runScripts:'outside-only',virtualConsole,pretendToBeVisual:app==='shuju'});
  const w=dom.window,alerts=[],calls=[],add=w.addEventListener;
  w.addEventListener=function(name,...rest){if(name!=='DOMContentLoaded')return add.call(this,name,...rest);};
  w.alert=x=>alerts.push(String(x));w.confirm=()=>true;w.fetch=()=>{throw Error('Fixture must not use network');};

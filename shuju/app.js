@@ -4,6 +4,49 @@
 
 var _currentTab = "realtime";
 var _refreshTimer = null;
+var _clockTimer = null;
+var _realtimeStarted = false, _realtimePageActive = true, _realtimeActive = false, _realtimeEpoch = 0, _realtimeCycle = null, _realtimeAgain = false;
+var _realtimeReads = Object.create(null);
+
+function realtimeVisible() {
+  var session = window.CKSession;
+  return _realtimePageActive && !document.hidden && _currentTab === 'realtime' && (!session || !!session.user && session.user.role === 'manager');
+}
+function withRealtimeRead(key, task) {
+  if (!realtimeVisible()) return Promise.resolve();
+  var old = _realtimeReads[key];
+  if (old) return old.owned() ? old.promise : old.promise.catch(function() {}).then(function() { return withRealtimeRead(key, task); });
+  var epoch = _realtimeEpoch, host = document.getElementById('tab-realtime'), identity = CKLatestListRead.identity(getKey), entry = {};
+  entry.owned = function() { return epoch === _realtimeEpoch && realtimeVisible() && identity() && host && host.isConnected && document.getElementById(host.id) === host; };
+  _realtimeReads[key] = entry;
+  entry.promise = Promise.resolve().then(function() { if (entry.owned()) return task(entry.owned); }).finally(function() { if (_realtimeReads[key] === entry) delete _realtimeReads[key]; });
+  return entry.promise;
+}
+function syncRealtimePolling(refresh) {
+  var active = realtimeVisible(), changed = active !== _realtimeActive;
+  if (changed) { _realtimeActive = active; _realtimeEpoch++; if (active && _realtimeCycle) _realtimeAgain = true; }
+  if (!active || !_realtimeStarted) { clearTimeout(_refreshTimer); _refreshTimer = null; _realtimeAgain = false; return; }
+  if (refresh || changed) { clearTimeout(_refreshTimer); _refreshTimer = null; return refreshRealtime(); }
+  if (!_realtimeCycle && _refreshTimer === null) _refreshTimer = setTimeout(function() { _refreshTimer = null; refreshRealtime(); }, 30000);
+}
+function refreshRealtime() {
+  if (!_realtimeStarted || !realtimeVisible()) { syncRealtimePolling(false); return Promise.resolve(); }
+  clearTimeout(_refreshTimer); _refreshTimer = null;
+  if (_realtimeCycle) return _realtimeCycle;
+  var cycle = Promise.all([
+    Promise.resolve().then(function() { return loadRealtime(); }).catch(function() {}),
+    Promise.resolve().then(function() { return loadLiveDocs(); }).catch(function() {})
+  ]).finally(function() {
+    if (_realtimeCycle !== cycle) return;
+    _realtimeCycle = null;
+    var again = _realtimeAgain; _realtimeAgain = false;
+    if (again && realtimeVisible()) refreshRealtime(); else syncRealtimePolling(false);
+  });
+  _realtimeCycle = cycle; return cycle;
+}
+document.addEventListener('visibilitychange', function() { syncRealtimePolling(false); });
+window.addEventListener('pagehide', function() { _realtimePageActive = false; syncRealtimePolling(false); });
+window.addEventListener('pageshow', function() { _realtimePageActive = true; syncRealtimePolling(false); });
 
 // ===== 通用 utils =====
 function esc(s) {
@@ -190,14 +233,8 @@ function showApp() {
   initFilterSelects();
   // 首次默认日期
   setDefaultDateInputs();
-  loadRealtime();
-  loadLiveDocs();
-  _refreshTimer = setInterval(function() {
-    if (_currentTab === "realtime") {
-      loadRealtime();
-      loadLiveDocs();
-    }
-  }, 30000);
+  _realtimeStarted = true;
+  syncRealtimePolling(true);
 }
 function startClock() {
   function tick() {
@@ -206,7 +243,8 @@ function startClock() {
     if (el) el.textContent = d.toISOString().slice(0,10) + " " + d.toISOString().slice(11,19) + " KST";
   }
   tick();
-  setInterval(tick, 1000);
+  clearInterval(_clockTimer);
+  _clockTimer = setInterval(tick, 1000);
 }
 
 function initFilterSelects() {
@@ -257,8 +295,8 @@ function switchTab(tab, btn) {
     var el = document.getElementById("tab-" + t);
     if (el) el.style.display = (t === tab) ? "" : "none";
   });
-  if (tab === "realtime") { loadRealtime(); loadLiveDocs(); }
-  else if (tab === "orders" && !window._ordersLoaded) { window._ordersLoaded = true; loadOrders(); }
+  syncRealtimePolling(tab === 'realtime');
+  if (tab === "orders" && !window._ordersLoaded) { window._ordersLoaded = true; loadOrders(); }
   else if (tab === "workhours" && !window._workhoursLoaded) { window._workhoursLoaded = true; loadWorkhours(); }
   else if (tab === "wms" && !window._wmsLoaded) { window._wmsLoaded = true; loadWmsBatches(); }
   else if (tab === "management" && !window._managementLoaded) { window._managementLoaded = true; loadManagement(); }
@@ -269,8 +307,9 @@ var _liveWorkersCache = [];
 var _liveBizFilter = '';
 var _liveShowStaleOnly = false;
 async function loadRealtime() {
+  return withRealtimeRead('overview', async function(owned) {
   var res = await api({ action: "v2_dashboard_realtime_overview" });
-  if (!res || !res.ok) return;
+  if (!owned() || !res || !res.ok) return;
 
   document.getElementById("statActiveWorkers").textContent = res.current_active_workers || 0;
   document.getElementById("statTodayLogins").textContent = res.today_login_workers || 0;
@@ -298,6 +337,7 @@ async function loadRealtime() {
     });
     grid.innerHTML = bhtml;
   }
+  });
 }
 
 function filterLiveByJobType(jt) {
@@ -565,7 +605,9 @@ async function submitForceLeave(btnEl) {
 }
 
 async function loadLiveDocs() {
-  var res = await api({ action: "v2_dashboard_live_docs" });
+  return withRealtimeRead('live-docs', async function(owned) {
+  var res;try { res = await api({ action: "v2_dashboard_live_docs" }); } catch(e) { res = null; }
+  if (!owned()) return;
   var tbody = document.getElementById("liveDocsBody");
   if (!res || !res.ok) {
     tbody.innerHTML = '<tr><td colspan="8" class="muted" style="text-align:center;">加载失败</td></tr>';
@@ -600,6 +642,7 @@ async function loadLiveDocs() {
     html += "</tr>";
   });
   tbody.innerHTML = html;
+  });
 }
 
 async function markAnomaly(type, id) {
