@@ -96,19 +96,22 @@ async function closePerson(env,r,t,reason){
  sql.push(q(env,"UPDATE v2_pick_worker_docs SET status='completed',finished_at=?,minutes_worked=COALESCE((SELECT minutes_worked FROM v2_ops_job_workers WHERE id=segment_id),minutes_worked) WHERE segment_id IN (SELECT value FROM json_each(?)) AND status='working'",t,JSON.stringify(open.map(s=>s.id))));
  const ids=[...new Set(open.map(s=>s.job_id))];return {sql,open,valid,ids};
 }
-async function overview(env,date,t,scope='daily',detailPersonId=''){
+async function overview(env,date,t,scope='daily',detailPersonId='',{calendarDay=false}={}){
  if(attendanceReturnEnabled(env))return attendanceReturnOverview(env,date,t,scope,detailPersonId,{publicDay,agencies});
  if(scope==='employee')employeeWorkdayAccess(env);
  const filter=scope==='employee'?" AND d.worker_id LIKE 'EMP-%'":scope==='all'?'':" AND d.worker_id NOT LIKE 'EMP-%'";
  const start=new Date(date+'T00:00:00+09:00').toISOString(),end=new Date(Date.parse(start)+86400000).toISOString();
- const days=await rows(env,attendanceDaySelect+' WHERE d.day=?'+filter+' ORDER BY d.signed_in,d.name,d.id',date);
+ // Export by the requested natural day, independent of the attendance feature
+ // switch. Keep the legacy dashboard's original day selection unchanged.
+ const days=calendarDay?await rows(env,attendanceDaySelect+` WHERE (d.day=? OR (julianday(d.signed_in)<julianday(?) AND julianday(CASE WHEN d.signed_out<>'' THEN d.signed_out ELSE strftime('%Y-%m-%dT%H:%M:%fZ',julianday(d.signed_in),'+5 hours','start of day','+1 day','-5 hours') END)>julianday(?)))`+filter+' ORDER BY d.signed_in,d.name,d.id',date,end,start):await rows(env,attendanceDaySelect+' WHERE d.day=?'+filter+' ORDER BY d.signed_in,d.name,d.id',date);
+ const dayIds=JSON.stringify(days.map(d=>d.id));
  const employeeTables=scope==='employee'?new Set((await rows(env,"SELECT name FROM sqlite_master WHERE type='table'")).map(x=>x.name)):null,assignmentAvailable=!employeeTables||employeeTables.has('sop_records');
  let segments=await rows(env,`SELECT w.*,j.biz_class,j.job_type,j.status AS job_status,j.display_no,CASE WHEN j.id IS NOT NULL AND julianday(w.joined_at)<julianday(?) AND (w.left_at='' OR julianday(w.left_at)>julianday(?)) THEN 1 ELSE 0 END AS in_report_window,${assignmentAvailable?"s.kind AS assignment_kind,s.department AS assigned_department,s.state AS assignment_state":"'' AS assignment_kind,'' AS assigned_department,'{}' AS assignment_state"} FROM v2_ops_job_workers w LEFT JOIN v2_ops_jobs j ON j.id=w.job_id ${assignmentAvailable?"LEFT JOIN sop_records s ON s.id=j.id AND s.kind IN ('task','dispatch')":''} WHERE (julianday(w.joined_at)<julianday(?) AND (w.left_at='' OR julianday(w.left_at)>julianday(?))) OR (?=1 AND w.left_at='')`,end,start,end,start,date===kstDay(t)?1:0);
  if(!employeeTables||assignmentAvailable&&employeeTables.has('sop_document_numbers'))segments=await jobNumbers(env,segments,'job_id');
  for(const s of segments){let assignment={};try{assignment=JSON.parse(s.assignment_state||'{}');}catch{}s.labor_department=assignment.labor_department||'';}
  const reportSegmentIds=new Set(segments.filter(s=>s.in_report_window).map(s=>s.id));
- const breaks=await rows(env,'SELECT b.* FROM ck_attendance_breaks b JOIN ck_attendance_days d ON d.id=b.attendance_id WHERE d.day=?',date);
- const history=await rows(env,'SELECT e.* FROM ck_attendance_events e JOIN ck_attendance_days d ON d.id=e.record_id WHERE d.day=? ORDER BY e.version',date);
+ const breaks=calendarDay?await rows(env,'SELECT b.* FROM ck_attendance_breaks b WHERE b.attendance_id IN (SELECT value FROM json_each(?))',dayIds):await rows(env,'SELECT b.* FROM ck_attendance_breaks b JOIN ck_attendance_days d ON d.id=b.attendance_id WHERE d.day=?',date);
+ const history=calendarDay?await rows(env,'SELECT e.* FROM ck_attendance_events e WHERE e.record_id IN (SELECT value FROM json_each(?)) ORDER BY e.version',dayIds):await rows(env,'SELECT e.* FROM ck_attendance_events e JOIN ck_attendance_days d ON d.id=e.record_id WHERE d.day=? ORDER BY e.version',date);
  const dutyByAttendance=await dispatchTimeAttendance(env,date,t);
  const validSegments=new Map(),output=[],deletedItems=[],blockers=await attendanceVoidBlockers(env,date),identities=await dailyIdentityMap(env,days);
  for(const d of days){
