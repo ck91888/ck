@@ -29,3 +29,7 @@ Evidence directory: `/workspace/scratch/ck-003-photo-evidence-20261104` (synthet
 - Full Node is running. Independent fixed-SHA review is pending. No release conclusion yet.
 
 The prior stage's actual stored/private-downloaded bytes passed barcode/QR and fine-text OCR at desktop/mobile, 4/4 each (3462248 -> 403880 bytes, 2048x1536). This synthetic result does not guarantee real scan readability, domestic network speed or physical device behavior. Original 743/1869ms/manual RUNTIME and earlier failures are retained, not relabeled.
+
+## Independent P2 follow-up (new local savepoint)
+
+Independent review of fixed87ff found both entrances would compress concatenated JPEG+JPEG whose final bytes were EOI. The original two failing cases are retained in the independent evidence directory;87ff is not approved. A separate local worktree/branch feature/003-photo-safe-final-20261104 adds a bounded scan from first SOS: only accept if the first unstuffed EOI ends the file. Pre-SOS Exif thumbnail data is skipped; unusual post-SOS containers are conservatively preserved. Regression includes both entrances, appended payload ending in EOI, and EOI split across a1MiB scan boundary. The compressor and raw-file behavior are unchanged. New verification is required; prior fixed-candidate full results do not substitute for it.

@@ -727,11 +727,19 @@ function choose003Photo(kind,mode){
 }
 // Conservative opt-in: keep originals, animations, transparency, scans and
 // special JPEG containers out of the lossy photo path. Never infer a scan from pixels.
+async function singlePhoto003End(file,start){
+ // In entropy-coded JPEG data a literal FF is stuffed as FF00. The first
+ // unstuffed EOI therefore ends the first image; any trailing container stays raw.
+ // Skip pre-SOS metadata (including Exif thumbnails); scan in bounded chunks.
+ var previous=-1;
+ for(var offset=start;offset<file.size;offset+=1048576){var bytes=new Uint8Array(await file.slice(offset,offset+1048576).arrayBuffer());for(var i=0;i<bytes.length;i++){if(previous===255&&bytes[i]===217)return offset+i===file.size-1;previous=bytes[i];}}
+ return false;
+}
 async function simplePhoto003(file){
  if(file.type!=='image/jpeg'||! /\.jpe?g$/i.test(file.name)||file.size>20*1048576)return false;
  var b=new Uint8Array(await file.slice(0,262144).arrayBuffer()),last=new Uint8Array(await file.slice(-2).arrayBuffer()),v=new DataView(b.buffer),ascii=function(p,n){return String.fromCharCode.apply(null,b.subarray(p,p+n));};
  if(b[0]!==255||b[1]!==216||last[0]!==255||last[1]!==217)return false;
- var p=2,frame=false;while(p+4<=b.length){if(b[p++]!==255)return false;while(b[p]===255)p++;var marker=b[p++];if(marker===218)return frame;if(p+2>b.length)return false;var len=v.getUint16(p);if(len<2||p+len>b.length)return false;
+ var p=2,frame=false;while(p+4<=b.length){if(b[p++]!==255)return false;while(b[p]===255)p++;var marker=b[p++];if(marker===218)return frame&&await singlePhoto003End(file,p);if(p+2>b.length)return false;var len=v.getUint16(p);if(len<2||p+len>b.length)return false;
   if(marker===224&&!['JFIF\0','JFXX\0'].includes(ascii(p+2,5))||marker===225&&ascii(p+2,6)!=='Exif\0\0'||marker===226&&ascii(p+2,12)!=='ICC_PROFILE\0'||marker===254||marker>=227&&marker<=239)return false;
   if([192,193,194,195,197,198,199,201,202,203,205,206,207].indexOf(marker)>=0){if(marker!==192&&marker!==194)return false;frame=true;}p+=len;
  }return false;
