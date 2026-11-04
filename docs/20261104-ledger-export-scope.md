@@ -48,3 +48,21 @@ Node及原生workerd D1均以500条混合数据确认原分页限制：offset=0/
 证据：`fe04-browser-baseline/result.json`、`fe04-browser/result.json`、`fe04-filter-browser.log`、`fe04-api-d1.log`、`fe04-capacity-node.json`和`fe04-capacity-d1.json`，保留在隔离运行目录。容量脚本不读取远程数据，所有库存和流水均为本地合成。
 
 构建通过。FE-01浏览器及全量待最终收尾；本候选尚待独立审核，未发布。
+
+## 最终开发自测
+
+最终以本节为准。业务源码固定在`d0024962467b5fc436a03f81d5e59f4445670609`，后续提交仅测试和记录。
+
+- 全量Node **1865通过/0失败/0跳过**，退出码0，314738毫秒；日志`fe04-full.log`。没有放宽原等待或断言。
+- 相关Node **99/0/0**、原生workerd D1 **2/0/0**；新导出浏览器两宽 **8组通过**、原筛选竞态 **82项通过**、原FE-01两宽 **2组通过**。两宽中韩范围提示截图已查看。
+- 构建与diff检查通过。相对89709cb只涉及003三个前端文件、四个合成测试/夹具及本文；Worker、权限、数据库/schema、共享模块和部署配置不变。FE-03候选不是本分支祖先，未混入其代码或重置补丁。
+- 没有未关闭的自测失败；旧混合分页/一致性限制仍未修复，本批明确不提供全量导出。实体设备、Safari、真实账号现场切换及远程大库未验收。尚待固定独立QA，不合测试/main、不发布。
+
+```sh
+node worker-v2/build-sop-staging.mjs
+CK_P1_NATIVE_D1=true CODEX_PRIMARY_RUNTIME_NODE_MODULES=<含miniflare的目录> node --test --test-reporter=tap tests/ledger-export-api.test.mjs
+CODEX_PRIMARY_RUNTIME_NODE_MODULES=<含playwright的目录> node tests/ledger-export-browser.mjs
+CODEX_PRIMARY_RUNTIME_NODE_MODULES=<含playwright的目录> node tests/filter-request-races-browser.mjs
+CODEX_PRIMARY_RUNTIME_NODE_MODULES=<含playwright的目录> node tests/location-picker-browser.mjs
+CK_JSDOM_MODULE=<jsdom/lib/api.js路径> node --test --test-reporter=tap --test-concurrency=2 tests/*.test.mjs
+```
