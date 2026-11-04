@@ -908,16 +908,17 @@ function lookupShipmentManual(){openReceiptByCode(val('trackingLookupInput'));}
 async function openReceiptByCode(code,options){
   code=String(code||'').trim();if(!code)return;
   var previous=S003.receiptLookup,shown=S003.currentShipment&&S003.currentShipment.shipment;
-  if(previous&&previous.code===code&&previous.owner.current())return previous.promise;
+  var refresh=!!(options&&options.refresh),inPlace=refresh&&S003.currentView==='receipt-detail'&&shown&&[shown.shipment_no,shown.tracking_no].includes(code)&&S003.receiptDraftOwner&&S003.receiptDraftOwner();
+  if(!refresh&&previous&&previous.code===code&&previous.owner.current())return previous.promise;
   if(!(options&&options.refresh)&&S003.currentView==='receipt-detail'&&shown&&[shown.shipment_no,shown.tracking_no].includes(code)&&S003.receiptDraftOwner&&S003.receiptDraftOwner()){if(S003.receiptLookup)S003.uiVersion++;S003.receiptLookup=null;stopReceivingScan();return;}
   stopReceivingScan();
-  S003.uiVersion++;
+  if(!inPlace)S003.uiVersion++;
   var lookup={code:code,owner:capture003Ui()};S003.receiptLookup=lookup;
   function current(){return S003.receiptLookup===lookup&&lookup.owner.current();}
   lookup.promise=(async function(){try{
     var res=await api('v2_003_receiving_lookup',{code:code});if(!current())return;
     if(!S003.locations.length)await loadLocations(false);if(!current())return;
-    closeReceivingScanner();S003.currentShipment=res;goView('receipt-detail');renderReceiptDetail(res);
+    if(!inPlace||!res.shipment||res.shipment.id!==shown.id){closeReceivingScanner();goView('receipt-detail');}S003.currentShipment=res;renderReceiptDetail(res);
   }catch(e){if(current()){toast(errorText(e.message),true);if(E('receivingScannerError'))E('receivingScannerError').textContent=errorText(e.message);}}
   finally{if(S003.receiptLookup===lookup)S003.receiptLookup=null;}})();return lookup.promise;
 }
