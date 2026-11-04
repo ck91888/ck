@@ -14,7 +14,7 @@ function fixture(run){
   finish(kind='load',status=200,body={ok:true,id:'synthetic-attachment'}){if(!this.live)return;this.live=false;active--;this.status=status;this.responseText=typeof body==='string'?body:JSON.stringify(body);this['on'+kind]?.();}
   abort(){this.finish('abort');}
  }
- vm.runInNewContext(source,{window,location,URL,FormData,XMLHttpRequest:XHR,setTimeout,clearTimeout,Promise});
+ vm.runInNewContext(source,{window,location,URL,FormData,AbortController,performance,XMLHttpRequest:XHR,setTimeout,clearTimeout,Promise});
  Object.assign(window.CKMaterialUpload.limits,{retryMs:[1,1],idleMs:500,totalMs:1000});
  return {api:window.CKMaterialUpload,window,sent,get peak(){return peak;},get active(){return active;}};
 }
@@ -60,7 +60,7 @@ test('file type and size limits match the server, and plan writes cannot be retr
  const data=body();data.set('action','v2_inbound_create');await assert.rejects(f.api.send(data),/编号或目标缺失/);assert.equal(f.sent.length,0);
 });
 test('existing save-session deadline remains authoritative and its timeout is not retried',async()=>{
- const f=fixture(x=>{assert.equal(x.timeout,250);x.finish('timeout');});await assert.rejects(f.api.send(body(),{timeoutMs:250,retryTimeout:false}),/附件上传超时/);assert.equal(f.sent.length,1);
+ const f=fixture(x=>{assert.ok(x.timeout>0&&x.timeout<=250);x.finish('timeout');});await assert.rejects(f.api.send(body(),{timeoutMs:250}),/附件上传超时/);assert.equal(f.sent.length,1);
 });
 test('finishing byte transfer shows confirmation state and cannot masquerade as an acknowledgement',async()=>{
  const events=[],f=fixture(x=>x.upload.onload());let settled=false;const p=f.api.send(body(),{progress:(n,size,info)=>events.push(info.phase)}).then(r=>{settled=true;return r;});await delay(1);assert.equal(settled,false);assert.equal(events.at(-1),'confirming');assert.match(f.api.status(1,1,{phase:'confirming'}),/等待服务器确认/);f.sent[0].finish();await p;assert.equal(settled,true);

@@ -1,0 +1,21 @@
+// Real Chromium XHR + Worker, local synthetic files; never contacts the test site.
+import assert from 'node:assert/strict';import {createRequire} from 'node:module';
+import {materialUploadFixture,multipartField} from './multiple-material-upload-fixture.mjs';
+const require=createRequire(import.meta.url),{chromium}=require(require.resolve('playwright',{paths:[process.env.CODEX_PRIMARY_RUNTIME_NODE_MODULES]})),f=await materialUploadFixture(),browser=await chromium.launch({executablePath:'/usr/bin/chromium',headless:true,args:['--no-sandbox']});
+try{for(const width of [1440,390])for(const mode of ['lost-ack','retry-ack','backoff','queued','cancel-queued']){
+ const context=await browser.newContext({viewport:{width,height:1000}});await context.addCookies([{name:'ck_office_access',value:f.cookie.split('=')[1],url:f.origin}]);const page=await context.newPage(),requests=[],held=[];let failing=true;await page.route('**/*',r=>new URL(r.request().url()).origin===f.origin?r.continue():r.abort());await page.goto(f.origin+'/002/');await page.waitForFunction(()=>window.CKSession?.user?.operation_context?.id);
+ const before=f.DB.raw.prepare("SELECT count(*) n FROM sop_records WHERE kind='cargo_file'").get().n;
+ await page.route('**/api',async route=>{const req=route.request();if(multipartField(req,'related_doc_type')!=='cargo_draft')return route.continue();requests.push(multipartField(req,'client_req_id'));if(!failing)return route.continue();if(['backoff','retry-ack'].includes(mode)&&requests.length===1){await new Promise(r=>setTimeout(r,80));await route.fulfill({status:503,contentType:'application/json',body:JSON.stringify({ok:false,error:'synthetic gateway'})});return;}const response=await route.fetch();await new Promise(r=>held.push(r));await route.fulfill({response}).catch(()=>{});});
+ const result=await page.evaluate(async mode=>{
+  Object.assign(CKMaterialUpload.limits,{totalMs:200,retryMs:mode==='backoff'?[150,0]:mode==='retry-ack'?[30,0]:[0,0]});
+  const draft='CGD-'+crypto.randomUUID(),body=id=>{const b=new FormData();for(const[k,v]of Object.entries({action:'v2_attachment_upload',related_doc_type:'cargo_draft',related_doc_id:draft,client_req_id:id,file:new File(['synthetic timeout row'],'synthetic.csv',{type:'text/csv'})}))b.set(k,v);return b;},original=body('CGF-'+crypto.randomUUID());window.__deadlineBody=original;
+  const controllers=[new AbortController(),new AbortController()],blockers=mode.includes('queued')?controllers.map((c,i)=>CKMaterialUpload.send(body('CGF-'+crypto.randomUUID()),{signal:c.signal,timeoutMs:1000}).catch(e=>e.message)):[];if(blockers.length)await new Promise(r=>setTimeout(r,40));
+  const stop=new AbortController(),start=performance.now();if(mode==='cancel-queued')setTimeout(()=>stop.abort(),30);let error;try{await CKMaterialUpload.send(original,{signal:stop.signal});}catch(e){error={message:e.message,deadlineExceeded:!!e.deadlineExceeded,cancelled:!!e.cancelled};}const elapsed=Math.round(performance.now()-start);controllers.forEach(c=>c.abort());await Promise.all(blockers);return {elapsed,error,key:original.get('client_req_id')};
+ },mode);failing=false;held.splice(0).forEach(r=>r());
+ const added=f.DB.raw.prepare("SELECT count(*) n FROM sop_records WHERE kind='cargo_file'").get().n-before,facts={width,mode,...result,requests:requests.length,uniqueKeys:new Set(requests).size,added};console.log(JSON.stringify(facts));
+ assert.ok(result.elapsed<450,'the 200ms budget must not be multiplied by retries or queueing');assert.equal(result.error?.[mode==='cancel-queued'?'cancelled':'deadlineExceeded'],true);
+ if(['lost-ack','retry-ack'].includes(mode)){assert.equal(requests.length,mode==='lost-ack'?1:2);assert.equal(added,1);const replay=await page.evaluate(()=>CKMaterialUpload.send(window.__deadlineBody));assert.equal(replay.attachment.id,result.key);assert.equal(f.DB.raw.prepare("SELECT count(*) n FROM sop_records WHERE kind='cargo_file'").get().n-before,1);}
+ else if(mode==='backoff'){assert.equal(requests.length,1);assert.equal(added,0);}
+ else{assert.equal(requests.length,2);assert.equal(added,2);assert.ok(!requests.includes(result.key));}
+ await context.close();
+}}finally{await browser.close();await f.close();}

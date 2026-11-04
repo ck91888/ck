@@ -47,3 +47,15 @@
 证据由开发环境保留在 `/workspace/scratch/ck-p1-test-runtime/multi-upload-*.log`，包含原始失败。最终主要记录：`multi-upload-full-final.log`、`multi-upload-candidate-targeted.log`、`multi-upload-api-d1-fixed.log`、`multi-upload-grouped-final.log`、`multi-upload-entrances-final.log`、`multi-upload-regression-receipt.log`、`multi-upload-regression-plan-save-fixture-v2.log`、`multi-upload-regression-cargo-fixture-v2.log`、`multi-upload-photo-regression.log`、`multi-upload-performance.log`。全是隔离合成数据，没有用户截图或真实资料。
 
 尚待独立 QA 与部署；测试分支保持 `9650cd1`，main 保持 `4671f49`。现场上传请求的地址/状态/文件大小和国内网络原因尚未知；不能声称复现了现场全部原因，也不把本地模拟收益当现场保证。
+
+## QA 总截止阻断修复
+
+QA 指出的 P2 已在本地 Chromium 确认：原 `a2bfbde` 设置单份上传总时限 200ms、重试间隔为 0，服务端提交后扣留响应，最终 3 次同编号请求约 610ms 才停止，服务器只有 1 份资料。原始失败为 `multi-upload-deadline-browser-original.log`；确定性时钟初始 7 个专项亦全部失败，保留于 `multi-upload-deadline-original.log`。原全量通过不能覆盖此失败。
+
+每次 `send` 现在只建立一个基于 `performance.now()` 的绝对截止，包含全局排队、所有请求及重试等待；XHR 只获得剩余预算。到期统一终止，不再重试；移除已过期队列项、中止当前 XHR、取消等待计时器，保留原文件、编号及已确认标记。原保存会话的 `uploadMs` 同样成为该份资料的统一上限；超时后仍须由用户明确继续，新的继续操作使用原编号核查已有结果。不重试计划创建业务，不改 Worker、对象存储或历史数据。
+
+定时器受浏览器调度影响，通知可能稍晚，但每次排队出队、请求开始和确认均检查绝对截止，不能因迟到回调继续发送或接受超期确认。
+
+新增确定性时钟 9 项（200ms单一总预算、剩余90ms、退避/排队到期、排队/退避取消、进度不续期、已确认批次续传、199ms成功、非法预算），与既有28项传输及3项API合计 **40/0/0**。实际 Chromium 1440/390 × 丢响应、重试后慢确认、退避、排队、取消共 **10组通过**；预算200ms在201–203ms结束，丢确认原编号重放仍是同一资料/对象；取消约31ms完成。证据为 `multi-upload-deadline-targeted.log`、`multi-upload-deadline-browser-final.log`。全量与既有浏览器回归在执行，尚未复审或发布。
+
+后续排队：用户要求新增公司 `리드인`，旧存储值 `CKIK` 兼容显示为 `한국인력개발`，需覆盖历史、筛选、工牌、权限弹窗、CSV/Excel且保留审计原值；本批不混入公司调整。
