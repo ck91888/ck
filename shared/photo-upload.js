@@ -86,7 +86,8 @@ function upload(files,options){
  document.querySelectorAll('[data-photo-complete]').forEach(host=>host.remove());
  const unique=files.filter((f,i)=>files.findIndex(a=>a.name===f.name&&a.size===f.size&&a.lastModified===f.lastModified)===i);
  const host=document.createElement('section');host.className='ck-photo-transfer card';host.setAttribute('aria-label','照片上传 / 사진 업로드');
- host.innerHTML='<p data-status role="status" aria-live="polite"></p><p>'+hint+'</p><button type="button" data-stop>暂停后续照片 / 나머지 일시정지</button> <button type="button" data-retry hidden>重试未上传照片 / 업로드 재시도</button> <button type="button" data-discard hidden>移除待上传照片 / 대기 사진 제외</button>';
+ host.innerHTML='<p data-status role="status" aria-live="polite"></p><p data-photo-hint></p><button type="button" data-stop>暂停后续照片 / 나머지 일시정지</button> <button type="button" data-retry hidden>重试未上传照片 / 업로드 재시도</button> <button type="button" data-discard hidden>移除待上传照片 / 대기 사진 제외</button>';
+ host.querySelector('[data-photo-hint]').textContent=options.hint||hint;
  const place=()=>{const target=[...document.querySelectorAll('dialog[open]')].at(-1)||document.body;if(host.parentNode!==target)target.append(host);};place();
  // Native dialogs live in the top layer. Keep recovery controls visible even if
  // feedback is closed/reopened or its form is rerendered during an upload.
@@ -99,16 +100,16 @@ function upload(files,options){
  async function run(){
   if(batch.running)return;batch.running=true;batch.stop=false;stop.disabled=false;stop.hidden=false;retry.hidden=true;discard.hidden=true;options.onBusy?.(true);
   let error='';
-  try{while(batch.items.length&&!batch.stop){const item=batch.items[0];batch.controller=new AbortController();status.textContent='正在压缩照片… / 사진 압축 중…';item.file= item.file||await prepare(item.original,{signal:batch.controller.signal});batch.controller=null;if(batch.stop)break;
+  try{while(batch.items.length&&!batch.stop){const item=batch.items[0];batch.controller=new AbortController();status.textContent=options.preparingText||'正在压缩照片… / 사진 압축 중…';item.file= item.file||await (options.prepare||prepare)(item.original,{signal:batch.controller.signal});batch.controller=null;if(batch.stop)break;
     status.textContent='正在上传照片… / 사진 업로드 중…';const result=await options.send(item.file,item);
     if(!result?.ok)throw Error(result?.network_error?'上传结果未确认，请先核对已保存照片，再重试未保存的照片。 / 저장된 사진을 확인한 후 재시도하세요.':result?.error||'照片上传失败 / 사진 업로드 실패');
     batch.items.shift();options.onUploaded?.(result,item.file);
    }}catch(e){error=e.name==='AbortError'?'已暂停，可重试或移除 / 일시정지. 재시도 또는 제외':e.message;}
-  finally{batch.controller=null;batch.running=false;options.onBusy?.(false);stop.hidden=true;retry.hidden=!batch.items.length;discard.hidden=!batch.items.length;status.textContent=error|| (batch.items.length?'已暂停，可重试或移除 / 일시정지. 재시도 또는 제외':'照片已保存 / 사진 저장 완료');options.onDone?.({pending:batch.items.length});if(!batch.items.length){observer.disconnect();active=null;host.setAttribute('data-photo-complete','');setTimeout(()=>host.remove(),2500);}}
+  finally{batch.controller=null;batch.running=false;options.onBusy?.(false);stop.hidden=true;retry.hidden=!batch.items.length;retry.disabled=!!options.canRetry&&!options.canRetry(batch.items[0]);discard.hidden=!batch.items.length;status.textContent=error|| (batch.items.length?'已暂停，可重试或移除 / 일시정지. 재시도 또는 제외':'照片已保存 / 사진 저장 완료');options.onDone?.({pending:batch.items.length});if(!batch.items.length){observer.disconnect();active=null;host.setAttribute('data-photo-complete','');setTimeout(()=>host.remove(),2500);}}
   return !batch.items.length;
  }
  retry.onclick=()=>run();return run();
 }
 window.addEventListener('beforeunload',e=>{if(active?.items.length){e.preventDefault();e.returnValue='';}});
-window.CKPhotoUpload={prepare,inspect,upload,hint,busy:()=>!!active};
+window.CKPhotoUpload={prepare,inspect,upload,hint,supportsUploadPreparation:true,busy:()=>!!active};
 })();
