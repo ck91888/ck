@@ -59,3 +59,11 @@ QA 指出的 P2 已在本地 Chromium 确认：原 `a2bfbde` 设置单份上传�
 新增确定性时钟 9 项（200ms单一总预算、剩余90ms、退避/排队到期、排队/退避取消、进度不续期、已确认批次续传、199ms成功、非法预算），与既有28项传输及3项API合计 **40/0/0**。实际 Chromium 1440/390 × 丢响应、重试后慢确认、退避、排队、取消共 **10组通过**；预算200ms在201–203ms结束，丢确认原编号重放仍是同一资料/对象；取消约31ms完成。证据为 `multi-upload-deadline-targeted.log`、`multi-upload-deadline-browser-final.log`。全量与既有浏览器回归在执行，尚未复审或发布。
 
 后续排队：用户要求新增公司 `리드인`，旧存储值 `CKIK` 兼容显示为 `한국인력개발`，需覆盖历史、筛选、工牌、权限弹窗、CSV/Excel且保留审计原值；本批不混入公司调整。
+
+### 截止时间修复最终开发验证
+
+业务源码固定 `02d0316d53165241e10d18f3e9cd4a125ab45a6e`。完整 Node 回归 **1960/0/0**，350 秒；专项40/0/0，原生 workerd D1 API3/0/0；新截止浏览器10组、既有两宽六PDF2组/四入口8组/receipt12组/plan-save10组/cargo-create4组及原照片压缩脚本全部通过，staging构建通过。修复后无失败、跳过或未收尾的验证任务。
+
+本轮日志：`multi-upload-deadline-full.log`、`multi-upload-deadline-targeted.log`、`multi-upload-deadline-api-d1.log`、`multi-upload-deadline-browser-final.log`、`multi-upload-deadline-sixpdf.log`、`multi-upload-deadline-entrances.log`、`multi-upload-deadline-receipt.log`、`multi-upload-deadline-plan-save.log`、`multi-upload-deadline-cargo.log`、`multi-upload-deadline-photo.log`，均在上述隔离运行目录；原610ms失败与7项时钟失败仍保留。
+
+等待独立QA复审，无部署授权执行。本轮不更改测试/main、线上业务数据、重置功能或受阻FE-03/04；公司配置继续排后续独立批次。仍未验证国内真实网络、远端Worker实际部署及真实设备；浏览器执行/冻结造成的通知延迟受平台调度影响。
