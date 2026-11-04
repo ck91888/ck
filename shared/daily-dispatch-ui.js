@@ -13,7 +13,7 @@ window.CKDailyDispatchPermissions=async function(root,origin){
  const close=()=>{if(busy)return;epoch++;d.close();d.remove();origin?.focus({preventScroll:true});};
  d.oncancel=e=>{e.preventDefault();close();};
  const status=p=>!p.enabled?'工牌停用 / 명찰 비활성':p.grant.enabled?'已开启 / 허용':p.grant.version?'已撤销 / 해제':'未开启 / 미허용';
- const identity=p=>`<div class="dp-identity"><strong>${esc(p.name)}</strong><span>${esc(p.badge)}</span><small>${esc(p.agency)}</small></div>`;
+ const identity=p=>`<div class="dp-identity"><strong>${esc(p.name)}</strong><span>${esc(p.badge)}</span><small>${esc(window.CKAttendanceAgencies?.label(p.agency)??p.agency)}</small></div>`;
  function frame(title,content,back){epoch++;d.innerHTML=`<header><h2>${title}</h2><button type="button" data-close>关闭 / 닫기</button></header>${content}<p data-error role="alert" hidden></p>${back?'<button type="button" data-back>取消，返回列表 / 취소·목록</button>':''}`;d.querySelector('[data-close]').onclick=close;if(back)d.querySelector('[data-back]').onclick=()=>list();d.scrollTop=0;}
  function error(e){if(d.isConnected){const n=d.querySelector('[data-error]');n.hidden=false;n.textContent=e.message||'网络暂不可用，请重试 / 네트워크 연결 후 다시 시도하세요';}}
  async function save(action,data){
