@@ -27,3 +27,11 @@
 ```sh
 CK_JSDOM_MODULE=<jsdom/lib/api.js路径> node --test --test-reporter=tap tests/unload-photo-lifecycle.test.mjs tests/unload-photos.test.mjs
 ```
+
+## 第二阶段：服务器权限与重试
+
+首阶段`19bf3e7`已推送，业务源码此后未改。新增实际Worker API **Node 3/0/0、原生workerd D1 3/0/0**：两张整车计划与临时卸货反馈隔离，刷新看见另一上传；幂等回执包含完整attachment、同请求只存一份；改为其他派审员后重试仍拒绝；存储失败不改变原作业/成果，原请求可重试；取消任务拒绝新照片。没有修改服务端权限或存储实现。
+
+控件浏览器验证进行中。首轮夹具在旧授权模式下误用staging入口提供静态资源，脚本404未进入控件，改为直接提供构建出的公共脚本；业务API仍使用原Worker和真实本地登录cookie。第二轮已跑到换账号场景，原Worker拒绝另一个派审员读取列表；测试改为明确验证拒绝，不提高权限，也不改服务器返回。两轮原失败均保留。
+
+容量和原照片压缩/全量尚待后续阶段。新API日志`fe05-api-node.log`、`fe05-api-d1.log`；所有照片、账号、作业及R2均为隔离合成数据。
