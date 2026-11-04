@@ -1,4 +1,5 @@
 import {attendanceReturnEnvironment,guardAttendanceSession} from './attendance-context.js';
+import {purchaseMaterialPage} from './purchase-material-picker.js';
 import {ensureAutoDispatchTime} from './dispatch-time-runtime.js';
 import {handleOfficeDuty,protectOfficeDuty} from './office-duty.js';
 import {materialFileResponse} from './material-file-response.js';
@@ -11597,6 +11598,10 @@ route('v2_003_location_bulk_import', async (body, env) => {
 route('v2_003_material_list', async (body, env) => {
   if (!v003CanRead(body, env)) return err('unauthorized', 401);
   const { limit, offset } = pageParams(body);
+  if(String(body.purchase_picker||'')==='1'){
+    try{const page=await purchaseMaterialPage(env.DB,{search:body.search,search_locale:body.search_locale,limit,offset});return json({ok:true,items:page.items,...pageMeta(page.total,limit,offset)});}
+    catch(e){if(e.message==='invalid_material_search_locale')return err(e.message);throw e;}
+  }
   const search = v003Text(body.search, 120);
   const category = v003Text(body.category, 80);
   let status = v003Text(body.status, 30);

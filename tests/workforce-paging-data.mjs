@@ -1,0 +1,7 @@
+// Fictional records for UI-only scale and semantic checks. Never write to a Worker/database.
+export const DAY='2026-11-04';
+export function person(i,{deleted=false}={}){
+ const id='SYN-'+String(i).padStart(5,'0'),status=['unassigned','working','rest','out','dispatching','waiting_dispatch'][i%6],employee=i%10===9;
+ return {record:{id,name:'Synthetic person '+String(i).padStart(5,'0'),badgeId:(employee?'EMP-':'DAF-')+id,employeeNo:employee?id:'',personType:employee?'employee':'daily',profileDepartment:employee?'bulk':undefined,managementDepartment:['bulk','direct_ship','import',''][i%4],department:'bulk',agency:i%2?'포레인':'가온',day:DAY,inAt:DAY+'T08:00:00+09:00',outAt:status==='out'?DAY+'T10:00:00+09:00':'',version:1,voided:deleted,voidReason:deleted?'Synthetic duplicate':'',voidedAt:deleted?DAY+'T09:00:00+09:00':''},status,canVoid:status==='unassigned',voidBlockedReason:status==='unassigned'?'':'Synthetic recorded labor',currentJobs:status==='working'?[{id:'JOB-'+id,no:'TASK-'+id,department:'bulk',dispatcher_name:'Synthetic dispatcher',job_type:'bulk_op'}]:[],totals:{presence:120,bulk:10,direct_ship:5,import:2,rest:3,unassigned:100,other:0,conflict:0,dispatch:0,flags:[]},segments:[],breaks:[],events:[]};
+}
+export function report(count,{deleted=0}={}){return {date:DAY,asOf:DAY+'T10:00:00+09:00',items:Array.from({length:count},(_,i)=>person(i)),deletedItems:Array.from({length:deleted},(_,i)=>person(count+i,{deleted:true})),stale:[],identityWarnings:[]};}
