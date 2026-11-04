@@ -14,7 +14,7 @@
 
 空搜索采用同一只读batch的count+当前页；非空搜索对启用目录的精简投影进行一次一致读取，按浏览器locale和原JS规则匹配后，只保留/返回当前页及总数。支持分类、字面`%`/`_`、韩文、Unicode大小写及超过120字符的原搜索；非法locale明确失败。
 
-后端专项 **15通过、0失败、0跳过**：原完整目录顺序差分、全页/空页/参数边界、只读快照、停用隔离、原权限及普通查询不变，12种完整搜索条件。前端尚未接入，不代表功能完成。
+后端阶段专项 **15通过、0失败、0跳过**：原完整目录顺序差分、全页/空页/参数边界、只读快照、停用隔离、原权限及普通查询不变，12种完整搜索条件。最终接入和回归状态见文末。
 
 搜索仍需扫描精简的启用目录，服务器资源成本和原生本地D1大目录限制待下一阶段量化；不会把只返回50条描述为服务器只扫描50条，也不静默截断完整搜索。后续需前端竞态/选择保持、真实页面、D1及全量回归，固定候选交QA，不部署。
 
@@ -52,4 +52,34 @@
 
 分页补齐后的浏览器复跑在390宽键盘翻页超时，截图和`fe08-browser-page-clamp.log`保留：既有80毫秒延迟聚焦搜索框，会抢走已移至下一页的焦点。改为弹窗显示/选择完成时同步聚焦，不再排队延迟抢焦点；确定性键盘焦点用例覆盖此问题，没有加测试等待或删断言。
 
-新增UI16项+API15项+原相关23项合计 **54/0/0**，构建通过。之后需对这一最终源码重跑页面及完整Node，结果见后续；当前仍未发布。
+新增UI16项+API15项+原相关23项合计 **54/0/0**，构建通过。该修复已推`575e3e9`；最终源码已重跑页面及完整Node，见下文，未发布。
+
+## 最终候选验证
+
+| 验证 | 实际结果 |
+| --- | --- |
+| 最终源码完整Node，并发2 | **1928通过、0失败、0跳过**，退出0，347185毫秒 |
+| 新选品UI/API及原采购相关 | 54/0/0，包含页码缩减、空目录和键盘焦点确定性回归 |
+| 最终源码实际`/003`两宽 | 1440/390均通过，键盘/分类/末项/数量/重试/读取竞态/实际本地申请与库存不变 |
+| 原采购浏览器回归 | 编辑8组、发货并发与丢响应4组通过；之后的改动仅选品读取页码、焦点与移除保护 |
+| 原生本地D1万项成本/完整搜索 | 9组通过，0写行、材料全文快照一致 |
+| 完整Worker在workerd内 | locale/字面/分页7项通过，SQL同为原生D1 |
+| 最终源码合成目录100/1000/10000 | 3组通过，开表0目录请求；50条首屏+末项查询后共2请求/51条 |
+| 最终构建、语法和diff | 通过 |
+
+最终源码模拟100毫秒请求延迟，100/1000/10000项开表约4.8/2.6/1.5毫秒；第一次选品约275/161/152毫秒；末项查询约107/119/217毫秒。万项开表前读50请求/6.26MB的基线变为开表前0请求，选品后按需读页；首屏加末项查询合计12244字节。已暖D1读行150万→首屏3万，完整搜索仍约2万。前端状态最多保留当前页及已选/已加明细，非空查询在Worker内仍取得全量精简投影，不把它说成数据库只读当前页。
+
+验证均为本地合成数据和Chromium视口，未验证物理手机、国内网络、远端数据库或超万项目录的资源成本。未重跑FE-06原加载脚本，既有资源数量断言失败及其后续未执行的边界继续保留。先前Forbidden的部署检查和CONNECT403站点读取未重试或绕过；FE-06部署状态仍未知，FE-07/08未发布。受阻FE-03/04及其他模块的在途写入界面问题不在本批范围。
+
+第一阶段`c61538c`、前端阶段`a271a95`、真实页面/原生测试阶段`bf7cc36`、最终边界修复`575e3e9`均已推到独立功能分支；最后只完善本文。普通耗材列表、采购申请提交及后续审核/发货/收货/库存写入逻辑没有修改，没有数据库或部署配置迁移。
+
+最终日志：开发环境`/workspace/scratch/ck-p1-test-runtime/fe08-full-final.log`、`fe08-final-build.log`、`fe08-final-related-node.log`、`fe08-browser-final-source/`、`fe08-final-performance/`；原生证据见前文。初轮夹具失败、真实键盘失败和中断全量日志均保留，未称它们通过，没有将运行日志/截图或任何真实业务数据上传公开仓库。
+
+```sh
+CK_JSDOM_MODULE=<jsdom/lib/api.js> node --test --test-reporter=tap tests/purchase-picker-ui.test.mjs tests/purchase-picker-api.test.mjs tests/material-purchase-retry.test.mjs tests/material-purchase-flow.test.mjs
+CODEX_PRIMARY_RUNTIME_NODE_MODULES=<node_modules> node tests/purchase-picker-browser.mjs
+CODEX_PRIMARY_RUNTIME_NODE_MODULES=<node_modules> node tests/purchase-picker-d1.mjs
+CODEX_PRIMARY_RUNTIME_NODE_MODULES=<node_modules> node tests/purchase-picker-runtime.mjs
+CODEX_PRIMARY_RUNTIME_NODE_MODULES=<node_modules> node tests/purchase-picker-performance.mjs
+CK_JSDOM_MODULE=<jsdom/lib/api.js> node --test --test-reporter=tap --test-concurrency=2 tests/*.test.mjs
+```
