@@ -26,6 +26,11 @@ test('server rejects future, invalid cursors, stale/future asOf, changed day sna
  const response=await f.worker.fetch(new Request('http://127.0.0.1/attendance/api',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'sop_attendance_daily_export',...range})}),f.env);assert.equal((await response.json()).ok,false);
  for(const u of [{role:'manager',scope:'field'},{role:'kiosk',scope:'kiosk'},{role:'viewer',scope:'field'}])await assert.rejects(attendanceExportPage(range,{...f.env,SOP_REQUEST_USER:u},'2026-01-02T11:00:00Z',()=>{throw Error('must not read');}),/办公室/);
 }));
+test('same-name people remain separate; void/restore excludes and restores factual rows, not a name merge',()=>atTime('2026-01-02T11:00:00Z',async()=>{
+ const f=await exportFixture(),a=seedDaily(f,1,'2026-01-02',{name:'合成同名人员'});seedDaily(f,2,'2026-01-02',{name:'合成同名人员'});let p=await f.ok('office','sop_attendance_daily_export',range);assert.equal(p.total,2);assert.equal(new Set(p.items.map(x=>x.personKey)).size,2);
+ await f.ok('office','sop_attendance_void',{id:a.dayId,version:1,reason:'合成财务撤回误签到'});p=await f.ok('office','sop_attendance_daily_export',range);assert.equal(p.total,1);assert.equal(p.items[0].name,'合成同名人员');
+ const original=f.DB.raw.prepare('SELECT * FROM ck_attendance_days WHERE id=?').get(a.dayId);await f.ok('office','sop_attendance_restore',{id:a.dayId,version:original.version,reason:'合成财务恢复误撤回'});assert.equal((await f.ok('office','sop_attendance_daily_export',range)).total,2);
+}));
 test('department hours remain actual, sum before rounding, preserve gaps, no punch invented and no technical IDs in workbook',()=>{
  const item={record:{personId:'PRIVATE-ID',badgeId:'DAF-SYNTHETIC',name:'合成跨部门',agency:'直招',inAt:'2026-01-02T09:00:00+09:00',outAt:''},totals:{presence:60,bulk:0.49,direct_ship:0.49,import:0.49,other:0,dispatch:0.5,rest:10,unassigned:48.03,conflict:0,offShiftGapMinutes:60,flags:[],accounting:{rawPresenceMinutes:60,registeredRestMinutes:10,automaticRestMinutes:0}},attendanceSpans:[{id:'INTERNAL-SPAN',ordinal:2,kind:'return',start:'2026-01-02T09:00:00+09:00',end:'',totals:{presence:60,bulk:0.49,direct_ship:0.49,import:0.49,rest:10}}]};
  const row=financePersonDay(item,'2026-01-02','2026-01-02T01:00:00Z'),book=financeWorkbookData([row],{start:'2026-01-02',end:'2026-01-02',asOf:'2026-01-02T01:00:00Z'}),d=Object.fromEntries(book.daily[0].map((k,i)=>[k,book.daily[1][i]]));
@@ -39,4 +44,10 @@ test('paging stops without partial output on missing days, duplicate rows, error
  await assert.rejects(collectLaborExport(async()=>{throw Error('synthetic failed page');},{start:good.start,end:good.end}),/synthetic failed/);
  await assert.rejects(collectLaborExport(request,{start:good.start,end:good.end},{valid:()=>false}),/身份变化/);
  let allowed=true;await assert.rejects(collectLaborExport(async()=>{allowed=false;return good;},{start:good.start,end:good.end},{valid:()=>allowed}),/身份变化/);
+});
+test('client refuses more than 20000 person-days and duplicate or inconsistent page data instead of partial export',async()=>{
+ const asOf='2026-01-02T01:00:00Z',range={start:'2026-01-02',end:'2026-01-02'},response=(offset,total)=>({ok:true,start:range.start,end:range.end,date:range.start,filters:{agency:'',keyword:''},asOf,items:Array.from({length:Math.min(200,total-offset)},(_,i)=>({date:range.start,personKey:'SYN-'+(offset+i)})),total,snapshot:'same',next:offset+200<total?{date:range.start,offset:offset+200}:null});
+ await assert.rejects(collectLaborExport(async b=>response(b.cursor.offset,20001),range),/20000/);
+ await assert.rejects(collectLaborExport(async b=>{const r=response(b.cursor.offset,201);if(b.cursor.offset)r.items[0].personKey='SYN-0';return r;},range),/人员重复/);
+ await assert.rejects(collectLaborExport(async b=>{const r=response(b.cursor.offset,201);if(b.cursor.offset)r.asOf='2026-01-02T02:00:00Z';return r;},range),/校验失败/);
 });

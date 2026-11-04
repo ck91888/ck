@@ -24,7 +24,7 @@ export function mountLaborFinanceExport(root,{date,today,agencies,alive,visible}
  const form=dialog.querySelector('form'),status=dialog.querySelector('[data-finance-status]'),error=dialog.querySelector('[data-finance-error]'),close=dialog.querySelector('[data-finance-close]'),submit=form.querySelector('[type=submit]');
  const valid=()=>!disposed&&alive()&&visible()&&dialog.open;
  const cancel=()=>{run++;controller?.abort();busy=false;submit.disabled=false;form.querySelectorAll('input,select').forEach(n=>n.disabled=false);close.textContent='关闭 / 닫기';};
- const hide=()=>{cancel();dialog.close();};close.onclick=hide;dialog.oncancel=event=>{event.preventDefault();hide();};dialog.addEventListener('close',cancel);
+ const hide=()=>{cancel();dialog.close();};close.onclick=hide;dialog.oncancel=event=>{event.preventDefault();hide();};dialog.addEventListener('close',()=>{if(!dialog.open)cancel();});
  button.onclick=()=>{if(!alive()||!visible())return;form.elements.start.value=date().slice(0,8)+'01';form.elements.end.value=date();form.elements.mode.value='all';form.elements.agency.value='';form.elements.keyword.value='';form.querySelector('fieldset').hidden=true;error.hidden=true;status.textContent='全部日当；不继承页面的管理部门、当前作业或搜索筛选。';dialog.showModal();form.elements.start.focus();};
  form.elements.mode.onchange=()=>{form.querySelector('fieldset').hidden=form.elements.mode.value==='all';};
  form.onsubmit=async event=>{
