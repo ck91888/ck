@@ -4,6 +4,8 @@ const enabled=()=>!!window.CK_SOP_ROLLOUT?.workChain;
 const fieldContext=flag=>flag||window.CKSession?.user?.scope==='field'||window.location.pathname.startsWith('/001/');
 const e=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const api=(action,data={})=>CKSession.request(action,data);
+const uploadMaterial=async(body,item,status,isActive)=>{try{if(window.CKMaterialUpload)return await CKMaterialUpload.send(body,{guard:item.guard,isActive,progress:(n,size,info)=>{if(isActive())status.textContent=item.file.name+' · '+CKMaterialUpload.status(n,size,info);}});const response=await fetch(window.SOP_API||'/api',{method:'POST',credentials:'include',body});return await response.json();}catch(error){error.message=item.file.name+'：'+error.message;throw error;}};
+const uploadFiles=(items,run)=>window.CKMaterialUpload?CKMaterialUpload.files(items,run):items.reduce((p,item)=>p.then(()=>run(item)),Promise.resolve());
 const kinds={work_material:'作业说明／明细 · 작업 자료',pallet_label:'托唛 · 팔레트 라벨',shipping_document:'出库单 · 출고 서류',product_label:'产品条码标签 · 상품 바코드'};
 const fileUrl=f=>window.SOP_API+'?action=v2_attachment_get&file_key='+encodeURIComponent(f.file_key);
 const button=(label,fn)=>{const b=document.createElement('button');b.type='button';if(window.CKPlanCopy)CKPlanCopy.bind(b,label);else b.textContent=label;b.onclick=async()=>{b.disabled=true;try{await fn();}catch(x){alert(x.message);}finally{b.disabled=false;}};return b;};
@@ -75,11 +77,11 @@ async function materials(host,need,{field=false,onChange=()=>{},items=null}={}){
   host.querySelector('[data-direction="'+direction+'"]').append(form);
   let pending=[];
   form.querySelector('[data-files]').onchange=()=>{pending=[];};
-  form.onsubmit=async ev=>{ev.preventDefault();const submit=form.querySelector('[type=submit]'),status=form.querySelector('[data-status]');submit.disabled=true;
-   if(!pending.length)pending=Array.from(form.querySelector('[data-files]').files).map(file=>({file,request:crypto.randomUUID(),kind:feedbackForm?'work_material':form.querySelector('[data-kind]').value,done:false}));
-   try{for(const item of pending.filter(x=>!x.done)){status.textContent='正在上传 / 업로드 중：'+item.file.name;const data=new FormData();for(const [k,v] of Object.entries({action:'v2_attachment_upload',related_doc_type:'sop_need',related_doc_id:need.id,attachment_category:'work_material',material_kind:item.kind,revision,client_req_id:item.request}))data.set(k,v);data.set('file',item.file);const response=await fetch(window.SOP_API,{method:'POST',credentials:'include',body:data}),result=await response.json();if(!result.ok)throw Error(result.error||'上传失败');revision=result.revision;item.done=true;}
+  form.onsubmit=async ev=>{ev.preventDefault();const submit=form.querySelector('[type=submit]'),status=form.querySelector('[data-status]');if(submit.disabled)return;const controls=[...form.querySelectorAll('input,select,button')].map(x=>[x,x.disabled]);controls.forEach(([x])=>x.disabled=true);
+   if(!pending.length)pending=Array.from(form.querySelector('[data-files]').files).map(file=>({file,request:crypto.randomUUID(),kind:feedbackForm?'work_material':form.querySelector('[data-kind]').value,guard:window.CKMaterialUpload?.identity(),done:false}));
+   try{await uploadFiles(pending.filter(x=>!x.done),async item=>{status.textContent='正在上传 / 업로드 중：'+item.file.name;const data=new FormData();for(const [k,v] of Object.entries({action:'v2_attachment_upload',related_doc_type:'sop_need',related_doc_id:need.id,attachment_category:'work_material',material_kind:item.kind,revision,client_req_id:item.request}))data.set(k,v);data.set('file',item.file);const result=await uploadMaterial(data,item,status,()=>host.isConnected);if(!result.ok)throw Error(result.error||'上传失败');revision=result.revision;item.done=true;});
     status.textContent='资料已上传 / 업로드 완료';pending=[];await onChange();if(host.isConnected)await materials(host,need,{field,onChange});
-   }catch(x){status.textContent=x.message+'。已成功的文件会保留，请刷新确认后重试。';}finally{submit.disabled=false;}
+   }catch(x){status.textContent=x.message+'。已确认文件保留，可点击原上传按钮继续；无需重新选择文件。 / 확인된 파일 유지 · 기존 버튼으로 재시도';}finally{controls.forEach(([x,disabled])=>x.disabled=disabled);}
   };
  }
  if(canOffice)addUpload('office');
@@ -187,11 +189,11 @@ async function batchMaterials(host,group,{field=false}={}){
   }
  const form=document.createElement('form');form.className='chain-upload';form.innerHTML='<label>'+text('选择总作业明细（可多选）','전체 작업 명세 선택（복수 가능）')+'<input type="file" multiple required accept=".xlsx,.xls,.csv,.pdf,.jpg,.jpeg,.png,.webp"></label><button type="submit">'+text('上传总作业明细','전체 명세 업로드')+'</button><p class="muted">'+text('支持 Excel、CSV、PDF、图片，每个文件不超过 20MB。','Excel, CSV, PDF, 이미지 · 파일당 최대 20MB')+'</p><p role="status"></p>';host.append(form);
  let pending=[];const input=form.querySelector('input');input.onchange=()=>{pending=[];};
- form.onsubmit=async event=>{event.preventDefault();const submit=form.querySelector('button'),status=form.querySelector('[role=status]');submit.disabled=true;input.disabled=true;
-  if(!pending.length)pending=[...input.files].map(file=>({file,request:crypto.randomUUID(),done:false}));
-  try{for(const item of pending.filter(x=>!x.done)){status.textContent=(window.getLang?.()==='ko'?'업로드 중: ':'正在上传：')+item.file.name;const data=new FormData();for(const [k,v] of Object.entries({action:'v2_attachment_upload',related_doc_type:'inbound_plan',related_doc_id:group.source_id,need_id:need.id,attachment_category:'batch_work_material',client_req_id:item.request}))data.set(k,v);data.set('file',item.file);const response=await fetch(window.SOP_API,{method:'POST',credentials:'include',body:data}),result=await response.json();if(!result.ok)throw Error(result.error||'上传失败');item.done=true;}
+ form.onsubmit=async event=>{event.preventDefault();const submit=form.querySelector('button'),status=form.querySelector('[role=status]');if(submit.disabled)return;submit.disabled=true;input.disabled=true;
+  if(!pending.length)pending=[...input.files].map(file=>({file,request:crypto.randomUUID(),guard:window.CKMaterialUpload?.identity(),done:false}));
+  try{await uploadFiles(pending.filter(x=>!x.done),async item=>{status.textContent=(window.getLang?.()==='ko'?'업로드 중: ':'正在上传：')+item.file.name;const data=new FormData();for(const [k,v] of Object.entries({action:'v2_attachment_upload',related_doc_type:'inbound_plan',related_doc_id:group.source_id,need_id:need.id,attachment_category:'batch_work_material',client_req_id:item.request}))data.set(k,v);data.set('file',item.file);const result=await uploadMaterial(data,item,status,()=>host.isConnected);if(!result.ok)throw Error(result.error||'上传失败');item.done=true;});
    await batchMaterials(host,group,{field});
-  }catch(error){status.textContent=error.message;}finally{submit.disabled=false;input.disabled=false;}
+  }catch(error){status.textContent=error.message+'。已确认文件保留，点击原上传按钮继续，无需重新选择。';}finally{submit.disabled=false;input.disabled=false;}
  };
 }
 window.CKWorkChain={enabled,mountNeed,materials,batchMaterials,outboundPicker,prepareOutbound,submitOutbounds,multiBookingReady:()=>enabled()&&!!bookingReader,hideFileControls,installOffice};
