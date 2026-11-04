@@ -1,0 +1,7 @@
+import test from 'node:test';import assert from 'node:assert/strict';import {ledgerFixture} from './ledger-export-fixture.mjs';
+test('mixed ledger returns at most 200 of 260 and keeps material/asset/date/department filters read-only',async t=>{
+ const f=await ledgerFixture(t),before=await f.rows('SELECT * FROM v2_003_material_txns ORDER BY id'),all=await f.ledger();assert.equal(all.total,260);assert.equal(all.items.length,200);assert.equal(new Set(all.items.map(x=>x.kind)).size,2);for(const [kind,total]of [['material',f.materials],['asset',f.assets]]){const res=await f.ledger({kind});assert.equal(res.total,total);assert.equal(res.items.length,total);assert.ok(res.items.every(x=>x.kind===kind));}assert.equal((await f.ledger({department:'大货'})).total,260);assert.equal((await f.ledger({department:'进口'})).total,0);assert.equal((await f.ledger({search:'Synthetic ledger material'})).total,f.materials);assert.equal((await f.ledger({start_date:'2099-01-01',end_date:'2099-01-01'})).total,0);assert.deepEqual(await f.rows('SELECT * FROM v2_003_material_txns ORDER BY id'),before);
+});
+test('field and anonymous sessions cannot gain office ledger access through forged body roles',async t=>{
+ const f=await ledgerFixture(t);for(const scope of ['A','B','anonymous']){const r=await f.request(scope,'v2_003_ledger_list',{operator_id:'ADMIN',role:'admin',limit:200});assert.equal(r.data.ok,false);assert.ok([401,403].includes(r.response.status));}
+});

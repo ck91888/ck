@@ -310,13 +310,14 @@
       <div class="panel">
         <div class="panel-head ledger-title-row"><h2 id="ledgerTitle" data-i18n="ledger">出入记录</h2></div>
         <div class="filter-row ledger-filter">
-          <select id="ledgerKind" onchange="loadLedger()"><option value="" data-i18n="all_records">全部记录</option><option value="material" data-i18n="material_records">耗材记录</option><option value="asset" data-i18n="asset_records">物品记录</option></select>
-          <select id="ledgerDepartment" class="admin-only" onchange="loadLedger()"><option value="" data-i18n="all_departments">全部部门</option><option value="代发" data-i18n="department_direct">代发</option><option value="大货" data-i18n="department_bulk">大货</option><option value="进口" data-i18n="department_import">进口</option></select>
-          <input id="ledgerSearch" class="admin-only" data-i18n-placeholder="search" placeholder="搜索名称、编号或人员" onkeydown="if(event.key==='Enter')loadLedger()">
-          <input id="ledgerStart" type="date"><input id="ledgerEnd" type="date">
+          <select id="ledgerKind" oninput="updateLedgerExportScope()" onchange="loadLedger()"><option value="" data-i18n="all_records">全部记录</option><option value="material" data-i18n="material_records">耗材记录</option><option value="asset" data-i18n="asset_records">物品记录</option></select>
+          <select id="ledgerDepartment" class="admin-only" oninput="updateLedgerExportScope()" onchange="loadLedger()"><option value="" data-i18n="all_departments">全部部门</option><option value="代发" data-i18n="department_direct">代发</option><option value="大货" data-i18n="department_bulk">大货</option><option value="进口" data-i18n="department_import">进口</option></select>
+          <input id="ledgerSearch" class="admin-only" data-i18n-placeholder="search" placeholder="搜索名称、编号或人员" oninput="updateLedgerExportScope()" onkeydown="if(event.key==='Enter')loadLedger()">
+          <input id="ledgerStart" type="date" oninput="updateLedgerExportScope()"><input id="ledgerEnd" type="date" oninput="updateLedgerExportScope()">
           <button class="btn primary" onclick="loadLedger()" data-i18n="query">查询</button>
-          <button class="btn soft admin-only" onclick="exportLedgerCsv()" data-i18n="export_csv">导出 CSV</button>
+          <button id="ledgerExportBtn" class="btn soft admin-only" onclick="exportLedgerCsv()" data-i18n="export_current_csv" disabled>导出当前列表 CSV</button>
         </div>
+        <p id="ledgerExportScope" class="import-status" role="status" aria-live="polite"></p>
         <div id="ledgerList" class="table-wrap"></div>
       </div>
     </section>
