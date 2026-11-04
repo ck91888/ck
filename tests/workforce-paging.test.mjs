@@ -13,8 +13,8 @@ async function fixture(t,{count=121,field=false,role='manager',data=report(count
  return {w,root,$,ids,change,controller,calls,downloads,errors,get data(){return current;},set data(v){current=v;}};
 }
 test('all pages retain original order without duplicates, extra reads or page-sized aggregates',async t=>{
- const f=await fixture(t),all=[];do{all.push(...f.ids());if(f.$('people-next').disabled)break;f.$('people-next').click();}while(true);
- assert.deepEqual(all,f.data.items.map(x=>x.record.id));assert.equal(new Set(all).size,121);assert.equal(f.calls.length,2);assert.match(f.$('summary').textContent,/当天签到 \/ 출근121 人/);assert.equal(f.ids().length,21);
+ const f=await fixture(t),summary=f.$('summary').innerHTML,agencies=f.$('agencies').innerHTML,all=[];do{all.push(...f.ids());if(f.$('people-next').disabled)break;f.$('people-next').click();}while(true);
+ assert.deepEqual(all,f.data.items.map(x=>x.record.id));assert.equal(new Set(all).size,121);assert.equal(f.$('summary').innerHTML,summary);assert.equal(f.$('agencies').innerHTML,agencies);assert.match(f.$('summary').textContent,/34:17/);assert.match(f.$('summary').textContent,/6:03/);assert.equal(f.calls.length,2);assert.match(f.$('summary').textContent,/当天签到 \/ 출근121 人/);assert.equal(f.ids().length,21);
  assert.match(f.$('people-range').textContent,/101–121 \/ 121/);assert.equal(f.$('people-next').disabled,true);f.$('people-prev').click();assert.equal(f.ids()[0],'SYN-00050');assert.equal(f.$('people-prev').disabled,false);
 });
 test('company, department, status and raw case-insensitive search filter before paging and reset to first page',async t=>{
