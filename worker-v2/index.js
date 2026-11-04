@@ -39,7 +39,7 @@ import {referenceWriteBatch,ensureReferenceHistory} from './inbound-reference-hi
 import {ensureInboundDocuments,inboundDocumentStates,inboundDocumentStateRead,documentStatesFromRows,confirmInboundIssue} from './inbound-documents.js';
 import {adoptLegacyLoad} from './legacy-load.js';
 import {uploadBatchMaterial} from './batch-work-materials.js';
-import {accessEnabled,accessGuard,accessAdminAction,accessFileAllowed,issueAttachmentAllowed} from './access-control.js';
+import {accessEnabled,accessScope,accessGuard,accessAdminAction,accessFileAllowed,issueAttachmentAllowed} from './access-control.js';
 import {officeOperationContext,confirmOfficeOperator,officeOperationGuard,planAuditStatements,planOperationAudit} from './office-operator.js';
 import {uploadUnloadPhoto,unloadPhotos,inboundAttachmentRead} from './unload-photos.js';
 import {handleFeedbackLink,feedbackLinkDetail,feedbackLinkRead,feedbackLinkActor,feedbackSource,reconcileFeedbackLink} from './feedback-link.js';
@@ -12995,6 +12995,7 @@ export default {
       }catch(e){return json({ok:false,error:e.message},409);}
     }
     if(action.startsWith('sop_attendance_')){
+      if(action==='sop_attendance_daily_export'&&accessScope(request)!=='office')return err('仅办公室可导出历史工时 / 사무실에서만 근무시간을 내보낼 수 있습니다',403);
       try{const result=await handleAttendance(body,env);if(result.ok&&crewBorrowEnabled(env)&&['sop_attendance_checkout','sop_attendance_break_start','sop_attendance_break_end'].includes(action)){try{result.crew_returns=await reconcilePersonReturns(env,result.record?.badgeId);}catch{result.crew_return_error='借调归还暂未完成，请在原装卸任务重试归还';}}return json(result);}catch(e){return json({ok:false,error:e.message},400);}
     }
     if(crewBorrowEnabled(env)&&['sop_crew_availability','sop_crew_status','sop_crew_return','sop_native_start','sop_native_people'].includes(action)){

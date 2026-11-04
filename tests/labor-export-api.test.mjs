@@ -31,6 +31,11 @@ test('same-name people remain separate; void/restore excludes and restores factu
  await f.ok('office','sop_attendance_void',{id:a.dayId,version:1,reason:'合成财务撤回误签到'});p=await f.ok('office','sop_attendance_daily_export',range);assert.equal(p.total,1);assert.equal(p.items[0].name,'合成同名人员');
  const original=f.DB.raw.prepare('SELECT * FROM ck_attendance_days WHERE id=?').get(a.dayId);await f.ok('office','sop_attendance_restore',{id:a.dayId,version:original.version,reason:'合成财务恢复误撤回'});assert.equal((await f.ok('office','sop_attendance_daily_export',range)).total,2);
 }));
+test('compatibility mode still enforces office URL boundary instead of trusting a client scope or unscoped principal',()=>atTime('2026-01-02T11:00:00Z',async()=>{
+ const f=await exportFixture();seedDaily(f,1);f.env.SOP_ACCESS_CONTROL='false';f.env.SOP_PUBLIC_TEST_ACCESS='true';
+ assert.equal((await f.call('office','sop_attendance_daily_export',range)).ok,true);
+ for(const path of ['/001/api','/attendance/api']){const response=await f.worker.fetch(new Request('http://127.0.0.1'+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'sop_attendance_daily_export',scope:'office',...range})}),f.env);assert.equal(response.status,403);assert.equal((await response.json()).ok,false);}
+}));
 test('department hours remain actual, sum before rounding, preserve gaps, no punch invented and no technical IDs in workbook',()=>{
  const item={record:{personId:'PRIVATE-ID',badgeId:'DAF-SYNTHETIC',name:'合成跨部门',agency:'直招',inAt:'2026-01-02T09:00:00+09:00',outAt:''},totals:{presence:60,bulk:0.49,direct_ship:0.49,import:0.49,other:0,dispatch:0.5,rest:10,unassigned:48.03,conflict:0,offShiftGapMinutes:60,flags:[],accounting:{rawPresenceMinutes:60,registeredRestMinutes:10,automaticRestMinutes:0}},attendanceSpans:[{id:'INTERNAL-SPAN',ordinal:2,kind:'return',start:'2026-01-02T09:00:00+09:00',end:'',totals:{presence:60,bulk:0.49,direct_ship:0.49,import:0.49,rest:10}}]};
  const row=financePersonDay(item,'2026-01-02','2026-01-02T01:00:00Z'),book=financeWorkbookData([row],{start:'2026-01-02',end:'2026-01-02',asOf:'2026-01-02T01:00:00Z'}),d=Object.fromEntries(book.daily[0].map((k,i)=>[k,book.daily[1][i]]));
