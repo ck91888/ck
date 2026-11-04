@@ -496,9 +496,10 @@ function materialCardHtml(m) {
 
 async function openMaterialDetail(id) {
   goView('material-detail');
+  var owner=capture003Ui();
   E('materialDetail').innerHTML = '<div class="empty">'+esc(T('loading'))+'</div>';
-  try { var res = await api('v2_003_material_detail', { id:id }); S003.currentMaterial = res; renderMaterialDetail(res); }
-  catch(e) { E('materialDetail').innerHTML = '<div class="empty">'+esc(errorText(e.message))+'</div>'; }
+  try { var res = await api('v2_003_material_detail', { id:id }); if(!owner.current())return;S003.currentMaterial = res; renderMaterialDetail(res); }
+  catch(e) { if(owner.current())E('materialDetail').innerHTML = '<div class="empty">'+esc(errorText(e.message))+'</div>'; }
 }
 
 function renderMaterialDetail(res) {
@@ -693,7 +694,7 @@ function assetStatusLabel(s){return ({available:T('available'),assigned:T('assig
 function statusTagClass(s){return ({available:'green',assigned:'blue',repair:'orange',retired:'gray',lost:'red'})[s]||'gray';}
 function assetCardHtml(a){var name=S003.lang==='ko'&&a.name_ko?a.name_ko:a.name_zh;return '<article class="item-card" onclick="openAssetDetail(\''+jsq(a.id)+'\')"><div class="item-head"><div class="item-title"><b>'+esc(name)+'</b><small>'+esc(a.asset_code)+(a.model?' · '+esc(a.model):'')+'</small></div><span class="tag '+statusTagClass(a.status)+'">'+esc(assetStatusLabel(a.status))+'</span></div><div class="item-meta"><span class="tag blue">'+esc(a.category)+'</span>'+(a.location_code?'<span>⌖ '+esc(a.location_code)+'</span>':'')+(a.keeper_name?'<span>◎ '+esc(a.keeper_name)+'</span>':'')+(a.keeper_department?'<span class="tag '+departmentTagClass(a.keeper_department)+'">'+esc(departmentLabel(a.keeper_department))+'</span>':'')+'</div></article>';}
 
-async function openAssetDetail(id){goView('asset-detail');E('assetDetail').innerHTML='<div class="empty">'+esc(T('loading'))+'</div>';try{var res=await api('v2_003_asset_detail',{id:id});S003.currentAsset=res;renderAssetDetail(res);}catch(e){E('assetDetail').innerHTML='<div class="empty">'+esc(errorText(e.message))+'</div>';}}
+async function openAssetDetail(id){goView('asset-detail');var owner=capture003Ui();E('assetDetail').innerHTML='<div class="empty">'+esc(T('loading'))+'</div>';try{var res=await api('v2_003_asset_detail',{id:id});if(!owner.current())return;S003.currentAsset=res;renderAssetDetail(res);}catch(e){if(owner.current())E('assetDetail').innerHTML='<div class="empty">'+esc(errorText(e.message))+'</div>';}}
 
 function assetActionLabel(a){return ({create:S003.lang==='ko'?'등록':'建档',edit:T('edit'),assign:T('assign'),return:T('return_asset'),transfer:T('transfer'),repair_start:T('repair_start'),repair_done:T('repair_done'),retire:T('retire'),lost:T('mark_lost')})[a]||a;}
 function renderAssetDetail(res){
