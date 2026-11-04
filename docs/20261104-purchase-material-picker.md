@@ -43,3 +43,13 @@
 原始补测失败保留：浏览器首次字段值正确，但Node SQLite返回无原型对象，deepStrictEqual对普通对象失败；只将结果逐行转为普通对象后保留原ID/数量断言。完整workerd夹具首次未先初始化既有仓库/SOP表结构，返回migration failed/no such table sop_records；按仓库既有原生D1夹具预置schema后通过。两项均只改本地合成测试，业务源码未因此改动，没有删断言或延长等待。门控夹具只挂起第一个目标读，避免把重新打开后的新读也挂起。
 
 证据在开发环境`fe08-browser-final/`、`fe08-browser-first-failure.log`、`fe08-runtime-final.log`、`fe08-runtime-first-failure.log`、`fe08-d1-comparison.json`及同名前缀日志。后续原采购及全量回归尚未完成；本阶段未部署。
+
+## 最终边界补齐阶段
+
+原采购编辑浏览器8组、原发货并发/丢响应重试浏览器4组通过，日志为`fe08-purchase-edit-browser.log`与`fe08-purchase-replay-browser.log`。
+
+开始全量后复查新增分页边界：目录在翻页间缩减时，过期页自动回到有效末页，空目录直接重置页码；保留已选对象、数量和原因，读仍串行。另补关闭后DOM移除的迟到响应保护。修改前全量主动SIGINT中断，日志`fe08-full-before-page-clamp.log`保留，1242项已输出通过、无not-ok，但整轮未完成，不计全绿。
+
+分页补齐后的浏览器复跑在390宽键盘翻页超时，截图和`fe08-browser-page-clamp.log`保留：既有80毫秒延迟聚焦搜索框，会抢走已移至下一页的焦点。改为弹窗显示/选择完成时同步聚焦，不再排队延迟抢焦点；确定性键盘焦点用例覆盖此问题，没有加测试等待或删断言。
+
+新增UI16项+API15项+原相关23项合计 **54/0/0**，构建通过。之后需对这一最终源码重跑页面及完整Node，结果见后续；当前仍未发布。
