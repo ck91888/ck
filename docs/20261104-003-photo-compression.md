@@ -26,6 +26,11 @@ Local synthetic evidence root: `/workspace/scratch/ck-003-photo-evidence-2026110
 
 - Initial isolated handlers: 0 pass / 2 fail (missing preparation), retained in `baseline-node.log`.
 - Expanded Node coverage: 27 pass / 0 fail, including originals, special formats, fallback, limit, repeated events, cancellation, retry, ambiguous results, identity/permission changes and late receipts.
-- Real browser quality/upload, complete suite and independent fixed-SHA review: pending.
+- Complete Node: 2061 pass / 0 fail / 0 skip, exit 0 (`full-node.log`, `full-node.json`).
+- Existing compression browser regression: passed, original assertions preserved (`photo-quality-browser.json`).
+- Actual 003 built-page/Worker flows at 1440/390: 32 pass, exit 0 (`actual-003-controlled-receipt.log`). A zero-height empty-gallery fixture wait was corrected; the original failed run is retained.
+- Four actual stored/private-downloaded asset/arrival JPEGs: 3462248 -> 403880 bytes, 2048x1536. EAN/QR 4/4 and native-pixel fine-text OCR 4/4 (`stored-003-quality.json`). These are synthetic quality observations, not guarantees for real documents.
+- BLOCKER: pre-header response destruction reproducibly yields two HTTP POSTs, two attachments and two objects on both base 44144a2 and this stage (`transport-replay-analysis.json`, both diagnostic-lost-reply JSONs). The application sends once; the lower transport layer replay boundary is not instrumented further. This stage is not releasable. The controlled one-server-commit abort test only covers the application's uncertain-result guard and does not fix that native replay.
+- Independent fixed-SHA review: pending the two-type service idempotence fix.
 
 The existing historical upload manual RUNTIME, 743/1869 ms observations and prior failures remain historical unknowns; this patch does not resolve or relabel them. No claim is made about domestic real-network speed, physical mobile devices, real-world photo quality, or deployment state.
