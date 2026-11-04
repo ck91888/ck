@@ -34,3 +34,16 @@
 专项 Node 31/0/0（传输 28 + API 3）；原生 D1 API 3/0/0。既有 `inbound-create-receipt-browser.mjs` 两宽 12 组、`plan-save-resilience-browser.mjs` 10 组、`cargo-create-resilience-browser.mjs` 4 组及照片压缩原脚本通过。照片保持 3,462,248 → 403,880 字节、2048×1536，条码/QR 解码保留；不改压缩源码。
 
 原两个 resilience 脚本初轮分别超时，原因是单次 500 已被新重试恢复，原“显示失败”条件不再触发；仅将故障注入延续到该文件 3 次尝试，保留原断言和等待时长，断言总请求数 3 → 5，仍证明首次成功文件不重传、显式续作只上传缺失文件。另保留保存窗口超时配置兼容回归。没有削弱业务断言或修改受阻 FE-03/04 源码。
+
+## 最终开发验证
+
+业务源码固定提交 `dc47f5eef1a10b630d0a33f108fbe039085bc4df`，本节仅补验证记录。
+
+- 完整 `CK_JSDOM_MODULE=<隔离依赖>/jsdom/lib/api.js node --test --test-concurrency=2 tests/*.test.mjs`：1951 通过、0 失败、0 跳过，380 秒。首轮 1943/0/0 之后新增 API 和兼容专项，末次包含全部 1951 项。
+- `node --test tests/material-upload.test.mjs tests/material-upload-api.test.mjs`：31/0/0；`CK_P1_NATIVE_D1=true CODEX_PRIMARY_RUNTIME_NODE_MODULES=<隔离依赖> node --test --test-concurrency=1 tests/material-upload-api.test.mjs`：3/0/0。
+- 实际页面两宽六 PDF 创建 2 组、普通/本批/已有组/批量面板 8 组；既有 receipt 12 组、plan-save 10 组、cargo-create resilience 4 组；照片压缩原脚本及 staging 构建通过。所有浏览器为本地 Chromium，非真实手机、非国内网络。
+- 本地性能脚本 `tests/material-upload-performance.mjs` 12 轮、72 份合成草稿通过，指标见第二阶段。不测试/更改线上数据，不增加数据库迁移或 Worker 业务改动。
+
+证据由开发环境保留在 `/workspace/scratch/ck-p1-test-runtime/multi-upload-*.log`，包含原始失败。最终主要记录：`multi-upload-full-final.log`、`multi-upload-candidate-targeted.log`、`multi-upload-api-d1-fixed.log`、`multi-upload-grouped-final.log`、`multi-upload-entrances-final.log`、`multi-upload-regression-receipt.log`、`multi-upload-regression-plan-save-fixture-v2.log`、`multi-upload-regression-cargo-fixture-v2.log`、`multi-upload-photo-regression.log`、`multi-upload-performance.log`。全是隔离合成数据，没有用户截图或真实资料。
+
+尚待独立 QA 与部署；测试分支保持 `9650cd1`，main 保持 `4671f49`。现场上传请求的地址/状态/文件大小和国内网络原因尚未知；不能声称复现了现场全部原因，也不把本地模拟收益当现场保证。
