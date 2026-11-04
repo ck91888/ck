@@ -20,7 +20,7 @@
 - 性能脚本只关闭其隔离页面的15秒报表轮询，防止周期刷新干扰渲染测量，不改源码计时/刷新机制。测量包含实际共享UI、CSS与两次requestAnimationFrame，不是API或真实设备延迟。
 - 首次性能夹具在about:blank缺少secure-context randomUUID，尚未调用业务UI即失败，改为本地拦截的HTTPS虚拟来源后通过。新增专项两次失败均为预期写错：只匹配`001`而非完整搜索词、忽略原拼接字符串中的连续空白；修正测试预期而非业务匹配规则，原日志保留。
 
-后续尚需串行性能、实际浏览器键盘/窄屏/翻页操作、原流程及全量回归，固定候选交独立QA。本阶段未发布。
+该阶段只完成上述自测；后续验证结果见下文。固定候选须交独立QA，未发布。
 
 ## 串行性能与旧/新差分
 
@@ -47,7 +47,28 @@
 
 `fe07-browser-final/result.json`、同名日志、合成CSV及截图仅保存在开发环境。首轮实际浏览器也通过；补休息操作与分页可见截图后再次通过，没有修改业务断言或延长等待。
 
-本阶段仅补测试与说明，业务源码保持第一阶段不变。原返岗/实时概览浏览器及全量回归仍在后续阶段，不宣称已经全部通过。
+本阶段仅补测试与说明，业务源码保持第一阶段不变。之后的原返岗/实时概览浏览器及全量结果见最终验证。
+
+## 最终验证与边界
+
+| 检查 | 实际结果 |
+| --- | --- |
+| 完整Node回归，并发2 | **1897通过、0失败、0跳过**，退出0，498215毫秒 |
+| 新分页12项与原人力/刷新52项 | 全量中全部通过；阶段合集64/0/0 |
+| 旧新全文差分 | 44组通过，包含4种角色/现场组合、11种条件 |
+| 规模对照 | 100/1000/10000桌面、10000现场，基线/候选各4组通过 |
+| 实际构建页+真实本地Worker | 1440/390、办公室/现场共4组通过，含原操作及全量CSV |
+| 原`attendance-return-browser.mjs` | 1440/390/320及丢签退响应重试通过 |
+| 原`realtime-polling-browser.mjs` | 1440/390合计18组通过，三来源最大并发1、隐藏停刷及恢复保留 |
+| 构建、语法、diff检查 | 通过 |
+
+原源码仍完整读取汇总响应，筛选和统计扫描全量集合；本批减少DOM构建与重复控件查询。API载荷/后端查询、职员资料列表和长期工牌管理弹窗属于原路径，本批未做分页改动。性能为本地合成单轮，实际手机/网络、大型远端库不在验证范围。万条规模未逐页人工浏览，121条的全部分页HTML/顺序和万条CSV已分别核验。
+
+FE-06原加载浏览器的既有资源数量断言失败（旧/新均预期2、实际3）和后续检查未执行边界继续保留，本轮未重跑或修改该脚本。先前被拒的GitHub部署检查与站点版本访问未重试或绕过，FE-06实际部署状态仍未核验；本批没有发布动作。
+
+业务源码只有`shared/attendance-ui.js`中的`CKLabor`变化，Worker、数据库结构、其他应用及部署配置未变，不包含FE-03/04或重置补丁。第一阶段`4d609a1`、第二阶段`9afc7ee`均已推送独立功能分支；之后仅完善本文验证记录。
+
+最终日志位于`/workspace/scratch/ck-p1-test-runtime/fe07-full.log`、`fe07-final-build.log`、`fe07-return-browser.log`、`fe07-realtime-browser.log`；性能/差分/新浏览器证据见前文。没有真实人员、业务单据、凭据或运行截图日志加入公开提交。
 
 ```sh
 CK_JSDOM_MODULE=<jsdom/lib/api.js> node --test --test-reporter=tap tests/workforce-paging.test.mjs tests/workforce-dashboard-ui.test.mjs tests/workforce-refresh.test.mjs
@@ -55,4 +76,5 @@ CODEX_PRIMARY_RUNTIME_NODE_MODULES=<node_modules> node tests/workforce-paging-br
 CK_JSDOM_MODULE=<jsdom/lib/api.js> CK_FE07_BASELINE_ROOT=<固定6faee8b工作区> node tests/workforce-paging-diff.mjs
 CODEX_PRIMARY_RUNTIME_NODE_MODULES=<node_modules> CK_FE07_SOURCE_ROOT=<固定6faee8b工作区> node tests/workforce-paging-performance.mjs
 CODEX_PRIMARY_RUNTIME_NODE_MODULES=<node_modules> CK_FE07_EXPECT_PAGED=true node tests/workforce-paging-performance.mjs
+CK_JSDOM_MODULE=<jsdom/lib/api.js> node --test --test-reporter=tap --test-concurrency=2 tests/*.test.mjs
 ```
