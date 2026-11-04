@@ -39,7 +39,7 @@ test('ordinary open checkout says not off work and raw clock remains the true sc
  const {p}=project([span('A','09:00','')],[],{asOf:at('10:00')});assert.equal(p.checkoutState,'未下班');assert.equal(p.outAt,'');assert.equal(p.minutes.presence,60);assert.equal(p.needsVerification,false);
 });
 test('policy-effective presence stays distinct from raw punch presence',()=>{
- const {p,book}=project([span('A','08:37','18:00')],[],{shiftPolicy:true});assert.equal(p.minutes.rawPresence,563);assert.equal(p.minutes.presence,540);assert.equal(book.daily[1][book.daily[0].indexOf('原始在岗小时')],9.38);assert.equal(book.daily[1][book.daily[0].indexOf('规则核定在岗小时')],9);assert.equal(p.intervals[0].minutes.rawPresence,563);
+ const {p,book}=project([span('A','08:37','18:00')],[],{shiftPolicy:true});assert.equal(p.minutes.rawPresence,563);assert.equal(p.minutes.presence,540);assert.equal(book.daily[1][book.daily[0].indexOf('原始在岗小时')],563/60);assert.equal(book.daily[1][book.daily[0].indexOf('规则核定在岗小时')],9);assert.equal(p.intervals[0].minutes.rawPresence,563);
 });
 test('subminute operation sums original precision before two-decimal hour presentation',()=>{
  assert.equal(decimalHours(0.49+0.49+0.49),0.02);assert.equal(decimalHours(0.49)*3,0.03);assert.equal(decimalHours(90.000001),1.5);assert.equal(decimalHours(60.999999),1.02);
