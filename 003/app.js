@@ -749,7 +749,7 @@ async function upload003Photo(input,kind){
  if(CKPhotoUpload.busy()){toast(photo003Text('请先处理当前待上传照片','현재 대기 사진을 먼저 처리하세요'),true);return;}
  var context=input._photo003Context||photo003Context(kind),mode=input.dataset.photoMode==='photo'?'photo':'original';
  if(!context||context.kind!==kind||!context.current()){toast(photo003Text('请返回原记录和原操作身份重新选择照片','원래 기록과 작업자로 돌아가 사진을 다시 선택하세요'),true);return;}
- var changed=photo003Text('记录或操作身份已变化，请返回原记录重试','기록·작업자가 변경되었습니다. 원래 기록으로 돌아가 다시 시도하세요'),unknown=photo003Text('上传结果未确认，请先核对本记录已保存的照片；已停用重复发送，可移除本次待处理后再核对原件','업로드 결과를 확인할 수 없습니다. 저장된 사진을 먼저 확인하세요. 중복 전송은 중지되었습니다. 대기 항목을 제외한 후 원본을 확인하세요');
+ var changed=photo003Text('记录或操作身份已变化，请返回原记录重试','기록·작업자가 변경되었습니다. 원래 기록으로 돌아가 다시 시도하세요'),unknown=photo003Text('上传结果未确认，文件与编号已保留；可用同一编号重试，或先核对本记录已保存的照片','결과 미확인. 파일·번호가 유지됩니다. 같은 번호로 재시도하거나 저장된 사진을 확인하세요');
  function check(){if(!context.current())throw Error(changed);}
  var pending=CKPhotoUpload.upload(files,{
   hint:photo003Text('现场照片仅按明确选择压缩，成功后只上传处理版本，不另存原图；原件/扫描件及其他格式保持原文件。压缩失败回退原件，到货原件仍限15MiB。不自动重试结果不明的上传。','명시적으로 선택한 현장 사진만 압축하며 처리본만 업로드합니다. 촬영 원본 별도 저장 없음. 원본·스캔·다른 형식은 원본 유지. 압축 실패 시 원본 사용, 입고 원본은 15MiB 이하. 결과 불명 업로드는 자동 재전송하지 않습니다.'),
@@ -758,10 +758,10 @@ async function upload003Photo(input,kind){
    try{if(mode==='photo'&&await simplePhoto003(file))chosen=await CKPhotoUpload.prepare(file,options);}catch(e){if(options.signal.aborted||e.name==='AbortError')throw e;chosen=file;}
    check();if(options.signal.aborted)throw new DOMException('cancelled','AbortError');if(kind==='arrival'&&chosen.size>15*1048576)throw Error(errorText('file_too_large'));return chosen;
   },
-  canRetry:function(item){return !item||!item.uncertain;},
-  send:async function(file,item){check();if(item.uncertain)throw Error(unknown);var fd=new FormData();fd.append('action','v2_attachment_upload');fd.append('k',context.key);fd.append('file',file);fd.append('related_doc_type',kind==='asset'?'asset':'material_shipment');fd.append('related_doc_id',context.id);fd.append('attachment_category',kind==='asset'?'asset_photo':'arrival_photo');fd.append('uploaded_by',context.operatorName);if(kind==='arrival'){fd.append('operator_id',context.operatorId);fd.append('operator_name',context.operatorName);}
+  canRetry:function(){return true;},
+  send:async function(file,item){check();var fd=new FormData();fd.append('action','v2_attachment_upload');fd.append('k',context.key);fd.append('file',file);fd.append('photo_protocol','003-photo-v1');fd.append('client_req_id',item.request);fd.append('photo_target_type',kind==='asset'?'asset':'material_shipment');fd.append('related_doc_type','asset');fd.append('related_doc_id',context.id);fd.append('attachment_category','arrival_photo');fd.append('uploaded_by',context.operatorName);if(kind==='arrival'){fd.append('operator_id',context.operatorId);fd.append('operator_name',context.operatorName);}
    var response,result;try{response=await fetch(V2_API,{method:'POST',body:fd});result=await response.json();}catch(e){item.uncertain=true;throw Error(unknown);}
-   if(response.status>=500||!result||Array.isArray(result)||typeof result.ok!=='boolean'||result.ok&&(!response.ok||typeof result.id!=='string'||!result.id||typeof result.file_key!=='string'||!result.file_key)){item.uncertain=true;throw Error(unknown);}if(!response.ok||!result.ok)throw Error(errorText(result.error||'upload_failed'));return result;
+   if(response.status>=500||!result||Array.isArray(result)||typeof result.ok!=='boolean'||result.ok&&(!response.ok||typeof result.id!=='string'||!result.id||typeof result.file_key!=='string'||!result.file_key||result.photo_protocol!=='003-photo-v1'||result.client_req_id!==item.request)){item.uncertain=true;throw Error(unknown);}if(!response.ok||!result.ok)throw Error(errorText(result.error||'upload_failed'));return result;
   },
   onUploaded:function(result,file){photo003Uploaded(context,result,file);}
  });input.value='';delete input._photo003Context;delete input.dataset.photoMode;return pending;

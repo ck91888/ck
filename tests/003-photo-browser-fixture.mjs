@@ -2,10 +2,11 @@
 import assert from 'node:assert/strict';import fs from 'node:fs';import path from 'node:path';import http from 'node:http';
 import {ownedHomeFixture} from './field-owned-home-fixture.mjs';
 import entry from '../worker-v2/staging-entry.js';
+import {photoStore} from './003-photo-idempotency-fixture.mjs';
 export async function photoBrowserFixture(){
  const f=await ownedHomeFixture(),objects=new Map(),uploads=[],gates=[],assets=path.resolve('worker-v2/.sop-staging-assets');let mode='',hold=null;
  const api=(action,data={})=>f.ok('office',action,{operator_id:'SYN-PHOTO',operator_name:'Synthetic photo operator',...data});
- f.env.R2_BUCKET={async put(key,body,metadata){objects.set(key,{body:Buffer.from(await new Response(body).arrayBuffer()),...metadata});},async get(key){return objects.get(key);},async delete(key){objects.delete(key);}};
+ const store=photoStore();store.objects=objects;store.head=async key=>objects.get(key)||null;store.get=store.head;store.put=async(key,body,options)=>{const bytes=Buffer.from(await new Response(body).arrayBuffer());if(options.onlyIf?.etagDoesNotMatch==='*'&&objects.has(key))return null;const object={body:bytes,size:bytes.length,...options};objects.set(key,object);return object;};f.env.R2_BUCKET=store;
  f.env.ASSETS={async fetch(request){const u=new URL(request.url);let file=path.resolve(assets,'.'+decodeURIComponent(u.pathname));if(file!==assets&&!file.startsWith(assets+path.sep))return new Response('denied',{status:403});try{if(fs.statSync(file).isDirectory())file=path.join(file,'index.html');return new Response(fs.readFileSync(file),{headers:{'Content-Type':({'.html':'text/html;charset=utf-8','.js':'text/javascript;charset=utf-8','.css':'text/css;charset=utf-8','.json':'application/json'})[path.extname(file)]||'application/octet-stream'}});}catch{return new Response('missing',{status:404});}}};
  const material=await api('v2_003_material_save',{name_zh:'Synthetic photo material',category:'包材',unit:'个',opening_qty:0});
  const asset=()=>api('v2_003_asset_save',{name_zh:'Synthetic photographed asset',category:'设备'});

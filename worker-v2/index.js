@@ -1,3 +1,4 @@
+import {normalize003PhotoForm,is003PhotoForm,upload003Photo} from './003-photo-upload.js';
 import {attendanceReturnEnvironment,guardAttendanceSession} from './attendance-context.js';
 import {purchaseMaterialPage} from './purchase-material-picker.js';
 import {ensureAutoDispatchTime} from './dispatch-time-runtime.js';
@@ -7046,6 +7047,7 @@ function _materialFileAllowed(file) {
 route("v2_attachment_upload", async (body, env, request) => {
   if (!request) return err("upload requires multipart POST");
   const formData = await request.formData();
+      try{normalize003PhotoForm(formData);}catch(e){return json({ok:false,error:e.message},e.status||400);}
   const k = formData.get("k") || "";
   if (!isAuth({ k }, env)) return err("unauthorized", 401);
 
@@ -12935,6 +12937,7 @@ export default {
     } else if (ct.includes("multipart/form-data")) {
       isMultipart = true;
       formData = await request.formData();
+      try{normalize003PhotoForm(formData);}catch(e){return json({ok:false,error:e.message},e.status||400);}
       body = { action: formData.get("action") || "", k: formData.get("k") || "" };
     } else if (ct.includes("application/json")) {
       body = await request.json().catch(() => ({}));
@@ -13100,6 +13103,7 @@ async function handleMultipartUpload(formData, env) {
       && v003IsPublicField(fieldBody);
     if (!isOpsAuth(fieldBody, env) && !publicArrival) return err("unauthorized", 401);
     if (!related_doc_type || !related_doc_id) return err("missing attachment target");
+    if(is003PhotoForm(formData)){try{return json(await upload003Photo(formData,env,{type:related_doc_type,target:related_doc_id,category:attachment_category,uploadedBy:uploaded_by,operator:fieldBody}));}catch(e){return json({ok:false,error:e.message},e.status||500);}}
     if(related_doc_type==='issue_draft')return json(await uploadIssueDraft(formData,env));
     if(attachment_category==='issue_original')return err('原始附件须从新建问题的附件草稿提交 / 새 문제의 첨부 초안을 제출하세요',403);
     if(accessEnabled(env)&&['issue_ticket','issue','issue_handle'].includes(related_doc_type)&&!await issueAttachmentAllowed(env,env.SOP_REQUEST_USER,related_doc_type,related_doc_id))return err('无此问题附件权限',403);
