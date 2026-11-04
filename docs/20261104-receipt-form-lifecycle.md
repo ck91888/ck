@@ -58,3 +58,25 @@ node worker-v2/build-sop-staging.mjs
 - 构建与diff检查通过，已查看两宽收货截图，数量、选中库位和行备注保留。最终全量尚待运行；通过后补记精确统计。
 
 阶段三日志：`fe03-refresh-confirm-before-fix.log`（保留失败）、`fe03-stage3-related.log`、`fe03-browser-stage3/result.json`、`fe03-purchase-browser.log`与`fe03-photo-browser.log`。上述均为开发自测，尚待固定独立QA放行。
+
+## 最终开发自测
+
+最终以本节为准。业务源码固定在阶段三`a471041fce7b6327ebfd7f51a699c952293289ec`，后续仅补本文记录。
+
+- 全量Node **1890通过/0失败/0跳过**，退出码0，388531毫秒，原断言与等待未改。日志`fe03-full.log`。
+- 最终原生workerd D1 API复测 **3/0/0**，日志`fe03-final-api-d1.log`。相关Node仍为 **54/0/0**，服务端Node为 **21/0/0**。
+- 最终构建页面 **34组通过**，两宽收货截图均已实际查看；原FE-01两组、采购发货四组及照片压缩原脚本均通过。未以浏览器身份快照模拟代替真实账号交接验收。
+- 相对基线仅一个业务前端文件、四个合成测试/夹具及本文；Worker、共享模块、其它应用、数据库/schema、权限规则、构建配置均无差异。无真实数据改写、线上读取、重置或部署。
+- 基线复现失败、夹具入口错误和开发中发现的两条刷新交错失败均保留，未删除断言、放宽超时或跳过测试。没有尚未关闭的自测失败；尚待固定独立QA，实体设备相机、Safari和真实账号现场交接仍未验收。
+
+追加复现命令（先构建，全部本地合成）：
+
+```sh
+node --test --test-reporter=tap tests/receipt-lifecycle-api.test.mjs tests/material-purchase-flow.test.mjs
+CK_P1_NATIVE_D1=true CODEX_PRIMARY_RUNTIME_NODE_MODULES=<含miniflare的目录> node --test --test-reporter=tap tests/receipt-lifecycle-api.test.mjs
+CODEX_PRIMARY_RUNTIME_NODE_MODULES=<含playwright的目录> node tests/receipt-form-lifecycle-browser.mjs
+CODEX_PRIMARY_RUNTIME_NODE_MODULES=<含playwright的目录> node tests/location-picker-browser.mjs
+CODEX_PRIMARY_RUNTIME_NODE_MODULES=<含playwright的目录> node tests/purchase-shipment-replay-browser.mjs
+CODEX_PRIMARY_RUNTIME_NODE_MODULES=<含playwright的目录> CK_ATTENDANCE_RETURNS=true CK_AUTO_DISPATCH_TIME=true node tests/photo-compression-browser.mjs
+CK_JSDOM_MODULE=<jsdom/lib/api.js路径> node --test --test-reporter=tap --test-concurrency=2 tests/*.test.mjs
+```
