@@ -59,3 +59,18 @@ test('file type and size limits match the server, and plan writes cannot be retr
  for(const file of [new File([],'empty.pdf'),new File(['x'],'a.exe'),{name:'too-large.pdf',size:20*1024*1024+1}])assert.throws(()=>f.api.validate(file));assert.doesNotThrow(()=>f.api.validate({name:'limit.pdf',size:20*1024*1024}));
  const data=body();data.set('action','v2_inbound_create');await assert.rejects(f.api.send(data),/编号或目标缺失/);assert.equal(f.sent.length,0);
 });
+test('existing save-session deadline remains authoritative and its timeout is not retried',async()=>{
+ const f=fixture(x=>{assert.equal(x.timeout,250);x.finish('timeout');});await assert.rejects(f.api.send(body(),{timeoutMs:250,retryTimeout:false}),/附件上传超时/);assert.equal(f.sent.length,1);
+});
+test('finishing byte transfer shows confirmation state and cannot masquerade as an acknowledgement',async()=>{
+ const events=[],f=fixture(x=>x.upload.onload());let settled=false;const p=f.api.send(body(),{progress:(n,size,info)=>events.push(info.phase)}).then(r=>{settled=true;return r;});await delay(1);assert.equal(settled,false);assert.equal(events.at(-1),'confirming');assert.match(f.api.status(1,1,{phase:'confirming'}),/等待服务器确认/);f.sent[0].finish();await p;assert.equal(settled,true);
+});
+test('changing identity between batch files cannot send the remaining old files as the new account',async()=>{
+ const f=fixture(x=>x.finish()),started=[];await assert.rejects(f.api.files([1,2].map(id=>({id,file:body().get('file')})),async item=>{started.push(item.id);f.window.CKSession.user.id='different-account';}),e=>e.identityChanged);assert.deepEqual(started,[1]);assert.equal(f.sent.length,0);
+});
+test('leaving an upload surface prevents retries after the current uncertain response',async()=>{
+ let connected=true;const f=fixture(x=>{connected=false;x.finish('error');});await assert.rejects(f.api.send(body(),{isActive:()=>connected}),e=>e.cancelled);assert.equal(f.sent.length,1);
+});
+test('legacy non-idempotent attachments never enter the automatic retry transport',async()=>{
+ const f=fixture(x=>x.finish());for(const[type,category]of [['outbound_order','outbound_material'],['inbound_plan','inbound_material'],['sop_need','inbound_material'],['sop_need','pallet_details']]){const data=body('synthetic',type);data.set('attachment_category',category);await assert.rejects(f.api.send(data),/编号或目标缺失/);}assert.equal(f.sent.length,0);
+});
