@@ -22,7 +22,7 @@
 
 补查曾发现正常现场轮询会被首版对象引用判断误判为换人，原针对测试 **0通过/1失败** 保留；已使用服务端稳定工牌/出勤身份修复并纳入上述25项。没有削弱服务端拒绝断言或改授权规则。
 
-构建、浏览器、原生D1与容量/全量回归待后续阶段补齐。证据日志前缀`fe05-`，仅本地合成文件，不提交数据库、会话、照片或真实资料。候选尚待固定独立审核。
+首阶段构建通过，浏览器、原生D1与容量/全量回归待后续阶段补齐。证据日志前缀`fe05-`，仅本地合成文件，不提交数据库、会话、照片或真实资料。候选尚待固定独立审核。
 
 ```sh
 CK_JSDOM_MODULE=<jsdom/lib/api.js路径> node --test --test-reporter=tap tests/unload-photo-lifecycle.test.mjs tests/unload-photos.test.mjs
@@ -55,3 +55,23 @@ CK_JSDOM_MODULE=<jsdom/lib/api.js路径> node --test --test-reporter=tap tests/u
 容量测试不含真实照片解码内存，不代表设备总内存或现场网络。当前可见及真实待上传实例继续保留，不对它们套16个上限或丢弃文件；并非任何数量待上传内容都能恒定内存。
 
 证据：`fe05-browser-final2/result.json`、`fe05-cache-final/result.json`及对应日志；原生D1与Node API见上节。原照片压缩与最终全量仍待收尾，不合测试、不部署。
+
+## 最终开发验证
+
+以本节为准。业务源码固定在`19bf3e7`，后续阶段仅补测试与说明。
+
+- 完整全量TAP日志 **1869通过/0失败/0跳过**，309002毫秒。执行中环境曾变为starting，恢复后日志包含最终`1..1869`及完整汇总，无Node在途进程；旧进程句柄已失效，无法回取原shell退出码。没有盲目重跑或将未知退出码记为0。证据`fe05-full.log`。
+- 控件与原API **25/0/0**；新增API Node、原生workerd D1各 **3/0/0**；控件浏览器两宽 **10组通过**；容量基线/候选各3规模共 **6组通过**。上述进程均曾返回退出码0。
+- 原`photo-compression-browser.mjs`在返岗与自动派审启用下通过，退出码0：合成照片3462248→403880字节、2048×1536，条码/二维码均可解码；卸货照片重试保持相同字节和请求号，原异常格式、方向、透明度、故障与各宽度断言保持。压缩模块本身未改。证据`fe05-photo-browser.log`。
+- 构建及diff检查通过。相对89709cb只改一个业务共享控件、五个合成测试/夹具及本文；Worker、权限服务、照片压缩模块、各应用和部署配置无差异。FE-03/04候选不是本分支祖先，未混入它们或重置补丁。
+- 无未关闭的自测失败；最终全量原退出码无法回取这一证据边界保留。实体相机、Safari、真实现场重新登录、远程库及真实照片内存未验收；本批仅页面内存保留，不承诺崩溃或整页重载后的恢复。候选交固定独立QA，未合测试/main、未部署、未操作线上数据。
+
+```sh
+node worker-v2/build-sop-staging.mjs
+node --test --test-reporter=tap tests/unload-photo-lifecycle-api.test.mjs
+CK_P1_NATIVE_D1=true CODEX_PRIMARY_RUNTIME_NODE_MODULES=<含miniflare的目录> node --test --test-reporter=tap tests/unload-photo-lifecycle-api.test.mjs
+CODEX_PRIMARY_RUNTIME_NODE_MODULES=<含playwright的目录> node tests/unload-photo-lifecycle-browser.mjs
+CODEX_PRIMARY_RUNTIME_NODE_MODULES=<含playwright的目录> node tests/unload-photo-cache-browser.mjs
+CODEX_PRIMARY_RUNTIME_NODE_MODULES=<含playwright的目录> CK_ATTENDANCE_RETURNS=true CK_AUTO_DISPATCH_TIME=true node tests/photo-compression-browser.mjs
+CK_JSDOM_MODULE=<jsdom/lib/api.js路径> node --test --test-reporter=tap --test-concurrency=2 tests/*.test.mjs
+```
