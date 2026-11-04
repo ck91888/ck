@@ -728,12 +728,21 @@ function choose003Photo(kind,mode){
 // Conservative opt-in: keep originals, animations, transparency, scans and
 // special JPEG containers out of the lossy photo path. Never infer a scan from pixels.
 async function singlePhoto003End(file,start){
- // In entropy-coded JPEG data a literal FF is stuffed as FF00. The first
- // unstuffed EOI therefore ends the first image; any trailing container stays raw.
- // Skip pre-SOS metadata (including Exif thumbnails); scan in bounded chunks.
- var previous=-1;
- for(var offset=start;offset<file.size;offset+=1048576){var bytes=new Uint8Array(await file.slice(offset,offset+1048576).arrayBuffer());for(var i=0;i<bytes.length;i++){if(previous===255&&bytes[i]===217)return offset+i===file.size-1;previous=bytes[i];}}
- return false;
+ // Skip the first SOS header, then parse only marker boundaries. FF00 is
+ // stuffed entropy data; restart/fill markers and ordinary progressive tables
+ // are safe. Late metadata, unknown structures and extra images stay original.
+ async function segmentEnd(position){var b=new Uint8Array(await file.slice(position,position+2).arrayBuffer());if(b.length!==2)return -1;var length=b[0]*256+b[1];return length>=2&&position+length<=file.size?position+length:-1;}
+ var offset=await segmentEnd(start),previous=-1;if(offset<0)return false;
+ scan:while(offset<file.size){var bytes=new Uint8Array(await file.slice(offset,offset+1048576).arrayBuffer());
+  for(var i=0;i<bytes.length;i++){var marker=bytes[i];if(previous===255){
+   if(marker===217)return offset+i===file.size-1;
+   if(marker===255)continue;
+   if(marker===0||marker>=208&&marker<=215){previous=-1;continue;}
+   if([196,204,219,221,218].indexOf(marker)>=0){offset=await segmentEnd(offset+i+1);if(offset<0)return false;previous=-1;continue scan;}
+   return false;
+  }previous=marker===255?255:-1;}
+  offset+=bytes.length;
+ }return false;
 }
 async function simplePhoto003(file){
  if(file.type!=='image/jpeg'||! /\.jpe?g$/i.test(file.name)||file.size>20*1048576)return false;
