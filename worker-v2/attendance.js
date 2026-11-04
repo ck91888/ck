@@ -1,4 +1,5 @@
 import {attendanceReturnOverview} from './attendance-return-overview.js';
+import {attendanceExportPage} from './attendance-export.js';
 import {attendanceReturnEnabled,attendanceReturnsRequested} from './attendance-return-schema.js';
 import {attendanceSource,attendanceDaySQL,attendanceCurrentSQL,guardAttendanceState} from './attendance-context.js';
 import {nextAttendanceCutoff} from './attendance-return-time.js';
@@ -144,6 +145,7 @@ export async function handleAttendance(b,env){
  if(action==='sop_attendance_config')return {ok:true,...(attendanceReturnEnabled(env)?{attendanceReturnsEnabled:true,attendanceReturnCreationEnabled:attendanceReturnsRequested(env)}:{}),day,asOf:t,agencies,employeeDepartments,user:{id:u.id,name:u.name,role:u.role},publicTest:!!u.public_test};
  if(action==='sop_attendance_employee_work_detail'){employeeWorkdayAccess(env);const personId=typeof b.person_id==='string'?b.person_id:'';if(!personId||!await q(env,"SELECT p.id FROM ck_attendance_people p JOIN ck_employee_profiles e ON e.person_id=p.id WHERE p.id=? AND p.badge_id='EMP-'||e.employee_no AND p.kind='permanent'",personId).first())fail('职员身份不存在 / 직원 정보가 없습니다');return overview(env,dateOf(b.date||day),t,'employee',personId);}
  if(action==='sop_attendance_summary'){access(env,['manager','dispatcher','reviewer','viewer']);return overview(env,dateOf(b.date||day),t,b.scope);}
+ if(action==='sop_attendance_daily_export')return attendanceExportPage(b,env,t,overview);
  if(['sop_attendance_employee_people','sop_attendance_employee_search','sop_attendance_employee_import_preview'].includes(action))return employeeAction(b,env,{access,fail,nameOf,text,commit,u,t});
  if(action==='sop_attendance_lookup'){
   const badge=badgeOf(b.badge),resolved=await resolveDailyBadge(env,badge,{day}),p=resolved.person||await q(env,"SELECT p.*,v.version FROM ck_attendance_people p LEFT JOIN ck_permanent_badge_profiles v ON v.person_id=p.id WHERE p.badge_id=? AND (p.enabled=1 OR (p.kind='permanent' AND p.badge_id GLOB 'DAF-*'))",badge).first();

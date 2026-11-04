@@ -1,10 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {ownedHomeFixture} from './field-owned-home-fixture.mjs';
-import {confirmOperation} from './office-operator-fixture.mjs';
-const NativeDate=Date;
-export async function atTime(start,fn){let time=NativeDate.parse(start);globalThis.Date=class extends NativeDate{constructor(...a){super(...(a.length?a:[time]));}static now(){return time;}};try{return await fn(iso=>{time=NativeDate.parse(iso);});}finally{globalThis.Date=NativeDate;}}
-export async function office(f){await f.ok('office','sop_login',{sop_key:'synthetic-owned-home-fixture'});await confirmOperation((a,b)=>f.ok('office',a,b),'合成工时核验员');}
+import {atTime,office} from './labor-export-fixture.mjs';
 const cursor=(badge,p)=>({badge,id:p.record.id,version:p.version,span_id:p.span_id,span_version:p.span_version});
 test('calendar-day projection excludes old pending punches and counts only that day’s return facts without changing evidence',()=>atTime('2026-10-25T00:00:00Z',async set=>{
  const f=await ownedHomeFixture();f.env.SOP_ATTENDANCE_RETURNS_ENABLED='true';

@@ -1,0 +1,31 @@
+// Financial presentation only. Labor is calculated by the attendance report,
+// at original precision; this module never creates or reallocates work time.
+const DAY=86400000;
+export const LABOR_EXPORT_LIMITS={days:366,page:200,rows:20000};
+export function exportDate(value){const s=String(value||'');if(!/^\d{4}-\d{2}-\d{2}$/.test(s)||!Number.isFinite(Date.parse(s+'T00:00:00Z'))||new Date(s+'T00:00:00Z').toISOString().slice(0,10)!==s)throw Error('请选择有效的开始和结束日期');return s;}
+export function exportRange(start,end){start=exportDate(start);end=exportDate(end);const days=(Date.parse(end)-Date.parse(start))/DAY+1;if(days<1||days>LABOR_EXPORT_LIMITS.days)throw Error('开始日期须不晚于结束日期，每次最多导出366天；请分段导出');return {start,end,days};}
+export const nextExportDate=date=>new Date(Date.parse(exportDate(date)+'T00:00:00Z')+DAY).toISOString().slice(0,10);
+export const koreanTime=value=>Number.isFinite(Date.parse(value))?new Date(Date.parse(value)+9*3600000).toISOString().slice(0,19).replace('T',' '):'';
+export const decimalHours=minutes=>Math.round(Math.round(Number(minutes||0)*60000)/36000)/100;
+const n=value=>Number.isFinite(Number(value))?Number(value):0;
+function minutes(t={}){return {presence:n(t.presence),rawPresence:n(t.accounting?.rawPresenceMinutes??t.presence),bulk:n(t.bulk),direct_ship:n(t.direct_ship),import:n(t.import),other:n(t.other),operation:n(t.bulk)+n(t.direct_ship)+n(t.import)+n(t.other),dispatch:n(t.dispatch),rest:n(t.rest),registeredRest:n(t.accounting?.registeredRestMinutes??t.registeredRestMinutes??t.rest),automaticRest:n(t.accounting?.automaticRestMinutes??t.automaticRestMinutes),unassigned:n(t.unassigned),conflict:n(t.conflict),attendancePending:n(t.attendancePendingMinutes),dispatchPending:n(t.dispatchPendingMinutes),systemCutoff:n(t.systemCutoffMinutes),gap:n(t.offShiftGapMinutes)};}
+export function financePersonDay(item,date,asOf){
+ const r=item.record,t=item.totals||{},from=Date.parse(date+'T00:00:00+09:00'),to=from+DAY;
+ const source=item.attendanceSpans||[{id:r.id,ordinal:1,kind:'normal',start:r.inAt,end:r.outAt,status:r.outAt?'closed':'open',totals:t}];
+ const intervals=source.map(s=>{const start=Date.parse(s.start),rawEnd=s.end||'',pending=!!s.needsVerification||s.status==='pending_review',cutoff=Math.floor((start+5*3600000)/DAY)*DAY-5*3600000+DAY;
+  const end=Math.min(Date.parse(asOf),rawEnd?Date.parse(rawEnd):cutoff,pending&&Number.isFinite(Date.parse(s.provisionalEnd))?Date.parse(s.provisionalEnd):Infinity),a=Math.max(from,start),b=Math.min(to,end);
+  return {ordinal:s.ordinal||1,kind:s.kind||'normal',start:s.start,end:rawEnd,dayStart:Number.isFinite(a)&&b>a?new Date(a).toISOString():'',dayEnd:Number.isFinite(b)&&b>a?new Date(b).toISOString():'',needsVerification:pending,approval:s.overtimeState||'none',minutes:{...minutes(s.totals||{}),rawPresence:Number.isFinite(a)&&b>a?(b-a)/60000:0}};});
+ const open=intervals.filter(s=>!s.end),pending=!!item.identityConflict||intervals.some(s=>s.needsVerification)||n(t.attendancePendingMinutes)>0||n(t.conflict)>0;
+ return {personKey:r.stablePersonId||r.personId,date,name:r.name,badge:r.badgeId,agency:r.agency,inAt:intervals[0]?.start||r.inAt,outAt:open.length?'':intervals.at(-1)?.end||r.outAt||'',checkoutState:open.length?pending?'未签退（待核实）':'未下班':pending?'已签退（待核实）':'已下班',minutes:minutes(t),intervals,flags:[...new Set([...(t.flags||[]),...(item.identityConflict?['身份待核实，未计正式部门劳动']:[])])],accountingStatus:t.accounting?.status||'',needsVerification:pending};
+}
+const hourFields=[['bulk','大货小时'],['direct_ship','代发小时'],['import','进口小时'],['other','其他作业小时（部门未细分）'],['operation','实际操作合计小时'],['dispatch','派审小时'],['rest','休息合计小时'],['registeredRest','实际登记休息小时'],['automaticRest','规则补足休息小时'],['unassigned','未归属小时'],['conflict','冲突小时'],['attendancePending','出勤待核实小时'],['dispatchPending','派审待核实小时'],['systemCutoff','系统截止待核实小时']];
+const kind=value=>({normal:'正常上班',return:'返岗',correction_resume:'更正后续作'}[value]||value),approval=value=>({none:'不适用',pending:'待确认',approved:'已批准',denied:'未批准'}[value]||value);
+export function financeWorkbookData(rows,meta){
+ const daily=[['日期','姓名','工牌','人力公司','上班时间（韩国时间）','下班时间（韩国时间）','签退状态','当天全部上下班时段（韩国时间）','出勤段数','原始在岗小时','规则核定在岗小时',...hourFields.map(x=>x[1]),'离岗间隔小时','需核实','说明']];
+ const spans=[['日期','姓名','工牌','人力公司','当日第几段','类型','真实上班（韩国时间）','真实下班（韩国时间）','当天统计开始（韩国时间）','当天统计截止（韩国时间）','签退状态','加班属性','原始在岗小时','规则核定在岗小时',...hourFields.map(x=>x[1]),'需核实']];
+ for(const r of rows){const h=k=>decimalHours(r.minutes[k]),intervals=r.intervals.map(s=>koreanTime(s.start)+' ～ '+(s.end?koreanTime(s.end):s.needsVerification?'未签退（待核实）':'未下班')).join('\n');daily.push([r.date,r.name,r.badge,r.agency,koreanTime(r.inAt),r.outAt?koreanTime(r.outAt):r.checkoutState,r.checkoutState,intervals,r.intervals.length,h('rawPresence'),h('presence'),...hourFields.map(([k])=>h(k)),h('gap'),r.needsVerification?'是':'否',r.flags.join('；')]);
+  r.intervals.forEach((s,i)=>{const m=s.minutes;spans.push([r.date,r.name,r.badge,r.agency,i+1,kind(s.kind),koreanTime(s.start),s.end?koreanTime(s.end):s.needsVerification?'未签退（待核实）':'未下班',koreanTime(s.dayStart),koreanTime(s.dayEnd),s.end?'已签退':s.needsVerification?'未签退（待核实）':'未下班',approval(s.approval),decimalHours(m.rawPresence),decimalHours(m.presence),...hourFields.map(([k])=>decimalHours(m[k])),s.needsVerification?'是':'否']);});
+ }
+ const notes=[['项目','说明'],['导出范围',`${meta.start} 至 ${meta.end}（首尾日期均包含，韩国自然日）`],['生效筛选',meta.agency||meta.keyword?`公司：${meta.agency||'全部'}；姓名/工牌：${meta.keyword||'全部'}`:'全部日当；不受当前页面人数、分页及实时状态筛选限制'],['工时统计截止（韩国时间）',koreanTime(meta.asOf)],['数据行数',rows.length],['单位','小时，先按原精度合计再显示2位小数；仅展示精度，非工资结算'],['部门归属','按实际个人作业部门；管理部门不替代作业部门。其他作业尚未细分时单列，不分摊。'],['出勤','保留全部真实上下班；跨日按自然日拆分工时，真实打卡保留日期；返岗离岗间隔既非在岗也非休息。'],['规则核定','沿用现有班次和补休规则，可能与真实打卡在岗不同；正常班次补休一次，返岗仅实际登记休息。'],['未签退','明确显示未下班；截至统计时间计算，04:00未结束段按已有规则待核实，不伪造下班。'],['避免重复','派审与实际操作、休息互斥；实际操作合计含各部门，休息合计含实际及补足，请勿再次相加。'],['待核实','冲突、出勤/派审/系统截止待核实列是提示子集，可能重合，不是额外劳动；无记录不推算。'],['数据一致性','同一工时统计截止；每个自然日完整分页校验，分页中数据变化须重新导出。历史更正以本次读取的证据为准。'],['限制',`每次最多${LABOR_EXPORT_LIMITS.days}天、${LABOR_EXPORT_LIMITS.rows}个人日；超限或任一页失败不生成部分文件，请缩小范围重试。`]];
+ return {daily,spans,notes,hourColumns:{daily:[9,10,...hourFields.map((_,i)=>11+i),11+hourFields.length],spans:[12,13,...hourFields.map((_,i)=>14+i)]}};
+}
