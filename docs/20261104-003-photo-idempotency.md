@@ -24,6 +24,8 @@ Evidence directory: `/workspace/scratch/ck-003-photo-evidence-20261104` (synthet
 - Frontend/service/API Node targeted: 30 pass / 0 fail, actual exit 0, `receipt-stage2-node.log`. Includes no automatic retry, exact same-ID/File recovery and unchanged office/field/anonymous/legacy authorization.
 - Native workerd D1 SQL: eight groups pass / zero fail, exit 0, `receipt-stage1-d1.log`. Concurrent requests, content/target/actor conflicts, R2-before/after faults, D1 publication rollback and cold recovery, target-close race and unowned-object protection.
 - New page against old Worker: eight combinations pass / zero fail, exit 0, `receipt-old-server.log`; no attachments or objects written.
-- Actual 003 browser, native workerd/R2, full Node and independent review: running/pending. No release conclusion yet.
+- Native complete workerd/D1/R2: 10 pass / 0 fail, actual exit 0 (`receipt-workerd-root-fixed.log`). Initial startup failed because the generated bundle was outside the default module root; only the fixture rootPath/modulesRoot was corrected. Original failure remains in `receipt-workerd.log`.
+- Actual 003 browser first run stopped at initial page.goto load (original 15s limit) before uploading; `receipt-actual-browser.log` is retained. This is not a passing upload result, nor a diagnosed product error. An isolated follow-up is pending.
+- Full Node is running. Independent fixed-SHA review is pending. No release conclusion yet.
 
 The prior stage's actual stored/private-downloaded bytes passed barcode/QR and fine-text OCR at desktop/mobile, 4/4 each (3462248 -> 403880 bytes, 2048x1536). This synthetic result does not guarantee real scan readability, domestic network speed or physical device behavior. Original 743/1869ms/manual RUNTIME and earlier failures are retained, not relabeled.
