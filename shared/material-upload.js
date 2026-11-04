@@ -9,7 +9,7 @@
  const slot=run=>new Promise((resolve,reject)=>{queue.push({run,resolve,reject});pump();});
  async function send(body,{signal,progress,guard=()=>{},isActive=()=>true}={}){
   const file=body.get('file');validate(file);const who=owner(),request=String(body.get('client_req_id')||''),type=String(body.get('related_doc_type')||'');
-  if(body.get('action')!=='v2_attachment_upload'||!request||!body.get('related_doc_id')||!['cargo_draft','sop_need','inbound_plan'].includes(type))throw failure('资料上传编号或目标缺失，请保留原文件重新核查',{businessError:true});
+  if(body.get('action')!=='v2_attachment_upload'||!request||!body.get('related_doc_id')||!['cargo_draft','sop_need','inbound_plan'].includes(type)||type==='inbound_plan'&&body.get('attachment_category')!=='batch_work_material'||type==='sop_need'&&['inbound_material','pallet_details'].includes(body.get('attachment_category')))throw failure('资料上传编号或目标缺失，请保留原文件重新核查',{businessError:true});
   const captured=new FormData();for(const [k,v]of body)captured.append(k,v);
   const check=()=>{guard();if(!who||owner()!==who)throw failure('登录身份已变化，原文件与编号保留，请用原身份核查 / 로그인 정보가 변경되었습니다',{identityChanged:true});if(signal?.aborted||!isActive())throw failure('上传已停止，原文件和编号保留 / 업로드 중지·원본 유지',{cancelled:true});};
   const endpoint=new URL(window.SOP_API||'/api',location.href);if(endpoint.origin!==location.origin)throw failure('请从本系统页面上传资料 / 시스템 페이지에서 자료를 업로드하세요',{businessError:true});
