@@ -2,7 +2,7 @@
 // large/unknown files wait for a click. Blob URLs live only in this page/view.
 (function(){
  'use strict';
- const entries=new Map(),queue=[],MAX_CACHE_BYTES=64*1048576,MAX_CACHE_COUNT=8;let active=0,current=null,modal=null,observer=null,scheduled=false,openedView=null,usage=0;
+ const entries=new Map(),queue=[],MAX_CACHE_BYTES=64*1048576,MAX_CACHE_COUNT=8;let active=0,current=null,modal=null,observer=null,scheduled=false,openedView=null,usage=0,suspended=false;
  const t=(zh,ko)=>window.getLang?.()==='ko'?ko:zh;
  const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
  const size=n=>n>=1048576?(n/1048576).toFixed(1)+' MB':Math.ceil(n/1024)+' KB';
@@ -15,7 +15,7 @@
  }
  function dropPreview(e){const url=e.blob;e.blob='';e.actualBytes=0;e.pixels=0;paint(e);if(url)URL.revokeObjectURL(url);}
  function evict(e){e.state='idle';e.error='';e.autoAttempted=true;for(const cell of e.cells)observer?.unobserve(cell);dropPreview(e);}
- function release(e){e.controller?.abort();e.cancelled=true;e.generation=(e.generation||0)+1;e.state='idle';e.error='';dropPreview(e);entries.delete(e.url);}
+ function release(e){e.controller?.abort();e.cancelled=true;e.generation=(e.generation||0)+1;e.state='idle';e.error='';for(const cell of e.cells)observer?.unobserve(cell);dropPreview(e);entries.delete(e.url);}
  // Estimate retained encoded bytes plus one decoded RGBA surface. This is a
  // cache budget, not a measurement of browser heap/GPU memory. A displayed
  // photo stays pinned, even alone over budget, and is trimmed when closed.
@@ -31,8 +31,8 @@
  }
  let returnFocus=null;
  function close(){if(!modal||!current)return;const e=current;current=null;modal.classList.remove('show');modal.querySelector('img').removeAttribute('src');if(e&&['queued','loading'].includes(e.state)){e.cancelled=true;e.controller?.abort();e.state='cancelled';e.error=t('加载已取消，可重试','로딩 취소됨. 다시 시도하세요.');paint(e);}if(returnFocus?.isConnected)returnFocus.focus();trim();}
- function open(url,name='',bytes=0){ensureModal();openedView=window._currentView;if(current&&current.url!==url)close();returnFocus=document.activeElement;current=entry(url,name,bytes);current.used=++usage;modal.querySelector('[data-view-name]').textContent=current.name||t('照片','사진');const link=modal.querySelector('[data-view-download]');link.href=url;link.download=current.name;modal.classList.add('show');modal.querySelector('[data-view-close]').focus();paint(current);load(current,true);}
- function load(e,priority=false){if(!e||['ready','loading','queued'].includes(e.state)||!priority&&e.autoAttempted)return;e.autoAttempted=true;e.state='queued';e.error='';e.cancelled=false;e.generation=(e.generation||0)+1;paint(e);const item={e,generation:e.generation};if(priority)queue.unshift(item);else queue.push(item);pump();}
+ function open(url,name='',bytes=0){if(suspended)return;ensureModal();openedView=window._currentView;if(current&&current.url!==url)close();returnFocus=document.activeElement;current=entry(url,name,bytes);current.used=++usage;modal.querySelector('[data-view-name]').textContent=current.name||t('照片','사진');const link=modal.querySelector('[data-view-download]');link.href=url;link.download=current.name;modal.classList.add('show');modal.querySelector('[data-view-close]').focus();paint(current);load(current,true);}
+ function load(e,priority=false){if(suspended||!e||['ready','loading','queued'].includes(e.state)||!priority&&e.autoAttempted)return;e.autoAttempted=true;e.state='queued';e.error='';e.cancelled=false;e.generation=(e.generation||0)+1;paint(e);const item={e,generation:e.generation};if(priority)queue.unshift(item);else queue.push(item);pump();}
  function pump(){while(active<2&&queue.length){const {e,generation}=queue.shift();if(e.cancelled||entries.get(e.url)!==e||e.generation!==generation)continue;active++;run(e,generation).finally(()=>{active--;pump();});}}
  async function run(e,generation){
   const controller=e.controller=new AbortController();let timedOut=false,url='',timer=setTimeout(()=>{timedOut=true;controller.abort();},120000);e.state='loading';e.loaded=0;paint(e);
@@ -60,15 +60,16 @@
   }catch(error){if(entries.get(e.url)===e&&e.generation===generation){e.state=controller.signal.aborted&&!timedOut?'cancelled':'error';e.error=timedOut?t('图片加载超时，可重试或下载照片','사진 로딩 시간 초과. 다시 시도하거나 사진을 다운로드하세요'):controller.signal.aborted?t('加载已取消，可重试','로딩 취소됨. 다시 시도하세요.'):error.name==='TypeError'||/network error|load failed|failed to fetch/i.test(error.message)?t('未收到完整图片，请重试或下载照片','전체 사진을 받지 못했습니다. 다시 시도하거나 사진을 다운로드하세요'):error.message;paint(e);}}
   finally{clearTimeout(timer);if(url)URL.revokeObjectURL(url);if(e.controller===controller)e.controller=null;}
  }
- function scan(){scheduled=false;for(const e of entries.values()){for(const cell of e.cells)if(!visible(cell)){observer?.unobserve(cell);e.cells.delete(cell);}if(!e.cells.size&&e!==current)release(e);}
+ function scan(){scheduled=false;if(suspended)return;for(const e of entries.values()){for(const cell of e.cells)if(!visible(cell)){observer?.unobserve(cell);e.cells.delete(cell);}if(!e.cells.size&&e!==current)release(e);}
   if(current&&openedView!==window._currentView)close();
   document.querySelectorAll('[data-issue-image]').forEach(cell=>{if(!visible(cell))return;const e=entry(cell.dataset.imageUrl,cell.dataset.imageName,Number(cell.dataset.imageSize));if(e.cells.has(cell))return;e.cells.add(cell);paint(e);if(!e.autoAttempted&&e.bytes>0&&e.bytes<=262144&&observer)observer.observe(cell);});
  }
- function schedule(){if(!scheduled){scheduled=true;requestAnimationFrame(scan);}}
+ function schedule(){if(!suspended&&!scheduled){scheduled=true;requestAnimationFrame(scan);}}
  window.CKIssueImages={html(att,url){return '<div class="att-cell issue-photo-cell" data-issue-image data-image-url="'+esc(url)+'" data-image-name="'+esc(att.file_name||'')+'" data-image-size="'+Number(att.file_size||0)+'"><img class="att-thumb issue-photo-thumb" alt="'+esc(att.file_name||'照片 / 사진')+'" hidden><div class="issue-photo-name">'+esc(att.file_name||'照片 / 사진')+'</div><div class="issue-image-note">'+esc(att.uploaded_by||'')+(att.created_at?' · '+esc(window.fmtTime?fmtTime(att.created_at):att.created_at):'')+'</div><div class="issue-image-note" data-image-status></div><button type="button" data-image-open>'+t('查看图片','사진 보기')+'</button><a href="'+esc(url)+'" download="'+esc(att.file_name||'')+'" target="_blank" rel="noopener">'+t('下载照片','사진 다운로드')+'</a></div>';},open,close};
  document.addEventListener('DOMContentLoaded',()=>{if('IntersectionObserver'in window)observer=new IntersectionObserver(items=>{for(const {target,isIntersecting}of items)if(isIntersecting){observer.unobserve(target);load(entries.get(target.dataset.imageUrl));}},{rootMargin:'0px'});
   document.addEventListener('click',event=>{const cell=event.target.closest('[data-issue-image]');if(cell&&(event.target.closest('[data-image-open]')||event.target.tagName==='IMG'))open(cell.dataset.imageUrl,cell.dataset.imageName,Number(cell.dataset.imageSize));});
   new MutationObserver(schedule).observe(document.body,{childList:true,subtree:true,attributes:true,attributeFilter:['class','style','hidden']});schedule();
  });
- window.addEventListener('pagehide',()=>{close();for(const e of entries.values())release(e);});
+ window.addEventListener('pagehide',()=>{suspended=true;observer?.disconnect();close();for(const e of entries.values())release(e);});
+ window.addEventListener('pageshow',()=>{suspended=false;schedule();});
 })();
