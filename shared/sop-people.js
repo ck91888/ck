@@ -53,7 +53,7 @@
  window.CKPeoplePicker=function(root,{workers=[],leadId='',error,allowEmpty=false,borrowContext=null,maxPeople=50}={}){
   const find=s=>root.querySelector('[data-staff-'+s+']'),input=find('badge'),lead=find('lead'),status=find('status'),camera=find('camera'),model=selection(workers,leadId);
   const scannerBox=find('scanner');scannerBox.id='ck-staff-scanner-'+(++scannerSequence);
-  let scanner=null,starting=false,closed=false,lastCamera='',lastCameraAt=0,queue=Promise.resolve(),checking=0;const confirmations=new Map();
+  let scanner=null,starting=false,closed=false,beforeCameraStart=null,lastCamera='',lastCameraAt=0,queue=Promise.resolve(),checking=0;const confirmations=new Map();
   const report=message=>{status.textContent=message;};
   const showError=e=>{report(e.message);if(error)error.textContent=e.message;};
   function render(){
@@ -78,12 +78,12 @@
   async function stop(){const current=scanner;scanner=null;if(current)await current.stop().catch(()=>{});camera.textContent='相机扫码 / 카메라';}
   find('camera').onclick=async()=>{
    if(starting)return;if(scanner){await stop();return;}
-   starting=true;const current=new Html5Qrcode(scannerBox.id);scanner=current;
+   starting=true;try{if(beforeCameraStart)await beforeCameraStart();}catch{starting=false;if(!closed)showError(Error('相机未能就绪，请重试或输入工牌 / 카메라 준비 실패 · 다시 시도하거나 명찰을 입력하세요'));return;}if(closed){starting=false;return;}const current=new Html5Qrcode(scannerBox.id);scanner=current;
    try{await current.start({facingMode:'environment'},{fps:8,qrbox:220},raw=>{if(closed||scanner!==current)return;const key=String(raw).trim(),now=Date.now();if(key===lastCamera&&now-lastCameraAt<1500)return;lastCamera=key;lastCameraAt=now;add(raw);},()=>{});if(closed||scanner!==current)await current.stop().catch(()=>{});else camera.textContent='停止扫码 / 스캔 중지';}
    catch(e){if(scanner===current)scanner=null;if(!closed)showError(Error('无法打开相机，可使用扫码枪或输入工牌 / 카메라를 사용할 수 없습니다'));}
    finally{starting=false;}
   };
   render();input.focus();
-  return {setMaxPeople(value){maxPeople=value;lead.closest('label').hidden=value===1;},ready(){return queue;},read(){if(model.people.length>maxPeople)throw Error('多单只能选择1名实际操作员，请移除多余人员 / 작업자는 한 명만 선택하세요');if(checking)throw Error('正在核对工牌，请稍后 / 명찰 확인 중');if(allowEmpty&&!model.people.length)return {workers:[],lead_id:''};model.select(maxPeople===1?model.people[0]?.id:lead.value);const staff=model.read();if(confirmations.size)staff.borrow_confirmations=[...confirmations.values()].filter(c=>staff.workers.some(w=>w.id===c.worker_id));return staff;},async destroy(){closed=true;await stop();}};
+  return {stopCamera:stop,setBeforeCameraStart(fn){beforeCameraStart=fn;},setMaxPeople(value){maxPeople=value;lead.closest('label').hidden=value===1;},ready(){return queue;},read(){if(model.people.length>maxPeople)throw Error('多单只能选择1名实际操作员，请移除多余人员 / 작업자는 한 명만 선택하세요');if(checking)throw Error('正在核对工牌，请稍后 / 명찰 확인 중');if(allowEmpty&&!model.people.length)return {workers:[],lead_id:''};model.select(maxPeople===1?model.people[0]?.id:lead.value);const staff=model.read();if(confirmations.size)staff.borrow_confirmations=[...confirmations.values()].filter(c=>staff.workers.some(w=>w.id===c.worker_id));return staff;},async destroy(){closed=true;await stop();}};
  };
 })();

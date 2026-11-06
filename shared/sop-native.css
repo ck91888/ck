@@ -59,3 +59,10 @@ body.ck-stage-home{display:block;min-height:100vh}body.ck-stage-home .nav{max-wi
 #ck-putaway-workload input[type=radio] { width:20px; min-width:20px; height:20px; min-height:20px; margin:0; }
 
 .ck-order-selection [data-bulk-candidates]{max-height:18rem;overflow:auto;overscroll-behavior:contain}
+
+/* Order and staff scans stay distinct, with touch-size controls on narrow phones. */
+.ck-order-selection [data-order-scan]{margin-top:12px;padding-top:12px;border-top:1px solid #ccd9d5}
+.ck-order-selection [data-order-scan] button{min-height:44px;white-space:normal}
+.ck-order-selection .ck-document-camera{margin:8px 0}
+.ck-order-selection .ck-document-camera [data-camera-panel]{margin-top:10px;max-width:100%;overflow:hidden}
+.ck-order-selection .ck-document-camera [data-camera-status]:empty{display:none}
