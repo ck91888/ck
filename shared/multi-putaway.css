@@ -1,0 +1,14 @@
+.ck-putaway-selected { margin:14px 0;padding:12px;border:1px solid #c8dcd5;border-radius:10px;background:#f5faf7;overflow-wrap:anywhere; }
+.ck-putaway-selected h3 { margin:0 0 8px;font-size:16px; }
+.ck-putaway-selected p { margin:6px 0;line-height:1.5; }
+.ck-putaway-member { display:flex;gap:10px;align-items:center;justify-content:space-between;border-top:1px solid #dae6e0;padding:10px 0; }
+.ck-putaway-member>div { min-width:0; }
+.ck-putaway-member strong,.ck-putaway-member small { display:block;overflow-wrap:anywhere; }
+.ck-putaway-member small { color:#52665d;margin-top:5px; }
+.ck-putaway-member button { min-height:44px;min-width:70px;flex-shrink:0; }
+#inboundCodeInput { min-width:0; }
+#inboundPlanSelect { max-width:100%; }
+@media(max-width:420px){.ck-putaway-member { align-items:flex-start; }.ck-putaway-selected { padding:10px; }.ck-putaway-member button { max-width:80px;white-space:normal; }}
+
+.ck-multi-putaway-working #inboundPlanInfoCard { display:none; }
+@media(max-width:420px){.ck-multi-putaway-entry .ck-putaway-scan-row { flex-wrap:wrap; }.ck-multi-putaway-entry #inboundCodeInput { flex-basis:100% !important;width:100%; }.ck-multi-putaway-entry #ibScanBtn { width:100%; }}

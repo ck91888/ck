@@ -498,3 +498,12 @@ label {
   margin: 6px 0 4px 0;
   font-size: 12px;
 }
+
+.issue-document-download{display:block;max-width:100%;padding:10px 0;font-size:14px;overflow-wrap:anywhere;}
+
+/* Explicit yes/no choices for timed operation data. */
+.ck-internal-operation { overflow-wrap: anywhere; }
+.ck-internal-operation fieldset { margin-top: 12px; border: 1px solid #bfd0cb; border-radius: 8px; padding: 12px; }
+.ck-internal-operation fieldset label { display: inline-flex; align-items: center; gap: 8px; margin: 4px 20px 4px 0; }
+.ck-internal-operation input[type="radio"] { width: auto; margin: 0; }
+.ck-internal-operation [role="alert"]:empty { display: none; }

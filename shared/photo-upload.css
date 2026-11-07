@@ -1,0 +1,5 @@
+.ck-photo-transfer{position:fixed;inset:auto 12px 12px auto;width:min(440px,calc(100vw - 24px));box-sizing:border-box;z-index:1100;max-height:70vh;overflow:auto;box-shadow:0 4px 24px #0004;background:#fff;color:#17202a;word-break:keep-all;overflow-wrap:break-word;padding:12px;border:1px solid #9daebc;border-radius:8px}
+.ck-photo-transfer p{margin:0 0 8px;line-height:1.5}
+.ck-photo-transfer p+p{font-size:12px;color:#52606d}
+.ck-system .ck-photo-transfer button,.ck-photo-transfer button{min-height:44px;max-width:100%;white-space:normal;margin:4px 4px 0 0;padding:8px;border:1px solid #9daebc;border-radius:6px;background:#f8fafc;color:#17202a;font:inherit;cursor:pointer}
+dialog .ck-photo-transfer{position:static;inset:auto;width:100%;max-height:none;margin:12px 0 0}

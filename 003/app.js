@@ -2,8 +2,8 @@
 var S003 = {
   lang: localStorage.getItem(V2_003_LANG_KEY) || 'zh',
   key: '', role: '', badge: '', operatorId: '', operatorName: '',
-  locations: [], materialRows: [], currentMaterial: null, currentAsset: null, ledgerRows: [],
-  purchaseOrders: [], purchaseMaterials: [], purchaseRequestLines: [], purchaseSelectedMaterialId: '', currentPurchase: null, currentShipment: null,
+  locations: [], materialRows: [], currentMaterial: null, currentAsset: null, ledgerRows: [], materialTxnSubmission: null,
+  purchaseOrders: [], purchaseMaterials: [], purchaseRequestLines: [], purchaseRequestSubmission: null, purchaseSelectedMaterialId: '', currentPurchase: null, currentShipment: null, shipmentSubmission: null,
   materialImportRows: [], materialImportPreview: null, locationImportRows: [], locationImportPreview: null,
   valuePickerTargetId: '', valuePickerKind: '', locationTarget: null,
   badgeScanner: null, itemScanner: null, receivingScanner: null, locationScanner: null, currentView: 'dashboard', busy: false
@@ -78,7 +78,7 @@ function errorText(code) {
   var zh = {
     unauthorized:'身份验证失败或登录已失效', unauthorized_admin_only:'此操作仅限管理员', network_error:'网络连接失败，请稍后重试',
     invalid_response:'服务器返回异常', not_found:'没有找到对应记录', duplicate_item_code:'编号已被使用', duplicate_barcode:'条码已被使用', duplicate_serial_no:'序列号已被使用',
-    insufficient_stock:'库存不足，不能提交', material_inactive:'该耗材已停用', stock_changed_retry:'库存刚被其他人修改，请刷新后重试',
+    insufficient_stock:'库存不足，不能提交', material_inactive:'该耗材已停用', stock_changed_retry:'库存刚被其他人修改，请刷新后重试', request_id_conflict:'请求编号对应的内容不同，请核对已保存记录后重新确认',
     asset_changed_retry:'物品状态刚被修改，请刷新后重试', asset_not_available:'该物品当前不可领用', asset_not_assigned:'该物品当前没有被领用',
     not_current_keeper:'只有当前领用人或管理员可以归还', asset_unavailable:'该物品已报废或遗失', asset_not_in_repair:'该物品不在维修中',
     operator_required:'缺少操作人信息', positive_qty_required:'数量必须大于 0', valid_counted_qty_required:'请输入正确的实盘数量',
@@ -88,7 +88,7 @@ function errorText(code) {
     bulk_code_barcode_conflict:'耗材编号和条码分别对应两条现有记录', bulk_duplicate_target:'表格中多行指向同一耗材', bulk_duplicate_code:'表格内耗材编号重复', bulk_duplicate_barcode:'表格内条码重复',
     bulk_invalid_status:'状态只能填写 active/启用 或 inactive/停用', bulk_invalid_number:'库存、最低库存或单价格式不正确', bulk_location_code_required:'位置编码不能为空', bulk_duplicate_location:'表格内位置编码重复',
     purchase_lines_required:'请至少添加一种采购耗材', invalid_purchase_line:'采购耗材或申请数量不正确', material_not_found:'耗材不存在或已停用',
-    purchase_order_closed:'采购单已经关闭，不能继续修改', ordered_qty_below_shipped:'实际采购量不能小于已经登记发货的数量', ordered_qty_required:'请逐项填写实际采购量，没有购买的填 0',
+    purchase_order_closed:'采购单已经关闭，不能继续修改', purchase_order_lines_changed:'采购明细已变化，请重新打开采购单后确认', ordered_qty_below_shipped:'实际采购量不能小于已经登记发货的数量', ordered_qty_required:'请逐项填写实际采购量，没有购买的填 0',
     delivery_method_required:'请选择送货方式', tracking_no_required:'请填写快递单号', duplicate_tracking_no:'这个快递单号已经登记过',
     invalid_shipment_line:'发货明细或数量不正确', shipment_qty_exceeds_ordered:'本批发货数量超过尚未发货的采购数量', shipment_lines_required:'请先勾选这个快递包含的物品并填写数量',
     shipment_not_found:'没有找到对应的采购到货记录', arrival_photo_required:'供应商送货必须先拍摄至少一张到货照片', receipt_lines_incomplete:'请清点全部到货明细',
@@ -99,7 +99,7 @@ function errorText(code) {
   var ko = {
     unauthorized:'본인 확인에 실패했거나 로그인이 만료되었습니다', unauthorized_admin_only:'관리자만 가능한 작업입니다', network_error:'네트워크 연결 실패',
     invalid_response:'서버 응답 오류', not_found:'해당 기록을 찾을 수 없습니다', duplicate_item_code:'이미 사용 중인 번호입니다', duplicate_barcode:'이미 사용 중인 바코드입니다', duplicate_serial_no:'이미 사용 중인 시리얼 번호입니다',
-    insufficient_stock:'재고가 부족합니다', material_inactive:'사용 중지된 소모품입니다', stock_changed_retry:'재고가 변경되었습니다. 새로고침 후 다시 시도하세요',
+    insufficient_stock:'재고가 부족합니다', material_inactive:'사용 중지된 소모품입니다', stock_changed_retry:'재고가 변경되었습니다. 새로고침 후 다시 시도하세요', request_id_conflict:'요청 번호의 내용이 다릅니다. 저장된 내역을 확인한 후 다시 확인하세요',
     asset_changed_retry:'비품 상태가 변경되었습니다. 다시 시도하세요', asset_not_available:'현재 수령할 수 없는 비품입니다', asset_not_assigned:'현재 사용 중인 비품이 아닙니다',
     not_current_keeper:'현재 사용자 또는 관리자만 반납할 수 있습니다', asset_unavailable:'폐기 또는 분실 처리된 비품입니다', asset_not_in_repair:'수리 중인 비품이 아닙니다',
     operator_required:'작업자 정보가 없습니다', positive_qty_required:'수량은 0보다 커야 합니다', valid_counted_qty_required:'올바른 실사 수량을 입력하세요',
@@ -109,7 +109,7 @@ function errorText(code) {
     bulk_code_barcode_conflict:'번호와 바코드가 서로 다른 기존 소모품을 가리킵니다', bulk_duplicate_target:'여러 행이 같은 소모품을 가리킵니다', bulk_duplicate_code:'표 안에 중복 번호가 있습니다', bulk_duplicate_barcode:'표 안에 중복 바코드가 있습니다',
     bulk_invalid_status:'상태는 active/사용 또는 inactive/미사용만 가능합니다', bulk_invalid_number:'재고·최소 재고·단가 형식이 올바르지 않습니다', bulk_location_code_required:'위치 코드를 입력하세요', bulk_duplicate_location:'표 안에 중복 위치 코드가 있습니다',
     purchase_lines_required:'구매할 소모품을 한 개 이상 추가하세요', invalid_purchase_line:'구매 품목 또는 요청 수량이 올바르지 않습니다', material_not_found:'소모품이 없거나 사용 중지 상태입니다',
-    purchase_order_closed:'이미 종료된 구매 건입니다', ordered_qty_below_shipped:'실제 구매 수량은 이미 발송 등록된 수량보다 적을 수 없습니다', ordered_qty_required:'품목별 실제 구매 수량을 입력하고 구매하지 않은 품목은 0을 입력하세요',
+    purchase_order_closed:'이미 종료된 구매 건입니다', purchase_order_lines_changed:'구매 품목이 변경되었습니다. 구매 건을 다시 열어 확인하세요', ordered_qty_below_shipped:'실제 구매 수량은 이미 발송 등록된 수량보다 적을 수 없습니다', ordered_qty_required:'품목별 실제 구매 수량을 입력하고 구매하지 않은 품목은 0을 입력하세요',
     delivery_method_required:'배송 방식을 선택하세요', tracking_no_required:'택배 송장번호를 입력하세요', duplicate_tracking_no:'이미 등록된 송장번호입니다',
     invalid_shipment_line:'발송 품목 또는 수량이 올바르지 않습니다', shipment_qty_exceeds_ordered:'발송 수량이 미발송 구매 수량을 초과합니다', shipment_lines_required:'이 송장에 포함된 품목을 선택하고 수량을 입력하세요',
     shipment_not_found:'구매 입고 내역을 찾을 수 없습니다', arrival_photo_required:'공급업체 배송은 도착 사진을 한 장 이상 촬영해야 합니다', receipt_lines_incomplete:'전체 입고 품목을 확인하세요',
@@ -253,6 +253,7 @@ function changeAdminName() {
 }
 
 function logout003() {
+  S003.purchaseRequestToken=null;if(S003.purchasePicker)closePurchaseMaterialPicker();
   S003.key = ''; S003.role = ''; S003.operatorId = ''; S003.operatorName = '';
   localStorage.removeItem(V2_003_AUTH_KEY); localStorage.removeItem(V2_003_ROLE_KEY);
   S003.badge = '';
@@ -424,7 +425,16 @@ function openLocationPicker(trigger){
 function renderLocationPicker(){
   var q=val('locationPickerSearch').toLocaleLowerCase(),selected=S003.locationTarget&&S003.locationTarget.querySelector('.location-value');selected=selected?selected.value:'';
   var rows=activeLocations().filter(function(x){return !q||[x.location_code,x.location_name].some(function(v){return String(v||'').toLocaleLowerCase().includes(q);});});
-  E('locationPickerList').innerHTML=rows.length?rows.map(function(x){return '<button type="button" class="material-picker-item '+(x.location_code===selected?'selected':'')+'" onclick="selectLocation(\''+jsq(x.location_code)+'\')"><span><b>'+esc(x.location_code)+'</b><small>'+esc(x.location_name||'--')+'</small></span><i>✓</i></button>';}).join(''):'<div class="empty">'+esc(T('location_no_match'))+'</div>';
+  var list=E('locationPickerList'),fragment=document.createDocumentFragment();
+  rows.forEach(function(x){
+    var button=document.createElement('button'),label=document.createElement('span'),code=document.createElement('b'),name=document.createElement('small'),check=document.createElement('i');
+    button.type='button';button.className='material-picker-item '+(x.location_code===selected?'selected':'');
+    code.textContent=x.location_code;name.textContent=x.location_name||'--';check.textContent='✓';
+    label.appendChild(code);label.appendChild(name);button.appendChild(label);button.appendChild(check);
+    button.addEventListener('click',function(){selectLocation(x.location_code);});fragment.appendChild(button);
+  });
+  if(!rows.length){var empty=document.createElement('div');empty.className='empty';empty.textContent=T('location_no_match');fragment.appendChild(empty);}
+  list.textContent='';list.appendChild(fragment);
 }
 
 function selectLocation(code){var x=findActiveLocation(code);if(!x){toast(errorText('location_not_registered'),true);return;}setLocationControlValue(S003.locationTarget,x.location_code);closeLocationScanner();closeLocationPicker();}
@@ -438,22 +448,29 @@ function openLocationScanner(trigger){
 
 async function startLocationScan(){
   if(S003.locationScanner){stopLocationScan();return;}E('locationScannerError').textContent='';
-  try{S003.locationScanner=new Html5Qrcode('locationReader');await S003.locationScanner.start({facingMode:'environment'},{fps:10,qrbox:{width:260,height:180}},function(text){applyScannedLocation(text);},function(){});E('locationScanStartBtn').textContent=T('close');}
-  catch(e){E('locationScannerError').textContent=S003.lang==='ko'?'카메라를 열 수 없습니다. 위치 코드를 직접 입력하세요.':'无法打开摄像头，请手动输入位置编码';stopLocationScan();}
+  var scanner;
+  try{scanner=new Html5Qrcode('locationReader');S003.locationScanner=scanner;await scanner.start({facingMode:'environment'},{fps:10,qrbox:{width:260,height:180}},function(text){if(S003.locationScanner===scanner)applyScannedLocation(text);},function(){});
+    if(S003.locationScanner!==scanner){Promise.resolve().then(function(){return scanner.stop();}).catch(function(){}).finally(function(){try{scanner.clear();}catch(e){}});return;}
+    E('locationScanStartBtn').textContent=T('close');}
+  catch(e){if(S003.locationScanner!==scanner)return;E('locationScannerError').textContent=S003.lang==='ko'?'카메라를 열 수 없습니다. 위치 코드를 직접 입력하세요.':'无法打开摄像头，请手动输入位置编码';stopLocationScan();}
 }
 
-function stopLocationScan(){if(!S003.locationScanner)return;var scanner=S003.locationScanner;S003.locationScanner=null;Promise.resolve(scanner.stop()).catch(function(){}).finally(function(){try{scanner.clear();}catch(e){}if(E('locationScanStartBtn'))E('locationScanStartBtn').textContent=T('start_scan');});}
+function stopLocationScan(){if(!S003.locationScanner)return;var scanner=S003.locationScanner;S003.locationScanner=null;Promise.resolve().then(function(){return scanner.stop();}).catch(function(){}).finally(function(){try{scanner.clear();}catch(e){}if(E('locationScanStartBtn'))E('locationScanStartBtn').textContent=T('start_scan');});}
 function applyScannedLocation(code){var x=findActiveLocation(code);if(!x){E('locationScannerError').textContent=errorText('location_not_registered');return;}setLocationControlValue(S003.locationTarget,x.location_code);closeLocationScanner();closeLocationPicker();toast((S003.lang==='ko'?'위치 선택: ':'已选择位置：')+x.location_code);}
 function applyManualLocationCode(){applyScannedLocation(val('manualLocationCode'));}
 function closeLocationScanner(){stopLocationScan();if(E('locationScannerModal'))E('locationScannerModal').classList.add('hidden');if(E('locationPickerModal').classList.contains('hidden'))S003.locationTarget=null;}
 
 async function loadMaterials() {
-  E('materialList').innerHTML = '<div class="empty">'+esc(T('loading'))+'</div>';
+  var host=E('materialList');if(!host)return;
+  var read=CKLatestListRead.begin('003:materials',host,function(){return JSON.stringify([S003.key,S003.role,S003.operatorId,S003.badge,S003.operatorName]);});
+  S003.materialRows=[];
+  host.innerHTML = '<div class="empty">'+esc(T('loading'))+'</div>';
   try {
     var res = await api('v2_003_material_list', { search:val('materialSearch'), category:val('materialCategory'), status:val('materialStatus'), low_stock_only:E('lowStockOnly').checked ? 1 : 0, limit:200 });
+    if(!read.commit())return;
     S003.materialRows = res.items || [];
-    E('materialList').innerHTML = S003.materialRows.length ? S003.materialRows.map(materialCardHtml).join('') : '<div class="empty">'+esc(T('no_data'))+'</div>';
-  } catch(e) { E('materialList').innerHTML = '<div class="empty">'+esc(errorText(e.message))+'</div>'; }
+    host.innerHTML = S003.materialRows.length ? S003.materialRows.map(materialCardHtml).join('') : '<div class="empty">'+esc(T('no_data'))+'</div>';
+  } catch(e) { if(read.current())host.innerHTML = '<div class="empty">'+esc(errorText(e.message))+'</div>'; }
 }
 
 function materialCardHtml(m) {
@@ -567,10 +584,11 @@ async function deleteMaterial(id) {
 }
 
 function openMaterialTxn(type) {
+  S003.materialTxnSubmission=null;
   var m=S003.currentMaterial&&S003.currentMaterial.item; if(!m)return;
   E('mtMaterialId').value=m.id; E('mtType').value=type; E('mtTitle').textContent=txnLabel(type); E('mtItemInfo').textContent=(S003.lang==='ko'&&m.name_ko?m.name_ko:m.name_zh)+' · '+fmtQty(m.current_qty)+' '+m.unit;
   ['mtQty','mtPurpose','mtDoc','mtNote'].forEach(function(id){E(id).value='';}); E('mtCost').value=m.unit_cost||''; E('mtSupplier').value=m.supplier||''; E('mtRecipient').value=S003.operatorName||''; E('mtDepartment').value='';
-  E('mtQty').min=type==='adjust'?'':'0.01'; E('mtQtyLabel').textContent=type==='stocktake'?T('counted_qty'):(type==='adjust'?T('delta_qty'):T('qty'));
+  E('mtQty').min=type==='adjust'?'':(type==='stocktake'?'0':'0.01'); E('mtQtyLabel').textContent=type==='stocktake'?T('counted_qty'):(type==='adjust'?T('delta_qty'):T('qty'));
   var needsPeople=!['inbound','adjust','stocktake'].includes(type);
   E('mtInboundFields').classList.toggle('hidden',type!=='inbound'); E('mtPeopleFields').classList.toggle('hidden',!needsPeople);
   E('mtRecipient').readOnly=isField(); E('mtRecipient').required=needsPeople; E('mtDepartment').required=needsPeople;
@@ -579,10 +597,11 @@ function openMaterialTxn(type) {
 
 async function submitMaterialTxn(event) {
   event.preventDefault(); if(S003.busy)return; S003.busy=true;
-  var type=val('mtType'), qty=num('mtQty'); var data=Object.assign(operatorPayload(),{material_id:val('mtMaterialId'),txn_type:type,recipient_name:val('mtRecipient'),department:val('mtDepartment'),purpose:val('mtPurpose'),related_doc_no:val('mtDoc'),unit_cost:num('mtCost'),supplier:val('mtSupplier'),note:val('mtNote'),client_req_id:reqId('mtx')});
+  var type=val('mtType'), qty=num('mtQty'); var data=Object.assign(operatorPayload(),{material_id:val('mtMaterialId'),txn_type:type,recipient_name:val('mtRecipient'),department:val('mtDepartment'),purpose:val('mtPurpose'),related_doc_no:val('mtDoc'),unit_cost:num('mtCost'),supplier:val('mtSupplier'),note:val('mtNote')});
   if(type==='adjust')data.delta=qty; else if(type==='stocktake')data.counted_qty=qty; else data.qty=qty;
   if(['issue','use','return'].includes(type)&&val('mtRecipient')===S003.operatorName)data.recipient_id=S003.operatorId;
-  try { await api('v2_003_material_txn',data); closeModal('materialTxnModal'); toast(T('success')); openMaterialDetail(data.material_id); }
+  var signature=JSON.stringify(data);if(!S003.materialTxnSubmission||S003.materialTxnSubmission.signature!==signature)S003.materialTxnSubmission={signature:signature,requestId:reqId('mtx')};data.client_req_id=S003.materialTxnSubmission.requestId;
+  try { await api('v2_003_material_txn',data); S003.materialTxnSubmission=null; closeModal('materialTxnModal'); toast(T('success')); openMaterialDetail(data.material_id); }
   catch(e){toast(errorText(e.message),true);} finally{S003.busy=false;}
 }
 
@@ -644,7 +663,7 @@ function renderMaterialImportPreview(preview,fileName){
 
 async function readMaterialImport(input){
   var file=input.files&&input.files[0];if(!file)return;E('confirmMaterialImportBtn').disabled=true;E('materialImportStatus').className='import-status';E('materialImportStatus').innerHTML='<span>'+esc(T('loading'))+'</span>';E('materialImportPreview').innerHTML='';
-  try{var buffer=await file.arrayBuffer(),wb=XLSX.read(buffer,{type:'array'}),sheet=wb.Sheets[wb.SheetNames[0]],raw=XLSX.utils.sheet_to_json(sheet,{defval:'',raw:false}),rows=mapMaterialImportRows(raw),localErrors=localMaterialImportErrors(rows);if(localErrors.length){renderMaterialImportErrors(localErrors);return;}var preview=await api('v2_003_material_bulk_import',Object.assign(operatorPayload(),{rows:rows,dry_run:1}));S003.materialImportRows=rows;S003.materialImportPreview=preview;renderMaterialImportPreview(preview,file.name);}catch(e){var errors=e.details&&e.details.errors;if(errors&&errors.length)renderMaterialImportErrors(errors);else{E('materialImportStatus').className='import-status error';E('materialImportStatus').textContent=errorText(e.message);}}
+  try{var buffer=await file.arrayBuffer(),wb=XLSX.read(buffer,{type:'array',codepage:/\.csv$/i.test(file.name)?65001:undefined}),sheet=wb.Sheets[wb.SheetNames[0]],raw=XLSX.utils.sheet_to_json(sheet,{defval:'',raw:false}),rows=mapMaterialImportRows(raw),localErrors=localMaterialImportErrors(rows);if(localErrors.length){renderMaterialImportErrors(localErrors);return;}var preview=await api('v2_003_material_bulk_import',Object.assign(operatorPayload(),{rows:rows,dry_run:1}));S003.materialImportRows=rows;S003.materialImportPreview=preview;renderMaterialImportPreview(preview,file.name);}catch(e){var errors=e.details&&e.details.errors;if(errors&&errors.length)renderMaterialImportErrors(errors);else{E('materialImportStatus').className='import-status error';E('materialImportStatus').textContent=errorText(e.message);}}
 }
 
 async function confirmMaterialImport(){if(S003.busy||!S003.materialImportRows.length)return;S003.busy=true;E('confirmMaterialImportBtn').disabled=true;try{var res=await api('v2_003_material_bulk_import',Object.assign(operatorPayload(),{rows:S003.materialImportRows,client_req_id:reqId('mimp')}));toast((S003.lang==='ko'?'일괄 등록 완료: 신규 ':'批量导入完成：新建 ')+res.created_count+(S003.lang==='ko'?', 수정 ':'，更新 ')+res.updated_count);S003.purchaseMaterials=[];closeMaterialImport();loadMaterials();loadDashboard();}catch(e){var errors=e.details&&e.details.errors;if(errors&&errors.length)renderMaterialImportErrors(errors);else toast(errorText(e.message),true);}finally{S003.busy=false;if(!E('materialImportModal').classList.contains('hidden'))E('confirmMaterialImportBtn').disabled=false;}}
@@ -672,13 +691,13 @@ function renderAssetDetail(res){
     if(a.status!=='repair'&&!['retired','lost'].includes(a.status))actions+='<button class="btn warning" onclick="openAssetAction(\'repair_start\')">'+esc(T('repair_start'))+'</button>';
     if(a.status==='repair')actions+='<button class="btn success" onclick="openAssetAction(\'repair_done\')">'+esc(T('repair_done'))+'</button>';
     if(!['retired','lost'].includes(a.status))actions+='<button class="btn danger" onclick="openAssetAction(\'retire\')">'+esc(T('retire'))+'</button><button class="btn danger" onclick="openAssetAction(\'lost\')">'+esc(T('mark_lost'))+'</button>';
-    actions+='<button class="btn soft" onclick="printAssetQr()">'+esc(T('print_qr'))+'</button><button class="btn soft" onclick="E(\'assetPhotoInput\').click()">'+esc(T('upload_photo'))+'</button>';
+    actions+='<button class="btn soft" onclick="printAssetQr()">'+esc(T('print_qr'))+'</button>'+photo003Buttons('asset');
   }
   var info=isField()?[[T('category'),a.category],[T('brand'),a.brand],[T('model'),a.model],[T('storage_location'),a.location_code],[T('keeper'),a.keeper_name||'--'],[T('department'),departmentLabel(a.keeper_department)],[T('status'),assetStatusLabel(a.status)]]:[[T('category'),a.category],[T('brand'),a.brand],[T('model'),a.model],[T('serial_no'),a.serial_no],[T('storage_location'),a.location_code],[T('keeper'),a.keeper_name||'--'],[T('department'),departmentLabel(a.keeper_department)],[T('status'),assetStatusLabel(a.status)],[T('purchase_date'),fmtDate(a.purchase_date)],[T('purchase_cost'),fmtMoney(a.purchase_cost,a.currency)],[T('supplier'),a.supplier],[T('warranty_until'),fmtDate(a.warranty_until)]];
-  var photos=(res.attachments||[]).length?'<div class="panel"><div class="panel-head"><h2>'+esc(T('photos'))+'</h2></div><div class="photo-grid">'+res.attachments.map(function(p){return '<a href="'+esc(fileUrl(p.file_key))+'" target="_blank"><img src="'+esc(fileUrl(p.file_key))+'" alt="'+esc(p.file_name)+'"></a>';}).join('')+'</div></div>':'';
+  var photos=photo003Markup(res.attachments||[],false);
   var history=(res.transactions||[]).length?res.transactions.map(assetTxnHtml).join(''):'<div class="empty">'+esc(T('no_data'))+'</div>';
   var historyPanel=isField()?'':'<div class="panel"><div class="panel-head"><h2>'+esc(T('asset_history'))+'</h2></div><div class="timeline">'+history+'</div></div>';
-  E('assetDetail').innerHTML='<div class="detail-hero"><div class="hero-top"><div><h1>'+esc(name)+'</h1><p>'+esc(a.asset_code)+(a.barcode?' · '+esc(a.barcode):'')+'</p></div><div><span class="tag '+statusTagClass(a.status)+'">'+esc(assetStatusLabel(a.status))+'</span></div></div><div class="detail-actions">'+actions+'</div></div><div class="panel"><div class="info-grid">'+info.map(infoCell).join('')+'</div>'+(a.note?'<p class="item-meta">'+esc(T('note'))+': '+esc(a.note)+'</p>':'')+'</div>'+(isField()?'':photos)+historyPanel;
+  E('assetDetail').innerHTML='<div class="detail-hero"><div class="hero-top"><div><h1>'+esc(name)+'</h1><p>'+esc(a.asset_code)+(a.barcode?' · '+esc(a.barcode):'')+'</p></div><div><span class="tag '+statusTagClass(a.status)+'">'+esc(assetStatusLabel(a.status))+'</span></div></div><div class="detail-actions">'+actions+'</div></div><div class="panel"><div class="info-grid">'+info.map(infoCell).join('')+'</div>'+(a.note?'<p class="item-meta">'+esc(T('note'))+': '+esc(a.note)+'</p>':'')+'</div>'+(isField()?'':'<div data-photo003-gallery="asset" data-photo003-id="'+esc(a.id)+'">'+photos+'</div>')+historyPanel;
 }
 
 function assetTxnHtml(t){var move=t.to_location||'',keeper=t.to_keeper_name||'',dept=t.to_department||t.from_department||'';return '<div class="timeline-row"><div class="timeline-action">'+esc(assetActionLabel(t.action_type))+'</div><div class="timeline-detail">'+esc(t.operator_name||'--')+'<small>'+esc([keeper,departmentLabel(dept),move,t.related_doc_no,t.note].filter(function(x){return x&&x!=='--';}).join(' · ')||'--')+'</small></div><div class="timeline-time">'+esc(fmtTime(t.created_at))+'</div></div>';}
@@ -693,7 +712,78 @@ function openAssetAction(type){var a=S003.currentAsset&&S003.currentAsset.item;i
 async function submitAssetAction(event){event.preventDefault();if(S003.busy)return;S003.busy=true;var type=val('aaType'),keeper=val('aaKeeper');var data=Object.assign(operatorPayload(),{asset_id:val('aaAssetId'),action_type:type,to_keeper_name:keeper,department:val('aaDepartment'),location_code:val('aaLocation'),related_doc_no:val('aaDoc'),note:val('aaNote'),client_req_id:reqId('atx')});if(type==='assign'&&keeper===S003.operatorName)data.to_keeper_id=S003.operatorId;try{await api('v2_003_asset_action',data);closeModal('assetActionModal');toast(T('success'));openAssetDetail(data.asset_id);}catch(e){toast(errorText(e.message),true);}finally{S003.busy=false;}}
 
 function fileUrl(key){return V2_API+'/file?key='+encodeURIComponent(key||'');}
-async function uploadAssetPhoto(input){var a=S003.currentAsset&&S003.currentAsset.item,file=input.files&&input.files[0];if(!a||!file)return;var fd=new FormData();fd.append('action','v2_attachment_upload');fd.append('k',S003.key);fd.append('file',file);fd.append('related_doc_type','asset');fd.append('related_doc_id',a.id);fd.append('attachment_category','asset_photo');fd.append('uploaded_by',S003.operatorName);try{var res=await fetch(V2_API,{method:'POST',body:fd});var json=await res.json();if(!res.ok||!json.ok)throw new Error(json.error||'upload_failed');toast(T('photo_uploaded'));openAssetDetail(a.id);}catch(e){toast(errorText(e.message),true);}finally{input.value='';}}
+function photo003Text(zh,ko){return S003.lang==='ko'?ko:zh;}
+function photo003Buttons(kind,required){return '<div class="photo003-actions"><button type="button" class="btn '+(required?'warning':'soft')+'" onclick="choose003Photo(\''+kind+'\',\'photo\')">'+photo003Text('现场照片（压缩）','현장 사진 (압축)')+'</button><button type="button" class="btn soft" onclick="choose003Photo(\''+kind+'\',\'original\')">'+photo003Text('原件/扫描件（保留）','원본·스캔 (원본 유지)')+'</button><small class="photo003-help">'+photo003Text('只压缩明确选择的普通 JPEG 现场照片；原件/扫描件、其他格式及特殊 JPEG 保留原文件。请确认细字、条码清晰。','직접 선택한 일반 JPEG 현장 사진만 압축합니다. 원본·스캔·다른 형식·특수 JPEG는 원본을 유지합니다. 작은 글자와 바코드를 확인하세요.')+'</small></div>';}
+function photo003Context(kind){
+ var record=kind==='asset'?S003.currentAsset&&S003.currentAsset.item:S003.currentShipment&&S003.currentShipment.shipment;if(!record)return null;
+ var legacy=function(){return JSON.stringify([S003.key,S003.role,S003.operatorId,S003.operatorName,S003.badge]);},saved=legacy(),owns=window.CKLatestListRead?CKLatestListRead.identity(legacy):function(){return legacy()===saved;};
+ var id=record.id,view=kind==='asset'?'asset-detail':'receipt-detail',container=kind==='asset'?'assetDetail':'receiptDetail';
+ return {kind:kind,id:id,key:S003.key,operatorId:S003.operatorId,operatorName:S003.operatorName,owns:owns,current:function(){var host=E(container)&&E(container).querySelector('[data-photo003-gallery]'),row=kind==='asset'?S003.currentAsset&&S003.currentAsset.item:S003.currentShipment&&S003.currentShipment.shipment;return owns()&&S003.currentView===view&&row&&row.id===id&&host&&host.dataset.photo003Id===id;}};
+}
+function choose003Photo(kind,mode){
+ if(window.CKPhotoUpload&&CKPhotoUpload.busy()){toast(photo003Text('请先处理当前待上传照片','현재 대기 사진을 먼저 처리하세요'),true);return;}
+ var context=photo003Context(kind),input=E(kind==='asset'?'assetPhotoInput':'arrivalPhotoInput');if(!context||!context.current()||!input)return;
+ input._photo003Context=context;input.dataset.photoMode=mode==='photo'?'photo':'original';if(mode==='photo')input.setAttribute('capture','environment');else input.removeAttribute('capture');input.click();
+}
+// Conservative opt-in: keep originals, animations, transparency, scans and
+// special JPEG containers out of the lossy photo path. Never infer a scan from pixels.
+async function singlePhoto003End(file,start){
+ // Skip the first SOS header, then parse only marker boundaries. FF00 is
+ // stuffed entropy data; restart/fill markers and ordinary progressive tables
+ // are safe. Late metadata, unknown structures and extra images stay original.
+ async function segmentEnd(position){var b=new Uint8Array(await file.slice(position,position+2).arrayBuffer());if(b.length!==2)return -1;var length=b[0]*256+b[1];return length>=2&&position+length<=file.size?position+length:-1;}
+ var offset=await segmentEnd(start),previous=-1;if(offset<0)return false;
+ scan:while(offset<file.size){var bytes=new Uint8Array(await file.slice(offset,offset+1048576).arrayBuffer());
+  for(var i=0;i<bytes.length;i++){var marker=bytes[i];if(previous===255){
+   if(marker===217)return offset+i===file.size-1;
+   if(marker===255)continue;
+   if(marker===0||marker>=208&&marker<=215){previous=-1;continue;}
+   if([196,204,219,221,218].indexOf(marker)>=0){offset=await segmentEnd(offset+i+1);if(offset<0)return false;previous=-1;continue scan;}
+   return false;
+  }previous=marker===255?255:-1;}
+  offset+=bytes.length;
+ }return false;
+}
+async function simplePhoto003(file){
+ if(file.type!=='image/jpeg'||! /\.jpe?g$/i.test(file.name)||file.size>20*1048576)return false;
+ var b=new Uint8Array(await file.slice(0,262144).arrayBuffer()),last=new Uint8Array(await file.slice(-2).arrayBuffer()),v=new DataView(b.buffer),ascii=function(p,n){return String.fromCharCode.apply(null,b.subarray(p,p+n));};
+ if(b[0]!==255||b[1]!==216||last[0]!==255||last[1]!==217)return false;
+ var p=2,frame=false;while(p+4<=b.length){if(b[p++]!==255)return false;while(b[p]===255)p++;var marker=b[p++];if(marker===218)return frame&&await singlePhoto003End(file,p);if(p+2>b.length)return false;var len=v.getUint16(p);if(len<2||p+len>b.length)return false;
+  if(marker===224&&!['JFIF\0','JFXX\0'].includes(ascii(p+2,5))||marker===225&&ascii(p+2,6)!=='Exif\0\0'||marker===226&&ascii(p+2,12)!=='ICC_PROFILE\0'||marker===254||marker>=227&&marker<=239)return false;
+  if([192,193,194,195,197,198,199,201,202,203,205,206,207].indexOf(marker)>=0){if(marker!==192&&marker!==194)return false;frame=true;}p+=len;
+ }return false;
+}
+function photo003Markup(photos,arrival){var grid=photos.length?'<div class="photo-grid'+(arrival?' arrival-photo-grid':'')+'">'+photos.map(function(p){return '<a href="'+esc(fileUrl(p.file_key))+'" target="_blank"><img src="'+esc(fileUrl(p.file_key))+'" alt="'+esc(p.file_name||'')+'"></a>';}).join('')+'</div>':(arrival?'<div class="photo-placeholder">'+esc(T('photo_required'))+'</div>':'');return arrival?grid:(grid?'<div class="panel"><div class="panel-head"><h2>'+esc(T('photos'))+'</h2></div>'+grid+'</div>':'');}
+function photo003Uploaded(context,result,file){
+ if(!context.current())return;var data=context.kind==='asset'?S003.currentAsset:S003.currentShipment;data.attachments=data.attachments||[];if(!data.attachments.some(function(p){return p.id===result.id;}))data.attachments.push({id:result.id,file_key:result.file_key,file_name:file.name,file_size:file.size,content_type:file.type});
+ var container=E(context.kind==='asset'?'assetDetail':'receiptDetail'),host=container.querySelector('[data-photo003-gallery]');if(host)host.innerHTML=photo003Markup(data.attachments,context.kind!=='asset');container.querySelectorAll('.photo003-actions .warning').forEach(function(button){button.classList.remove('warning');button.classList.add('soft');});toast(T('photo_uploaded'));
+}
+async function upload003Photo(input,kind){
+ var files=Array.from(input.files||[]);if(!files.length)return;
+ if(files.length!==1){toast(photo003Text('此入口每次选择一张照片，尚未上传或清除任何文件','한 번에 사진 한 장을 선택하세요. 파일은 업로드·삭제되지 않았습니다'),true);return;}
+ if(!files[0].size){toast(photo003Text('文件为空，请重新选择；尚未上传','빈 파일입니다. 다시 선택하세요. 아직 업로드되지 않았습니다'),true);return;}
+ if(!window.CKPhotoUpload||!CKPhotoUpload.supportsUploadPreparation){toast(photo003Text('照片组件尚未就绪，请保留原文件后重试','사진 기능이 준비되지 않았습니다. 원본을 보관하고 다시 시도하세요'),true);return;}
+ if(CKPhotoUpload.busy()){toast(photo003Text('请先处理当前待上传照片','현재 대기 사진을 먼저 처리하세요'),true);return;}
+ var context=input._photo003Context||photo003Context(kind),mode=input.dataset.photoMode==='photo'?'photo':'original';
+ if(!context||context.kind!==kind||!context.current()){toast(photo003Text('请返回原记录和原操作身份重新选择照片','원래 기록과 작업자로 돌아가 사진을 다시 선택하세요'),true);return;}
+ var changed=photo003Text('记录或操作身份已变化，请返回原记录重试','기록·작업자가 변경되었습니다. 원래 기록으로 돌아가 다시 시도하세요'),unknown=photo003Text('上传结果未确认，文件与编号已保留；可用同一编号重试，或先核对本记录已保存的照片','결과 미확인. 파일·번호가 유지됩니다. 같은 번호로 재시도하거나 저장된 사진을 확인하세요');
+ function check(){if(!context.current())throw Error(changed);}
+ var pending=CKPhotoUpload.upload(files,{
+  hint:photo003Text('现场照片仅按明确选择压缩，成功后只上传处理版本，不另存原图；原件/扫描件及其他格式保持原文件。压缩失败回退原件，到货原件仍限15MiB。不自动重试结果不明的上传。','명시적으로 선택한 현장 사진만 압축하며 처리본만 업로드합니다. 촬영 원본 별도 저장 없음. 원본·스캔·다른 형식은 원본 유지. 압축 실패 시 원본 사용, 입고 원본은 15MiB 이하. 결과 불명 업로드는 자동 재전송하지 않습니다.'),
+  preparingText:photo003Text('正在准备照片…','사진 준비 중…'),
+  prepare:async function(file,options){check();if(options.signal.aborted)throw new DOMException('cancelled','AbortError');var chosen=file;
+   try{if(mode==='photo'&&await simplePhoto003(file))chosen=await CKPhotoUpload.prepare(file,options);}catch(e){if(options.signal.aborted||e.name==='AbortError')throw e;chosen=file;}
+   check();if(options.signal.aborted)throw new DOMException('cancelled','AbortError');if(kind==='arrival'&&chosen.size>15*1048576)throw Error(errorText('file_too_large'));return chosen;
+  },
+  canRetry:function(){return true;},
+  send:async function(file,item){check();var fd=new FormData();fd.append('action','v2_attachment_upload');fd.append('k',context.key);fd.append('file',file);fd.append('photo_protocol','003-photo-v1');fd.append('client_req_id',item.request);fd.append('photo_target_type',kind==='asset'?'asset':'material_shipment');fd.append('related_doc_type','asset');fd.append('related_doc_id',context.id);fd.append('attachment_category','arrival_photo');fd.append('uploaded_by',context.operatorName);if(kind==='arrival'){fd.append('operator_id',context.operatorId);fd.append('operator_name',context.operatorName);}
+   var response,result;try{response=await fetch(V2_API,{method:'POST',body:fd});result=await response.json();}catch(e){item.uncertain=true;throw Error(unknown);}
+   if(response.status>=500||!result||Array.isArray(result)||typeof result.ok!=='boolean'||result.ok&&(!response.ok||typeof result.id!=='string'||!result.id||typeof result.file_key!=='string'||!result.file_key||result.photo_protocol!=='003-photo-v1'||result.client_req_id!==item.request)){item.uncertain=true;throw Error(unknown);}if(!response.ok||!result.ok)throw Error(errorText(result.error||'upload_failed'));return result;
+  },
+  onUploaded:function(result,file){photo003Uploaded(context,result,file);}
+ });input.value='';delete input._photo003Context;delete input.dataset.photoMode;return pending;
+}
+async function uploadAssetPhoto(input){return upload003Photo(input,'asset');}
 
 function printAssetQr(){var a=S003.currentAsset&&S003.currentAsset.item;if(!a)return;var qr=qrcode(0,'M');qr.addData(a.asset_code);qr.make();var svg=qr.createSvgTag({cellSize:6,margin:0,scalable:true});var name=S003.lang==='ko'&&a.name_ko?a.name_ko:a.name_zh;var w=window.open('','_blank');w.document.write('<!doctype html><html><head><meta charset="utf-8"><title>'+esc(a.asset_code)+'</title><style>body{font-family:Arial,sans-serif;text-align:center;margin:24px}.label{width:70mm;border:1px solid #aaa;padding:7mm;margin:auto}.qr svg{width:42mm;height:42mm}h1{font-size:18px;margin:8px 0 3px}p{margin:2px;font-size:12px}@media print{@page{margin:5mm}body{margin:0}.label{border:0}}</style></head><body><div class="label"><div class="qr">'+svg+'</div><h1>'+esc(name)+'</h1><p>'+esc(a.asset_code)+'</p><p>CK Warehouse</p></div><script>window.onload=function(){window.print()}<\/script></body></html>');w.document.close();}
 
@@ -702,21 +792,49 @@ function purchaseStatusClass(s){return ({requested:'orange',purchasing:'blue',sh
 function deliveryLabel(m){return m==='supplier'?T('supplier_delivery'):T('express_delivery');}
 function materialDisplay(m){return S003.lang==='ko'&&m.name_ko?m.name_ko:m.name_zh;}
 
-async function ensurePurchaseMaterials(){
-  if(S003.purchaseMaterials.length)return;
-  var first=await api('v2_003_material_list',{status:'active',limit:200,offset:0});
-  var items=(first.items||[]).slice(),total=Number(first.total)||items.length;
-  for(var offset=items.length;offset<total;offset+=200){
-    var page=await api('v2_003_material_list',{status:'active',limit:200,offset:offset});
-    items=items.concat(page.items||[]);
-    if(!(page.items||[]).length)break;
-  }
+function purchasePickerState(){
+  return S003.purchasePicker||(S003.purchasePicker={version:0,pending:null,timer:null,rows:[],offset:0,total:0,applied:null});
+}
+function rememberPurchaseMaterials(rows){
+  var selected=S003.purchaseMaterials.find(function(x){return x.id===S003.purchaseSelectedMaterialId;}),items=[];
+  (S003.purchaseRequestLines.map(function(x){return x.material;}).concat(selected?[selected]:[],rows)).forEach(function(m){if(m&&!items.some(function(x){return x.id===m.id;}))items.push(m);});
   S003.purchaseMaterials=items;
 }
+function purchasePickerVisible(){var form=E('purchaseRequestModal'),picker=E('purchaseMaterialPickerModal');return !!form&&!!picker&&!form.classList.contains('hidden')&&!picker.classList.contains('hidden');}
+function purchasePickerLoading(){
+  var p=purchasePickerState();p.applied=null;E('purchaseMaterialPickerList').setAttribute('aria-busy','true');
+  E('purchaseMaterialPickerList').innerHTML='<div class="empty">'+esc(T('loading'))+'</div>';
+  E('purchaseMaterialPickerError').textContent='';E('purchaseMaterialPickerRetry').classList.add('hidden');
+  E('purchaseMaterialPickerPrev').disabled=true;E('purchaseMaterialPickerNext').disabled=true;E('purchaseMaterialPickerStatus').textContent=T('loading');
+}
+function loadPurchaseMaterialPage(offset){
+  var p=purchasePickerState();clearTimeout(p.timer);p.timer=null;if(!purchasePickerVisible())return Promise.resolve();
+  offset=Number(offset);offset=Number.isFinite(offset)&&offset>0?Math.floor(offset):0;var search=val('purchaseMaterialSearch');
+  if(p.pending&&p.request&&p.request.offset===offset&&p.request.search===search&&p.request.owned())return p.pending;
+  var version=++p.version,host=E('purchaseMaterialPickerList'),form=S003.purchaseRequestToken,identity=CKLatestListRead.identity(function(){return JSON.stringify([S003.key,S003.role,S003.operatorId,S003.badge,S003.operatorName]);});
+  var owned=function(){return p===S003.purchasePicker&&version===p.version&&form===S003.purchaseRequestToken&&purchasePickerVisible()&&identity()&&host.isConnected&&E(host.id)===host&&val('purchaseMaterialSearch')===search;};
+  p.requestedOffset=offset;p.request={offset:offset,search:search,owned:owned};purchasePickerLoading();
+  var pending=Promise.resolve(p.pending).catch(function(){}).then(async function(){
+    if(!owned())return;
+    try{var res=await api('v2_003_material_list',{purchase_picker:1,search:search,search_locale:Intl.DateTimeFormat().resolvedOptions().locale,limit:50,offset:Math.max(0,offset||0)});
+      if(!owned())return;if(!res||!Array.isArray(res.items)||!Number.isFinite(Number(res.total))||Number(res.total)<0||!Number.isFinite(Number(res.offset))||Number(res.offset)!==offset||res.items.length>50)throw Error('invalid_response');
+      if(Number(res.total)>0&&offset>=Number(res.total)){loadPurchaseMaterialPage(Math.floor((Number(res.total)-1)/50)*50);return;}
+      p.rows=res.items;p.offset=Number(res.total)?Number(res.offset):0;p.total=Number(res.total)||0;p.applied={owned:owned};rememberPurchaseMaterials(p.rows);renderPurchaseMaterialPicker();
+    }catch(e){if(owned()){E('purchaseMaterialPickerList').innerHTML='';E('purchaseMaterialPickerError').textContent=errorText(e.message);E('purchaseMaterialPickerRetry').classList.remove('hidden');E('purchaseMaterialPickerStatus').textContent='';}}
+    finally{if(owned())host.removeAttribute('aria-busy');}
+  }).finally(function(){if(p.pending===pending)p.pending=null;});p.pending=pending;return pending;
+}
+function searchPurchaseMaterialPicker(){
+  if(!purchasePickerVisible())return;var p=purchasePickerState();p.version++;clearTimeout(p.timer);purchasePickerLoading();
+  p.timer=setTimeout(function(){p.timer=null;loadPurchaseMaterialPage(0);},250);
+}
+function turnPurchaseMaterialPage(delta){var p=purchasePickerState();if(!p.applied||!p.applied.owned())return;var offset=p.offset+delta*50;if(offset<0||offset>=p.total)return;return loadPurchaseMaterialPage(offset);}
 
 async function openPurchaseRequest(){
-  try{await ensurePurchaseMaterials();}catch(e){toast(errorText(e.message),true);return;}
+  if(typeof closePurchaseMaterialPicker==='function')closePurchaseMaterialPicker();
+  S003.purchaseRequestToken={};S003.purchaseMaterials=[];
   S003.purchaseRequestLines=[];
+  S003.purchaseRequestSubmission=null;
   S003.purchaseSelectedMaterialId='';
   E('prUrgency').value='normal';E('prReason').value='';E('prNote').value='';E('prMaterialQty').value='1';
   renderPurchaseMaterialSelection();
@@ -731,29 +849,27 @@ function renderPurchaseMaterialSelection(){
 }
 
 function openPurchaseMaterialPicker(){
-  E('purchaseMaterialSearch').value='';renderPurchaseMaterialPicker();
-  E('purchaseMaterialPickerModal').classList.remove('hidden');
-  setTimeout(function(){E('purchaseMaterialSearch').focus();},80);
+  E('purchaseMaterialSearch').value='';E('purchaseMaterialPickerModal').classList.remove('hidden');
+  E('purchaseMaterialSearch').focus();return loadPurchaseMaterialPage(0);
 }
-
-function closePurchaseMaterialPicker(){E('purchaseMaterialPickerModal').classList.add('hidden');}
-
+function closePurchaseMaterialPicker(){
+  var p=purchasePickerState();p.version++;clearTimeout(p.timer);p.timer=null;p.applied=null;p.request=null;p.rows=[];
+  E('purchaseMaterialPickerModal').classList.add('hidden');E('purchaseMaterialPickerList').innerHTML='';E('purchaseMaterialPickerList').removeAttribute('aria-busy');rememberPurchaseMaterials([]);
+}
 function renderPurchaseMaterialPicker(){
-  var q=val('purchaseMaterialSearch').toLocaleLowerCase(),selected=S003.purchaseSelectedMaterialId;
-  var rows=S003.purchaseMaterials.filter(function(m){
-    if(!q)return true;
-    return [m.material_code,m.barcode,m.name_zh,m.name_ko,m.spec,m.category].some(function(v){return String(v||'').toLocaleLowerCase().includes(q);});
-  });
-  var shown=rows.slice(0,200);
-  E('purchaseMaterialPickerList').innerHTML=shown.length?shown.map(function(m){
-    return '<button type="button" class="material-picker-item '+(m.id===selected?'selected':'')+'" onclick="selectPurchaseMaterial(\''+jsq(m.id)+'\')"><span><b>'+esc(materialDisplay(m))+'</b><small>'+esc(m.material_code+(m.spec?' · '+m.spec:'')+' · '+T('current_stock')+' '+fmtQty(m.current_qty)+' '+m.unit)+'</small></span><i>✓</i></button>';
+  var p=purchasePickerState(),selected=S003.purchaseSelectedMaterialId;if(!p.applied||!p.applied.owned())return;
+  E('purchaseMaterialPickerList').innerHTML=p.rows.length?p.rows.map(function(m){
+    return '<button type="button" data-purchase-material="'+esc(m.id)+'" class="material-picker-item '+(m.id===selected?'selected':'')+'"><span><b>'+esc(materialDisplay(m))+'</b><small>'+esc(m.material_code+(m.spec?' · '+m.spec:'')+' · '+T('current_stock')+' '+fmtQty(m.current_qty)+' '+m.unit)+'</small></span><i>✓</i></button>';
   }).join(''):'<div class="empty">'+esc(T('material_no_match'))+'</div>';
+  E('purchaseMaterialPickerList').querySelectorAll('[data-purchase-material]').forEach(function(b){b.onclick=function(){selectPurchaseMaterial(b.dataset.purchaseMaterial);};});
+  E('purchaseMaterialPickerStatus').textContent=(S003.lang==='ko'?'표시 ':'显示 ')+(p.rows.length?p.offset+1:0)+'–'+(p.rows.length?p.offset+p.rows.length:0)+' / '+p.total;
+  E('purchaseMaterialPickerPrev').disabled=p.offset===0;E('purchaseMaterialPickerNext').disabled=p.offset+p.rows.length>=p.total;
 }
 
 function selectPurchaseMaterial(id){
-  var m=S003.purchaseMaterials.find(function(x){return x.id===id;});if(!m)return;
+  var p=purchasePickerState();if(!p.applied||!p.applied.owned())return;var m=p.rows.find(function(x){return x.id===id;});if(!m)return;
   S003.purchaseSelectedMaterialId=m.id;renderPurchaseMaterialSelection();closePurchaseMaterialPicker();
-  setTimeout(function(){E('prMaterialQty').focus();E('prMaterialQty').select();},80);
+  E('prMaterialQty').focus();E('prMaterialQty').select();
 }
 
 function addPurchaseRequestLine(){
@@ -764,7 +880,7 @@ function addPurchaseRequestLine(){
   var existing=S003.purchaseRequestLines.find(function(x){return x.material_id===m.id;});
   if(existing)existing.requested_qty=Math.round((existing.requested_qty+qty)*10000)/10000;
   else S003.purchaseRequestLines.push({material_id:m.id,material:m,requested_qty:qty,note:''});
-  S003.purchaseSelectedMaterialId='';E('prMaterialQty').value='1';renderPurchaseMaterialSelection();renderPurchaseRequestLines();
+  S003.purchaseSelectedMaterialId='';E('prMaterialQty').value='1';rememberPurchaseMaterials(purchasePickerState().rows);renderPurchaseMaterialSelection();renderPurchaseRequestLines();
 }
 
 function updatePurchaseRequestLine(id,value){var x=S003.purchaseRequestLines.find(function(v){return v.material_id===id;});if(x)x.requested_qty=Number(value)||0;}
@@ -778,8 +894,16 @@ async function submitPurchaseRequest(event){
   event.preventDefault();if(S003.busy)return;
   var lines=S003.purchaseRequestLines.filter(function(x){return Number(x.requested_qty)>0;}).map(function(x){return{material_id:x.material_id,requested_qty:Number(x.requested_qty),note:x.note||''};});
   if(!lines.length){toast(T('add_material_hint'),true);return;}
+  var data=Object.assign(operatorPayload(),{urgency:val('prUrgency'),request_reason:val('prReason'),note:val('prNote'),lines:lines});
+  var signature=JSON.stringify(data);
+  // Keep the original request ID when the response is lost after a commit.
+  // Changed form data or an explicitly opened new form starts a new request.
+  if(!S003.purchaseRequestSubmission||S003.purchaseRequestSubmission.signature!==signature){
+    S003.purchaseRequestSubmission={signature:signature,requestId:reqId('preq')};
+  }
+  data.client_req_id=S003.purchaseRequestSubmission.requestId;
   S003.busy=true;
-  try{var res=await api('v2_003_purchase_request_create',Object.assign(operatorPayload(),{urgency:val('prUrgency'),request_reason:val('prReason'),note:val('prNote'),lines:lines,client_req_id:reqId('preq')}));closeModal('purchaseRequestModal');toast(S003.lang==='ko'?'구매 요청이 제출되었습니다':'采购申请已提交');if(isAdmin())openPurchaseDetail(res.id);else loadFieldHome();}
+  try{var res=await api('v2_003_purchase_request_create',data);S003.purchaseRequestSubmission=null;closeModal('purchaseRequestModal');toast(S003.lang==='ko'?'구매 요청이 제출되었습니다':'采购申请已提交');if(isAdmin())openPurchaseDetail(res.id);else loadFieldHome();}
   catch(e){toast(errorText(e.message),true);}finally{S003.busy=false;}
 }
 
@@ -831,6 +955,7 @@ async function submitPurchaseOrder(event){
 }
 
 function openShipmentModal(){
+  S003.shipmentSubmission=null;
   var res=S003.currentPurchase;if(!res)return;var o=res.order;E('shOrderId').value=o.id;E('shTracking').value='';E('shSupplier').value=o.supplier||'';E('shExpectedDate').value=o.expected_date||'';E('shNote').value='';
   var radio=document.querySelector('input[name="deliveryMethod"][value="express"]');if(radio)radio.checked=true;toggleDeliveryMethod();
   var available=res.lines.filter(function(l){return Number(l.ordered_qty)>Number(l.scheduled_qty);});
@@ -842,7 +967,10 @@ function toggleShipmentLine(input){var row=input.closest('[data-line-id]'),qty=r
 function toggleDeliveryMethod(){var method=(document.querySelector('input[name="deliveryMethod"]:checked')||{}).value||'express';E('trackingField').classList.toggle('hidden',method!=='express');E('shTracking').required=method==='express';}
 async function submitShipment(event){
   event.preventDefault();if(S003.busy)return;var method=(document.querySelector('input[name="deliveryMethod"]:checked')||{}).value||'express',items=[],rows=Array.from(E('shLineEditor').querySelectorAll('[data-line-id]'));for(var i=0;i<rows.length;i++){var checked=rows[i].querySelector('.sh-selected'),qtyInput=rows[i].querySelector('.sh-qty');if(!checked.checked)continue;var raw=qtyInput.value.trim(),qty=Number(raw),max=Number(rows[i].dataset.remain);if(raw===''||!Number.isFinite(qty)||qty<=0||qty>max){toast(errorText('invalid_shipment_line'),true);qtyInput.focus();return;}items.push({order_line_id:rows[i].dataset.lineId,expected_qty:qty});}if(!items.length){toast(errorText('shipment_lines_required'),true);return;}S003.busy=true;
-  try{await api('v2_003_purchase_shipment_create',Object.assign(operatorPayload(),{order_id:val('shOrderId'),delivery_method:method,tracking_no:val('shTracking'),supplier:val('shSupplier'),expected_date:val('shExpectedDate'),note:val('shNote'),items:items,client_req_id:reqId('ship')}));closeModal('shipmentModal');toast(T('success'));openPurchaseDetail(val('shOrderId'));}catch(e){toast(errorText(e.message),true);}finally{S003.busy=false;}
+  var data=Object.assign(operatorPayload(),{order_id:val('shOrderId'),delivery_method:method,tracking_no:val('shTracking'),supplier:val('shSupplier'),expected_date:val('shExpectedDate'),note:val('shNote'),items:items}),signature=JSON.stringify(data);
+  if(!S003.shipmentSubmission||S003.shipmentSubmission.signature!==signature)S003.shipmentSubmission={signature:signature,requestId:reqId('ship')};
+  data.client_req_id=S003.shipmentSubmission.requestId;
+  try{await api('v2_003_purchase_shipment_create',data);S003.shipmentSubmission=null;closeModal('shipmentModal');toast(T('success'));openPurchaseDetail(val('shOrderId'));}catch(e){toast(errorText(e.message),true);}finally{S003.busy=false;}
 }
 
 async function closePurchaseOrder(mode){
@@ -861,10 +989,10 @@ async function openReceiptByCode(code){code=String(code||'').trim();if(!code)ret
 
 function renderReceiptDetail(res){
   var s=res.shipment||{},already=s.status!=='pending',photos=res.attachments||[];
-  var photoHtml=photos.length?'<div class="photo-grid arrival-photo-grid">'+photos.map(function(p){return '<a href="'+esc(fileUrl(p.file_key))+'" target="_blank"><img src="'+esc(fileUrl(p.file_key))+'" alt=""></a>';}).join('')+'</div>':'<div class="photo-placeholder">'+esc(T('photo_required'))+'</div>';
+  var photoHtml=photo003Markup(photos,true);
   if(already){E('receiptDetail').innerHTML='<div class="detail-hero"><div class="hero-top"><div><p>'+esc(s.shipment_no)+'</p><h1>'+esc(s.tracking_no||deliveryLabel(s.delivery_method))+'</h1></div><span class="tag '+(s.status==='discrepancy'?'red':'green')+'">'+esc(s.status==='discrepancy'?T('discrepancy'):T('status_completed'))+'</span></div></div><div class="panel success-panel"><h2>'+esc(T('already_received'))+'</h2><p>'+esc([s.received_by,fmtTime(s.received_at)].filter(Boolean).join(' · '))+'</p></div>'+(photos.length?'<div class="panel"><h2>'+esc(T('arrival_photos'))+'</h2>'+photoHtml+'</div>':'');return;}
   var itemRows=(res.items||[]).map(function(i){var loc=findActiveLocation(i.location_code)?i.location_code:'';return '<div class="receipt-line" data-item-id="'+esc(i.id)+'"><div class="receipt-line-title"><div><b>'+esc(materialDisplay(i))+'</b><small>'+esc(i.material_code+' · '+(i.spec||'--'))+'</small></div><span>'+esc(T('expected_qty'))+' <b>'+esc(fmtQty(i.expected_qty))+' '+esc(i.unit)+'</b></span></div><div class="receipt-inputs"><label><span>'+esc(T('actual_received'))+'</span><div class="qty-unit"><input class="rc-qty" type="number" min="0" step="0.01" value="" placeholder="'+esc(T('expected_qty')+' '+fmtQty(i.expected_qty))+'" inputmode="decimal" required><em>'+esc(i.unit)+'</em></div></label><div class="location-field"><span>'+esc(T('putaway_location'))+'</span>'+locationControlHtml(loc,true)+'</div><label class="receipt-note"><span>'+esc(T('note'))+'</span><input class="rc-note"></label></div></div>';}).join('');
-  E('receiptDetail').innerHTML='<div class="detail-hero receipt-hero"><div class="hero-top"><div><p>'+esc(s.shipment_no)+' · '+esc(s.order_no||'')+'</p><h1>'+esc(s.tracking_no||deliveryLabel(s.delivery_method))+'</h1><small>'+esc([s.supplier,s.expected_date].filter(Boolean).join(' · '))+'</small></div><span class="tag purple">'+esc(T('waiting_receipt_count'))+'</span></div></div><form class="receipt-form" onsubmit="submitReceipt(event)"><div class="panel"><div class="panel-head"><h2>'+esc(T('shipment_items'))+'</h2></div><p class="picker-guide receipt-package-guide">'+esc(T('package_contents_hint'))+'</p><div class="receipt-lines">'+itemRows+'</div></div><div class="panel"><div class="panel-head"><h2>'+esc(T('arrival_photos'))+'</h2><button type="button" class="btn '+(s.delivery_method==='supplier'&&!photos.length?'warning':'soft')+'" onclick="E(\'arrivalPhotoInput\').click()">＋ '+esc(T('take_arrival_photo'))+'</button></div>'+photoHtml+'</div><div class="panel"><label><span>'+esc(T('difference_note'))+'</span><textarea id="receiptDiffNote" rows="3" placeholder="'+esc(S003.lang==='ko'?'파손·부족·초과·오배송 내용을 입력하세요':'破损、少货、多货、错货时填写')+'"></textarea></label><div class="form-actions sticky-actions"><button type="button" class="btn soft" onclick="goView(\'receiving\')">'+esc(T('cancel'))+'</button><button type="submit" class="btn success">'+esc(T('confirm_receipt'))+'</button></div></div></form>';
+  E('receiptDetail').innerHTML='<div class="detail-hero receipt-hero"><div class="hero-top"><div><p>'+esc(s.shipment_no)+' · '+esc(s.order_no||'')+'</p><h1>'+esc(s.tracking_no||deliveryLabel(s.delivery_method))+'</h1><small>'+esc([s.supplier,s.expected_date].filter(Boolean).join(' · '))+'</small></div><span class="tag purple">'+esc(T('waiting_receipt_count'))+'</span></div></div><form class="receipt-form" onsubmit="submitReceipt(event)"><div class="panel"><div class="panel-head"><h2>'+esc(T('shipment_items'))+'</h2></div><p class="picker-guide receipt-package-guide">'+esc(T('package_contents_hint'))+'</p><div class="receipt-lines">'+itemRows+'</div></div><div class="panel"><div class="panel-head"><h2>'+esc(T('arrival_photos'))+'</h2>'+photo003Buttons('arrival',s.delivery_method==='supplier'&&!photos.length)+'</div><div data-photo003-gallery="arrival" data-photo003-id="'+esc(s.id)+'">'+photoHtml+'</div>'+'</div><div class="panel"><label><span>'+esc(T('difference_note'))+'</span><textarea id="receiptDiffNote" rows="3" placeholder="'+esc(S003.lang==='ko'?'파손·부족·초과·오배송 내용을 입력하세요':'破损、少货、多货、错货时填写')+'"></textarea></label><div class="form-actions sticky-actions"><button type="button" class="btn soft" onclick="goView(\'receiving\')">'+esc(T('cancel'))+'</button><button type="submit" class="btn success">'+esc(T('confirm_receipt'))+'</button></div></div></form>';
 }
 
 async function submitReceipt(event){
@@ -873,8 +1001,7 @@ async function submitReceipt(event){
 }
 
 async function uploadArrivalPhoto(input){
-  var s=S003.currentShipment&&S003.currentShipment.shipment,file=input.files&&input.files[0];if(!s||!file)return;var fd=new FormData();fd.append('action','v2_attachment_upload');fd.append('k',S003.key);fd.append('file',file);fd.append('related_doc_type','material_shipment');fd.append('related_doc_id',s.id);fd.append('attachment_category','arrival_photo');fd.append('uploaded_by',S003.operatorName);fd.append('operator_id',S003.operatorId);fd.append('operator_name',S003.operatorName);
-  try{var response=await fetch(V2_API,{method:'POST',body:fd}),json=await response.json();if(!response.ok||!json.ok)throw new Error(json.error||'upload_failed');toast(T('photo_uploaded'));await openReceiptByCode(s.shipment_no);}catch(e){toast(errorText(e.message),true);}finally{input.value='';}
+ return upload003Photo(input,'arrival');
 }
 
 function openReceivingScanner(){E('receivingScannerModal').classList.remove('hidden');E('receivingScannerError').textContent='';E('manualTrackingCode').value='';startReceivingScan();}
@@ -883,11 +1010,17 @@ async function startReceivingScan(){if(S003.receivingScanner){stopReceivingScan(
 function stopReceivingScan(){if(!S003.receivingScanner)return;var s=S003.receivingScanner;S003.receivingScanner=null;Promise.resolve(s.stop()).catch(function(){}).finally(function(){try{s.clear();}catch(e){}if(E('receivingScanBtn'))E('receivingScanBtn').textContent=T('start_scan');});}
 function lookupShipmentFromScanner(){openReceiptByCode(val('manualTrackingCode'));}
 
-async function loadLedger(){E('ledgerList').innerHTML='<div class="empty">'+esc(T('loading'))+'</div>';try{var payload={kind:val('ledgerKind'),department:isField()?'':val('ledgerDepartment'),search:isField()?'':val('ledgerSearch'),start_date:val('ledgerStart'),end_date:val('ledgerEnd'),limit:200};if(isField())payload.operator_id=S003.operatorId;var res=await api('v2_003_ledger_list',payload);S003.ledgerRows=res.items||[];renderLedger();}catch(e){E('ledgerList').innerHTML='<div class="empty">'+esc(errorText(e.message))+'</div>';}}
+async function loadLedger(){
+ var host=E('ledgerList');if(!host)return;
+ var read=S003.ledgerRead=CKLatestListRead.begin('003:ledger',host,function(){return JSON.stringify([S003.key,S003.role,S003.operatorId,S003.badge,S003.operatorName]);});
+ S003.ledgerRows=[];host.innerHTML='<div class="empty">'+esc(T('loading'))+'</div>';
+ try{var payload={kind:val('ledgerKind'),department:isField()?'':val('ledgerDepartment'),search:isField()?'':val('ledgerSearch'),start_date:val('ledgerStart'),end_date:val('ledgerEnd'),limit:200};if(isField())payload.operator_id=S003.operatorId;var res=await api('v2_003_ledger_list',payload);if(!read.commit())return;S003.ledgerRows=res.items||[];renderLedger();}
+ catch(e){if(read.current())host.innerHTML='<div class="empty">'+esc(errorText(e.message))+'</div>';}
+}
 function renderLedger(){if(!S003.ledgerRows.length){E('ledgerList').innerHTML='<div class="empty">'+esc(T('no_data'))+'</div>';return;}if(isField()){E('ledgerList').className='my-record-list';E('ledgerList').innerHTML=S003.ledgerRows.map(ledgerActivityHtml).join('');return;}E('ledgerList').className='table-wrap';var head='<table><thead><tr><th>'+esc(T('time'))+'</th><th>'+esc(T('category'))+'</th><th>'+esc(T('asset_name'))+'</th><th>'+esc(T('status'))+'</th><th>'+esc(T('qty'))+'</th><th>'+esc(T('operator'))+'</th><th>'+esc(T('recipient'))+'</th><th>'+esc(T('department'))+'</th><th>'+esc(T('storage_location'))+'</th><th>'+esc(T('note'))+'</th></tr></thead><tbody>';var rows=S003.ledgerRows.map(function(r){var action=r.kind==='material'?txnLabel(r.action_type):assetActionLabel(r.action_type);var qty=r.kind==='material'?((Number(r.qty_delta)>0?'+':'')+fmtQty(r.qty_delta)+' '+(r.unit||'')):'--';return '<tr><td>'+esc(fmtTime(r.created_at))+'</td><td>'+esc(r.kind==='material'?T('materials'):T('assets'))+'</td><td><b>'+esc(r.item_name)+'</b><br><small>'+esc(r.item_code)+'</small></td><td>'+esc(action)+'</td><td>'+esc(qty)+'</td><td>'+esc(r.operator_name||'--')+'</td><td>'+esc(r.recipient_name||'--')+'</td><td>'+esc(departmentLabel(r.department))+'</td><td>'+esc(r.location_code||'--')+'</td><td>'+esc([r.purpose,r.related_doc_no,r.note].filter(Boolean).join(' · ')||'--')+'</td></tr>';}).join('');E('ledgerList').innerHTML=head+rows+'</tbody></table>';}
 
 function csvCell(v){v=String(v==null?'':v);return '"'+v.replace(/"/g,'""')+'"';}
-function exportLedgerCsv(){if(!isAdmin())return;if(!S003.ledgerRows.length){toast(T('no_data'),true);return;}var rows=[['时间','类别','编号','名称','操作','数量变化','操作前','操作后','操作人','领用人','部门','存放位置','关联单号','备注']];S003.ledgerRows.forEach(function(r){rows.push([fmtTime(r.created_at),r.kind,r.item_code,r.item_name,r.action_type,r.qty_delta,r.qty_before,r.qty_after,r.operator_name,r.recipient_name,r.department,r.location_code,r.related_doc_no,[r.purpose,r.note].filter(Boolean).join(' · ')]);});var csv='\ufeff'+rows.map(function(row){return row.map(csvCell).join(',');}).join('\r\n');var blob=new Blob([csv],{type:'text/csv;charset=utf-8'});var url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='CK-003-ledger-'+kstToday()+'.csv';a.click();setTimeout(function(){URL.revokeObjectURL(url);},500);}
+function exportLedgerCsv(){if(!isAdmin())return;if(!S003.ledgerRead||!S003.ledgerRead.canUse()){toast(S003.lang==='ko'?'다시 조회한 후 내보내세요':'请先查询并等待完成后导出',true);return;}if(!S003.ledgerRows.length){toast(T('no_data'),true);return;}var rows=[['时间','类别','编号','名称','操作','数量变化','操作前','操作后','操作人','领用人','部门','存放位置','关联单号','备注']];S003.ledgerRows.forEach(function(r){rows.push([fmtTime(r.created_at),r.kind,r.item_code,r.item_name,r.action_type,r.qty_delta,r.qty_before,r.qty_after,r.operator_name,r.recipient_name,r.department,r.location_code,r.related_doc_no,[r.purpose,r.note].filter(Boolean).join(' · ')]);});var csv='\ufeff'+rows.map(function(row){return row.map(csvCell).join(',');}).join('\r\n');var blob=new Blob([csv],{type:'text/csv;charset=utf-8'});var url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='CK-003-ledger-'+kstToday()+'.csv';a.click();setTimeout(function(){URL.revokeObjectURL(url);},500);}
 
 function openLocationModal(){if(!isAdmin())return;E('locId').value='';E('locCode').value='';E('locName').value='';E('locActive').checked=true;E('locationModal').classList.remove('hidden');}
 function editLocation(id){var x=S003.locations.find(function(v){return v.id===id;});if(!x)return;E('locId').value=x.id;E('locCode').value=x.location_code;E('locName').value=x.location_name||'';E('locActive').checked=Number(x.active)!==0;E('locationModal').classList.remove('hidden');}
@@ -926,12 +1059,12 @@ function renderLocationImportPreview(preview,fileName){
 
 async function readLocationImport(input){
   var file=input.files&&input.files[0];if(!file)return;E('confirmLocationImportBtn').disabled=true;E('locationImportStatus').className='import-status';E('locationImportStatus').innerHTML='<span>'+esc(T('loading'))+'</span>';E('locationImportPreview').innerHTML='';
-  try{var buffer=await file.arrayBuffer(),wb=XLSX.read(buffer,{type:'array'}),sheet=wb.Sheets[wb.SheetNames[0]],raw=XLSX.utils.sheet_to_json(sheet,{defval:'',raw:false}),rows=mapLocationImportRows(raw),localErrors=localLocationImportErrors(rows);if(localErrors.length){renderLocationImportErrors(localErrors);return;}var preview=await api('v2_003_location_bulk_import',Object.assign(operatorPayload(),{rows:rows,dry_run:1}));S003.locationImportRows=rows;S003.locationImportPreview=preview;renderLocationImportPreview(preview,file.name);}catch(e){var errors=e.details&&e.details.errors;if(errors&&errors.length)renderLocationImportErrors(errors);else{E('locationImportStatus').className='import-status error';E('locationImportStatus').textContent=errorText(e.message);}}
+  try{var buffer=await file.arrayBuffer(),wb=XLSX.read(buffer,{type:'array',codepage:/\.csv$/i.test(file.name)?65001:undefined}),sheet=wb.Sheets[wb.SheetNames[0]],raw=XLSX.utils.sheet_to_json(sheet,{defval:'',raw:false}),rows=mapLocationImportRows(raw),localErrors=localLocationImportErrors(rows);if(localErrors.length){renderLocationImportErrors(localErrors);return;}var preview=await api('v2_003_location_bulk_import',Object.assign(operatorPayload(),{rows:rows,dry_run:1}));S003.locationImportRows=rows;S003.locationImportPreview=preview;renderLocationImportPreview(preview,file.name);}catch(e){var errors=e.details&&e.details.errors;if(errors&&errors.length)renderLocationImportErrors(errors);else{E('locationImportStatus').className='import-status error';E('locationImportStatus').textContent=errorText(e.message);}}
 }
 
 async function confirmLocationImport(){if(S003.busy||!S003.locationImportRows.length)return;S003.busy=true;E('confirmLocationImportBtn').disabled=true;try{var res=await api('v2_003_location_bulk_import',Object.assign(operatorPayload(),{rows:S003.locationImportRows,client_req_id:reqId('limp')}));toast((S003.lang==='ko'?'위치 일괄 등록 완료: 신규 ':'位置批量导入完成：新建 ')+res.created_count+(S003.lang==='ko'?', 수정 ':'，更新 ')+res.updated_count);closeLocationImport();await loadLocations(true);}catch(e){var errors=e.details&&e.details.errors;if(errors&&errors.length)renderLocationImportErrors(errors);else toast(errorText(e.message),true);}finally{S003.busy=false;if(!E('locationImportModal').classList.contains('hidden'))E('confirmLocationImportBtn').disabled=false;}}
 
-function closeModal(id){E(id).classList.add('hidden');}
+function closeModal(id){E(id).classList.add('hidden');if(id==='purchaseRequestModal'){S003.purchaseRequestToken=null;closePurchaseMaterialPicker();}}
 function openScanner(){E('scannerModal').classList.remove('hidden');E('scannerError').textContent='';E('manualItemCode').value='';}
 function closeScanner(){stopItemScanner();E('scannerModal').classList.add('hidden');}
 async function startItemScan(){if(S003.itemScanner){stopItemScanner();return;}E('scannerError').textContent='';try{S003.itemScanner=new Html5Qrcode('itemReader');await S003.itemScanner.start({facingMode:'environment'},{fps:10,qrbox:{width:250,height:180}},function(text){lookupCode(text);},function(){});E('itemScanBtn').textContent=T('close');}catch(e){E('scannerError').textContent=S003.lang==='ko'?'카메라를 열 수 없습니다. 번호를 직접 입력하세요.':'无法打开摄像头，请手动输入编号';stopItemScanner();}}

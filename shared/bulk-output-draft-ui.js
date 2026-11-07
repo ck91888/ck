@@ -1,0 +1,17 @@
+/* Persist partial output separately from the existing completion actions. */
+(function(){
+ 'use strict';
+ window.CKBulkOutputDraft=function(form,target,{onSaved=()=>{},onLoaded=()=>{}}={}){
+  const section=document.createElement('div'),button=document.createElement('button'),reload=document.createElement('button'),status=document.createElement('p');
+  section.className='ck-output-draft';button.type=reload.type='button';button.textContent='保存产出草稿 / 산출 초안 저장';button.dataset.saveOutputDraft='';button.className=reload.className='ck-small';reload.textContent='重新读取已保存草稿 / 저장된 초안 다시 읽기';reload.hidden=true;reload.style.display='none';status.setAttribute('role','status');status.style.whiteSpace='pre-wrap';section.append(button,reload,status);const final=form.querySelector('button.ck-primary,button:not([type]),button[type=submit]');if(final?.parentElement===form)form.insertBefore(section,final);else form.append(section);
+  let state=null,request=null,busy=false;
+  const fields=()=>[...form.querySelectorAll('[name]')].filter(x=>x.type!=='file'),values=()=>Object.fromEntries(fields().map(x=>[x.name,x.type==='checkbox'?x.checked:x.value]));
+  const lock=()=>{const controls=[...form.querySelectorAll('button,input,select,textarea')].map(x=>[x,x.disabled]);for(const[x]of controls)x.disabled=true;return()=>{for(const[x,d]of controls)x.disabled=d;};};
+  const message=()=>state?.draft?'已保存草稿 · '+state.draft.by+' · '+(window.CKAttendance?.at(state.draft.at)||state.draft.at)+' · V'+state.draft.version+'\n'+(state.draft.scope_version!==state.scope_version?'作业要求已更新，请重新核对草稿。 / 작업 지시 변경·초안 재확인':'结束时请核对并最终修正 / 종료 시 최종 확인'):'可先填写部分内容并保存；结束时再最终确认 / 일부 입력 후 초안 저장';
+  async function load(){if(busy)return;busy=true;const unlock=lock();try{const r=await CKSession.request('sop_bulk_output_draft_read',target);if(!form.isConnected)return;state=r;for(const x of fields())if(r.draft?.values&&Object.hasOwn(r.draft.values,x.name)&&!x.readOnly&&!(x.name==='customer'&&x.value&&!String(r.draft.values[x.name]).trim())){if(x.type==='checkbox')x.checked=!!r.draft.values[x.name];else x.value=r.draft.values[x.name];}status.textContent=message();reload.hidden=true;reload.style.display='none';form.dispatchEvent(new CustomEvent('ck-output-draft-state',{bubbles:true,detail:r}));onLoaded(r);}catch(x){status.textContent=x.message;reload.hidden=false;reload.style.display='';throw x;}finally{busy=false;unlock();}}
+  const ready=load();ready.catch(()=>{});
+  button.onclick=async()=>{if(busy||!state)return;busy=true;const body={...target,revision:state.revision,version:state.version,scope_version:state.scope_version,values:values()},signature=JSON.stringify(body);if(request?.signature!==signature)request={signature,body:{...body,client_req_id:crypto.randomUUID()}};const unlock=lock();try{const r=await CKSession.request('sop_bulk_output_draft_save',request.body);request=null;if(!form.isConnected)return;state=r;status.textContent=message();reload.hidden=true;reload.style.display='none';form.dispatchEvent(new CustomEvent('ck-output-draft-state',{bubbles:true,detail:r}));onSaved(r);}catch(x){status.textContent=x.message+'\n本次输入保留在表单中 / 현재 입력은 폼에 유지됩니다';reload.hidden=false;reload.style.display='';}finally{busy=false;unlock();}};
+  reload.onclick=()=>load().catch(()=>{});
+  return {ready,get state(){return state;},completion(){if(busy||!state)throw Error('请等待读取或保存草稿完成 / 초안 처리를 기다리세요');return {output_draft_revision:state.revision};}};
+ };
+})();

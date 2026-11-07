@@ -6,6 +6,7 @@
   <meta name="theme-color" content="#102a43">
   <title>耗材与物品管理 / 소모품·비품 관리</title>
   <link rel="stylesheet" href="style.css?v=20260810c">
+  <link rel="stylesheet" href="../shared/photo-upload.css">
 </head>
 <body>
 
@@ -447,8 +448,15 @@
   <div class="modal-card wide material-picker-card">
     <div class="modal-head"><h2 data-i18n="material_picker_title">选择已备案耗材</h2><button type="button" onclick="closePurchaseMaterialPicker()">×</button></div>
     <p class="picker-guide" data-i18n="material_picker_hint">输入文字只用于搜索，点中一条已备案耗材后才算选择成功</p>
-    <div class="material-picker-search"><span>⌕</span><input id="purchaseMaterialSearch" data-i18n-placeholder="material_search" placeholder="搜索名称、编号或规格" oninput="renderPurchaseMaterialPicker()"></div>
+    <div class="material-picker-search"><span>⌕</span><input id="purchaseMaterialSearch" data-i18n-placeholder="material_search" placeholder="搜索名称、编号或规格" oninput="searchPurchaseMaterialPicker()"></div>
     <div id="purchaseMaterialPickerList" class="material-picker-list"></div>
+    <p id="purchaseMaterialPickerStatus" role="status" aria-live="polite"></p>
+    <p id="purchaseMaterialPickerError" class="error-text" role="alert"></p>
+    <nav class="form-actions" aria-label="采购耗材分页 / 구매 소모품 페이지">
+      <button id="purchaseMaterialPickerPrev" type="button" class="btn soft" onclick="turnPurchaseMaterialPage(-1)" data-i18n="material_picker_prev">上一页</button>
+      <button id="purchaseMaterialPickerNext" type="button" class="btn soft" onclick="turnPurchaseMaterialPage(1)" data-i18n="material_picker_next">下一页</button>
+      <button id="purchaseMaterialPickerRetry" type="button" class="btn soft hidden" onclick="loadPurchaseMaterialPage(purchasePickerState().requestedOffset||0)" data-i18n="material_picker_retry">重试</button>
+    </nav>
   </div>
 </div>
 
@@ -534,6 +542,8 @@
 <script src="../shared/html5-qrcode.min.js"></script>
 <script src="../shared/qrcode.min.js"></script>
 <script src="config.js?v=20260810c"></script>
+<script src="../shared/latest-list-read.js"></script>
+<script src="../shared/photo-upload.js"></script>
 <script src="app.js?v=20260810c"></script>
 </body>
 </html>

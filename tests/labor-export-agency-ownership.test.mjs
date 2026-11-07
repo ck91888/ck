@@ -1,0 +1,24 @@
+// Same stable person, distinct immutable parent-day company facts, local synthetic data only.
+import test from 'node:test';import assert from 'node:assert/strict';
+import {atTime} from './labor-export-fixture.mjs';import {midnightFixture,seedMidnight} from './labor-export-midnight-fixture.mjs';
+import {collectLaborExport} from '../shared/labor-export-ui.js';import * as financeData from '../shared/labor-export-data.js';const {financeWorkbookData,financeCompanyDay,financePersonDay}=financeData;import {localD1} from './d1-local-runtime.mjs';
+for(const returns of [false,true])for(const policy of [false,true])test(`overnight company ownership and filtering remain per attendance; returns=${returns} policy=${policy}`,async()=>atTime('2026-01-02T11:00:00Z',async()=>{
+ const f=await midnightFixture(returns),p=seedMidnight(f,301,{next:true});f.env.SOP_ATTENDANCE_SHIFT_ACCOUNTING=String(policy);f.DB.raw.prepare('UPDATE ck_attendance_days SET agency=? WHERE id=?').run('CKIK',p.dayId);
+ const native=process.env.CK_AGENCY_NATIVE_D1==='true'?await localD1(f.DB.raw):null;if(native)f.env.DB=native;
+ const rows=async(sql,...v)=>(await f.env.DB.prepare(sql).bind(...v).all()).results;
+ const snapshot=async()=>JSON.stringify({days:await rows('SELECT * FROM ck_attendance_days ORDER BY id'),people:await rows('SELECT * FROM ck_attendance_people ORDER BY id'),labor:await rows('SELECT * FROM v2_ops_job_workers ORDER BY id')});
+ try{const before=await snapshot(),range={start:'2026-01-02',end:'2026-01-02'},read=agency=>collectLaborExport(b=>f.ok('office','sop_attendance_daily_export',b),{...range,agency}),all=await read(''),old=await read('CKIK'),next=await read('가온');
+  assert.equal(all.rows.length,1);assert.equal(all.rows[0].agency,'CKIK／가온');assert.deepEqual(all.rows[0].intervals.map(s=>s.agency),['CKIK','가온']);assert.equal(all.rows[0].minutes.rawPresence,120);assert.equal(all.rows[0].minutes.bulk,60);assert.equal(all.rows[0].minutes.gap,480);
+  for(const[result,agency]of [[old,'CKIK'],[next,'가온']]){assert.equal(result.rows.length,1,agency+' filter must not omit the original company interval');assert.equal(result.rows[0].agency,agency);assert.equal(result.rows[0].intervals.length,1);assert.equal(result.rows[0].intervals[0].agency,agency);assert.equal(result.rows[0].minutes.rawPresence,60);assert.equal(result.rows[0].minutes.gap,0);}
+  assert.equal(old.rows[0].minutes.bulk,60);assert.equal(next.rows[0].minutes.bulk,0);for(const key of ['presence','bulk','direct_ship','import','other','rest','dispatch','unassigned','conflict','registeredRest','automaticRest'])assert.ok(Math.abs((old.rows[0].minutes[key]||0)+(next.rows[0].minutes[key]||0)-(all.rows[0].minutes[key]||0))<1e-7,'company totals conserve '+key);
+  assert.equal((await read('리드인')).rows.length,0);const book=financeWorkbookData(all.rows,all.meta);assert.equal(book.daily[1][3],'한국인력개발／가온');assert.deepEqual(book.spans.slice(1).map(s=>s[3]),['한국인력개발','가온']);assert.equal(await snapshot(),before);
+ }finally{await native?.close();f.DB.raw.close();}
+}));
+test('a different company between selected intervals never becomes invented off-shift time',()=>{
+ const time=h=>'2026-01-02T'+h+':00:00+09:00',intervals=[['09','10','CKIK'],['10','12','가온'],['12','13','CKIK']].map(([a,b,agency])=>({agency,start:time(a),end:time(b),dayStart:time(a),dayEnd:time(b),minutes:{rawPresence:(Number(b)-Number(a))*60,presence:(Number(b)-Number(a))*60}})),row={agency:'CKIK／가온',intervals,minutes:{presence:240,rawPresence:240,gap:0},needsVerification:false},before=JSON.stringify(row),filtered=financeCompanyDay(row,'CKIK');
+ assert.equal(filtered.minutes.presence,120);assert.equal(filtered.minutes.gap,0);assert.equal(filtered.intervals.length,2);assert.equal(JSON.stringify(row),before);assert.equal(financeCompanyDay(row,'리드인'),null);
+});
+test('source parent company remains authoritative for older span responses; missing multi-parent evidence rejects export',()=>{
+ const r={id:'NEW',personId:'SYN',badgeId:'DAF-SYN',name:'合成兼容人员',agency:'가온',attendanceIds:['OLD','NEW'],originalRecords:[{id:'OLD',agency:'CKIK'},{id:'NEW',agency:'가온'}]},item={record:r,totals:{presence:120},attendanceSpans:[{attendanceId:'OLD',start:'2026-01-02T00:00:00+09:00',end:'2026-01-02T01:00:00+09:00',totals:{presence:60}},{attendanceId:'NEW',start:'2026-01-02T09:00:00+09:00',end:'2026-01-02T10:00:00+09:00',totals:{presence:60}}]},before=JSON.stringify(item),result=financePersonDay(item,'2026-01-02','2026-01-02T11:00:00+09:00');
+ assert.deepEqual(result.intervals.map(s=>s.agency),['CKIK','가온']);assert.equal(result.agency,'CKIK／가온');assert.equal(JSON.stringify(item),before);const unlinked=JSON.parse(before);unlinked.attendanceSpans.forEach(s=>delete s.attendanceId);assert.throws(()=>financePersonDay(unlinked,'2026-01-02','2026-01-02T11:00:00+09:00'),/公司来源不明/);delete item.record.originalRecords;assert.throws(()=>financePersonDay(item,'2026-01-02','2026-01-02T11:00:00+09:00'),/公司来源不明/);
+});

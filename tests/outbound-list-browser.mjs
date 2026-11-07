@@ -1,0 +1,34 @@
+// Actual built collaboration lists with synthetic data; never targets an online database.
+import assert from 'node:assert/strict';import fs from 'node:fs';import http from 'node:http';import path from 'node:path';import {gzipSync} from 'node:zlib';import {createRequire} from 'node:module';
+import {operationHeaders,rememberOperation,confirmOperation} from './office-operator-fixture.mjs';
+import entry from '../worker-v2/staging-entry.js';import {database} from './d1-adapter.mjs';
+const require=createRequire(import.meta.url),{chromium}=require(process.env.CODEX_PRIMARY_RUNTIME_NODE_MODULES+'/playwright');
+const root=process.env.CK_COLLAB_ASSETS||path.resolve('worker-v2/.sop-staging-assets'),DB=database(),requests=[];
+const env={DB,SOP_ENVIRONMENT:'staging',SOP_UPGRADE_ENABLED:'true',SOP_WORK_CHAIN_ENABLED:'true',SOP_ACCESS_CONTROL:'true',SOP_ATTENDANCE_ENABLED:'true',SOP_ADMIN_PASSWORD:'Synthetic-collab-perf',ASSETS:{async fetch(r){let f=path.join(root,new URL(r.url).pathname);if(fs.statSync(f).isDirectory())f=path.join(f,'index.html');const type=f.endsWith('.js')?'text/javascript':f.endsWith('.css')?'text/css':f.endsWith('.json')?'application/json':'text/html';return new Response(fs.readFileSync(f),{headers:{'Content-Type':type}});}}};
+let cookie='';async function direct(action,body={}){const r=await entry.fetch(new Request('https://fixture.invalid/api',{method:'POST',headers:{'Content-Type':'application/json',Cookie:cookie,...operationHeaders(cookie)},body:JSON.stringify({action,...body})}),env);const j=await r.json();assert.equal(j.ok,true,j.error);if(action==='sop_login')cookie=r.headers.get('set-cookie').split(';')[0];return rememberOperation(j,cookie);}
+await direct('sop_login',{sop_key:env.SOP_ADMIN_PASSWORD});await confirmOperation(direct,'Synthetic performance operator');
+const today=new Date(Date.now()+9*3600000).toISOString().slice(0,10);for(let i=0;i<100;i++)DB.raw.prepare("INSERT INTO v2_inbound_plans(id,customer,biz_class,plan_date,created_at,source_type,status) VALUES(?,?,'bulk',?,?,'manual','pending')").run('QA-COLLAB-'+i,'Synthetic '+i,today,today+'T00:00:00Z');
+
+for(let i=0;i<50;i++){DB.raw.prepare("INSERT INTO v2_outbound_orders(id,customer,order_date,expected_ship_at,created_at) VALUES(?,?,?,?,?)").run('QA-O-'+i,'Synthetic outbound',today,today,today);DB.raw.prepare("INSERT INTO v2_field_feedbacks(id,title,created_at) VALUES(?,?,?)").run('QA-F-'+i,'Synthetic feedback',today);}
+for(let i=0;i<200;i++){
+ DB.raw.prepare("INSERT INTO sop_records(id,kind,department,state,updated_at) VALUES(?,'need','bulk',?,?)").run('QA-N-'+i,JSON.stringify({status:'open',source_type:'inbound',source_id:'QA-I-'+i,links:[{outbound_id:i<10?'QA-O-'+i:'OTHER-'+i}]}),today);
+ for(let j=0;j<5;j++)DB.raw.prepare("INSERT INTO v2_attachments(id,related_doc_type,related_doc_id,attachment_category) VALUES(?,'sop_need',?,'work_material')").run('QA-A-'+i+'-'+j,'QA-N-'+i);
+}
+
+const server=http.createServer(async(req,res)=>{try{const chunks=[];for await(const c of req)chunks.push(c);const body=Buffer.concat(chunks);let action='';try{action=JSON.parse(body).action||'';}catch{}const started=performance.now(),r=await entry.fetch(new Request('http://'+req.headers.host+req.url,{method:req.method,headers:req.headers,...(req.method==='POST'?{body}:{})}),env),headers=Object.fromEntries(r.headers),raw=Buffer.from(await r.arrayBuffer()),bytes=gzipSync(raw);requests.push({url:req.url,action,status:r.status,rawBytes:raw.length,gzipBytes:bytes.length,appMs:performance.now()-started});res.writeHead(r.status,{...headers,'content-encoding':'gzip','content-length':bytes.length});res.end(bytes);}catch(e){res.writeHead(500);res.end(e.message);}});await new Promise(r=>server.listen(0,'127.0.0.1',r));const origin='http://127.0.0.1:'+server.address().port,browser=await chromium.launch({executablePath:'/usr/bin/chromium',headless:true,args:['--no-sandbox']}),results=[],errors=[];
+
+try{for(const width of [1440,390]){
+ const context=await browser.newContext({viewport:{width,height:900}});await context.addCookies([{name:cookie.split('=')[0],value:cookie.slice(cookie.indexOf('=')+1),url:origin}]);const page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));
+ await page.goto(origin+'/002/');await page.waitForFunction(()=>window.CKSession?.user&&document.querySelector('#page-main.active'));
+ const waitAction=action=>page.waitForResponse(r=>r.url()===origin+'/api'&&r.request().postDataJSON()?.action===action);
+ let response=waitAction('v2_outbound_order_list'),start=performance.now();await page.locator('#mainTabs [data-tab=outbound]').click();let data=await (await response).json();assert.equal(data.ok,true,data.error);assert.equal(data.total,50);await page.waitForFunction(()=>document.querySelectorAll('#outboundListBody .list-item').length===50);const readyMs=Math.round(performance.now()-start);
+ assert.equal(data.items.filter(x=>x.material_count===5).length,10);assert.equal(await page.locator('#obQueryBtn').isEnabled(),true);
+ const drawer=page.locator('#view-outbound .ck-filter-drawer');if(!await drawer.evaluate(el=>el.open))await drawer.locator('summary').click();
+ response=waitAction('v2_outbound_order_list');await page.locator('#obFilterHasMaterial').selectOption('1');data=await (await response).json();assert.equal(data.total,10);await page.waitForFunction(()=>document.querySelectorAll('#outboundListBody .list-item').length===10);assert.ok(data.items.every(x=>x.material_count===5));
+ response=waitAction('v2_outbound_order_list');await page.locator('#obFilterHasMaterial').selectOption('0');data=await (await response).json();assert.equal(data.total,40);await page.waitForFunction(()=>document.querySelectorAll('#outboundListBody .list-item').length===40);assert.ok(data.items.every(x=>x.material_count===0));
+ response=waitAction('v2_feedback_list');await page.locator('#mainTabs [data-tab=feedback]').click();data=await (await response).json();assert.equal(data.ok,true,data.error);assert.equal(data.total,50);await page.waitForFunction(()=>document.querySelectorAll('#feedbackListBody .list-item').length===50);
+ assert.equal(await page.evaluate(()=>typeof XLSX),'undefined');assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true);
+ results.push({width,outboundReadyMs:readyMs,outboundRows:50,withMaterial:10,withoutMaterial:40,feedbackRows:50});await page.screenshot({path:'/tmp/ck-outbound-query-'+width+'.png'});await context.close();
+}
+assert.deepEqual(errors,[]);fs.writeFileSync('/tmp/ck-outbound-query-browser.json',JSON.stringify({synthetic:true,results,errors,api:requests.filter(r=>['v2_outbound_order_list','v2_feedback_list'].includes(r.action))},null,2));console.log(JSON.stringify({results,errors},null,2));
+}finally{await browser.close();await new Promise(r=>server.close(r));DB.raw.close();}

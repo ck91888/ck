@@ -1,0 +1,57 @@
+# 采购发货同请求重试
+
+分支 `feature/fix-purchase-shipment-replay-20261103`，最初基线为测试 `0fd959318078ef4ad7ac4e94684d16476510f567`。后续按总管授权整合已审资料计数候选3f36d0e，见整合节。不合测试、不部署，不读写线上业务数据。
+
+## 根因与前后版本对照
+
+62bcf79（采购编辑修复前）与0fd9593（修复后）的完整 `v2_003_purchase_shipment_create` 处理函数逐字一致，SHA-256均为 `d4462dbd72f06242a121f0f3216145c2870fe90f5d16656a02ecaab9c80f817e`。两版本均已在合成Node/原生本地workerd D1复现：采购10，旧请求通过入口回执与快递号检查后，在读取实时累计前暂停；同key同内容另一请求登记8成功；旧请求恢复后比较8+8>10，误报超量。最终只有1条发货、数量8，问题不是此次采购编辑事务保护引入，也不存在该场景的重复库存变动。
+
+原路径只在入口及写批次未获行数时读取回执，事务前因状态、快递号、数量变化返回的分支漏了已提交回执；旧回执还未绑定内容，同key改数量等会错误返回旧成功。
+
+## 第一阶段
+
+复用仓库现有的内容签名回执工具：发货回执绑定规范化订单、方式、快递号、明确供应商或默认意图、预计日期、备注、真实操作人及按行ID排序的完整数量集。所有拒绝点重新核验匹配回执；无匹配回执仍执行原状态/快递号/真实超量验证，同key不同内容或不同action返回409冲突。响应不暴露签名。
+
+原SQL事务内的数量/状态/快递号/全局key占用守卫保留。发货、明细、订单状态和回执仍同一批次；回执改用严格INSERT，失败必须整体回滚，不忽略回执写入故障。新增中韩文冲突说明。
+
+历史无签名回执须与原发货头、原完整行数量、操作人名等匹配才可只读重放。供应商使用默认值的历史意图，只有当前默认与原保存值仍可核验一致才兼容，无法证明或记录损坏时拒绝，不重新创建发货。新签名回执则不受后续默认供应商变化影响。
+
+新增 `purchase-shipment-replay.test.mjs` 的5项真实登录API专项，修复前Node/D1均 **0 passed / 5 failed / 0 skipped**；修复后均 **5/0/0**。包括数量、重复快递号、取消/完成发生在入口回执读取后，以及同key改内容/异action冲突。加原采购流程、采购编辑并发的Node合集 **44/0/0**。原失败日志保留，本阶段尚待完整边界、故障、历史兼容、权限及全量回归，不代表独立审核放行。
+
+仅提交源码、合成测试和说明，不上传数据库、日志、凭据或真实个人/业务数据。本地证据在 `/workspace/scratch/ck-p1-test-runtime/shipment-replay-*`，包含修复前后日志和旧62bcf79确定性对照。
+
+首阶段提交 `541b90a9b6baeb002ba16257aa85adbf7c265357` 已推送并核远端；推送与查询初次返回延迟，原句柄最终确认成功，未盲目重复写入。
+
+## 第二阶段
+
+专项扩展为 **21项**，Node与原生本地workerd D1均 **21 passed / 0 failed / 0 skipped**。新增同key双写同时释放、同key改内容竞争、不同key合法独立登记、超量竞争仅一赢家、异key快递号冲突、未提交时取消/完成仍拒绝、收货与重试交错仍仅一条入库流水、回执落库故障全批回滚、无key旧接口、新回执多行重排/数字格式规范化、默认供应商后改、历史无签名回执可核验兼容/不确定时拒绝、坏回执不二次创建、权限及返岗/派审旗标。
+
+所有真实超量、不同key、不同action、无权限及无法证明的旧回执仍失败；回执读取不重新登记发货，不改库存和原审计。保存两个不同合法key各3/4时登记合计7、无库存流水；两key各6竞争采购10时只登记6且只有1条回执；真实收货8后仅有+8入库流水，重复收货不重复计入。此阶段只补充合成测试，业务源码仍与541b90a一致。全量、原失败D1回归和页面回归继续，未发布。
+
+## 整合候选
+
+扩展提交 `a2f7dc56b2725eab0d16fb995e623c63d989a7c7` 已推送。随后无冲突整合独立QA已审资料候选 `3f36d0ebc4e00b670dac8a03efe5e90022388afc`，合并提交 `9a38f1a71607156b4af39985b9aa2e8c30e966e6` 已推送。材料计数、分页与采购编辑保护原样保留；本批发货业务源码仍与541b90a相同。四类相关Node **62/0/0**。
+
+整合时前一轮单支全量仍在途，停止命令未匹配进程；该轮虽最终1701/0/0，但可能跨源码切换，明确不作为最终整合证明。保留其日志 `shipment-replay-full.log`，在固定9a38f1a上重新执行全量及D1合集。
+
+- 固定整合源码全量 **1715 passed / 0 failed / 0 skipped / 0 cancelled**，约304秒。
+- 原生本地workerd D1四类合集 **62/0/0**，包括新发货21项、原采购编辑21项、资料null14项、出库性能分页6项。原先阻断的采购同key重试用例在新整合版通过。资料候选说明中保留的失败属于修复前历史，本候选以此处新证据为准，未删旧失败记录。
+- 构建及 `git diff --check` 通过；资料旧/新30份API全文对照也再次通过，仅接受已审null计数修正及其分页/筛选后果。
+- 新增实际构建 `/003` 的 `purchase-shipment-replay-browser.mjs` 首轮通过1440/390两宽、各并发及丢响应2场景，共4组。真实表单输入8、请求在数量查询前暂停、另一相同key请求提交后，原表单成功且只有1条发货；丢弃已提交的HTTP响应后保留表单及请求key，重试关闭表单且仍1条发货。每场景另验证改内容请求HTTP409及中韩文提示，库存始终0、无浏览器/服务器异常。桌面Chromium视口，不宣称实体手机或国内网络。
+
+此阶段只追加合成浏览器脚本及本记录，业务源码不再改动；其余六份既有页面脚本串行回归继续。证据均在本地 `/workspace/scratch/ck-p1-test-runtime/shipment-replay-*`，不提交日志、PDF、数据库、凭据或图片。
+
+## 最终交审
+
+浏览器与整合证据提交 `8e22374` 已推送。七份脚本串行均首次 exit 0：`purchase-shipment-replay-browser.mjs`、`purchase-edit-browser.mjs`、`material-count-null-browser.mjs`、`outbound-list-browser.mjs`、`work-print-null-browser.mjs`、`photo-compression-browser.mjs`、`work-plan-list-browser.mjs`。覆盖新增发货表单4组，采购编辑与资料null的PC/手机表单，原出库筛选，打印真实PDF，照片压缩/条码/QR及取消失败重试，以及作业计划2功能流程、9视觉矩阵（含320/390）。没有改旧脚本等待或断言，未宣称实体手机、国内网络或线上数据验收。
+
+最终固定整合源码9a38f1a的全量 **1715/0/0/0（通过/失败/跳过/取消）**，原生D1四类合集 **62/0/0**。其后只新增已通过的新浏览器脚本与说明，业务逻辑没有再改动。修复前、阶段失败、旧版确定性复现和不计入最终证明的在途1701日志均保留，不把旧问题或运行中的版本切换隐藏为通过。当前无未关闭的开发自测失败，仍待固定独立QA核验精确最终SHA后才能考虑发布。
+
+```sh
+CK_JSDOM_MODULE=/已安装依赖/node_modules/jsdom/lib/api.js node --test --test-concurrency=2 tests/*.test.mjs
+CK_SHIPMENT_REPLAY_NATIVE_D1=true CK_PURCHASE_EDIT_NATIVE_D1=true CK_MATERIAL_NULL_NATIVE_D1=true CK_OUTBOUND_PAGE_NATIVE_D1=true CODEX_PRIMARY_RUNTIME_NODE_MODULES=/已安装依赖/node_modules node --test --test-concurrency=1 tests/purchase-shipment-replay.test.mjs tests/purchase-edit-atomic.test.mjs tests/material-count-null.test.mjs tests/outbound-page-material.test.mjs
+node worker-v2/build-sop-staging.mjs
+CODEX_PRIMARY_RUNTIME_NODE_MODULES=/已安装依赖/node_modules node tests/purchase-shipment-replay-browser.mjs
+```
+
+完整证据：`shipment-replay-integrated-full.log`、`shipment-replay-integrated-d1.log`、`shipment-replay-integrated-api-diff.log`、`shipment-replay-final-*-browser.log`、`shipment-replay-final-browser-results.json`，均在本地上述证据目录，不纳入公开源码。当前候选包含已审资料修复及本发货修复，不改部署配置、schema、main或真实历史数据，尚未合测试、部署。
