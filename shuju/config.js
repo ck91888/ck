@@ -6,6 +6,7 @@ var SHUJU_KEY_STORAGE = "ck_v2_shuju_k";
 
 // ---- Label 字典 ----
 var JOB_TYPE_LABELS = {
+  office_order_processing: '订单处理（仅工时）',
   unload: "卸货",
   inbound_direct: "代发入库",
   inbound_bulk: "大货入库",

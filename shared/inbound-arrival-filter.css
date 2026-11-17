@@ -1,0 +1,24 @@
+body.ck-system[data-app="002"] #view-inbound .ck-inbound-filters{display:block;padding:8px 0;margin:8px 0;border:0;background:transparent;white-space:normal}
+.ck-inbound-filters [data-inbound-dates]{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;align-items:start}
+.ck-inbound-filters .ck-date-filter-group{min-width:0}
+.ck-inbound-filters .ck-date-filter-heading{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:28px;margin-bottom:4px}
+.ck-inbound-filters .ck-date-filter-heading>span{font-size:14px;color:#223C36;word-break:keep-all}
+.ck-inbound-filters .ck-date-filter-heading small{font-size:12px;color:#52675f;margin-left:7px;white-space:nowrap}
+.ck-inbound-filters .ck-date-filter-actions{display:flex;align-items:center;gap:4px}
+.ck-inbound-filters .ck-date-pair{display:grid;grid-template-columns:minmax(0,1fr) 14px minmax(0,1fr);align-items:center;gap:6px}
+.ck-inbound-filters .ck-date-pair>span{color:#52675f;text-align:center;font-size:14px}
+body.ck-system[data-app="002"] #view-inbound .ck-inbound-filters input[type=date]{display:block;width:100%;min-width:0;max-width:100%;height:38px;min-height:38px;padding:5px 8px;margin:0;font-size:14px}
+body.ck-system[data-app="002"] #view-inbound .ck-inbound-filters [data-clear-arrival]{min-height:26px;height:26px;padding:2px 7px;margin:0;background:transparent;color:#18564A;border:1px solid #c7d7ce;border-radius:4px;font-size:12px;line-height:1.4;white-space:nowrap}
+.ck-inbound-filters .ck-arrival-help{position:relative;margin:0;padding:0}
+.ck-inbound-filters .ck-arrival-help>summary{list-style:none;cursor:pointer;border:1px solid #c7d7ce;border-radius:50%;width:26px;height:26px;display:flex;align-items:center;justify-content:center;font-size:13px;color:#18564A;padding:0;min-height:0}
+.ck-inbound-filters .ck-arrival-help>summary::-webkit-details-marker{display:none}
+.ck-inbound-filters .ck-arrival-help-panel{position:absolute;right:0;top:32px;z-index:5;width:320px;max-width:calc(100vw - 48px);padding:12px;background:#fff;border:1px solid #c7d7ce;border-radius:6px;box-shadow:0 4px 12px #173d341a;font-size:13px;line-height:1.6;word-break:keep-all;overflow-wrap:anywhere}
+.ck-inbound-filters .ck-arrival-filter-error{font-size:14px;color:#972f28;margin:8px 0}
+.ck-inbound-filters .ck-inbound-filter-tools{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:12px}
+body.ck-system[data-app="002"] #view-inbound .ck-inbound-filter-tools input,body.ck-system[data-app="002"] #view-inbound .ck-inbound-filter-tools select{min-height:38px;height:38px;max-width:100%;min-width:0;margin:0;font-size:14px}
+body.ck-system[data-app="002"] #view-inbound .ck-inbound-filter-tools button{min-height:38px;height:auto;margin:0;padding:6px 12px;font-size:14px;white-space:normal;word-break:keep-all}
+.ck-inbound-filter-tools .filter-label{font-size:13px;white-space:nowrap}
+@media(max-width:1100px){.ck-inbound-filters [data-inbound-dates]{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:700px){.ck-inbound-filters [data-inbound-dates]{grid-template-columns:1fr;gap:14px}.ck-inbound-filters .ck-date-filter-heading{min-height:48px}.ck-inbound-filters .ck-date-filter-heading>span{font-size:16px}.ck-inbound-filters .ck-date-filter-heading small{display:block;margin:2px 0 0}.ck-inbound-filters .ck-inbound-filter-tools{display:grid;grid-template-columns:1fr 1fr;gap:10px}.ck-inbound-filter-tools #ibFilterCustomer,.ck-inbound-filter-tools .filter-label,.ck-inbound-filter-tools #inboundFilterAccounted,.ck-inbound-filter-tools #ibExportBtn{grid-column:1/-1;width:100%}.ck-inbound-filter-tools .filter-label{margin:0 0 -4px}body.ck-system[data-app="002"] #view-inbound .ck-inbound-filters input[type=date],body.ck-system[data-app="002"] #view-inbound .ck-inbound-filter-tools input,body.ck-system[data-app="002"] #view-inbound .ck-inbound-filter-tools select{height:48px;min-height:48px;font-size:16px}body.ck-system[data-app="002"] #view-inbound .ck-inbound-filter-tools button{min-height:48px;font-size:14px}body.ck-system[data-app="002"] #view-inbound .ck-inbound-filters [data-clear-arrival]{height:48px;min-height:48px;padding:6px 10px;font-size:13px}.ck-inbound-filters .ck-arrival-help>summary{height:48px;width:48px;border-radius:6px}.ck-inbound-filters .ck-arrival-help-panel{top:54px;max-width:calc(100vw - 36px)}}
+@media(max-width:400px){.ck-inbound-filters .ck-date-pair{grid-template-columns:1fr;gap:4px}.ck-inbound-filters .ck-date-pair>span{font-size:12px;line-height:1}}
+@media(max-width:350px){.ck-inbound-filter-tools #ibFilterStatus,.ck-inbound-filter-tools #ibFilterBizClass{grid-column:1/-1;width:100%}}

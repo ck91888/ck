@@ -1,0 +1,27 @@
+.ck-check-workbench .card{max-width:1100px;margin-inline:auto}
+.ck-check-workbench label,.ck-check-workbench button{white-space:normal;word-break:normal;overflow-wrap:anywhere}
+.ck-check-workbench small[lang=ko],.ck-check-workbench label>small{display:block;font-size:13px;font-weight:400;line-height:1.5;word-break:keep-all}
+.ck-check-workbench #vsBatchHeader{font-size:17px;font-weight:700;overflow-wrap:anywhere;margin:12px 0}
+.ck-check-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;border-block:1px solid #D1DED8;padding:16px 0}
+.ck-check-stats>div{display:flex;flex-direction:column;gap:2px}.ck-check-stats strong{font-size:28px;font-variant-numeric:tabular-nums}
+.ck-check-caption{font-size:13px;color:#526960;line-height:1.6}.ck-check-caption [lang=ko]{word-break:keep-all}
+.ck-check-inputs{display:grid;grid-template-columns:1fr 1fr;gap:16px}.ck-check-inputs label:last-child{grid-column:1/-1}
+.ck-check-workbench .ck-check-inputs input,.ck-check-workbench .ck-check-inputs select{width:100%;min-height:48px;font-size:17px;margin-top:6px}
+.ck-check-workbench .ck-check-inputs #vsBarcodeInput{font-size:22px;min-height:56px}
+.ck-check-scan-actions{display:flex;gap:12px;flex-wrap:wrap;margin-top:12px}.ck-system .ck-check-workbench button{min-height:48px}.ck-check-workbench .ck-check-scan-actions button,.ck-check-workbench #vsRetry,.ck-check-workbench #vsFinish{padding:10px 20px;font-size:16px;line-height:1.5}
+.ck-check-result{border-left:4px solid #18564A;background:#EEF3F1;padding:12px;margin-top:12px;overflow-wrap:anywhere;white-space:pre-line}.ck-check-result.err,.ck-check-result.warn{border-color:#976315;background:#FFF6E4}.ck-check-result:empty{display:none}
+.ck-check-workbench #vsState{font-weight:700}.ck-check-workbench #vsQueue{background:#FFF6E4;padding:16px;margin-top:12px}.ck-check-workbench #vsQueueItems{max-height:240px;overflow:auto;padding-left:22px}.ck-check-workbench #vsQueueItems li{padding:5px 0;overflow-wrap:anywhere}
+.ck-check-log{display:grid;grid-template-columns:auto minmax(0,1fr);gap:6px 12px;padding:14px 0;border-bottom:1px solid #D1DED8}.ck-check-log p{grid-column:1/-1;margin:0;color:#526960;font-size:14px;overflow-wrap:anywhere}.ck-check-log strong{overflow-wrap:anywhere}.ck-check-status{font-size:13px;border-radius:4px;padding:3px 6px;background:#EEF3F1;align-self:start}.ck-check-status.warn{background:#FFF0CA;color:#76520B}
+.ck-check-workbench #vsFinishForm textarea{min-height:90px;width:100%}.ck-check-workbench #vsCloseBatchLabel{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.ck-check-workbench #vsCloseBatchLabel[hidden]{display:none}.ck-check-workbench #vsCloseBatchLabel input{width:auto;margin:0}
+.ck-check-workbench [role=alert]{color:#8D401C;overflow-wrap:anywhere}.ck-check-workbench #vsFinish{background:#18564A;color:white}
+@media(max-width:600px){.ck-check-workbench .ck-check-inputs{grid-template-columns:minmax(0,1fr)}.ck-check-workbench .ck-check-stats{grid-template-columns:repeat(2,minmax(0,1fr))}.ck-check-workbench .ck-check-scan-actions>button{flex:1;min-width:100px}.ck-check-workbench .ck-check-log{grid-template-columns:minmax(0,1fr)}.ck-check-workbench .ck-check-status{justify-self:start}.ck-check-workbench .card{padding:16px}.ck-check-workbench #vsFinish{width:100%}}
+
+.ck-check-workbench #vsHandoverHint{word-break:keep-all;overflow-wrap:anywhere;line-height:1.7}
+.ck-system #vsWorkingCard #vsPalletInput,.ck-system #vsWorkingCard #vsOperator{min-height:48px;font-size:17px}
+.ck-system #vsWorkingCard .ck-check-scan-actions>.btn{width:auto;margin:0;min-width:150px;text-align:center}
+.ck-system #vsActionCard #vsFinish,.ck-system #vsWorkingCard #vsRetry{width:auto;text-align:center}
+.ck-check-workbench #vsBatchHeader{word-break:keep-all}
+.ck-system:has(.ck-check-workbench.active) .ck-workflow button{min-height:48px;word-break:keep-all}
+.ck-system:has(.ck-check-workbench.active) .ck-workflow [data-staff-people] button{min-width:54px;flex-shrink:0;white-space:nowrap}
+.ck-system:has(.ck-check-workbench.active) .ck-workflow [data-staff-status]{word-break:keep-all;overflow-wrap:anywhere}
+@media(max-width:600px){.ck-system #vsWorkingCard .ck-check-scan-actions>.btn{min-width:110px;flex:1}.ck-system #vsActionCard #vsFinish{width:100%}}

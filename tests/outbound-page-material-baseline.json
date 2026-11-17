@@ -1,0 +1,149 @@
+{
+  "source": "3cb5b02c28e9b2242b95ae67893f4534b1c9ae43",
+  "cases": {
+    "default": {
+      "sha256": "6bb6023e9b58ef6a7d4f79f06305cfa34b8034d7b2c6d94cf4291c35847df98a",
+      "total": 60,
+      "returned": 50
+    },
+    "second-page": {
+      "sha256": "2f1d3bd5fa9b2cb208269981bae359294c64b5ca7a3f0eb7bc7144b40767e281",
+      "total": 60,
+      "returned": 10
+    },
+    "last-page": {
+      "sha256": "1975e67d84f5ad0f576e38e77d478be513ed2c7db709b05f18f35e33e08860d6",
+      "total": 60,
+      "returned": 1
+    },
+    "past-end": {
+      "sha256": "1be06b5229aecabb35807322950cb08deb91d35b81e7748447473d2f97fef9b3",
+      "total": 60,
+      "returned": 0
+    },
+    "one": {
+      "sha256": "b668394f3d95a857872ee854f7e3ed1a6fd0dad49ea43a2dcc75935cf07e6f4b",
+      "total": 60,
+      "returned": 1
+    },
+    "max": {
+      "sha256": "b161136cca4942cda89b5e19c035c265e971e8220080f83a1aa9760495f9a2d4",
+      "total": 60,
+      "returned": 60
+    },
+    "coerced-page": {
+      "sha256": "bf52be4a877a10809d67633021cd30d435dedb644f527fa13b43cc9008642c6a",
+      "total": 60,
+      "returned": 7
+    },
+    "date-range": {
+      "sha256": "71db760dceb1cab825190fea1bc41c47689490b433b192739b3d75c1a2fc19a1",
+      "total": 40,
+      "returned": 40
+    },
+    "order-date": {
+      "sha256": "4d40bf3dd92f0287281f26fd3f127e505ceaa6525bd1c7a6e5b51bb7c77f0522",
+      "total": 44,
+      "returned": 44
+    },
+    "unknown-date-basis": {
+      "sha256": "6bb6023e9b58ef6a7d4f79f06305cfa34b8034d7b2c6d94cf4291c35847df98a",
+      "total": 60,
+      "returned": 50
+    },
+    "cancelled": {
+      "sha256": "167c9e7b3494988866701192f83324d59dadeb6dd6add4ba27a6fa1a5e020040",
+      "total": 5,
+      "returned": 5
+    },
+    "accounted-0": {
+      "sha256": "53dfeecfe7eb9eea152dbcd53a5caf73888122ee2d746275de3f8f82d763a2e4",
+      "total": 40,
+      "returned": 40
+    },
+    "accounted-1": {
+      "sha256": "814bd47762590fcc3214db7cf05c65e64940bec29410c49fcc72f2ea8b1b0a67",
+      "total": 20,
+      "returned": 20
+    },
+    "stock-0": {
+      "sha256": "53dfeecfe7eb9eea152dbcd53a5caf73888122ee2d746275de3f8f82d763a2e4",
+      "total": 40,
+      "returned": 40
+    },
+    "stock-1": {
+      "sha256": "814bd47762590fcc3214db7cf05c65e64940bec29410c49fcc72f2ea8b1b0a67",
+      "total": 20,
+      "returned": 20
+    },
+    "bulk": {
+      "sha256": "aa7268e9f735d11ddb781940c87431dadfae422259283a911cbef1558c9bc325",
+      "total": 20,
+      "returned": 20
+    },
+    "customer": {
+      "sha256": "9d6a95638be63472afc355d81cee73904ee756a0f11b2801933a90d6da47a5bd",
+      "total": 20,
+      "returned": 20
+    },
+    "combined": {
+      "sha256": "392387b8a444e65f963f2ba976d61871a4d77e4f5066ff0654eb3712ede80018",
+      "total": 20,
+      "returned": 3
+    },
+    "empty": {
+      "sha256": "c3fb8732ffc90b669bf30c90520a6b650e2ab3f6b8ae28cea01698245633b7d0",
+      "total": 0,
+      "returned": 0
+    },
+    "has-1": {
+      "sha256": "52aac6170db8d92ba1dc4c10bbfe7006858905e34cb577f8947f557b724ddc93",
+      "total": 14,
+      "returned": 14
+    },
+    "has-0": {
+      "sha256": "e3a7ae3ad15d565deccbfca7b46dfbceef7c3bd08aa73c0f3d2cec52514e5630",
+      "total": 46,
+      "returned": 46
+    },
+    "has-unrecognized": {
+      "sha256": "6bb6023e9b58ef6a7d4f79f06305cfa34b8034d7b2c6d94cf4291c35847df98a",
+      "total": 60,
+      "returned": 50
+    }
+  },
+  "modes": {
+    "legacy": {
+      "sha256": "1a6f8d44117b7406bcf748d3fa7673b5136fdd0a62b04fdac7c41a7b897145c9",
+      "ok": true
+    },
+    "legacy-has-1": {
+      "sha256": "fb199aac63011f86e29490e69a489ad23458a3ea9184c842810de423355931a7",
+      "ok": true
+    },
+    "legacy-has-0": {
+      "sha256": "411973ad14152ab2e8553b5ccbf97b7478cd8615d45023296c19ddf4c4239b4d",
+      "ok": true
+    },
+    "non-staging": {
+      "sha256": "e68751dab3b8f3d23102ee17146c3438164fc2821bfe882f1bcce7bd9635af1f",
+      "ok": false
+    },
+    "load-trip": {
+      "sha256": "a135d3626a26b27da4c2d3b0599554d9669e7bb3725edc1155b422ea4de23fa4",
+      "ok": true
+    },
+    "A": {
+      "sha256": "6bb6023e9b58ef6a7d4f79f06305cfa34b8034d7b2c6d94cf4291c35847df98a",
+      "ok": true
+    },
+    "guest": {
+      "sha256": "716ace1697278de3193825b8c3fa327db29c933c98c9c11eb48fb1897c7c6f06",
+      "ok": false
+    },
+    "limited-field": {
+      "sha256": "6bb6023e9b58ef6a7d4f79f06305cfa34b8034d7b2c6d94cf4291c35847df98a",
+      "ok": true
+    }
+  }
+}

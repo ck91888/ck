@@ -1,0 +1,6 @@
+import {ownedHomeFixture} from './field-owned-home-fixture.mjs';
+export async function executionFixture(t){const f=await ownedHomeFixture();t?.after(()=>f.DB.raw.close());
+ f.DB.raw.prepare("UPDATE ck_access_sessions SET departments='[\"bulk\"]' WHERE scope='field'").run();
+ f.historical=async(department,extra={})=>{const n=await f.ok('office','sop_need_create',{department,source_type:'inventory',supply_chain_no:'SYNTHETIC-EXECUTION-'+crypto.randomUUID(),customer:'合成协同作业客户',title:'合成库存翻新装箱',instructions:'由大货按单操作执行',...extra});const row=f.DB.raw.prepare('SELECT state FROM sop_records WHERE id=?').get(n.id),state=JSON.parse(row.state);delete state.execution_department;f.DB.raw.prepare('UPDATE sop_records SET state=? WHERE id=?').run(JSON.stringify(state),n.id);return n;};
+ f.daily=async(key,departments=['bulk'])=>{const p=(await f.ok('office','sop_attendance_register',{name:'合成日当派审'+key,agency:'가온'})).person;await f.ok('office','sop_attendance_checkin',{badge:p.badgeId,agency:p.agency});await f.ok('office','sop_daily_dispatch_update',{person_id:p.id,badge:p.badgeId,enabled:true,version:0,departments,reason:'隔离执行规则测试授权'});await f.ok(key,'sop_login',{badge:p.badgeId});f.people[key]=p;return p;};return f;
+}

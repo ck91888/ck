@@ -35,6 +35,11 @@ body {
 .app-header h1 { font-size: 17px; font-weight: 700; }
 .app-header .header-right { display: flex; align-items: center; gap: 12px; font-size: 13px; color: #666; }
 .app-header .header-right a { color: #1677ff; text-decoration: none; font-size: 13px; }
+/* Wrapped office identity/time controls must not cover the job tabs on phones. */
+@media (max-width: 700px) {
+  .app-header { height: auto; min-height: 56px; flex-wrap: wrap; gap: 10px; }
+  .app-header .header-right { flex-wrap: wrap; gap: 8px 12px; max-width: 100%; }
+}
 .header-btn { background: none; border: 1px solid #d9d9d9; border-radius: 4px; padding: 4px 10px; font-size: 12px; cursor: pointer; color: #555; }
 .header-btn:hover { border-color: #1677ff; color: #1677ff; }
 
@@ -257,4 +262,104 @@ body {
   background: #b71c1c;
   border-color: #b71c1c;
   color: #fff;
+}
+
+.report-gap { display:block; color:#925000; font-size:12px; max-width:28em; white-space:normal; overflow-wrap:anywhere; }
+.report-departments { display:flex; flex-wrap:wrap; gap:16px; }
+.report-departments>div { flex:1 1 180px; padding:12px; border:1px solid #ddd; border-radius:8px; }
+#ordersReportHint,#whReportHint { white-space:normal; overflow-wrap:anywhere; line-height:1.7; }
+#orderDetailBody code { white-space:pre-wrap; overflow-wrap:anywhere; }
+#orderDetailBody table { table-layout:fixed; width:100%; }
+#orderDetailBody td { overflow-wrap:anywhere; }
+@media(max-width:600px){
+ .filter-row input,.filter-row select { max-width:100%; min-width:0; }
+ .filter-row label { max-width:100%; }
+ #ordersDateBasis { display:block; width:100%; }
+ .stat-row { grid-template-columns:repeat(2,minmax(0,1fr)); }
+ #ordersBody td,#whSegmentsBody td { max-width:210px; white-space:normal; overflow-wrap:anywhere; }
+}
+@media(max-width:600px){
+ #tab-orders .data-table thead,#tab-workhours .section-card:last-child thead { display:none; }
+ #ordersBody,#ordersBody tr,#ordersBody td,#whSegmentsBody,#whSegmentsBody tr,#whSegmentsBody td { display:block; width:100%; max-width:none; }
+ #ordersBody tr,#whSegmentsBody tr { padding:10px 0; border-bottom:2px solid #e4e9ef; }
+ #ordersBody td,#whSegmentsBody td { display:grid; grid-template-columns:6.5em minmax(0,1fr); gap:8px; padding:5px 0; border:0; }
+ #ordersBody td::before,#whSegmentsBody td::before { content:attr(data-label); color:#666; font-size:12px; }
+ .report-gap { grid-column:2; }
+ #orderDetailBody .data-table th,#orderDetailBody .data-table td { padding:5px 3px; font-size:12px; }
+}
+#ordersReportHint,#whReportHint,#orderDetailBody .section-hint { color:#50635d; font-size:12px; }
+#tab-orders .row-action { white-space:nowrap; }
+@media(min-width:601px){ #tab-orders .data-table { min-width:1100px; } }
+@media(max-width:600px){
+ #orderDetailBody .report-detail-facts,#orderDetailBody .report-detail-facts tbody { display:block; }
+ #orderDetailBody .report-detail-facts tr { display:grid; grid-template-columns:minmax(0,.9fr) minmax(0,1.1fr); }
+ #orderDetailBody .report-detail-facts th,#orderDetailBody .report-detail-facts td { display:block; white-space:normal; overflow-wrap:anywhere; width:auto; }
+ #orderDetailBody .report-detail-records thead { display:none; }
+ #orderDetailBody .report-detail-records tbody,#orderDetailBody .report-detail-records tr { display:block; }
+ #orderDetailBody .report-detail-records td { display:block; white-space:normal; }
+ #orderDetailBody .report-detail-records td::before { content:attr(data-label); display:block; color:#50635d; font-weight:bold; }
+}
+
+/* Orders: keep dense task facts separate from whole-task output and period hours. */
+body.ck-system[data-app="shuju"] #appWrap { max-width:1680px; }
+#tab-orders { max-width:1600px; padding-inline:0; min-width:0; }
+#tab-orders .section-card { min-width:0; }
+#tab-orders .orders-pager { background:transparent; border:0; padding:10px 0; margin:0; }
+.orders-scroll-hint { font-size:12px; color:#52675f; }
+.orders-table-wrap { max-width:100%; overflow-x:auto; isolation:isolate; border:1px solid #d1ded8; border-radius:6px; }
+#tab-orders .orders-table { table-layout:fixed; min-width:1260px; border-collapse:separate; border-spacing:0; }
+.orders-col-date { width:100px; }.orders-col-doc { width:185px; }.orders-col-type { width:120px; }
+.orders-col-dept { width:108px; }.orders-col-status { width:82px; }.orders-col-people { width:56px; }
+.orders-col-hours { width:108px; }.orders-col-time { width:132px; }.orders-col-results { width:300px; }.orders-col-actions { width:69px; }
+#tab-orders .orders-table td,#tab-orders .orders-table th { padding:10px 9px; line-height:1.5; }
+#tab-orders .orders-table td { background:#fff; overflow-wrap:break-word; }
+#tab-orders .orders-table tr:hover td { background:#f6f9f7; }
+#tab-orders .orders-table .orders-actions { position:sticky; right:0; z-index:2; box-shadow:-5px 0 7px -6px #52675f; border-left:1px solid #d1ded8; text-align:center; }
+#tab-orders .orders-table th.orders-actions { z-index:3; background:#f2f7f4; }
+#tab-orders .orders-actions .row-action { margin:0; color:#18564a; }
+.orders-date,.orders-number,.orders-hours { font-variant-numeric:tabular-nums; }
+.orders-date,.orders-number { white-space:nowrap; }
+.orders-secondary,.orders-dispatcher { display:block; font-size:12px; color:#52675f; margin-top:3px; }
+.orders-clamp { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden; overflow-wrap:anywhere; word-break:normal; }
+.orders-dispatcher { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.orders-time>span { display:block; white-space:nowrap; font-variant-numeric:tabular-nums; }
+.orders-time small { color:#52675f; }
+.orders-result summary,.orders-reference summary { cursor:pointer; list-style:none; border-radius:3px; }
+.orders-result summary::-webkit-details-marker,.orders-reference summary::-webkit-details-marker { display:none; }
+.orders-result-scope { display:block; color:#52675f; font-size:11px; margin-bottom:4px; }
+.orders-result-preview { display:block; }
+.orders-metric { display:flex; gap:8px; justify-content:space-between; min-width:0; line-height:20px; }
+.orders-metric>span { overflow:hidden; white-space:nowrap; text-overflow:ellipsis; min-width:0; }
+.orders-metric>b { flex-shrink:0; font-variant-numeric:tabular-nums; font-weight:600; }
+.orders-metric small { font-size:11px; color:#52675f; font-weight:400; }
+.orders-result-toggle,.orders-reference-toggle { display:block; color:#18564a; font-size:12px; margin-top:4px; text-decoration:underline; text-underline-offset:3px; }
+.orders-collapse { display:none; }
+.orders-result[open] .orders-expand,.orders-result[open] .orders-result-preview { display:none; }
+.orders-result[open] .orders-collapse { display:inline; }
+.orders-result-full { max-height:360px; overflow-y:auto; padding:8px 2px; margin-top:8px; border-top:1px solid #d1ded8; }
+.orders-result-full .orders-metric>span { white-space:normal; overflow:visible; overflow-wrap:anywhere; }
+.orders-result-original { margin-top:8px; white-space:pre-wrap; overflow-wrap:anywhere; font-size:12px; color:#52675f; }
+.orders-result-text { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:3; overflow:hidden; overflow-wrap:anywhere; }
+.orders-reference>div { max-height:200px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; padding-top:8px; }
+.orders-reference[open] .orders-reference-toggle { font-size:0; }
+.orders-reference[open] .orders-reference-toggle::after { content:'收起单号 / 派审员'; font-size:12px; }
+@media(max-width:600px){
+ #tab-orders .orders-scroll-hint { flex-basis:100%; }
+ #tab-orders .orders-table-wrap { border:0; overflow:visible; }
+ #tab-orders .orders-table { min-width:0; display:block; }
+ #tab-orders .orders-table colgroup { display:none; }
+ #ordersBody tr { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:10px 14px; padding:16px 0; }
+ #tab-orders #ordersBody td { display:block; padding:0; min-width:0; max-width:none; background:transparent; }
+ #ordersBody td::before { display:block; margin-bottom:3px; font-size:11px; color:#52675f; }
+ #ordersBody .orders-doc,#ordersBody .orders-results,#ordersBody .orders-time,#ordersBody .orders-actions,#ordersBody td[colspan] { grid-column:1/-1; }
+ #ordersBody td:nth-child(5) { grid-column:2; grid-row:1; }
+ #tab-orders #ordersBody .orders-actions { position:static; border:0; box-shadow:none; text-align:left; }
+ #ordersBody .orders-actions::before { display:none; }
+ #ordersBody .orders-actions button { width:100%; }
+ #ordersBody .orders-time>span { display:inline-block; margin-right:10px; }
+ #ordersBody .orders-time>.orders-secondary { display:none; }
+ #ordersBody .orders-result-scope { margin-bottom:2px; }
+ #ordersBody .orders-clamp { -webkit-line-clamp:2; }
+ #tab-orders .filter-row { gap:8px; padding-inline:8px; }
+ #tab-orders .orders-pager { padding-inline:0; }
 }

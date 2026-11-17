@@ -413,6 +413,7 @@
         <div class="detail-field"><b>已用时 / 경과 시간:</b> <span id="pickWorkingElapsed" style="font-family:monospace;font-weight:700;color:#1677ff;">0m 0s</span></div>
         <div class="detail-field"><b>本次拣货单 / 이번 피킹번호:</b> <span id="pickWorkingDocCount">0</span> 张/장</div>
       </div>
+      <div id="pickPlannedWorkload"></div>
       <div id="pickWorkingDocList" style="margin-top:8px;font-size:13px;"></div>
     </div>
 
@@ -442,10 +443,6 @@
       <div id="pickWorkers" class="workers-panel"><span class="muted">--</span></div>
     </div>
 
-    <div class="interrupt-bar">
-      <button class="btn btn-warning btn-sm" onclick="interruptToUnload()">挂起→临时卸货 / 임시 하차</button>
-      <button class="btn btn-warning btn-sm" onclick="interruptToLoad()">挂起→临时装货 / 임시 상차</button>
-    </div>
   </div>
 </div>
 
@@ -545,10 +542,6 @@
       <button class="btn btn-danger" id="bulkFinishBtn" onclick="finishBulkJob(this)">完成操作 / 작업 완료</button>
     </div>
 
-    <div class="interrupt-bar">
-      <button class="btn btn-warning btn-sm" onclick="interruptToUnload()">挂起→临时卸货 / 임시 하차</button>
-      <button class="btn btn-warning btn-sm" onclick="interruptToLoad()">挂起→临时装货 / 임시 상차</button>
-    </div>
   </div><!-- /bulkStateWorking -->
 </div>
 
@@ -711,7 +704,6 @@
     <button class="btn btn-primary mt-10" onclick="saveOutboundLoadResult(this)">保存并完成 / 저장 후 완료</button>
   </div>
   <div class="interrupt-bar" id="loadInterruptBar" style="display:none;">
-    <button class="btn btn-warning btn-sm" onclick="interruptToUnload()">挂起→临时卸货 / 임시 하차</button>
   </div>
 </div>
 
@@ -793,7 +785,7 @@
     <button onclick="filterIssues('responded',this)">已反馈/완료</button>
   </div>
   <div style="padding:8px 12px 0;">
-    <select id="issueBizFilter" onchange="loadIssueList()" style="width:100%;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:13px;">
+    <select id="issueBizFilter" onchange="_issueListPage=0;loadIssueList()" style="width:100%;padding:6px 8px;border:1px solid #ddd;border-radius:6px;font-size:13px;">
       <option value="">全部业务/전체 업무</option>
       <option value="direct_ship">代发/직배송</option>
       <option value="bulk">大货/대량화물</option>
@@ -876,10 +868,6 @@
       <button class="btn btn-danger" id="gjFinishBtn" onclick="finishGenericJob(this)">结束 / 종료</button>
     </div>
 
-    <div class="interrupt-bar">
-      <button class="btn btn-warning btn-sm" onclick="interruptToUnload()">挂起→临时卸货 / 임시 하차</button>
-      <button class="btn btn-warning btn-sm" onclick="interruptToLoad()">挂起→临시 상차</button>
-    </div>
   </div><!-- /gjStateWorking -->
 </div>
 
@@ -907,6 +895,11 @@
 <input type="file" id="photoInputAlbum" accept="image/*" multiple style="display:none;" onchange="handlePhotoUpload(this)">
 
 <script src="config.js?v=20260526d-date-only"></script>
+<script src="../shared/document-labels.js"></script>
+<link rel="stylesheet" href="../shared/photo-upload.css">
+<script src="../shared/photo-upload.js"></script>
 <script src="app.js?v=20260526d-date-only"></script>
+<script src="../shared/sop-rollout.js?v=20260917"></script>
+<script src="../shared/sop-entry.js?v=20260917"></script>
 </body>
 </html>

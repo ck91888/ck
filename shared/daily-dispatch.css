@@ -1,0 +1,38 @@
+body.ck-system dialog.ck-dispatch-permissions{box-sizing:border-box;width:min(960px,calc(100vw - 32px));max-width:none;max-height:calc(100dvh - 32px);margin:auto;padding:24px;border:1px solid #D1DED8;border-radius:12px;background:#fff;color:#223C36;font:16px/1.5 'Microsoft YaHei','Malgun Gothic',sans-serif;overflow:auto;overflow-wrap:anywhere;word-break:keep-all}
+.ck-dispatch-permissions::backdrop{background:#173d3455}
+body.ck-system .ck-dispatch-permissions *{box-sizing:border-box;min-width:0}
+body.ck-system .ck-dispatch-permissions header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:16px}
+body.ck-system .ck-dispatch-permissions h2{margin:0;font-size:23px;line-height:1.4}
+body.ck-system .ck-dispatch-permissions h2 small{display:block;font-size:15px;font-weight:400;color:#52675f}
+body.ck-system .ck-dispatch-permissions p{margin:12px 0}
+body.ck-system .ck-dispatch-permissions .dp-note{background:#eef3f1;padding:12px;font-size:14px}
+body.ck-system .ck-dispatch-permissions label{display:block;margin:12px 0;font-weight:500}
+body.ck-system .ck-dispatch-permissions input:not([type=checkbox]),body.ck-system .ck-dispatch-permissions textarea{display:block;width:100%;margin-top:6px;font:inherit;border:1px solid #9aafa5;padding:10px;border-radius:6px;min-height:48px;background:white;color:#223C36}
+body.ck-system .ck-dispatch-permissions button{font:inherit;line-height:1.4;min-height:48px;border:1px solid #9aafa5;border-radius:6px;padding:9px 14px;background:#fff;color:#18564A;cursor:pointer;white-space:normal;word-break:keep-all;max-width:100%}
+body.ck-system .ck-dispatch-permissions button[type=submit]{background:#18564A;color:white;width:100%;margin:12px 0}
+body.ck-system .ck-dispatch-permissions button:disabled{opacity:.5;cursor:default}
+body.ck-system .ck-dispatch-permissions article{border-top:1px solid #D1DED8;padding:18px 0;display:grid;grid-template-columns:minmax(160px,1fr) minmax(220px,1.4fr) minmax(180px,1fr);gap:18px}
+body.ck-system .ck-dispatch-permissions .dp-identity,body.ck-system .ck-dispatch-permissions .dp-state{display:flex;flex-direction:column;gap:4px}
+body.ck-system .ck-dispatch-permissions small{font-size:13px;color:#52675f}
+body.ck-system .ck-dispatch-permissions .dp-actions{display:grid;grid-template-columns:1fr;gap:8px;align-content:start}
+body.ck-system .ck-dispatch-permissions fieldset{padding:12px;border:1px solid #D1DED8;margin:18px 0}
+body.ck-system .ck-dispatch-permissions label.dp-check{display:flex;align-items:center;gap:10px;min-height:48px;margin:0}
+body.ck-system .ck-dispatch-permissions input[type=checkbox]{width:22px;height:22px;flex:0 0 22px;margin:0;accent-color:#18564A}
+body.ck-system .ck-dispatch-permissions .dp-preview{border-top:2px solid #D1DED8;margin-top:18px;padding-top:8px}
+body.ck-system .ck-dispatch-permissions .dp-event{display:block}
+body.ck-system .ck-dispatch-permissions .dp-event small{display:block}
+body.ck-system .ck-dispatch-permissions [data-error]{color:#972f28;background:#fff1ee;padding:12px}
+body.ck-system .ck-dispatch-permissions [data-back]{margin-top:18px;width:100%}
+@media(max-width:700px){body.ck-system dialog.ck-dispatch-permissions{width:calc(100vw - 16px);max-height:calc(100dvh - 16px);padding:16px}body.ck-system .ck-dispatch-permissions article{grid-template-columns:1fr;gap:12px}body.ck-system .ck-dispatch-permissions header{gap:10px}body.ck-system .ck-dispatch-permissions header button{flex:0 0 96px}body.ck-system .ck-dispatch-permissions .dp-actions{grid-template-columns:1fr 1fr}}
+/* Override the compact office input rule inside this touch-friendly workflow. */
+body.ck-system[data-app] dialog.ck-dispatch-permissions input:not([type=checkbox]):not([type=radio]){min-height:48px;height:48px;padding:10px;font-size:16px}
+
+@media(max-width:700px){body.ck-system[data-app] .ck-labor .ck-section-heading .ck-actions>button,body.ck-system[data-app] .ck-labor .ck-section-heading .ck-actions>a{min-height:48px;display:inline-flex;align-items:center;justify-content:center}}
+/* Extra toolbar actions must wrap as a group before squeezing the bilingual heading. */
+body.ck-system .ck-labor .ck-section-heading{flex-wrap:wrap}
+body.ck-system .ck-labor .ck-section-heading>div:first-child{flex:1 1 300px;min-width:0}
+body.ck-system .ck-labor .ck-section-heading>.ck-actions{flex:2 1 620px;justify-content:flex-start}
+body.ck-system .ck-labor .ck-section-heading h2{word-break:keep-all;overflow-wrap:normal}
+
+body.ck-system .ck-labor .ck-filters label{word-break:keep-all}
+@media(max-width:700px){body.ck-system .ck-labor .ck-section-heading>div:first-child,body.ck-system .ck-labor .ck-section-heading>.ck-actions{flex:0 1 auto;width:100%}}
