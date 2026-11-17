@@ -64,8 +64,15 @@ export async function actualWorkReport(body,env){
  if(body.job_id){filter+=' AND j.id=?';args.push(String(body.job_id));}
  for(const key of ['flow_stage','job_type','status'])if(body[key]){filter+=' AND j.'+key+'=?';args.push(String(body[key]));}
  if(body.doc_no){const f=jobBusinessFilter(env,'%'+String(body.doc_no)+'%');filter+=' AND '+f.sql;args.push(...f.args);}
- let jobs=limitRows(await rows(env,`SELECT j.*,s.state AS report_dispatch_state,s.department AS report_saved_department,s.kind AS report_record_kind FROM v2_ops_jobs j LEFT JOIN sop_records s ON s.id=j.id AND s.kind IN ('task','dispatch')
- WHERE (j.id IN (SELECT value FROM json_each(?)) OR (julianday(j.finished_at)>=julianday(?) AND julianday(j.finished_at)<julianday(?)) OR (NOT EXISTS(SELECT 1 FROM v2_ops_job_workers w WHERE w.job_id=j.id) AND julianday(COALESCE(NULLIF(j.finished_at,''),NULLIF(j.updated_at,''),j.created_at))>=julianday(?) AND julianday(COALESCE(NULLIF(j.finished_at,''),NULLIF(j.updated_at,''),j.created_at))<julianday(?))) ${filter} ORDER BY j.created_at DESC,j.id LIMIT ${MAX_JOBS+1}`,...args),MAX_JOBS,'区间任务');
+ // Resolve SOP metadata by unique ID, never by a repeated scan on kind.
+ // Check the date before probing for a missing worker on historical jobs.
+ let jobs=limitRows(await rows(env,`SELECT j.*,
+ CASE WHEN s.kind IN ('task','dispatch') THEN s.state END AS report_dispatch_state,
+ CASE WHEN s.kind IN ('task','dispatch') THEN s.department END AS report_saved_department,
+ CASE WHEN s.kind IN ('task','dispatch') THEN s.kind END AS report_record_kind
+ FROM v2_ops_jobs j LEFT JOIN sop_records s ON s.id=j.id
+ WHERE (j.id IN (SELECT value FROM json_each(?)) OR (julianday(j.finished_at)>=julianday(?) AND julianday(j.finished_at)<julianday(?)) OR (julianday(COALESCE(NULLIF(j.finished_at,''),NULLIF(j.updated_at,''),j.created_at))>=julianday(?) AND julianday(COALESCE(NULLIF(j.finished_at,''),NULLIF(j.updated_at,''),j.created_at))<julianday(?) AND NOT EXISTS(SELECT 1 FROM v2_ops_job_workers w WHERE w.job_id=j.id))) ${filter}
+ ORDER BY j.created_at DESC,j.id LIMIT ${MAX_JOBS+1}`,...args),MAX_JOBS,'区间任务');
  const department=j=>{const s=parse(j.report_dispatch_state),record=j.report_saved_department?executionDepartment({state:j.report_dispatch_state,department:j.report_saved_department,kind:j.report_record_kind}):'';const d=s.labor_department||record||j.biz_class;return (j.job_type==='office_order_processing'?Object.hasOwn(employeeDepartments,d):['bulk','direct_ship','import'].includes(d))?d:d==='return'?'direct_ship':'other';};
  jobs=jobs.map(j=>({...j,department:department(j)})).filter(j=>!body.department||j.department===body.department);
  const name=String(body.worker_name||'').toLowerCase();

@@ -1,11 +1,12 @@
 // Staging attendance labels and reversible voids. No work or break record is deleted.
 import {ensureSchema} from './schema-ready.js';
-import {workerBadgeMatch} from './daily-badge-identity.js';
+import {workerBadgeMatch,canonicalWorkerSQL} from './daily-badge-identity.js';
 const q=(e,s,...a)=>e.DB.prepare(s).bind(...a);
 export const activeAttendanceSQL=alias=>`NOT EXISTS(SELECT 1 FROM ck_attendance_management m WHERE m.attendance_id=${alias}.id AND m.voided_at!='')`;
 export const attendanceDaySelect=`SELECT d.*,COALESCE(m.department,'') AS management_department,COALESCE(m.voided_at,'') AS voided_at,COALESCE(m.void_reason,'') AS void_reason,COALESCE(ep.department,'') AS employee_profile_department FROM ck_attendance_days d LEFT JOIN ck_attendance_management m ON m.attendance_id=d.id LEFT JOIN ck_employee_profiles ep ON ep.person_id=d.person_id`;
 // julianday handles canonical ISO strings and historical offsets consistently.
-const relatedWork=(w,d)=>`${workerBadgeMatch(w+'.worker_id',d+'.worker_id')} AND julianday(${w}.joined_at)<julianday(${d}.day,'+1 day','-9 hours') AND (${w}.left_at='' OR julianday(${w}.left_at)>=julianday(${d}.day,'-9 hours'))`;
+const workOverlap=(w,day)=>`julianday(${w}.joined_at)<julianday(${day},'+1 day','-9 hours') AND (${w}.left_at='' OR julianday(${w}.left_at)>=julianday(${day},'-9 hours'))`;
+const relatedWork=(w,d)=>`${workerBadgeMatch(w+'.worker_id',d+'.worker_id')} AND ${workOverlap(w,d+'.day')}`;
 export const ATTENDANCE_MANAGEMENT_SCHEMA=[
  `CREATE TABLE IF NOT EXISTS ck_attendance_management(attendance_id TEXT PRIMARY KEY,department TEXT NOT NULL DEFAULT '' CHECK(department IN ('','bulk','direct_ship','import')),voided_at TEXT NOT NULL DEFAULT '',void_reason TEXT NOT NULL DEFAULT '',voided_by TEXT NOT NULL DEFAULT '')`,
  ...['INSERT','UPDATE'].map(operation=>`CREATE TRIGGER IF NOT EXISTS ck_attendance_void_safe_${operation.toLowerCase()} BEFORE ${operation} ON ck_attendance_management WHEN NEW.voided_at!='' BEGIN
@@ -24,7 +25,9 @@ export async function ensureAttendanceLoanGuard(env){
  ]));return true;
 }
 export async function attendanceVoidBlockers(env,date){
- const work=(await q(env,`SELECT DISTINCT d.id FROM ck_attendance_days d JOIN v2_ops_job_workers w ON ${relatedWork('w','d')} WHERE d.day=?`,date).all()).results;
+ // Build the day's badge set once, not a scan of worker history for every attendance row.
+ const work=(await q(env,`SELECT d.id FROM ck_attendance_days d WHERE d.day=? AND ${canonicalWorkerSQL('d.worker_id')} IN (
+ SELECT ${canonicalWorkerSQL('w.worker_id')} FROM v2_ops_job_workers w WHERE ${workOverlap('w','?')})`,date,date,date).all()).results;
  const rest=(await q(env,'SELECT DISTINCT d.id FROM ck_attendance_days d JOIN ck_attendance_breaks b ON b.attendance_id=d.id WHERE d.day=?',date).all()).results;
  const hasLoans=await q(env,"SELECT name FROM sqlite_master WHERE type='table' AND name='ck_crew_borrows'").first();
  const loans=hasLoans?(await q(env,`SELECT DISTINCT d.id FROM ck_attendance_days d JOIN ck_crew_borrows b ON ${workerBadgeMatch('b.worker_id','d.worker_id')} WHERE d.day=? AND b.status IN ('borrowed','return_pending')`,date).all()).results:[];

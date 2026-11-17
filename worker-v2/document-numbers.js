@@ -118,9 +118,13 @@ export function jobBusinessFilter(env,pattern){
  if(env.SOP_UPGRADE_ENABLED==='true')clauses.push(
   "j.inbound_external_no LIKE ?",
   "EXISTS(SELECT 1 FROM ck_putaway_links pl JOIN v2_inbound_plans pp ON pp.id=pl.plan_id WHERE pl.job_id=j.id AND (pl.external_no LIKE ? OR pp.display_no LIKE ?))",
-  "EXISTS(SELECT 1 FROM sop_document_numbers dn LEFT JOIN sop_records sr ON sr.id=j.id AND sr.kind='task' WHERE (dn.record_id=j.id OR dn.record_id=json_extract(sr.state,'$.need_id') OR dn.record_id=j.related_doc_id) AND dn.display_no LIKE ?)",
-  "EXISTS(SELECT 1 FROM v2_inbound_plans ip WHERE (ip.id=j.related_doc_id OR EXISTS(SELECT 1 FROM ck_unload_plan_links l WHERE l.job_id=j.id AND l.plan_id=ip.id)) AND ip.display_no LIKE ?)",
-  "EXISTS(SELECT 1 FROM v2_outbound_orders op WHERE (op.id=j.related_doc_id OR op.id=j.linked_outbound_order_id"+(loadTripEnabled(env)?" OR EXISTS(SELECT 1 FROM ck_load_order_links l WHERE l.job_id=j.id AND l.order_id=op.id)":"")+") AND op.display_no LIKE ?)",
+  // Resolve the job's linked keys first. Scanning every plan/order for each job
+  // to test a nested OR makes a contains search multiply across whole tables.
+  "EXISTS(SELECT 1 FROM sop_document_numbers dn WHERE dn.record_id IN (j.id,j.related_doc_id,(SELECT json_extract(sr.state,'$.need_id') FROM sop_records sr WHERE sr.id=j.id AND sr.kind='task')) AND dn.display_no LIKE ?)",
+  "EXISTS(SELECT 1 FROM v2_inbound_plans ip WHERE ip.id=j.related_doc_id AND ip.display_no LIKE ?)",
+  "EXISTS(SELECT 1 FROM ck_unload_plan_links l CROSS JOIN v2_inbound_plans ip ON ip.id=l.plan_id WHERE l.job_id=j.id AND ip.display_no LIKE ?)",
+  "EXISTS(SELECT 1 FROM v2_outbound_orders op WHERE op.id IN (j.related_doc_id,j.linked_outbound_order_id) AND op.display_no LIKE ?)",
+  ...(loadTripEnabled(env)?["EXISTS(SELECT 1 FROM ck_load_order_links l CROSS JOIN v2_outbound_orders op ON op.id=l.order_id WHERE l.job_id=j.id AND op.display_no LIKE ?)"]:[]),
   "EXISTS(SELECT 1 FROM v2_ops_job_pick_docs pd WHERE pd.job_id=j.id AND pd.pick_doc_no LIKE ?)",
   "EXISTS(SELECT 1 FROM v2_field_feedbacks f WHERE j.related_doc_type='field_feedback' AND f.id=j.related_doc_id AND f.display_no LIKE ?)",
   "EXISTS(SELECT 1 FROM v2_issue_tickets t WHERE j.related_doc_type='issue_ticket' AND t.id=j.related_doc_id AND t.related_doc_no LIKE ?)",
